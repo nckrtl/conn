@@ -27,8 +27,6 @@ struct ThreadView: View {
     private static let titleInset: CGFloat = 16 + 44 + 16
     @State private var showsAgents = false
     @Namespace private var floatingGlass
-    /// The feed's tail marker is in the visible region (`onScrollVisibilityChange`).
-    @State private var bottomVisible = false
     @State private var historyNotice: String?
     @State private var scrollTarget: String?
     @State private var historyRequest = UUID()
@@ -622,8 +620,6 @@ struct ThreadView: View {
                 Color.clear
                     .frame(height: 1)
                     .id("timeline-bottom")
-                    // iOS's own measure of the tail being on screen, beside the inset arithmetic.
-                    .onScrollVisibilityChange(threshold: 0.5) { bottomVisible = $0 }
             }
             .scrollTargetLayout()
             // A tap on the feed puts the keyboard away; simultaneous, so links, cards and buttons still
@@ -661,7 +657,7 @@ struct ThreadView: View {
             if phase == .idle {
                 // Re-pin only when the scroll settles at the very end, not merely near it: a short
                 // drag up used to land within the 80 pt "near end" and re-pin at release.
-                if userScrolling { stickToBottom = bottomVisible || TimelineEdges(context.geometry).atEnd }
+                if userScrolling { stickToBottom = TimelineEdges(context.geometry).atEnd }
                 userScrolling = false
                 if requestedByScroll {
                     requestedByScroll = false
@@ -672,7 +668,7 @@ struct ThreadView: View {
         .onScrollGeometryChange(for: TimelineEdges.self, of: { TimelineEdges($0) }) { previous, edges in
             if userScrolling {
                 // Mid-gesture the pin can only be dropped, never taken back.
-                if !edges.atEnd && !bottomVisible { stickToBottom = false }
+                if !edges.atEnd { stickToBottom = false }
                 if edges.top < previous.top && !paging { requestedByScroll = true }
             }
         }

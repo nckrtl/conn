@@ -241,9 +241,12 @@ final class CoreStore {
             for id in linkedOrder where KeychainStore.loadSession(scope: id) != nil {
                 linked[id] = CoreStore(scope: id, deferOrbit: true, publications: publications)
             }
-        } else if deferOrbit && fleetID != nil {
-            session?.suspend()
         } else {
+            // A saved linked machine reconnects at once with its saved credentials, beside the
+            // primary and inside the launch grace window. It used to sit suspended until the
+            // primary connected and discovery woke it, which showed "Not connected" and blocked
+            // sending in its threads for a long while after every cold launch. Discovery still
+            // suspends machines Orbit no longer lists or that are asleep.
             session?.restore(saved: saved)
         }
         coldLaunchSession = saved
@@ -327,6 +330,13 @@ final class CoreStore {
                 guard target.isAwake else {
                     child.suspendFleetSession()
                     continue
+                }
+                // Already live or connecting from launch (restore): leave that attempt alone.
+                switch child.state?.phase {
+                case .live?, .connecting?:
+                    if child.lastFleetAttempt == nil { child.lastFleetAttempt = Date() }
+                    continue
+                default: break
                 }
                 if let attempt = child.lastFleetAttempt {
                     guard child.showsOffline, Date().timeIntervalSince(attempt) >= 300 else { continue }

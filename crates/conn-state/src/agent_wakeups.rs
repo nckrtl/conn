@@ -20,16 +20,18 @@
 //!
 //! Conn Server cannot cancel any of these, so the rows are read-only.
 
+use std::collections::{HashMap, VecDeque};
+
 use conn_contract::{
     OrchestrationV2PendingBackgroundTask as PendingTask,
     OrchestrationV2TurnItemDynamicTool as DynamicToolItem, OrchestrationV2TurnItemStatus as Status,
 };
 use serde_json::Value;
 
-use crate::thread::{ThreadState, TimelineEntry, parse_iso8601_epoch_ms};
+use crate::thread::{RunTiming, ThreadState, parse_iso8601_epoch_ms};
 
 /// The task id of Claude's one pending `ScheduleWakeup` in `pendingBackgroundTasks`
-/// (`CLAUDE_SCHEDULED_WAKEUP_TASK`).
+/// (`CLAUDE_SCHEDULED_WAKEUP_TASK_ID`).
 pub const CLAUDE_WAKEUP_TASK_ID: &str = "claude-scheduled-wakeup";
 
 /// `ScheduleWakeup` clamps `delaySeconds` to this range.
@@ -43,6 +45,18 @@ const STALE_AFTER_MS: i64 = 600_000;
 const CRON_EXPIRY_MS: i64 = 7 * 86_400_000;
 /// Longest title, in characters.
 const TITLE_CHARS: usize = 80;
+/// The last instant a time may have, in Unix ms (`9999-12-31T23:59:59Z`). A reported or computed
+/// time past it is not a time, and adding to it could overflow.
+const MAX_EPOCH_MS: i64 = 253_402_300_799_000;
+const MAX_EPOCH_MS_F64: f64 = 253_402_300_799_000.0;
+/// The longest `sleep` that counts as a timer: one year. A longer one (`sleep 1e300`) is a wait
+/// with no end in view, not a wakeup.
+const MAX_SLEEP_SECS: f64 = 366.0 * 86_400.0;
+/// How many dropped call ids the ledger remembers, so a late update of one is not read as a new
+/// call.
+const RETIRED_CAP: usize = 32;
+/// How many `CronDelete` calls the ledger keeps for a job in history not loaded yet.
+const DELETE_CAP: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ScheduleTool {
@@ -62,7 +76,8 @@ impl ScheduleTool {
     }
 }
 
-/// One scheduling tool call, as the timeline's turn item carried it.
+/// One scheduling tool call, as the timeline's turn item carried it. The [`ScheduleLedger`] reads
+/// it once and keeps only what it needs.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ScheduleCall {
     tool: ScheduleTool,
@@ -94,6 +109,18 @@ impl ScheduleCall {
             self.status,
             Status::Failed | Status::Cancelled | Status::Interrupted
         )
+    }
+
+    /// Whether a `ScheduleWakeup` call schedules nothing: it failed, it asked to `stop`, or the
+    /// tool reported a due time of `0`.
+    fn ends_wakeup(&self) -> bool {
+        self.failed()
+            || self.input["stop"] == true
+            || self
+                .output
+                .as_ref()
+                .and_then(scheduled_for_ms)
+                .is_some_and(|ms| ms <= 0)
     }
 }
 
@@ -137,13 +164,19 @@ pub struct WakeupContext<'a> {
     pub pending: &'a [PendingTask],
     /// The thread's provider instance id.
     pub provider: &'a str,
+    /// The driver (provider kind) of that instance, when the catalog lists it (`claudeAgent`).
+    pub driver: Option<&'a str>,
 }
 
 impl WakeupContext<'_> {
-    /// Whether the shell's roster says if Claude holds a wakeup, so a timeline call that the
-    /// roster does not list is cancelled.
+    /// Whether the shell's roster says if Claude holds a wakeup, so a wakeup that the roster
+    /// does not list is cancelled. The driver decides; an instance the catalog does not list
+    /// falls back to its id.
     fn roster_is_authority(&self) -> bool {
-        self.provider.to_ascii_lowercase().contains("claude")
+        match self.driver {
+            Some(driver) => driver == "claudeAgent",
+            None => self.provider.to_ascii_lowercase().contains("claude"),
+        }
     }
 
     fn roster_lists_wakeup(&self) -> bool {
@@ -154,74 +187,51 @@ impl WakeupContext<'_> {
     }
 }
 
-impl ThreadState {
-    /// The wakeups the agent set for itself, soonest first, those with no known time last.
-    #[must_use]
-    pub fn agent_wakeups(&self, context: &WakeupContext<'_>) -> Vec<AgentWakeup> {
-        let calls: Vec<(&str, &ScheduleCall)> = self
-            .entries
-            .iter()
-            .filter_map(|entry| match entry {
-                TimelineEntry::Tool { id, .. } => {
-                    self.schedule_calls.get(id).map(|call| (id.as_str(), call))
-                }
-                _ => None,
-            })
-            .collect();
-        let mut rows: Vec<AgentWakeup> = Vec::new();
-        rows.extend(self.scheduled_wakeup(&calls, context));
-        rows.extend(self.cron_jobs(&calls, context));
-        rows.extend(self.sleep_timers(context));
-        rows.sort_by_key(|row| row.due_ms.unwrap_or(i64::MAX));
-        rows
-    }
+/// `a + b` ms as a time, or `None` when the sum is not a time.
+fn add_ms(a: i64, b: i64) -> Option<i64> {
+    a.checked_add(b)
+        .filter(|sum| (0..=MAX_EPOCH_MS).contains(sum))
+}
 
-    /// Whether a run other than `own_run` started at or after `after_ms`.
-    fn run_started_since(&self, after_ms: i64, own_run: Option<&str>) -> bool {
-        self.run_timings.iter().any(|(id, timing)| {
-            own_run != Some(id.as_str()) && timing.started_at_ms.is_some_and(|s| s >= after_ms)
-        })
-    }
+/// Whether a run other than `own_run` started at or after `after_ms`.
+fn run_started_since(
+    runs: &HashMap<String, RunTiming>,
+    after_ms: i64,
+    own_run: Option<&str>,
+) -> bool {
+    runs.iter().any(|(id, timing)| {
+        own_run != Some(id.as_str()) && timing.started_at_ms.is_some_and(|s| s >= after_ms)
+    })
+}
 
-    fn scheduled_wakeup(
-        &self,
-        calls: &[(&str, &ScheduleCall)],
-        context: &WakeupContext<'_>,
-    ) -> Option<AgentWakeup> {
-        let (id, call) = calls
-            .iter()
-            .rev()
-            .find(|(_, call)| call.tool == ScheduleTool::Wakeup)?;
-        if call.failed() || call.input["stop"] == true {
-            return None;
-        }
-        if context.roster_is_authority() && !context.roster_lists_wakeup() {
+/// The wakeup that a `ScheduleWakeup` call left pending.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingWakeup {
+    due_ms: Option<i64>,
+    estimated: bool,
+    title: String,
+    looping: bool,
+    at_ms: Option<i64>,
+    run_id: Option<String>,
+}
+
+impl PendingWakeup {
+    /// `None` when the call schedules nothing.
+    fn from_call(call: &ScheduleCall) -> Option<Self> {
+        if call.ends_wakeup() {
             return None;
         }
         let reported = call.output.as_ref().and_then(scheduled_for_ms);
-        if reported.is_some_and(|ms| ms <= 0) {
-            return None;
-        }
         let (due_ms, estimated) = match reported {
             Some(ms) => (Some(ms), false),
             None => {
                 let due = call
                     .at_ms
                     .zip(delay_secs(&call.input))
-                    .map(|(at, delay)| at + delay * 1_000);
+                    .and_then(|(at, delay)| add_ms(at, delay.saturating_mul(1_000)));
                 (due, true)
             }
         };
-        if let Some(due) = due_ms {
-            let fired_from = call.at_ms.map_or(due - EARLY_FIRE_MARGIN_MS, |at| {
-                (at + 1).max(due - EARLY_FIRE_MARGIN_MS)
-            });
-            if self.run_started_since(fired_from, call.run_id.as_deref())
-                || context.now_ms >= due + STALE_AFTER_MS
-            {
-                return None;
-            }
-        }
         let prompt = call.input["prompt"].as_str().map(str::trim).unwrap_or("");
         let looping = prompt.starts_with("<<autonomous-loop") || prompt.starts_with("/loop");
         let title = text(&call.input["reason"])
@@ -233,68 +243,388 @@ impl ThreadState {
                     "Scheduled wakeup".to_owned()
                 }
             });
+        Some(Self {
+            due_ms,
+            estimated,
+            title,
+            looping,
+            at_ms: call.at_ms,
+            run_id: call.run_id.clone(),
+        })
+    }
+
+    /// Whether a run that is not the caller's started at the due time: the wakeup fired.
+    fn fired(&self, runs: &HashMap<String, RunTiming>) -> bool {
+        self.due_ms.is_some_and(|due| {
+            let early = due.saturating_sub(EARLY_FIRE_MARGIN_MS);
+            let from = self
+                .at_ms
+                .map_or(early, |at| at.saturating_add(1).max(early));
+            run_started_since(runs, from, self.run_id.as_deref())
+        })
+    }
+}
+
+/// The latest `ScheduleWakeup` call. `pending` is `None` once it ended or fired.
+#[derive(Clone, Debug)]
+struct WakeupSlot {
+    order: i64,
+    id: String,
+    pending: Option<PendingWakeup>,
+}
+
+/// A `CronCreate` call that made a job, or may still.
+#[derive(Clone, Debug)]
+struct CronJob {
+    order: i64,
+    item_id: String,
+    /// The job id the result names.
+    job_id: Option<String>,
+    completed: bool,
+    recurring: bool,
+    title: String,
+    schedule: Option<String>,
+    at_ms: Option<i64>,
+    run_id: Option<String>,
+}
+
+/// A `CronDelete` call, kept for a `CronCreate` in history not loaded yet.
+#[derive(Clone, Debug)]
+struct CronDelete {
+    order: i64,
+    item_id: String,
+    job_id: String,
+    at_ms: Option<i64>,
+}
+
+/// What the thread keeps of the agent's scheduling tool calls, to work out the wakeups that are
+/// still pending. The timeline drops a tool call's input, so the calls are read as they arrive.
+///
+/// It holds the latest `ScheduleWakeup` (an earlier one is replaced), the cron jobs not deleted,
+/// expired or fired, and the `CronDelete` calls that a history page not loaded yet may need. A
+/// stopped, deleted, passed or replaced call is dropped, so it does not grow with the thread.
+/// Calls have an `order`: the position in the timeline, with history before it counted down.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ScheduleLedger {
+    /// The next order of a call that arrives.
+    next_order: i64,
+    /// The lowest order handed out; history pages count down from it.
+    floor_order: i64,
+    /// The newest time a call or run showed (Unix ms): a lower bound of now.
+    newest_ms: Option<i64>,
+    wakeup: Option<WakeupSlot>,
+    crons: Vec<CronJob>,
+    deletes: Vec<CronDelete>,
+    /// Ids that were dropped, so a late update of one is ignored.
+    retired: VecDeque<String>,
+}
+
+impl ScheduleLedger {
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// What the ledger holds: a pending wakeup, cron jobs and kept deletes.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        usize::from(
+            self.wakeup
+                .as_ref()
+                .is_some_and(|slot| slot.pending.is_some()),
+        ) + self.crons.len()
+            + self.deletes.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cron_len(&self) -> usize {
+        self.crons.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn delete_len(&self) -> usize {
+        self.deletes.len()
+    }
+
+    /// A call that arrived live or with a snapshot, in timeline order. `None` means the item is
+    /// not a scheduling call (any more).
+    pub(crate) fn observe(&mut self, id: &str, call: Option<ScheduleCall>) {
+        let Some(call) = call else {
+            self.forget(id);
+            return;
+        };
+        let order = match self.order_of(id) {
+            Some(order) => order,
+            None if self.is_retired(id) => return,
+            None => {
+                let order = self.next_order;
+                self.next_order = self.next_order.saturating_add(1);
+                order
+            }
+        };
+        self.place(id, &call, order);
+    }
+
+    /// The calls of a history page, oldest first. They come before every call held. A call the
+    /// ledger knows is kept as it is.
+    pub(crate) fn observe_older(&mut self, calls: Vec<(String, ScheduleCall)>) {
+        let count = i64::try_from(calls.len()).unwrap_or(i64::MAX);
+        let base = self.floor_order;
+        self.floor_order = self.floor_order.saturating_sub(count);
+        for (index, (id, call)) in calls.into_iter().enumerate() {
+            if self.order_of(&id).is_some() || self.is_retired(&id) {
+                continue;
+            }
+            let behind = count.saturating_sub(i64::try_from(index).unwrap_or(i64::MAX));
+            self.place(&id, &call, base.saturating_sub(behind));
+        }
+    }
+
+    /// The item behind `id` is gone from the timeline.
+    pub(crate) fn forget(&mut self, id: &str) {
+        if self.wakeup.as_ref().is_some_and(|slot| slot.id == id) {
+            self.wakeup = None;
+        }
+        self.crons.retain(|job| job.item_id != id);
+        self.deletes.retain(|delete| delete.item_id != id);
+    }
+
+    /// Drops what the runs and the clock settled: a wakeup that fired, a cron job that expired
+    /// or fired, and (with `keep_deletes` off) the `CronDelete` calls no older page needs.
+    pub(crate) fn prune(&mut self, runs: &HashMap<String, RunTiming>, keep_deletes: bool) {
+        let now = self
+            .newest_ms
+            .into_iter()
+            .chain(runs.values().filter_map(|timing| timing.started_at_ms))
+            .max();
+        let expired = |at: Option<i64>| {
+            now.zip(at)
+                .is_some_and(|(now, at)| now >= at.saturating_add(CRON_EXPIRY_MS))
+        };
+        if let Some(slot) = &mut self.wakeup
+            && slot.pending.as_ref().is_some_and(|p| p.fired(runs))
+        {
+            slot.pending = None;
+        }
+        let mut gone = Vec::new();
+        self.crons.retain(|job| {
+            let fired = job.completed
+                && !job.recurring
+                && job.at_ms.is_some_and(|at| {
+                    run_started_since(runs, at.saturating_add(1), job.run_id.as_deref())
+                });
+            let keep = !(fired || expired(job.at_ms));
+            if !keep {
+                gone.push(job.item_id.clone());
+            }
+            keep
+        });
+        for id in gone {
+            self.retire(id);
+        }
+        if keep_deletes {
+            self.deletes.retain(|delete| !expired(delete.at_ms));
+            if self.deletes.len() > DELETE_CAP {
+                self.deletes.sort_by_key(|delete| delete.order);
+                let extra = self.deletes.len() - DELETE_CAP;
+                self.deletes.drain(..extra);
+            }
+        } else {
+            self.deletes.clear();
+        }
+    }
+
+    fn is_retired(&self, id: &str) -> bool {
+        self.retired.iter().any(|retired| retired == id)
+    }
+
+    fn retire(&mut self, id: String) {
+        if !self.is_retired(&id) {
+            if self.retired.len() >= RETIRED_CAP {
+                self.retired.pop_front();
+            }
+            self.retired.push_back(id);
+        }
+    }
+
+    /// The order of the call behind `id`, when the ledger holds it.
+    fn order_of(&self, id: &str) -> Option<i64> {
+        if let Some(slot) = &self.wakeup
+            && slot.id == id
+        {
+            return Some(slot.order);
+        }
+        self.crons
+            .iter()
+            .find(|job| job.item_id == id)
+            .map(|job| job.order)
+            .or_else(|| {
+                self.deletes
+                    .iter()
+                    .find(|delete| delete.item_id == id)
+                    .map(|delete| delete.order)
+            })
+    }
+
+    fn place(&mut self, id: &str, call: &ScheduleCall, order: i64) {
+        if let Some(at) = call.at_ms.filter(|at| (0..=MAX_EPOCH_MS).contains(at)) {
+            self.newest_ms = Some(self.newest_ms.map_or(at, |newest| newest.max(at)));
+        }
+        match call.tool {
+            ScheduleTool::Wakeup => self.place_wakeup(id, call, order),
+            ScheduleTool::CronCreate => self.place_cron_create(id, call, order),
+            ScheduleTool::CronDelete => self.place_cron_delete(id, call, order),
+        }
+    }
+
+    fn place_wakeup(&mut self, id: &str, call: &ScheduleCall, order: i64) {
+        if let Some(slot) = &self.wakeup {
+            if slot.order > order {
+                // An older call than the one held: only the latest matters.
+                return;
+            }
+            if slot.id != id {
+                let replaced = slot.id.clone();
+                self.retire(replaced);
+            }
+        }
+        self.wakeup = Some(WakeupSlot {
+            order,
+            id: id.to_owned(),
+            pending: PendingWakeup::from_call(call),
+        });
+    }
+
+    fn place_cron_create(&mut self, id: &str, call: &ScheduleCall, order: i64) {
+        self.crons.retain(|job| job.item_id != id);
+        if call.failed() {
+            return;
+        }
+        let job_id = call.output.as_ref().and_then(cron_id);
+        let deleted = job_id.as_deref().is_some_and(|job| {
+            self.deletes
+                .iter()
+                .any(|delete| delete.job_id == job && delete.order > order)
+        });
+        if deleted {
+            self.retire(id.to_owned());
+            return;
+        }
+        self.crons.push(CronJob {
+            order,
+            item_id: id.to_owned(),
+            job_id,
+            completed: call.status == Status::Completed,
+            recurring: call.input["recurring"].as_bool().unwrap_or(true),
+            title: first_line(call.input["prompt"].as_str().unwrap_or(""))
+                .unwrap_or_else(|| "Scheduled prompt".to_owned()),
+            schedule: call
+                .output
+                .as_ref()
+                .and_then(human_schedule)
+                .or_else(|| text(&call.input["cron"])),
+            at_ms: call.at_ms,
+            run_id: call.run_id.clone(),
+        });
+    }
+
+    fn place_cron_delete(&mut self, id: &str, call: &ScheduleCall, order: i64) {
+        self.deletes.retain(|delete| delete.item_id != id);
+        let Some(job) = call.input["id"].as_str().filter(|_| !call.failed()) else {
+            return;
+        };
+        let mut removed = Vec::new();
+        self.crons.retain(|cron| {
+            let hit = cron.job_id.as_deref() == Some(job) && cron.order < order;
+            if hit {
+                removed.push(cron.item_id.clone());
+            }
+            !hit
+        });
+        for item in removed {
+            self.retire(item);
+        }
+        self.deletes.push(CronDelete {
+            order,
+            item_id: id.to_owned(),
+            job_id: job.to_owned(),
+            at_ms: call.at_ms,
+        });
+    }
+}
+
+impl ThreadState {
+    /// The wakeups the agent set for itself, soonest first, those with no known time last.
+    ///
+    /// It reads the thread's [`ScheduleLedger`], not the timeline, so its cost does not grow with
+    /// the thread.
+    #[must_use]
+    pub fn agent_wakeups(&self, context: &WakeupContext<'_>) -> Vec<AgentWakeup> {
+        let mut rows: Vec<AgentWakeup> = Vec::new();
+        rows.extend(self.scheduled_wakeup(context));
+        rows.extend(self.cron_jobs(context));
+        rows.extend(self.sleep_timers(context));
+        rows.sort_by_key(|row| row.due_ms.unwrap_or(i64::MAX));
+        rows
+    }
+
+    fn scheduled_wakeup(&self, context: &WakeupContext<'_>) -> Option<AgentWakeup> {
+        let slot = self.schedule_calls.wakeup.as_ref()?;
+        let pending = slot.pending.as_ref()?;
+        if context.roster_is_authority() && !context.roster_lists_wakeup() {
+            return None;
+        }
+        if let Some(due) = pending.due_ms
+            && (pending.fired(&self.run_timings)
+                || context.now_ms >= due.saturating_add(STALE_AFTER_MS))
+        {
+            return None;
+        }
         Some(AgentWakeup {
-            key: (*id).to_owned(),
-            kind: if looping {
+            key: slot.id.clone(),
+            kind: if pending.looping {
                 WakeupKind::Loop
             } else {
                 WakeupKind::Wakeup
             },
-            recurring: looping,
-            title,
+            recurring: pending.looping,
+            title: pending.title.clone(),
             schedule: None,
-            due_ms,
-            estimated,
+            due_ms: pending.due_ms,
+            estimated: pending.estimated,
         })
     }
 
-    fn cron_jobs(
-        &self,
-        calls: &[(&str, &ScheduleCall)],
-        context: &WakeupContext<'_>,
-    ) -> Vec<AgentWakeup> {
-        let mut jobs: Vec<(Option<String>, &str, &ScheduleCall)> = Vec::new();
-        for (item_id, call) in calls {
-            match call.tool {
-                ScheduleTool::CronCreate if call.status == Status::Completed => {
-                    let id = call.output.as_ref().and_then(cron_id);
-                    jobs.push((id, item_id, call));
-                }
-                ScheduleTool::CronDelete if !call.failed() => {
-                    if let Some(id) = call.input["id"].as_str() {
-                        jobs.retain(|(job, _, _)| job.as_deref() != Some(id));
-                    }
-                }
-                _ => {}
-            }
-        }
+    fn cron_jobs(&self, context: &WakeupContext<'_>) -> Vec<AgentWakeup> {
+        let mut jobs: Vec<&CronJob> = self
+            .schedule_calls
+            .crons
+            .iter()
+            .filter(|job| job.completed)
+            .collect();
+        jobs.sort_by_key(|job| job.order);
         jobs.into_iter()
-            .filter_map(|(id, item_id, call)| {
-                let recurring = call.input["recurring"].as_bool().unwrap_or(true);
-                let at = call.at_ms;
-                if at.is_some_and(|at| context.now_ms >= at + CRON_EXPIRY_MS) {
-                    return None;
-                }
-                if !recurring
-                    && at.is_some_and(|at| self.run_started_since(at + 1, call.run_id.as_deref()))
-                {
-                    return None;
-                }
-                let schedule = call
-                    .output
-                    .as_ref()
-                    .and_then(human_schedule)
-                    .or_else(|| text(&call.input["cron"]));
-                Some(AgentWakeup {
-                    key: id.unwrap_or_else(|| item_id.to_owned()),
-                    kind: WakeupKind::Cron,
-                    recurring,
-                    title: first_line(call.input["prompt"].as_str().unwrap_or(""))
-                        .unwrap_or_else(|| "Scheduled prompt".to_owned()),
-                    schedule,
-                    due_ms: None,
-                    estimated: false,
-                })
+            .filter(|job| {
+                let expired = job
+                    .at_ms
+                    .is_some_and(|at| context.now_ms >= at.saturating_add(CRON_EXPIRY_MS));
+                let fired = !job.recurring
+                    && job.at_ms.is_some_and(|at| {
+                        run_started_since(
+                            &self.run_timings,
+                            at.saturating_add(1),
+                            job.run_id.as_deref(),
+                        )
+                    });
+                !(expired || fired)
+            })
+            .map(|job| AgentWakeup {
+                key: job.job_id.clone().unwrap_or_else(|| job.item_id.clone()),
+                kind: WakeupKind::Cron,
+                recurring: job.recurring,
+                title: job.title.clone(),
+                schedule: job.schedule.clone(),
+                due_ms: None,
+                estimated: false,
             })
             .collect()
     }
@@ -326,7 +656,7 @@ impl ThreadState {
                         .or_else(|| first_line(command))
                         .unwrap_or_else(|| "Waiting on a timer".to_owned()),
                     schedule: None,
-                    due_ms: started.map(|start| start + secs * 1_000),
+                    due_ms: started.and_then(|start| add_ms(start, secs.saturating_mul(1_000))),
                     estimated: true,
                 })
             })
@@ -374,10 +704,13 @@ fn number_in(output: &Value, key: &str) -> Option<f64> {
         .filter(|n| n.is_finite())
 }
 
-/// `scheduledFor` of a `ScheduleWakeup` result (Unix ms; `0` when `stop` ended the loop).
+/// `scheduledFor` of a `ScheduleWakeup` result (Unix ms; `0` when `stop` ended the loop). A value
+/// past the year 9999 is not a time, so it reads as none.
 fn scheduled_for_ms(output: &Value) -> Option<i64> {
     #[expect(clippy::cast_possible_truncation, reason = "a Unix time in ms")]
-    number_in(output, "scheduledFor").map(|n| n as i64)
+    number_in(output, "scheduledFor")
+        .filter(|n| *n <= MAX_EPOCH_MS_F64)
+        .map(|n| n as i64)
 }
 
 fn delay_secs(input: &Value) -> Option<i64> {
@@ -387,7 +720,10 @@ fn delay_secs(input: &Value) -> Option<i64> {
         .or_else(|| delay.as_str().and_then(|s| s.trim().parse().ok()))
         .filter(|n| n.is_finite())?;
     #[expect(clippy::cast_possible_truncation, reason = "clamped to an hour")]
-    Some((secs as i64).clamp(MIN_DELAY_SECS, MAX_DELAY_SECS))
+    Some(
+        (secs.clamp(MIN_DELAY_SECS as f64, MAX_DELAY_SECS as f64) as i64)
+            .clamp(MIN_DELAY_SECS, MAX_DELAY_SECS),
+    )
 }
 
 /// The id a `CronCreate` result names: an `id` field, or the word after `job` in its text.
@@ -415,7 +751,8 @@ fn human_schedule(output: &Value) -> Option<String> {
         .find_map(|key| text(&object[*key]))
 }
 
-/// The seconds a `sleep <time>` command waits, when it starts with one finite sleep.
+/// The seconds a `sleep <time>` command waits, when it starts with one finite sleep of at most a
+/// year (a longer one, `inf` or a negative time has no known time).
 ///
 /// `sleep 1700; echo done` is 1700. A suffix is `s`, `m`, `h` or `d`. A duration that needs a
 /// shell to work out (`$((…))`, a variable) has no known time.
@@ -442,7 +779,10 @@ fn sleep_secs(command: &str) -> Option<i64> {
         .ok()
         .filter(|n| n.is_finite() && *n >= 0.0)?
         * scale;
-    #[expect(clippy::cast_possible_truncation, reason = "a short sleep")]
+    if secs > MAX_SLEEP_SECS {
+        return None;
+    }
+    #[expect(clippy::cast_possible_truncation, reason = "at most a year")]
     Some(secs as i64)
 }
 
@@ -512,5 +852,271 @@ mod tests {
         assert_eq!(delay(serde_json::json!("1200")), Some(1200));
         assert_eq!(delay(serde_json::json!(99_999)), Some(3_600));
         assert_eq!(delay(Value::Null), None);
+    }
+
+    #[test]
+    fn a_reported_time_past_the_year_9999_is_no_time() {
+        let reported = |v: Value| scheduled_for_ms(&serde_json::json!({ "scheduledFor": v }));
+        assert_eq!(
+            reported(serde_json::json!(MAX_EPOCH_MS)),
+            Some(MAX_EPOCH_MS)
+        );
+        for huge in [
+            serde_json::json!(1e300),
+            serde_json::json!(u64::MAX),
+            serde_json::json!(i64::MAX),
+            serde_json::json!(f64::MAX),
+            serde_json::json!(MAX_EPOCH_MS + 1_000_000),
+        ] {
+            assert_eq!(reported(huge.clone()), None, "{huge}");
+        }
+        // A negative time ends the wakeup like `0` does.
+        assert!(reported(serde_json::json!(-1e300)).is_some_and(|ms| ms <= 0));
+    }
+
+    #[test]
+    fn a_huge_or_odd_delay_is_clamped_or_dropped() {
+        let delay = |v: Value| delay_secs(&serde_json::json!({ "delaySeconds": v }));
+        for huge in [
+            serde_json::json!(1e300),
+            serde_json::json!(u64::MAX),
+            serde_json::json!(i64::MAX),
+            serde_json::json!(f64::MAX),
+            serde_json::json!("99999999999999999999999"),
+            serde_json::json!("1e300"),
+        ] {
+            assert_eq!(delay(huge.clone()), Some(MAX_DELAY_SECS), "{huge}");
+        }
+        assert_eq!(delay(serde_json::json!(-5)), Some(MIN_DELAY_SECS));
+        assert_eq!(delay(serde_json::json!("-1e300")), Some(MIN_DELAY_SECS));
+        assert_eq!(delay(serde_json::json!("1e400")), None);
+        assert_eq!(delay(serde_json::json!("inf")), None);
+        assert_eq!(delay(serde_json::json!("nan")), None);
+    }
+
+    #[test]
+    fn a_sleep_that_is_no_time_or_too_long_has_no_seconds() {
+        for command in [
+            "sleep 1e300",
+            "sleep inf",
+            "sleep infinity",
+            "sleep nan",
+            "sleep -5",
+            "sleep -0.5m",
+            "sleep 18446744073709551615",
+            "sleep 99999999999999999999999",
+            "sleep 99999999999999999999999d",
+            "sleep 367d",
+        ] {
+            assert_eq!(sleep_secs(command), None, "{command}");
+        }
+        assert_eq!(sleep_secs("sleep 366d"), Some(366 * 86_400));
+        assert_eq!(sleep_secs("sleep 0"), Some(0));
+    }
+
+    #[test]
+    fn time_sums_that_overflow_are_no_time() {
+        assert_eq!(add_ms(i64::MAX, 1), None);
+        assert_eq!(add_ms(i64::MAX, 3_600_000), None);
+        assert_eq!(add_ms(MAX_EPOCH_MS, 1), None);
+        assert_eq!(add_ms(-5, 1), None);
+        assert_eq!(add_ms(1_000, 2_000), Some(3_000));
+    }
+
+    fn call(tool: ScheduleTool, at_ms: Option<i64>, input: Value, output: Value) -> ScheduleCall {
+        ScheduleCall {
+            tool,
+            input,
+            output: Some(output),
+            status: Status::Completed,
+            run_id: Some("run-1".to_owned()),
+            at_ms,
+        }
+    }
+
+    fn wake(at_ms: i64, reason: &str) -> ScheduleCall {
+        call(
+            ScheduleTool::Wakeup,
+            Some(at_ms),
+            serde_json::json!({"delaySeconds": 300, "reason": reason, "prompt": "p"}),
+            serde_json::json!("ok"),
+        )
+    }
+
+    fn cron(at_ms: i64, recurring: bool, job: &str) -> ScheduleCall {
+        call(
+            ScheduleTool::CronCreate,
+            Some(at_ms),
+            serde_json::json!({"cron": "* * * * *", "prompt": "poll", "recurring": recurring}),
+            serde_json::json!({ "id": job }),
+        )
+    }
+
+    fn cron_delete(at_ms: i64, job: &str) -> ScheduleCall {
+        call(
+            ScheduleTool::CronDelete,
+            Some(at_ms),
+            serde_json::json!({ "id": job }),
+            serde_json::json!("ok"),
+        )
+    }
+
+    fn context(now_ms: i64) -> WakeupContext<'static> {
+        WakeupContext {
+            now_ms,
+            pending: &[],
+            provider: "codex",
+            driver: Some("codex"),
+        }
+    }
+
+    const NOW: i64 = 1_800_000_000_000;
+
+    fn runs(started: &[(&str, i64)]) -> HashMap<String, RunTiming> {
+        started
+            .iter()
+            .map(|(id, at)| {
+                (
+                    (*id).to_owned(),
+                    RunTiming {
+                        started_at_ms: Some(*at),
+                        completed_at_ms: None,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn times_that_overflow_never_panic_the_rows() {
+        let mut state = ThreadState::new("t");
+        // A call that started at the end of time, with a delay and with a reported time.
+        state
+            .schedule_calls
+            .observe("w", Some(wake(i64::MAX, "late")));
+        state
+            .schedule_calls
+            .observe("c", Some(cron(i64::MAX, true, "job")));
+        for now in [i64::MIN, 0, NOW, i64::MAX] {
+            let rows = state.agent_wakeups(&context(now));
+            assert!(rows.iter().all(|row| row.due_ms.is_none()), "{rows:?}");
+        }
+        state.schedule_calls.prune(&HashMap::new(), true);
+        state.schedule_calls.prune(&runs(&[("r", i64::MAX)]), false);
+        let _ = state.agent_wakeups(&context(i64::MAX));
+    }
+
+    #[test]
+    fn a_loop_keeps_only_its_latest_call() {
+        let mut ledger = ScheduleLedger::default();
+        for step in 0..500 {
+            ledger.observe(&format!("w{step}"), Some(wake(NOW + step, "step")));
+            ledger.prune(&HashMap::new(), true);
+        }
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger.wakeup.as_ref().map(|s| s.id.as_str()), Some("w499"));
+        assert!(ledger.retired.len() <= RETIRED_CAP);
+    }
+
+    #[test]
+    fn a_stopped_wakeup_is_dropped_and_an_older_one_does_not_come_back() {
+        let mut ledger = ScheduleLedger::default();
+        ledger.observe("w1", Some(wake(NOW, "one")));
+        let mut stop = wake(NOW + 1_000, "stop");
+        stop.input = serde_json::json!({"stop": true});
+        ledger.observe("w2", Some(stop));
+        assert_eq!(ledger.len(), 0);
+        // A history page with an earlier wakeup does not bring one back.
+        ledger.observe_older(vec![("w0".to_owned(), wake(NOW - 1_000, "zero"))]);
+        assert_eq!(ledger.len(), 0);
+        // A failed call schedules nothing either.
+        let mut failed = wake(NOW + 2_000, "failed");
+        failed.status = Status::Failed;
+        ledger.observe("w3", Some(failed));
+        assert_eq!(ledger.len(), 0);
+    }
+
+    #[test]
+    fn a_late_update_of_a_replaced_call_is_ignored() {
+        let mut ledger = ScheduleLedger::default();
+        ledger.observe("w1", Some(wake(NOW, "one")));
+        ledger.observe("w2", Some(wake(NOW + 1_000, "two")));
+        // `w1` updates after `w2` was scheduled: it is still the older call.
+        ledger.observe("w1", Some(wake(NOW, "one, done")));
+        let pending = ledger.wakeup.as_ref().and_then(|s| s.pending.as_ref());
+        assert_eq!(pending.map(|p| p.title.as_str()), Some("two"));
+    }
+
+    #[test]
+    fn deleted_cron_jobs_are_dropped_and_the_deletes_stay_bounded() {
+        let mut ledger = ScheduleLedger::default();
+        for n in 0..400 {
+            let job = format!("job-{n}");
+            ledger.observe(&format!("create-{n}"), Some(cron(NOW + n, true, &job)));
+            ledger.observe(&format!("delete-{n}"), Some(cron_delete(NOW + n, &job)));
+            ledger.prune(&HashMap::new(), true);
+        }
+        assert_eq!(ledger.cron_len(), 0);
+        assert!(ledger.delete_len() <= DELETE_CAP);
+        // With no older history to load, no delete is needed.
+        ledger.prune(&HashMap::new(), false);
+        assert_eq!(ledger.delete_len(), 0);
+        assert_eq!(ledger.len(), 0);
+    }
+
+    #[test]
+    fn a_job_in_older_history_stays_deleted() {
+        let mut ledger = ScheduleLedger::default();
+        ledger.observe("delete", Some(cron_delete(NOW, "job-a")));
+        ledger.observe_older(vec![
+            ("create-a".to_owned(), cron(NOW - 2_000, true, "job-a")),
+            ("create-b".to_owned(), cron(NOW - 1_000, true, "job-b")),
+        ]);
+        assert_eq!(ledger.cron_len(), 1);
+        assert_eq!(ledger.crons[0].job_id.as_deref(), Some("job-b"));
+    }
+
+    #[test]
+    fn a_job_created_again_after_its_delete_stays() {
+        let mut ledger = ScheduleLedger::default();
+        ledger.observe("create-1", Some(cron(NOW, true, "job")));
+        ledger.observe("delete", Some(cron_delete(NOW + 1_000, "job")));
+        ledger.observe("create-2", Some(cron(NOW + 2_000, true, "job")));
+        assert_eq!(ledger.cron_len(), 1);
+        assert_eq!(ledger.crons[0].item_id, "create-2");
+    }
+
+    #[test]
+    fn fired_and_expired_calls_are_dropped() {
+        let mut ledger = ScheduleLedger::default();
+        ledger.observe("w", Some(wake(NOW, "wake")));
+        ledger.observe("once", Some(cron(NOW + 1, false, "once")));
+        ledger.observe("every", Some(cron(NOW + 2, true, "every")));
+        ledger.prune(&runs(&[("run-1", NOW)]), true);
+        assert_eq!(ledger.len(), 3, "the caller's own run fires nothing");
+        // Another run starts after the due time: the wakeup and the one-shot job are done.
+        ledger.prune(&runs(&[("run-1", NOW), ("run-2", NOW + 400_000)]), true);
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(ledger.crons[0].item_id, "every");
+        // A recurring job expires after a week.
+        ledger.prune(&runs(&[("run-2", NOW + CRON_EXPIRY_MS + 10)]), true);
+        assert_eq!(ledger.len(), 0);
+    }
+
+    #[test]
+    fn rendering_reads_the_ledger_and_nothing_else_of_the_timeline() {
+        let mut state = ThreadState::new("t");
+        state.schedule_calls.observe("w", Some(wake(NOW, "wake")));
+        state
+            .schedule_calls
+            .observe("c", Some(cron(NOW + 1, true, "job")));
+        let first = state.agent_wakeups(&context(NOW + 1_000));
+        assert_eq!(first.len(), 2, "{first:?}");
+        assert!(state.entries.is_empty(), "no timeline rows to scan");
+        assert_eq!(state.agent_wakeups(&context(NOW + 1_000)), first);
+        // Only the clock is checked again: a wakeup far past due is stale.
+        let later = state.agent_wakeups(&context(NOW + 3_600_000));
+        assert_eq!(later.len(), 1, "{later:?}");
+        assert_eq!(later[0].kind, WakeupKind::Cron);
     }
 }

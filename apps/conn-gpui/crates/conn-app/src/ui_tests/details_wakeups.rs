@@ -276,6 +276,20 @@ fn the_row_line_says_what_recurs_and_when_it_wakes() {
     assert_eq!(line(unknown), "Timer · one-off · time unknown");
 }
 
+/// A time at either end of the range must not panic the row line: a debug build would crash the
+/// app on that thread.
+#[test]
+fn the_row_line_survives_extreme_times() {
+    for due_ms in [i64::MAX, i64::MIN, 0, -1] {
+        for now in [i64::MAX, i64::MIN, 0, now_secs()] {
+            let mut w = wakeup(WakeupKind::Wakeup, false, None, true);
+            w.due_ms = Some(due_ms);
+            let line = wakeup_line(&w, now);
+            assert!(line.starts_with("Wakeup · one-off · "), "{line}");
+        }
+    }
+}
+
 /// Renders the details card offscreen with a pending wakeup and a cron job, in Dark Ocean and
 /// Light.
 ///

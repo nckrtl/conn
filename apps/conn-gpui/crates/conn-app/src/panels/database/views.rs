@@ -16,7 +16,9 @@ use gpui_kit::{
     SharedString, Styled, deferred, div, point, px, relative,
 };
 
-use super::super::chrome::{self, ROW_PAD_START_PX, UI_LINE_HEIGHT_PX, UI_TEXT_PX, XS_TEXT_PX};
+use super::super::chrome::{
+    self, FloatingSurfaceExt as _, ROW_PAD_START_PX, UI_LINE_HEIGHT_PX, UI_TEXT_PX, XS_TEXT_PX,
+};
 use super::super::color::to_hsla;
 use super::super::header::superhero_icon;
 use super::DatabasePanel;
@@ -61,7 +63,7 @@ pub(crate) fn render_connection_menu(
         .border_1()
         .border_color(divider)
         .shadow(vec![shadow])
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        .floating_surface();
 
     let selected_id = selected.map(|conn| conn.id.as_str());
     if !connections.is_empty() {

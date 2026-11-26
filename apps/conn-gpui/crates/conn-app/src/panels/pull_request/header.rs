@@ -22,8 +22,8 @@ use gpui_kit::{
 };
 
 use super::super::chrome::{
-    self, ConnTooltipExt as _, UI_LINE_HEIGHT_PX, UI_TEXT_PX, XS_LINE_HEIGHT_PX, XS_TEXT_PX,
-    actor_tooltip_label,
+    self, ConnTooltipExt as _, FloatingSurfaceExt as _, UI_LINE_HEIGHT_PX, UI_TEXT_PX,
+    XS_LINE_HEIGHT_PX, XS_TEXT_PX, actor_tooltip_label,
 };
 use super::super::color::to_hsla;
 use super::super::header::superhero_icon;
@@ -604,7 +604,7 @@ fn render_actions_menu(
         .border_1()
         .border_color(divider)
         .shadow(vec![shadow])
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        .floating_surface();
 
     let sep = |d: Hsla| div().mx(px(8.0)).my(px(4.0)).h(px(1.0)).bg(d);
 

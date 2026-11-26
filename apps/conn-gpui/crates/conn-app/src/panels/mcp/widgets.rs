@@ -14,7 +14,9 @@ use gpui_kit::{
 };
 use markdown::mdast::Node;
 
-use crate::panels::chrome::{UI_LINE_HEIGHT_PX, UI_TEXT_PX, XS_LINE_HEIGHT_PX, XS_TEXT_PX};
+use crate::panels::chrome::{
+    FloatingSurfaceExt as _, UI_LINE_HEIGHT_PX, UI_TEXT_PX, XS_LINE_HEIGHT_PX, XS_TEXT_PX,
+};
 use crate::panels::color::to_hsla;
 use crate::panels::highlight::highlight_lines;
 use crate::theme::MONO_FONT;
@@ -132,7 +134,7 @@ pub(super) fn dropdown_menu(
         .border_1()
         .border_color(divider)
         .shadow(vec![shadow])
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        .floating_surface();
 
     for entry in entries {
         match entry {

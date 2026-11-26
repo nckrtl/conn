@@ -1,0 +1,6 @@
+[application]
+name = "ConnApp"
+
+[macos]
+identifier = "com.nckrtl.conn.dev"
+minimum_system_version = "13.0"

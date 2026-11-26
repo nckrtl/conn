@@ -30,8 +30,11 @@ use crate::app::{ConnApp, register_keybindings};
 use crate::live::RT;
 use crate::theme::apply_kit_theme;
 
+mod annotations_popover;
 mod browser_inline_logins;
 pub(crate) mod details_tasks;
+mod floating_surfaces;
+mod preview_host;
 #[cfg(target_os = "macos")]
 mod selection_perf;
 

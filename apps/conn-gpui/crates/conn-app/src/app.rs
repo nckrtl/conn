@@ -39,6 +39,7 @@ mod child_approvals;
 pub(crate) mod details_tasks;
 mod linked;
 mod offline;
+mod preview;
 mod rail_workspaces;
 mod sidebar_keys;
 mod sidebar_more;
@@ -325,6 +326,13 @@ pub(crate) struct ConnApp {
     thread_panels: ThreadPanels,
     /// Where every thread's panel is saved, and its pending and last writes.
     panel_saves: thread_panels::PanelSaves,
+    /// Hosts the browser tabs for agents, as T3's desktop does (`hostDesktopTab`).
+    preview_host: crate::preview_host::PreviewHost,
+    /// The window that makes the pages agents ask for.
+    preview_window: Option<gpui_kit::AnyWindowHandle>,
+    /// Environment links tests give the preview host instead of the app's own connections.
+    #[cfg(test)]
+    preview_test_envs: Option<Vec<crate::preview_host::EnvConnection>>,
     /// The primary server's environment id: the one saved with the layout at launch, then the
     /// one its config snapshot names. Panel owners on the primary use it.
     primary_environment: Option<String>,
@@ -673,6 +681,9 @@ impl ConnApp {
                 crate::panels::RightPanelEvent::BrowserAddressChanged => {
                     app.save_thread_panels(cx);
                 }
+                crate::panels::RightPanelEvent::BrowserNavChanged => {
+                    app.preview_host.report_status();
+                }
             },
         )
         .detach();
@@ -720,6 +731,7 @@ impl ConnApp {
         } else {
             offline::Offline::default()
         };
+        let (preview_ui_tx, preview_ui_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = Self {
             tokens,
             geometry: ShellGeometry::default(),
@@ -763,6 +775,14 @@ impl ConnApp {
             right_panel_tabs: RightPanelTabs::default(),
             thread_panels: ThreadPanels::default(),
             panel_saves: thread_panels::PanelSaves::new(thread_panels::thread_panels_file_path()),
+            preview_host: crate::preview_host::PreviewHost::new(
+                crate::live::RT.handle().clone(),
+                default_device_name(),
+                preview_ui_tx,
+            ),
+            preview_window: None,
+            #[cfg(test)]
+            preview_test_envs: None,
             primary_environment: None,
             primary_confirmed: false,
             right_panel_add_menu_open: false,
@@ -818,9 +838,17 @@ impl ConnApp {
         app.expire_offline(cx);
         app.restore_saved_drafts(cx);
         app.restore_thread_panels(cx);
+        let preview_handles = app.preview_host.handles();
+        app.right_panel.update(cx, |panel, cx| {
+            panel.set_preview_handles(preview_handles, cx)
+        });
+        Self::pump_preview_requests(preview_ui_rx, cx);
         // The write in flight finishes, and the latest layout follows if it differs.
-        cx.on_app_quit(|app, cx| app.thread_panels_on_quit(cx))
-            .detach();
+        cx.on_app_quit(|app, cx| {
+            app.preview_host.close_all();
+            app.thread_panels_on_quit(cx)
+        })
+        .detach();
         app.sync_chat(cx);
         app.start_sidebar_clock(cx);
         if crate::orbit_sync::orbit_sync_enabled_by_env() {
@@ -1226,6 +1254,7 @@ impl ConnApp {
         if self.sync_panel_owner() {
             self.save_thread_panels(cx);
         }
+        self.sync_preview_host(cx);
         if self
             .right_panel_tabs
             .settle(self.shown_thread_has_project())
@@ -4111,6 +4140,7 @@ impl ConnApp {
             panel.forget_owner(owner, cx);
         });
         self.save_thread_panels(cx);
+        self.sync_preview_host(cx);
     }
 
     #[cfg(test)]
@@ -4444,6 +4474,8 @@ impl ConnApp {
             self.save_thread_panels(cx);
             cx.notify();
         }
+        // The closed tab's registration and record go with it.
+        self.sync_preview_host(cx);
     }
 
     /// Toggles the right panel when clicking the already-active tab toggle, or
@@ -4605,6 +4637,7 @@ impl ConnApp {
         cx: &mut Context<'_, Self>,
     ) {
         self._control_server = control_server;
+        self.preview_window = Some(window);
         let entity = cx.entity().downgrade();
         let task = cx.spawn(async move |_, cx| {
             loop {

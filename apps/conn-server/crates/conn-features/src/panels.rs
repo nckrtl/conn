@@ -37,6 +37,50 @@ mod tests {
         );
     }
     #[tokio::test(flavor = "current_thread")]
+    async fn only_desktops_that_host_tabs_get_a_tab_host_request() {
+        let broker = PanelBroker::default();
+        let mut electron = broker.subscribe().unwrap();
+        assert!(broker.has_desktop() && !broker.has_tab_host());
+        assert_eq!(
+            broker
+                .show_to_tab_hosts(request(), Duration::from_secs(1))
+                .await
+                .unwrap_err()
+                .reason,
+            "no_desktop"
+        );
+        assert!(electron.try_recv().is_err(), "the Electron app was asked");
+        // A Files-only link does not count either, even if it advertised hosting.
+        let _files = broker
+            .subscribe_with(1, Some("t".into()), true, true)
+            .unwrap();
+        assert!(!broker.has_tab_host());
+        let mut gpui = broker.subscribe_tab_host().unwrap();
+        assert!(broker.has_tab_host());
+        let (answer, ()) = tokio::join!(
+            broker.show_to_tab_hosts(request(), Duration::from_secs(2)),
+            async {
+                let shown = gpui.recv().await.unwrap();
+                broker.respond(
+                    from_json(json!({"requestId":shown.request_id,"ok":true,"deviceName":"GPUI"}))
+                        .unwrap(),
+                );
+            }
+        );
+        assert_eq!(answer.unwrap().device_name, Some("GPUI".into()));
+        assert!(electron.try_recv().is_err(), "the Electron app was asked");
+        // An ordinary request still reaches every desktop.
+        let (shown, ()) = tokio::join!(broker.show(request(), Duration::from_secs(2)), async {
+            let first = electron.recv().await.unwrap();
+            let second = gpui.recv().await.unwrap();
+            assert_eq!(first, second);
+            broker.respond(from_json(json!({"requestId":first.request_id,"ok":true})).unwrap());
+        });
+        assert!(shown.unwrap().ok);
+        drop(gpui);
+        assert!(!broker.has_tab_host());
+    }
+    #[tokio::test(flavor = "current_thread")]
     async fn fans_out_and_waits_past_a_refusal_for_the_first_success() {
         let broker = PanelBroker::default();
         let mut old = broker.subscribe().unwrap();
@@ -161,6 +205,8 @@ struct Subscriber {
     connection: u64,
     files_thread: Option<String>,
     files_only: bool,
+    /// The desktop advertised that it hosts agent browser tabs (`hostsAgentTabs`).
+    hosts_agent_tabs: bool,
     tx: mpsc::Sender<DesktopPanelRequest>,
 }
 
@@ -199,6 +245,21 @@ impl PanelBroker {
         files_thread: Option<String>,
         files_only: bool,
     ) -> Result<mpsc::Receiver<DesktopPanelRequest>, PanelError> {
+        self.subscribe_with(connection, files_thread, files_only, false)
+    }
+
+    /// A desktop that hosts agent browser tabs (the GPUI host) and says so.
+    pub fn subscribe_tab_host(&self) -> Result<mpsc::Receiver<DesktopPanelRequest>, PanelError> {
+        self.subscribe_with(0, None, false, true)
+    }
+
+    pub fn subscribe_with(
+        &self,
+        connection: u64,
+        files_thread: Option<String>,
+        files_only: bool,
+        hosts_agent_tabs: bool,
+    ) -> Result<mpsc::Receiver<DesktopPanelRequest>, PanelError> {
         let mut state = self.state();
         state.subscribers.retain(|tx| !tx.tx.is_closed());
         if state.subscribers.len() >= MAX_DESKTOPS {
@@ -213,6 +274,7 @@ impl PanelBroker {
             connection,
             files_thread,
             files_only,
+            hosts_agent_tabs,
         });
         Ok(rx)
     }
@@ -222,6 +284,27 @@ impl PanelBroker {
             .subscribers
             .iter()
             .any(|s| !s.files_only && !s.tx.is_closed())
+    }
+
+    /// Whether a connected desktop advertised that it hosts agent browser tabs.
+    pub fn has_tab_host(&self) -> bool {
+        self.state()
+            .subscribers
+            .iter()
+            .any(|s| !s.files_only && s.hosts_agent_tabs && !s.tx.is_closed())
+    }
+
+    /// Like [`Self::show`], but only desktops that host agent browser tabs get the request. Any
+    /// other desktop (the Electron app) is left alone: it would open an empty panel and never
+    /// register a tab.
+    pub async fn show_to_tab_hosts(
+        &self,
+        request: AgentPanelRequest,
+        timeout: Duration,
+    ) -> Result<AgentPanelResponse, PanelError> {
+        self.show_inner(request, None, true, timeout)
+            .await
+            .map(|answer| answer.panel)
     }
 
     pub fn respond(&self, response: AgentPanelResponse) {
@@ -262,15 +345,29 @@ impl PanelBroker {
 
     pub async fn show_action(
         &self,
+        request: AgentPanelRequest,
+        files_action: Option<FilesAction>,
+        timeout: Duration,
+    ) -> Result<DesktopPanelResponse, PanelError> {
+        self.show_inner(request, files_action, false, timeout).await
+    }
+
+    async fn show_inner(
+        &self,
         mut request: AgentPanelRequest,
         files_action: Option<FilesAction>,
+        tab_hosts_only: bool,
         timeout: Duration,
     ) -> Result<DesktopPanelResponse, PanelError> {
         let (answer, guard) = {
             let mut state = self.state();
             state.subscribers.retain(|tx| !tx.tx.is_closed());
             if state.subscribers.is_empty()
-                || (files_action.is_none() && state.subscribers.iter().all(|s| s.files_only))
+                || (files_action.is_none()
+                    && state
+                        .subscribers
+                        .iter()
+                        .all(|s| s.files_only || (tab_hosts_only && !s.hosts_agent_tabs)))
             {
                 return Err(PanelError { reason:"no_desktop", message:"No Conn desktop app is connected to this server, so nothing can show the panel. Ask the user to open Conn on their Mac.".into() });
             }
@@ -290,7 +387,7 @@ impl PanelBroker {
                     if files_action.is_some() {
                         s.files_thread.as_deref() == Some(&request.thread_id)
                     } else {
-                        !s.files_only
+                        !s.files_only && (!tab_hosts_only || s.hosts_agent_tabs)
                     }
                 })
                 .collect();

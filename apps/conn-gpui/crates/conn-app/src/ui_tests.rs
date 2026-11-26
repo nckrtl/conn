@@ -6965,3 +6965,130 @@ fn a_letter_an_icon_and_an_image_workspace_tile_have_the_same_size_and_shape(
         );
     });
 }
+
+/// A live work group (a running tool), then two queued messages, in a working thread.
+fn working_thread_with_two_queued() -> ThreadState {
+    let mut thread = kitchen_sink_thread();
+    thread.working = true;
+    thread.entries.truncate(1);
+    thread.entries.push(TimelineEntry::Tool {
+        id: "tool-live".to_owned(),
+        kind: "command".to_owned(),
+        title: "cargo test --workspace".to_owned(),
+        detail: None,
+        status: ItemStatus::Running,
+        output_omitted: false,
+    });
+    for n in 1..=2 {
+        thread.entries.push(TimelineEntry::QueuedUser {
+            id: format!("q-{n}"),
+            run_id: format!("run-q-{n}"),
+            message_id: format!("msg-q-{n}"),
+            text: format!("Queued follow-up number {n}"),
+            attachments: Vec::new(),
+            created_at: "2026-11-22T15:05:00.000Z".to_owned(),
+            created_by_agent: false,
+        });
+    }
+    thread
+}
+
+/// Lays out the virtualized timeline until the rows below the first are measured and painted.
+fn settle_timeline(cx: &mut TestAppContext, window: AnyWindowHandle) {
+    for _ in 0..6 {
+        cx.update_window(window, |_, window, cx| window.render_frame(cx))
+            .expect("mounted window");
+        cx.run_until_parked();
+    }
+}
+
+const QUEUED_MARKER_LABEL: &str = "Waiting in the queue until the agent is free";
+
+#[gpui_kit::test]
+fn every_queued_bubble_carries_a_queued_label_at_its_top_right(cx: &mut TestAppContext) {
+    let (window, app) = mount_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(kitchen_sink_shell(), cx);
+            app.set_thread_for_test(
+                "thread-selected".to_owned(),
+                working_thread_with_two_queued(),
+                cx,
+            );
+        })
+    });
+    settle_timeline(cx, window);
+    cx.update_window(window, |_, window, _cx| {
+        assert_eq!(window.find_all_by_label(QUEUED_MARKER_LABEL).len(), 2);
+        for n in 1..=2 {
+            let bubble = window
+                .find_by_label(&format!("Queued message: Queued follow-up number {n}"))
+                .bounds();
+            // The label right-aligned just above this bubble, inset 4px like a steer's label.
+            let marker = window
+                .find_all_by_label(QUEUED_MARKER_LABEL)
+                .into_iter()
+                .map(|marker| marker.bounds())
+                .find(|marker| {
+                    marker.bottom() <= bubble.top() + px(0.6)
+                        && f32::from(bubble.top() - marker.bottom()) <= 4.6
+                });
+            let marker = marker.unwrap_or_else(|| panic!("no Queued label above bubble {n}"));
+            assert!((f32::from(bubble.right() - marker.right()) - 4.0).abs() <= 0.6);
+        }
+    })
+    .expect("mounted queued window");
+}
+
+#[gpui_kit::test]
+fn the_first_queued_message_sits_one_timeline_gap_under_the_live_work_rows(
+    cx: &mut TestAppContext,
+) {
+    let (window, app) = mount_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(kitchen_sink_shell(), cx);
+            app.set_thread_for_test(
+                "thread-selected".to_owned(),
+                working_thread_with_two_queued(),
+                cx,
+            );
+        })
+    });
+    settle_timeline(cx, window);
+    let chat = app.read_with(cx, |app, _| app.chat_for_test());
+    let (row, above) = chat
+        .read_with(cx, |chat, _| chat.first_queued_row_for_test())
+        .expect("the first queued row is laid out");
+    cx.update_window(window, |_, window, _cx| {
+        let marker = window
+            .find_all_by_label(QUEUED_MARKER_LABEL)
+            .into_iter()
+            .map(|marker| marker.bounds())
+            .min_by(|a, b| a.top().partial_cmp(&b.top()).expect("finite"))
+            .expect("a Queued label");
+        // The row's own top pad, on top of the live work group's 6px bottom pad above it, makes
+        // the timeline's 16px gap.
+        assert_eq!(above, "live-work-group");
+        let top_pad = f32::from(marker.top() - row.top());
+        assert!(
+            (top_pad + 6.0 - crate::chat::QUEUED_FIRST_GAP_PX).abs() <= 0.6,
+            "top pad above the first queued message was {top_pad}"
+        );
+    })
+    .expect("mounted queued window");
+}
+
+#[test]
+fn a_queued_bubble_border_is_the_opaque_raised_colour_unless_editing() {
+    let theme = conn_theme::theme_by_id("dark-ocean").expect("dark-ocean theme");
+    let tokens = Tokens::derive(&theme);
+    let solid = crate::chat::queued_bubble_border(&tokens, false);
+    assert!((solid.a - 1.0).abs() < f32::EPSILON, "border is opaque");
+    assert_eq!(solid, crate::theme::hsla(tokens.shell_raised));
+    let editing = crate::chat::queued_bubble_border(&tokens, true);
+    assert!(
+        (editing.a - 0.60).abs() < 0.001,
+        "editing keeps the 60% primary tint"
+    );
+}

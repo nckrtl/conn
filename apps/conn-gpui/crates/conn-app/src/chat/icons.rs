@@ -42,6 +42,8 @@ pub(super) const IMAGE: &str = "superhero/image.svg";
 // Card and hover-action glyphs (Lucide name -> superheroicons concept via manifest.json).
 /// `Redo2` (Conn's `Steer` marker).
 pub(super) const REDO: &str = "superhero/redo.svg";
+/// `Clock` (the `Queued` marker above a queued message).
+pub(super) const CLOCK: &str = "superhero/clock.svg";
 /// `GitFork` (`Fork from this response`).
 pub(super) const FORK: &str = "superhero/fork.svg";
 /// `Minus` (declined secret request).

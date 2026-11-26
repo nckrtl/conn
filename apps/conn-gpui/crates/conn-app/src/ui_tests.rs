@@ -777,15 +777,17 @@ fn composer_popups_model_picker_and_plan_mode_render_cleanly(cx: &mut TestAppCon
     });
 }
 
-/// The launch connection asks for the provider catalog, or the composer's picker stays empty
-/// until the user switches servers.
-#[gpui_kit::test]
-async fn new_thread_uses_the_primary_scratch_project_and_launches_the_first_message(
-    cx: &mut TestAppContext,
+/// A loopback `conn-server` that answers `projects.ensureScratch` with `scratch_id`, reports
+/// every request tag, and hands over each `orchestration.launchThread` payload.
+fn spawn_scratch_server(
+    scratch_id: &'static str,
+) -> (
+    url::Url,
+    std::sync::mpsc::Receiver<String>,
+    tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
 ) {
-    cx.executor().allow_parking();
     let (tags_tx, tags_rx) = std::sync::mpsc::channel::<String>();
-    let (launch_tx, mut launch_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (launch_tx, launch_rx) = tokio::sync::mpsc::unbounded_channel();
     let addr = RT.block_on(async {
         let listener = match TcpListener::bind("127.0.0.1:0").await {
             Ok(l) => l,
@@ -810,7 +812,7 @@ async fn new_thread_uses_the_primary_scratch_project_and_launches_the_first_mess
                                     let reply = conn_wire::FromServer::Exit {
                                         request_id: req.id,
                                         exit: conn_wire::Exit::success(
-                                            json!({"projectId":"primary-scratch"}),
+                                            json!({"projectId": scratch_id}),
                                         ),
                                     };
                                     ws.send(Message::Text(
@@ -820,6 +822,17 @@ async fn new_thread_uses_the_primary_scratch_project_and_launches_the_first_mess
                                     .expect("send scratch project");
                                 } else if req.tag == "orchestration.launchThread" {
                                     let _ = launch_tx.send(req.payload);
+                                    let reply = conn_wire::FromServer::Exit {
+                                        request_id: req.id,
+                                        exit: conn_wire::Exit::success(
+                                            json!({"threadId": format!("{scratch_id}-thread")}),
+                                        ),
+                                    };
+                                    ws.send(Message::Text(
+                                        conn_wire::encode_server_frame(&reply).into(),
+                                    ))
+                                    .await
+                                    .expect("send launched thread");
                                 }
                                 let _ = tags_tx.send(req.tag);
                             }
@@ -830,10 +843,29 @@ async fn new_thread_uses_the_primary_scratch_project_and_launches_the_first_mess
         });
         addr
     });
-    let http_base_url = match url::Url::parse(&format!("http://{addr}")) {
-        Ok(url) => url,
+    match url::Url::parse(&format!("http://{addr}")) {
+        Ok(url) => (url, tags_rx, launch_rx),
         Err(err) => panic!("invalid loopback URL: {err}"),
-    };
+    }
+}
+
+fn wait_for_tag(tags: &std::sync::mpsc::Receiver<String>, tag: &str) {
+    while tags
+        .recv_timeout(Duration::from_secs(5))
+        .expect("request from the app")
+        != tag
+    {}
+}
+
+/// The launch connection asks for the provider catalog, or the composer's picker stays empty
+/// until the user switches servers. With no primary agent Node in the fleet (or Orbit off),
+/// General opens on the primary connection.
+#[gpui_kit::test]
+async fn new_thread_uses_the_primary_scratch_project_and_launches_the_first_message(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let (http_base_url, tags_rx, mut launch_rx) = spawn_scratch_server("primary-scratch");
     let (window, app) = mount_app_with_server(
         cx,
         Some(crate::live::StartupServer {
@@ -846,11 +878,7 @@ async fn new_thread_uses_the_primary_scratch_project_and_launches_the_first_mess
         }),
     );
 
-    while tags_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("server config subscription")
-        != "subscribeServerConfig"
-    {}
+    wait_for_tag(&tags_rx, "subscribeServerConfig");
 
     cx.update(|cx| {
         app.update(cx, |app, cx| {
@@ -891,6 +919,168 @@ async fn new_thread_uses_the_primary_scratch_project_and_launches_the_first_mess
     assert_eq!(launch["workspaceStrategy"], json!({"type":"root"}));
     assert_eq!(launch["modelSelection"]["model"], "test-model");
     assert_eq!(launch["initialMessage"]["text"], "Help with Mini");
+}
+
+/// Mounts the app on `nick` as its primary connection, with an Orbit fleet whose primary agent
+/// Node `agent` is linked at `agent_url`.
+fn mount_with_agent_node(
+    cx: &mut TestAppContext,
+    primary_url: url::Url,
+    primary_tags: &std::sync::mpsc::Receiver<String>,
+    agent_url: url::Url,
+) -> (AnyWindowHandle, Entity<ConnApp>) {
+    use conn_desktop::orbit::{OrbitFleet, OrbitServerTarget, OrbitTargetKind, OrbitTargetStatus};
+
+    let node = |id: &str, url: &url::Url, is_primary_agent: bool| OrbitServerTarget {
+        server_id: id.to_owned(),
+        label: id.to_owned(),
+        url: url.to_string(),
+        server_version: None,
+        registered_by: None,
+        status: OrbitTargetStatus::Registered,
+        cleanup_pending: false,
+        kind: OrbitTargetKind::Node {
+            node_name: id.to_owned(),
+            roles: if is_primary_agent {
+                vec!["agent".to_owned()]
+            } else {
+                Vec::new()
+            },
+            is_primary_agent,
+        },
+    };
+    let fleet = OrbitFleet::from_targets(
+        vec![
+            node("nick", &primary_url, false),
+            node("agent", &agent_url, true),
+        ],
+        None,
+    );
+    let (window, app) = mount_app_with_server(
+        cx,
+        Some(crate::live::StartupServer {
+            config: ServerConfig {
+                http_base_url: primary_url,
+                credential: Credential::Bearer("test-token".to_owned()),
+            },
+            label: Some("nick".to_owned()),
+            orbit_server_id: Some("nick".to_owned()),
+        }),
+    );
+    wait_for_tag(primary_tags, "subscribeServerConfig");
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(two_project_shell(), cx);
+            app.set_fleet_for_test(fleet);
+            app.connect_linked_for_test(
+                "agent",
+                ServerConfig {
+                    http_base_url: agent_url,
+                    credential: Credential::Bearer("agent-token".to_owned()),
+                },
+                cx,
+            );
+        })
+    });
+    (window, app)
+}
+
+/// The fleet's primary agent Node is connected as a linked environment: New thread opens
+/// General there and the first message launches on its connection, while the primary connection
+/// (another Node) stays the app's own.
+#[gpui_kit::test]
+async fn new_thread_starts_general_on_the_primary_agent_node(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (primary_url, primary_tags, mut primary_launch) = spawn_scratch_server("nick-scratch");
+    let (agent_url, agent_tags, mut agent_launch) = spawn_scratch_server("agent-scratch");
+    let (window, app) = mount_with_agent_node(cx, primary_url, &primary_tags, agent_url);
+    wait_for_tag(&agent_tags, "subscribeServerConfig");
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read(|cx| app.read(cx).linked_connected_for_test("agent")) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    let start = cx
+        .update_window(window, |_, window, cx| {
+            app.update(cx, |app, cx| app.start_general_draft(Some(window), cx))
+        })
+        .expect("test window");
+    let draft_id = start.await.expect("opened General draft");
+    assert_eq!(
+        cx.read(|cx| app.read(cx).open_draft_for_test()),
+        Some((draft_id, "agent-scratch".to_owned()))
+    );
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_model("codex", "test-model", None, cx);
+            app.send_prompt("Help with Mini".into(), cx);
+        })
+    });
+    let launch = agent_launch.recv().await.expect("launch on the agent Node");
+    assert_eq!(launch["projectId"], "agent-scratch");
+    assert_eq!(launch["initialMessage"]["text"], "Help with Mini");
+    assert!(primary_launch.try_recv().is_err());
+    assert!(
+        primary_tags
+            .try_iter()
+            .all(|tag| tag != "projects.ensureScratch"),
+        "the primary connection makes no General project"
+    );
+    // Before the agent's shell lists the new thread, follow-ups still go to the agent Node.
+    let mut owner = None;
+    for _ in 0..200 {
+        cx.run_until_parked();
+        owner = cx.read(|cx| {
+            app.read(cx)
+                .linked_environment_of_thread("agent-scratch-thread")
+                .map(str::to_owned)
+        });
+        if owner.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(owner.as_deref(), Some("agent"));
+}
+
+/// An agent Node that is not connected (here, nothing listens on its port) never takes General:
+/// New thread opens it on the primary connection, as it did before agent Nodes.
+#[gpui_kit::test]
+async fn new_thread_falls_back_to_the_primary_while_the_agent_node_is_unreachable(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let (primary_url, primary_tags, mut primary_launch) = spawn_scratch_server("nick-scratch");
+    let closed_port = std::net::TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .map(|addr| addr.port())
+        .expect("free loopback port");
+    let agent_url = url::Url::parse(&format!("http://127.0.0.1:{closed_port}")).expect("agent URL");
+    let (window, app) = mount_with_agent_node(cx, primary_url, &primary_tags, agent_url);
+    cx.run_until_parked();
+    assert!(!cx.read(|cx| app.read(cx).linked_connected_for_test("agent")));
+
+    let start = cx
+        .update_window(window, |_, window, cx| {
+            app.update(cx, |app, cx| app.start_general_draft(Some(window), cx))
+        })
+        .expect("test window");
+    let draft_id = start.await.expect("opened General draft");
+    assert_eq!(
+        cx.read(|cx| app.read(cx).open_draft_for_test()),
+        Some((draft_id, "nick-scratch".to_owned()))
+    );
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_model("codex", "test-model", None, cx);
+            app.send_prompt("Help with Mini".into(), cx);
+        })
+    });
+    let launch = primary_launch.recv().await.expect("launch on the primary");
+    assert_eq!(launch["projectId"], "nick-scratch");
 }
 
 #[gpui_kit::test]

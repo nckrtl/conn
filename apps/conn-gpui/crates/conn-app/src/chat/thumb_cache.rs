@@ -155,6 +155,13 @@ pub(super) fn decode_thumbnail(
     target: TargetPx,
     cancel: &AtomicBool,
 ) -> Option<Thumbnail> {
+    let picture = decode_upright(bytes, cancel)?;
+    Some(Thumbnail::fit(&picture, target, true))
+}
+
+/// Decodes PNG, JPEG, WebP or the first frame of a GIF into upright RGBA pixels (EXIF
+/// orientation applied). `None` for other formats, bad data, or once `cancel` is set.
+fn decode_upright(bytes: &[u8], cancel: &AtomicBool) -> Option<RgbaImage> {
     use image::ImageDecoder as _;
     let cancelled = || cancel.load(Ordering::Relaxed);
     let reader = image::ImageReader::new(Cursor::new(bytes))
@@ -182,7 +189,56 @@ pub(super) fn decode_thumbnail(
     if cancelled() {
         return None;
     }
-    Some(Thumbnail::fit(&picture, target, true))
+    Some(picture)
+}
+
+/// The whole of `picture`, uncropped, scaled down only when its pixels would pass `max_bytes`.
+/// This is what the full-image viewer paints. `to_bgra` swaps RGBA input.
+pub(super) fn whole_picture(picture: &RgbaImage, max_bytes: usize, to_bgra: bool) -> Thumbnail {
+    let (width, height) = (picture.width(), picture.height());
+    let own_size = TargetPx { width, height };
+    let (scaled_width, scaled_height) = scaled_size(width, height, own_size, max_bytes);
+    let mut pixels = if (scaled_width, scaled_height) == (width, height) {
+        picture.clone()
+    } else {
+        image::imageops::resize(
+            picture,
+            scaled_width,
+            scaled_height,
+            image::imageops::FilterType::Triangle,
+        )
+    };
+    if to_bgra {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
+            pixel.swap(0, 2);
+        }
+    }
+    Thumbnail { pixels }
+}
+
+/// The whole picture of downloaded `bytes` for the full-image viewer, in GPUI's pixel order.
+/// PNG, JPEG, WebP and a GIF's first frame decode here; SVG, BMP and TIFF go to
+/// `gpui_first_frame` (GPUI's own decoder). `None` for anything else, bad data, or once
+/// `cancel` is set. Slow: call it off the UI thread.
+pub(super) fn viewer_picture_for(
+    mime_type: &str,
+    bytes: Vec<u8>,
+    max_bytes: usize,
+    cancel: &AtomicBool,
+    gpui_first_frame: impl FnOnce(Vec<u8>) -> Option<RgbaImage>,
+) -> Option<Thumbnail> {
+    if let Some(picture) = decode_upright(&bytes, cancel) {
+        return Some(whole_picture(&picture, max_bytes, true));
+    }
+    let gpui_only = matches!(
+        mime_type.to_ascii_lowercase().as_str(),
+        "image/svg+xml" | "image/bmp" | "image/tiff"
+    );
+    if !gpui_only || cancel.load(Ordering::Relaxed) {
+        return None;
+    }
+    let first = gpui_first_frame(bytes)?;
+    (!cancel.load(Ordering::Relaxed)).then(|| whole_picture(&first, max_bytes, false))
 }
 
 /// A thumbnail for downloaded `bytes` of `mime_type`. PNG, JPEG, WebP and a GIF's first frame

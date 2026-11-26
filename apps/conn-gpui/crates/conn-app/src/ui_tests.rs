@@ -35,6 +35,7 @@ mod browser_inline_logins;
 mod browser_passkeys;
 pub(crate) mod details_tasks;
 mod floating_surfaces;
+mod image_viewer;
 mod preview_host;
 mod queue_tray;
 #[cfg(target_os = "macos")]

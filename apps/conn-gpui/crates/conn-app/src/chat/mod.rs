@@ -26,6 +26,9 @@ mod draft_hero;
 mod embedded_document;
 mod embedded_mount;
 mod icons;
+pub(crate) mod image_viewer;
+#[cfg(test)]
+mod image_viewer_shots;
 mod inline_code;
 #[cfg(test)]
 mod left_align_shots;
@@ -221,6 +224,11 @@ pub(crate) enum ChatEvent {
     },
     /// Open a workspace-relative file in the right panel's File preview tab.
     OpenFile(conn_contract::source::SourceLocation),
+    /// Open the full-image viewer on `images[index]` (a sent message's thumbnail was clicked).
+    OpenImageViewer {
+        images: Vec<image_viewer::ViewerItem>,
+        index: usize,
+    },
     /// Show a web link in the Browser panel (`Open in integrated browser`).
     OpenInBrowser(String),
     /// Switch the thread's runtime permission mode (`thread.runtime-mode.set`).

@@ -24,6 +24,8 @@ use crate::live::RT;
 /// composer card (`chat/queue_tray.rs`).
 const ROW_HEIGHT: f32 = 34.0;
 const TUCK: f32 = 16.0;
+/// How far the tray's sides sit inside the composer's.
+const TRAY_INSET: f32 = 20.0;
 
 /// A running turn with `messages` queued behind it: `run-q-1` is first in line.
 fn working_thread_with_queue(messages: &[&str]) -> ThreadState {
@@ -134,9 +136,21 @@ fn the_tray_tucks_behind_the_composer_with_one_row_per_queued_message_in_send_or
         let tray = window.find_by_label("Queued messages").bounds();
         let composer = window.find_by_label("Message input card").bounds();
 
-        // The same width as the composer, stacked right on top of it.
-        assert!((f32::from(tray.size.width) - f32::from(composer.size.width)).abs() <= 0.6);
-        assert!((f32::from(tray.left()) - f32::from(composer.left())).abs() <= 0.6);
+        // Narrower than the composer: inset on both sides, a card peeking out from behind it.
+        let left_inset = f32::from(tray.left() - composer.left());
+        let right_inset = f32::from(composer.right() - tray.right());
+        assert!(
+            (left_inset - TRAY_INSET).abs() <= 0.6,
+            "the tray's left edge sits {left_inset}px inside the composer's, expected {TRAY_INSET}px"
+        );
+        assert!(
+            (right_inset - TRAY_INSET).abs() <= 0.6,
+            "the tray's right edge sits {right_inset}px inside the composer's, expected {TRAY_INSET}px"
+        );
+        assert!(
+            (f32::from(composer.size.width - tray.size.width) - 2.0 * TRAY_INSET).abs() <= 1.2,
+            "the tray is {TRAY_INSET}px narrower on each side"
+        );
         assert!(
             tray.top() < composer.top(),
             "the tray starts above the composer"
@@ -177,6 +191,35 @@ fn the_tray_tucks_behind_the_composer_with_one_row_per_queued_message_in_send_or
         tray_order(cx, &mounted.chat),
         ["run-q-1", "run-q-2", "run-q-3"]
     );
+}
+
+#[gpui_kit::test]
+fn a_long_message_truncates_inside_the_narrower_row(cx: &mut TestAppContext) {
+    let long = "word ".repeat(120);
+    let long = long.trim();
+    let mounted = mount_with_queue(cx, &[long, "short one"]);
+    cx.update_window(mounted.window, |_, window, cx| {
+        window.render_frame(cx);
+        let tray = window.find_by_label("Queued messages").bounds();
+        let composer = window.find_by_label("Message input card").bounds();
+        let folded = long.split_whitespace().collect::<Vec<_>>().join(" ");
+        let row = window
+            .find_by_label(&row_label(1, 2, &folded[..folded.len().min(300)]))
+            .bounds();
+        assert!(
+            row.left() >= tray.left() && row.right() <= tray.right(),
+            "the long row stays inside the tray"
+        );
+        assert!(
+            (f32::from(row.size.height) - ROW_HEIGHT).abs() <= 0.6,
+            "the long row stays one line tall"
+        );
+        assert!(
+            row.right() < composer.right() - px(TRAY_INSET - 1.0),
+            "the long row ends inside the composer's right edge"
+        );
+    })
+    .expect("mounted window");
 }
 
 #[gpui_kit::test]

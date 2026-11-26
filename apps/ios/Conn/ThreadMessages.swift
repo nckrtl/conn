@@ -58,7 +58,8 @@ struct MessageFooter: View {
     // The time at the thread text size; one point smaller (`trailingCopy`, both message kinds
     // use it now). Copying is a tap on the message (CopyOnTap).
     @ScaledMetric(relativeTo: .body) private var fullSize: CGFloat = ThreadText.size
-    private var size: CGFloat { trailingCopy ? fullSize * (ThreadText.size - 1) / ThreadText.size : fullSize }
+    // Two points below the thread text: 13 pt on Polar (thread text 15).
+    private var size: CGFloat { trailingCopy ? fullSize * (ThreadText.size - 2) / ThreadText.size : fullSize }
     @Environment(\.connTheme) private var theme
     var body: some View {
         if let date = threadDate(timestamp) {

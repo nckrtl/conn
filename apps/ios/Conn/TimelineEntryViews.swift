@@ -323,12 +323,12 @@ struct TimelineEntryRow: View {
                 MarkdownView(source: markdown, messageStyle: .assistant, onTemplate: onTemplate)
                 if streaming { KitStatusIcon(.working, size: 12, label: "Streaming") }
                 else {
+                    // A soft rule between the text and its copy and time row, the work log's rule.
+                    Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
                     HStack {
                         if status == .failed { Label("Response interrupted", systemImage: "exclamationmark.circle").font(.caption) }
                         MessageFooter(text: markdown, timestamp: timestamp)
                     }
-                    // A rule closes the agent's message, the same soft rule as the work log's.
-                    Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
                 }
             }
 

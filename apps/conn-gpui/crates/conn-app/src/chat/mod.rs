@@ -3334,6 +3334,7 @@ impl ChatView {
         }
 
         // Conn `TimelineSystemDivider`: centered pill between 1px `--shell-divider` hairlines.
+        // The hairlines run right up to the pill's border (no gap), so line and pill read as one.
         let pill = div()
             .id(element_id)
             .a11y_group(ax_id, format!("Notice: {}", ax_snippet(text)))
@@ -3345,7 +3346,6 @@ impl ChatView {
                     .flex()
                     .flex_row()
                     .items_center()
-                    .gap(px(8.0))
                     .py(px(8.0))
                     .text_size(px(12.0))
                     .line_height(px(16.0))

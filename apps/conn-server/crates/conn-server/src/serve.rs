@@ -355,6 +355,9 @@ pub async fn serve_with_instances(
     config.idle_session = session_idle;
     config.host = Some(host.clone());
     config.turn_observer = Some(host.clone());
+    // A native host tells the Orbit Gateway of each new thread (`thread_push.rs`); a container
+    // server and an inert copy do not.
+    config.thread_push = !inert && provision.is_none();
     config.checkpoints = !inert;
     config.recover_runs = !inert;
     config.restart_policy = crate::settings::restart_policy(&environment.settings.raw());
@@ -526,6 +529,12 @@ pub async fn serve_with_instances(
             Some(start_managed(provision, &environment, &state, sqlite_engine.clone()).await)
         }
         None => {
+            crate::thread_push::spawn(
+                sqlite_engine.clone(),
+                Arc::new(crate::thread_push::CurlSender::new(state_dir.clone())),
+                crate::thread_push::registered_by(environment.auth.clone()),
+                environment.environment_id().to_owned(),
+            );
             if let Some(sender) = native_attention {
                 crate::attention::spawn(
                     sqlite_engine.clone(),

@@ -888,15 +888,9 @@ impl ConnApp {
             panel.set_preview_handles(preview_handles, cx)
         });
         Self::pump_preview_requests(preview_ui_rx, cx);
-        // The write in flight finishes, and the latest layout follows if it differs.
         cx.on_app_quit(|app, cx| {
             app.preview_host.close_all();
-            let panels = app.thread_panels_on_quit(cx);
-            let offline = app.offline_on_quit();
-            async move {
-                panels.await;
-                offline.await;
-            }
+            app.quit_saves(cx)
         })
         .detach();
         app.sync_chat(cx);

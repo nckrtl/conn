@@ -1208,6 +1208,23 @@ impl ConnApp {
         .detach();
     }
 
+    /// The writes a quit runs: the offline cache's, then the panel layout's (the write in flight
+    /// finishes, and the latest layout follows if it differs).
+    ///
+    /// GPUI gives every quit hook 200 ms in total. The two run side by side, so a slow panel
+    /// write cannot keep the shell from being written: the offline writes have no await point
+    /// and finish on the first poll.
+    pub(super) fn quit_saves(
+        &mut self,
+        cx: &mut Context<'_, Self>,
+    ) -> impl std::future::Future<Output = ()> + use<> {
+        let offline = self.offline_on_quit();
+        let panels = self.thread_panels_on_quit(cx);
+        async move {
+            futures::future::join(offline, panels).await;
+        }
+    }
+
     /// Writes what the quit would otherwise lose: every pending write, the shell included.
     pub(super) fn offline_on_quit(&mut self) -> impl std::future::Future<Output = ()> + use<> {
         let dir = self.offline.dir.clone();
@@ -1380,6 +1397,39 @@ mod tests {
             kitchen_sink_shell().threads.len(),
             "the buffered write holds the whole shell"
         );
+    }
+
+    /// A panel write still running at quit cannot keep the shell from being written: GPUI stops
+    /// polling the quit hooks after 200 ms.
+    #[gpui_kit::test]
+    fn a_slow_panel_write_does_not_hold_up_the_shell_on_quit(cx: &mut gpui_kit::TestAppContext) {
+        use futures::FutureExt as _;
+
+        use crate::ui_tests::{kitchen_sink_shell, mount_app};
+
+        let dir = tempfile::tempdir().expect("cache directory");
+        let (_, app) = mount_app(cx);
+        let quit = cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                app.offline.dir = Some(dir.path().to_owned());
+                app.server_url = Some("http://test.local".into());
+                let mut shell = kitchen_sink_shell();
+                shell.synchronized = true;
+                app.set_shell(shell, cx);
+                app.offline.shell_changed();
+                app.stall_panel_write_for_test(dir.path().join("thread-panels.json"), cx);
+                app.quit_saves(cx)
+            })
+        });
+        // The one poll GPUI may get to before its deadline.
+        assert!(
+            quit.now_or_never().is_none(),
+            "the panel write is still running"
+        );
+        let written = std::fs::read(dir.path().join(key("http://test.local")).join("shell"))
+            .expect("the shell was written");
+        let snapshot = LinkedShellSnapshot::from_json(&written).expect("valid snapshot JSON");
+        assert_eq!(snapshot.threads.len(), kitchen_sink_shell().threads.len());
     }
 
     /// Items of a background cache stream do not redraw the window; the open thread's do.

@@ -4318,6 +4318,22 @@ impl ConnApp {
         error
     }
 
+    /// Shows the browser tab whose record on `environment` is `record`, for an agent's
+    /// `panel_open` with a `tabId`.
+    fn show_agent_browser_tab(
+        &mut self,
+        environment: &str,
+        record: &str,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), String> {
+        let id = self
+            .preview_host
+            .browser_tab_of(environment, record)
+            .ok_or_else(|| format!("Conn has no browser tab {record} for this thread."))?;
+        self.select_right_panel_surface(PanelSurface::Browser(id), cx);
+        Ok(())
+    }
+
     /// Whose panel an agent's request for `thread` from `origin` reaches. The primary's needs
     /// its environment id confirmed by the server since it last connected: a request that
     /// arrives before is refused, never filed under a guessed id.
@@ -7028,7 +7044,19 @@ impl ConnApp {
                     }
                 }
             }
-            AgentPanelKind::Browser | AgentPanelKind::Diff | AgentPanelKind::Files => {}
+            // A named tab is one of this thread's desktop tabs (the server checked it is hosted):
+            // show that one instead of the tab the Browser panel showed last.
+            AgentPanelKind::Browser => {
+                if let Some(record) = request.tab_id
+                    && let Ok(Err(error)) = this.update(cx, |app, cx| {
+                        app.show_agent_browser_tab(&owner.environment, &record, cx)
+                    })
+                {
+                    resp.ok = false;
+                    resp.error = Some(error);
+                }
+            }
+            AgentPanelKind::Diff | AgentPanelKind::Files | AgentPanelKind::Terminal => {}
         }
 
         resp
@@ -7931,6 +7959,7 @@ fn agent_panel_tab(panel: conn_contract::AgentPanelKind) -> RightPanelTab {
         AgentPanelKind::Mcp => RightPanelTab::Mcp,
         AgentPanelKind::Diff => RightPanelTab::Diff,
         AgentPanelKind::Files => RightPanelTab::Files,
+        AgentPanelKind::Terminal => RightPanelTab::Terminal,
     }
 }
 

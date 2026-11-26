@@ -158,10 +158,16 @@ pub(super) async fn call(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
         .panels
         .as_ref()
         .is_some_and(|p| p.has_tab_host());
+    // A desktop tab on the thread always wins over the server's browser: without a named tab,
+    // `preview_open` drives the thread's desktop tab even when no tab-hosting desktop holds a
+    // panel subscription here (its panel stream can lag its tab registration, or belong to an
+    // older Conn). A named desktop tab with no tab host present still gets T3's `open`.
     let desktop_open = name == "preview_open"
-        && tab_host
         && !hosted.is_empty()
-        && tab.is_none_or(|tab| hosted.iter().any(|h| h.tab == tab));
+        && match tab {
+            None => true,
+            Some(tab) => tab_host && hosted.iter().any(|h| h.tab == tab),
+        };
     let (operation, desktop_input, timeout_ms) = if desktop_open {
         match args
             .get("url")

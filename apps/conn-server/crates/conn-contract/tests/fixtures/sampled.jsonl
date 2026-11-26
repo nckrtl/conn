@@ -2379,7 +2379,7 @@
 {"key":"rpc::orchestration::subscribe_thread::Error","value":{"_tag":"EnvironmentAuthorizationError","message":"?","requiredScope":"relay:configure"}}
 {"key":"rpc::orchestration::subscribe_thread::Error","value":{"_tag":"EnvironmentAuthorizationError","message":"","requiredScope":"environment:maintain","requiredPermission":"�"}}
 {"key":"rpc::panels::requests::Payload","value":{"deviceName":"+!x'"}}
-{"key":"rpc::panels::requests::Item","value":{"requestId":"33_","threadId":"\u0000","panel":"mcp","focusWindow":false}}
+{"key":"rpc::panels::requests::Item","value":{"requestId":"33_","threadId":"\u0000","panel":"diff","focusWindow":false}}
 {"key":"rpc::panels::requests::Error","value":{"_tag":"EnvironmentAuthorizationError","message":"","requiredScope":"preview:operate"}}
 {"key":"rpc::panels::respond::Payload","value":{"requestId":"😀","ok":false,"database":{"connection":"\t","columns":[],"rowCount":-4.4e-323,"rows":[{" ":null,"&2N=":[]},{},{"�":[{},{},null,-383609671240789800000],"\n":"�","*qQi":"\t"},{"0":false,"😀":{},"":null,"�":-1.7976931348623145e+308}],"truncated":true}}}
 {"key":"rpc::panels::respond::Success","value":null}

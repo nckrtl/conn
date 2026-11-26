@@ -363,15 +363,55 @@ async fn unsupported_operations_answer_with_t3s_error_and_never_hang() {
         .expect_err("not served");
     assert_eq!(error.tag, "PreviewAutomationExecutionError");
     assert_eq!(error.message, "Not supported on desktop tabs: cdpEndpoint.");
-    let error = runner
-        .execute(&request(PreviewAutomationOperation::Open, json!({})))
-        .await
-        .expect_err("not served");
-    assert_eq!(error.message, "Not supported on desktop tabs: open.");
     assert!(
         !page.intercepting.load(Ordering::SeqCst),
         "no action left running"
     );
+}
+
+/// Conn Server before 0.5.4 relays `preview_open` on a named desktop tab as T3's `open`. The
+/// host serves one tab, so `open` shows it: it answers with the tab's status, and loads the
+/// address first when the agent gave one.
+#[tokio::test]
+async fn open_on_the_hosted_tab_answers_its_status_and_loads_a_given_url() {
+    let page = FakePage::new(page_script(|method, _| match method {
+        "Page.navigate" => Ok(json!({"frameId": "frame"})),
+        _ => Ok(json!({})),
+    }));
+    let runner = runner(&page);
+    let response = runner
+        .respond(request(
+            PreviewAutomationOperation::Open,
+            json!({"reuseExistingTab": true}),
+        ))
+        .await;
+    assert!(response.ok, "{:?}", response.error);
+    let result = response.result.flatten().expect("a status");
+    assert_eq!(result["tabId"], "tab");
+    assert!(
+        !page
+            .cdp
+            .sent
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(method, _)| method == "Page.navigate"),
+        "an open without an address stays on the page"
+    );
+    // A same-document navigation commits without a loader, so nothing waits for DOM content.
+    let response = runner
+        .respond(request(
+            PreviewAutomationOperation::Open,
+            json!({"url": "localhost:5173/app", "reuseExistingTab": true}),
+        ))
+        .await;
+    assert!(response.ok, "{:?}", response.error);
+    let sent = page.cdp.sent.lock().unwrap();
+    let navigate = sent
+        .iter()
+        .find(|(method, _)| method == "Page.navigate")
+        .expect("navigated");
+    assert_eq!(navigate.1["url"], "http://localhost:5173/app");
 }
 
 #[tokio::test]

@@ -683,7 +683,11 @@ struct ThreadView: View {
         .onScrollGeometryChange(for: Int.self, of: { g in
             let toEnd = g.contentSize.height - (g.contentOffset.y + g.contentInsets.top + g.containerSize.height)
             return toEnd <= 24 ? 0 : toEnd <= 100 ? 1 : 2
-        }) { _, band in endBand = band }
+        }) { _, band in
+            // Explicit, so the jump circle's entrance and exit play: a change made in a scroll
+            // geometry callback got no animation from the row's value-based modifier.
+            withAnimation(.smooth(duration: 0.35)) { endBand = band }
+        }
         .onScrollGeometryChange(for: TimelineEdges.self, of: { TimelineEdges($0) }) { previous, edges in
             if userScrolling {
                 if edges.top < previous.top && !paging { requestedByScroll = true }
@@ -927,15 +931,17 @@ struct ThreadView: View {
                         .foregroundStyle(theme.foreground)
                         .frame(width: 38.5, height: 38.5)
                         .glassEffect(.regular.interactive(), in: .circle)
-                        // Beside the agents capsule it grows out of and dissolves back into it;
-                        // alone it materializes and fades.
+                        // The glass container draws the circle, so the glass makes its own entrance
+                        // and exit: alone it materializes, beside the agents capsule it morphs out
+                        // of and back into it. The chevron only fades in place, so it never drifts
+                        // from the circle (scaling the button moved it on its own curve).
                         .glassEffectID("jump", in: floatingGlass)
                         .glassEffectTransition(agents.isEmpty ? .materialize : .matchedGeometry)
                         .frame(width: 44, height: 44)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .transition(.scale(scale: 0.5).combined(with: .opacity))
+                .transition(.opacity)
                 .accessibilityLabel("Jump to latest")
                 .accessibilityIdentifier("thread.scrollToEnd")
             }

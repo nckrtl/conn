@@ -14,8 +14,8 @@ use gpui_kit::{
 
 use super::card_face::{
     CARD_CHEVRON_ROOM_PX, CARD_LINE_PX, CARD_META_LINE_PX, CARD_PREVIEW_LINES, CARD_TEXT_PX,
-    CHECKLIST, CardFace, MERGE, PULL_REQUEST, card_body, card_colors, card_header,
-    card_hover_surface, card_shell, disclosure_chevron, icon_with_dot, one_line_preview,
+    CHECKLIST, CardFace, MERGE, PULL_REQUEST, card_body, card_body_hover, card_colors, card_header,
+    card_shell, disclosure_chevron, icon_with_dot, one_line_preview,
 };
 use super::color::{hsla, hsla_alpha, prose_foreground};
 use super::{ChatEvent, ChatView, icons, markdown};
@@ -128,7 +128,9 @@ impl ChatView {
         let fg = hsla(self.tokens.foreground);
         let muted = hsla(self.tokens.muted_foreground);
         let toggle_key = key.clone();
-        let hover = card_hover_surface(colors, &self.tokens);
+        // The whole card is the button, but only the body lightens under the pointer.
+        let hover = card_body_hover(colors, &self.tokens);
+        let group = SharedString::from(format!("agent-msg-group-{id}"));
 
         let header = card_header(false)
             .child(icons::icon(icons::ROBOT, 15.0, muted))
@@ -178,8 +180,16 @@ impl ChatView {
                 .child(one_line_preview(text))
         };
 
+        let inner = card_body(colors)
+            .id(SharedString::from(format!("agent-msg-body-{id}")))
+            .group_hover(group.clone(), move |s| s.bg(hover))
+            .child(title)
+            .child(summary);
+        #[cfg(test)]
+        let inner = gpui_kit::TestSupportExt::test_support(inner);
         let card = card_shell(colors)
             .id(SharedString::from(key))
+            .group(group)
             .a11y_button(
                 format!("chat.agent-message.{id}"),
                 if expanded {
@@ -192,10 +202,9 @@ impl ChatView {
             .aria_expanded(expanded)
             .tab_index(0)
             .cursor_pointer()
-            .hover(move |s| s.bg(hover))
             .on_click(cx.listener(move |view, _, _, cx| view.toggle_expanded(&toggle_key, cx)))
             .child(header)
-            .child(card_body(colors).child(title).child(summary));
+            .child(inner);
         #[cfg(test)]
         let card = gpui_kit::TestSupportExt::test_support(card);
         div()
@@ -334,21 +343,28 @@ impl ChatView {
             .text_color(fg)
             .child(task.title.clone());
 
-        let hover = card_hover_surface(colors, &self.tokens);
+        // The whole card is the button, but only the body lightens under the pointer.
+        let hover = card_body_hover(colors, &self.tokens);
+        let group = SharedString::from(format!("orbit-task-group-{id}"));
         let a11y_label = match label {
             Some(label) => format!("Orbit task #{task_id}, {}, {label}", task.title),
             None => format!("Orbit task #{task_id}, {}", task.title),
         };
         let card = card_shell(colors)
             .id(SharedString::from(format!("orbit-task-{id}")))
+            .group(group.clone())
             .a11y_button(format!("chat.task.{id}"), a11y_label)
             .cursor_pointer()
-            .hover(move |s| s.bg(hover))
             .on_click(cx.listener(move |_, _, _, cx| {
                 cx.emit(ChatEvent::OpenTask { task_id });
             }))
             .child(header)
-            .child(card_body(colors).child(title));
+            .child(
+                card_body(colors)
+                    .id(SharedString::from(format!("orbit-task-body-{id}")))
+                    .group_hover(group, move |s| s.bg(hover))
+                    .child(title),
+            );
         div()
             .w_full()
             .min_w_0()

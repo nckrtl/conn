@@ -33,9 +33,9 @@ use gpui_kit::{
 
 use super::card_face::{
     CARD_ACTION_BOX_PX, CARD_ACTION_ICON_PX, CARD_BODY_RADIUS_PX, CARD_CHEVRON_ROOM_PX,
-    CARD_ICON_PX, CARD_LINE_PX, CARD_META_LINE_PX, CARD_PREVIEW_LINES, CARD_TEXT_PX, CHECKLIST,
-    CardFace, DOWNLOAD, card_body, card_colors, card_header, card_hover_surface, card_shell,
-    disclosure_chevron, icon_with_dot, one_line_preview,
+    CARD_ICON_PX, CARD_INSET_PX, CARD_LINE_PX, CARD_META_LINE_PX, CARD_PREVIEW_LINES, CARD_TEXT_PX,
+    CHECKLIST, CardFace, DOWNLOAD, card_body, card_body_hover, card_colors, card_header,
+    card_hover_surface, card_shell, disclosure_chevron, icon_with_dot, one_line_preview,
 };
 use super::color::{hsla, hsla_alpha, muted_icon, prose_foreground};
 use super::composer_state::{ComposerPendingRequest, PendingQuestion};
@@ -1937,6 +1937,17 @@ impl ChatView {
 
         let summary = summary.map(str::trim).filter(|s| !s.is_empty());
         let expanded = self.expanded_ids.contains(&subagent_summary_key(id));
+        let open = remote_child
+            .map(|remote| {
+                (
+                    remote.thread_id.clone(),
+                    Some(remote.environment_id.clone()),
+                )
+            })
+            .or_else(|| child_thread_id.map(|child| (child.to_owned(), None)));
+        // Only the body lightens under the pointer; the frame and its header keep the surface.
+        let body_hover = card_body_hover(colors, &self.tokens);
+        let group = SharedString::from(format!("subagent-group-{id}"));
         let mut title_row = div()
             .relative()
             .text_size(px(CARD_TEXT_PX))
@@ -1999,6 +2010,7 @@ impl ChatView {
                     },
                 )
                 .cursor_pointer()
+                .hover(move |s| s.bg(body_hover))
                 .on_click(cx.listener(move |view, _, _, cx| {
                     view.toggle_subagent_summary(&entry_id, cx);
                 }));
@@ -2009,20 +2021,18 @@ impl ChatView {
                 toggle.test_support()
             };
             toggle.into_any_element()
+        } else if open.is_some() {
+            // No report: the whole card is the button for the thread, and this body shows it.
+            card_body(colors)
+                .group_hover(group.clone(), move |s| s.bg(body_hover))
+                .child(title_row)
+                .into_any_element()
         } else {
             card_body(colors).child(title_row).into_any_element()
         };
         let card = card_shell(colors).id(SharedString::from(format!("subagent-{id}")));
-        let open = remote_child
-            .map(|remote| {
-                (
-                    remote.thread_id.clone(),
-                    Some(remote.environment_id.clone()),
-                )
-            })
-            .or_else(|| child_thread_id.map(|child| (child.to_owned(), None)));
         let a11y_label = format!("Subagent {title}, {status_label}");
-        // A card that opens a thread lightens under the pointer, as the subagent card always did.
+        // A header that opens a thread lightens under the pointer: it is a button of its own.
         let hover = card_hover_surface(colors, &self.tokens);
         let card = match (open, summary.is_some()) {
             // The header opens the thread; the body opens and closes the report.
@@ -2050,9 +2060,9 @@ impl ChatView {
             }
             // No report: the whole card is the button for the thread.
             (Some((thread_id, environment_id)), false) => card
+                .group(group)
                 .a11y_button(format!("chat.subagent.{id}"), format!("Open {title}"))
                 .cursor_pointer()
-                .hover(move |s| s.bg(hover))
                 .on_click(cx.listener(move |_, _, _, cx| {
                     cx.emit(ChatEvent::OpenThread {
                         thread_id: thread_id.clone(),
@@ -2230,10 +2240,10 @@ impl ChatView {
             .a11y_group(format!("chat.changed-files.group.{run_id}"), label)
             .flex()
             .flex_col()
-            .w_full()
+            .mx(px(-CARD_INSET_PX))
             .min_w_0()
-            .gap(px(3.0))
-            .p(px(3.0))
+            .gap(px(CARD_INSET_PX))
+            .p(px(CARD_INSET_PX))
             .rounded(px(14.0))
             .bg(surface)
             .child(

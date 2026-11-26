@@ -1182,8 +1182,40 @@ fn render_code_block(
     }
     header_actions = header_actions.child(copy_btn);
 
+    let code_surface = div()
+        .id(SharedString::from(format!("code-body-{block_id}")))
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
+        .rounded(px(CARD_BODY_RADIUS_PX))
+        // Lab `.lf-markdown .m-code-body`: the panel's own background, ink text.
+        .bg(if files {
+            files::code_body_background(tokens)
+        } else {
+            hsla(tokens.code_background)
+        })
+        .child(
+            div()
+                .id(SharedString::from(format!("code-scroll-{block_id}")))
+                .w_full()
+                .min_w_0()
+                .px(px(14.4))
+                .py(px(12.8))
+                .font_family(MONO_FONT_FAMILY)
+                .text_size(px(CODE_FONT_PX))
+                .line_height(px(CODE_LINE_HEIGHT_PX))
+                .text_color(if files {
+                    hsla(tokens.foreground)
+                } else {
+                    hsla(tokens.code_foreground)
+                })
+                .when(!is_wrapped, |el| el.overflow_x_scroll().whitespace_nowrap())
+                .child(code_body),
+        );
+    #[cfg(test)]
+    let code_surface = gpui_kit::TestSupportExt::test_support(code_surface);
     // Lab `.m-code`: the card's frame around a header and the code on its own darker surface.
-    card_shell(card)
+    let frame = card_shell(card)
         .id(md_element_id(block_id, "code"))
         .a11y(
             Role::Code,
@@ -1199,38 +1231,11 @@ fn render_code_block(
                 .child(lang_header)
                 .child(header_actions),
         )
-        .child(
-            div()
-                .w_full()
-                .min_w_0()
-                .overflow_hidden()
-                .rounded(px(CARD_BODY_RADIUS_PX))
-                // Lab `.lf-markdown .m-code-body`: the panel's own background, ink text.
-                .bg(if files {
-                    files::code_body_background(tokens)
-                } else {
-                    hsla(tokens.code_background)
-                })
-                .child(
-                    div()
-                        .id(SharedString::from(format!("code-scroll-{block_id}")))
-                        .w_full()
-                        .min_w_0()
-                        .px(px(14.4))
-                        .py(px(12.8))
-                        .font_family(MONO_FONT_FAMILY)
-                        .text_size(px(CODE_FONT_PX))
-                        .line_height(px(CODE_LINE_HEIGHT_PX))
-                        .text_color(if files {
-                            hsla(tokens.foreground)
-                        } else {
-                            hsla(tokens.code_foreground)
-                        })
-                        .when(!is_wrapped, |el| el.overflow_x_scroll().whitespace_nowrap())
-                        .child(code_body),
-                ),
-        )
-        .into_any_element()
+        .child(code_surface);
+    // Tests measure the frame by its label.
+    #[cfg(test)]
+    let frame = gpui_kit::TestSupportExt::test_support(frame);
+    frame.into_any_element()
 }
 
 /// Maps a fenced code block language tag to a synthetic filename for `file_icons::file_icon`.

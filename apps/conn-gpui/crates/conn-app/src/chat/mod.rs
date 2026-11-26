@@ -18,6 +18,10 @@ pub(crate) use self::composer_state::{
     ThreadWorkspace, approval_arrived, approval_redirect_notice, branch_selection_target,
     local_branch_name_from_remote_ref, plan_approval_send, previous_worktree,
 };
+#[cfg(all(test, target_os = "macos"))]
+mod card_shots;
+#[cfg(all(test, target_os = "macos"))]
+mod card_tests;
 mod draft_hero;
 mod embedded_document;
 mod embedded_mount;

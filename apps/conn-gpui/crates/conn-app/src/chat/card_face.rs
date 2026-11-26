@@ -97,19 +97,29 @@ pub(super) fn card_colors(tokens: &Tokens, face: CardFace) -> CardColors {
     }
 }
 
-/// The colour of a card's frame, or of a header on it, under the pointer: 6% of the foreground.
+/// The colour of a header button on a card's frame under the pointer: 6% of the foreground.
 pub(super) fn card_hover_surface(colors: CardColors, tokens: &Tokens) -> Hsla {
     hsla(color_mix_srgb(colors.surface, 0.94, tokens.foreground))
 }
 
-/// The card's frame: the surface, the radius, and the inset the body sits in.
+/// The colour of a card's body under the pointer: 4% of the foreground over the body. Only the
+/// body takes it; the frame and its header keep the surface. In light it stays short of the
+/// frame's own 6%, so the body never melts into the frame.
+pub(super) fn card_body_hover(colors: CardColors, tokens: &Tokens) -> Hsla {
+    hsla(color_mix_srgb(colors.body, 0.96, tokens.foreground))
+}
+
+/// The card's frame: the surface, the radius, and the inset the body sits in. The frame bleeds out
+/// of the text column by that inset on each side, so the body, not the frame, sits on the column
+/// and lines up with the paragraphs and dividers around it. Its width is the column plus both
+/// bleeds: an auto width between negative margins, so it needs a parent that stretches it.
 pub(super) fn card_shell(colors: CardColors) -> Div {
     div()
         .relative()
         .flex()
         .flex_col()
         .gap(px(CARD_INSET_PX))
-        .w_full()
+        .mx(px(-CARD_INSET_PX))
         .min_w_0()
         .p(px(CARD_INSET_PX))
         .rounded(px(CARD_RADIUS_PX))

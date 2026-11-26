@@ -384,7 +384,7 @@ struct ThreadView: View {
                 .safeAreaBar(edge: .bottom, spacing: 0) {
                     composerArea(proxy)
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { old, new in
-                            if old != new && stickToBottom && readingWindow == nil {
+                            if old != new && stickToBottom && !userScrolling && readingWindow == nil {
                                 proxy.scrollTo("timeline-bottom", anchor: .bottom)
                             }
                         }
@@ -644,7 +644,12 @@ struct ThreadView: View {
         .coordinateSpace(name: "timeline-viewport")
         .onPreferenceChange(TimelineFrames.self) { viewport.frames = $0 }
         .onScrollPhaseChange { _, phase, context in
-            if phase == .interacting { userScrolling = true }
+            // The finger owns the feed: stop pinning to the end the moment a scroll starts, and
+            // decide again only once it settles (an update mid-drag used to pull the feed down).
+            if phase == .interacting {
+                userScrolling = true
+                stickToBottom = false
+            }
             if phase == .idle {
                 if userScrolling { stickToBottom = TimelineEdges(context.geometry).nearEnd }
                 userScrolling = false
@@ -662,7 +667,7 @@ struct ThreadView: View {
         }
         .scrollDismissesKeyboard(.interactively)
         .onChange(of: scrollFingerprint) { old, _ in
-            guard stickToBottom && readingWindow == nil else { return }
+            guard stickToBottom && !userScrolling && readingWindow == nil else { return }
             // The first snapshot and the updates right after opening are not new messages: an
             // animated scroll there ran during the push and looked like the thread scrolling down.
             if old == "loading" || Date().timeIntervalSince(openedAt) < 1 {
@@ -681,7 +686,7 @@ struct ThreadView: View {
             }
         }
         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { old, new in
-            if old != new && stickToBottom && readingWindow == nil {
+            if old != new && stickToBottom && !userScrolling && readingWindow == nil {
                 proxy.scrollTo("timeline-bottom", anchor: .bottom)
             }
         }

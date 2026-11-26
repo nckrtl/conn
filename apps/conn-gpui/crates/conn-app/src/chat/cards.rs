@@ -86,7 +86,7 @@ impl UserInputCardState {
 
 /// Local state of one pending secret form.
 pub(super) struct SecretFormState {
-    input: Entity<InputState>,
+    pub(super) input: Entity<InputState>,
     pub(super) submitting: bool,
     pub(super) error: Option<String>,
     _subscription: Subscription,

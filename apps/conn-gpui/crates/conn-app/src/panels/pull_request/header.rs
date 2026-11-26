@@ -1890,8 +1890,11 @@ pub(super) fn primary_pill_button(
     disabled: bool,
     on_click: impl Fn(&mut Window, &mut App) + 'static,
 ) -> AnyElement {
-    let fg = to_hsla(tokens.primary_foreground);
-    let bg = to_hsla(tokens.primary);
+    let (bg, fg) = if disabled {
+        crate::theme::disabled_primary(tokens)
+    } else {
+        (to_hsla(tokens.primary), to_hsla(tokens.primary_foreground))
+    };
     let hover = to_hsla(tokens.primary.with_alpha(0.9));
     let label: SharedString = label.into();
     let mut btn = h_flex()
@@ -1910,9 +1913,7 @@ pub(super) fn primary_pill_button(
         .conn_fast_tooltip(label.clone(), tokens)
         .child(superhero_icon(icon, 14.0, fg))
         .child(label);
-    if disabled {
-        btn = btn.opacity(0.64);
-    } else {
+    if !disabled {
         btn = btn
             .cursor_pointer()
             .hover(move |s| s.bg(hover))

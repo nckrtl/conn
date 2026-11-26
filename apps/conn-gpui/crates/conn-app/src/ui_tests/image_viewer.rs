@@ -1,10 +1,19 @@
 //! The sent-message image viewer: opened from a thumbnail, stepped, zoomed and closed.
 
+use std::time::Duration;
+
+use conn_client::{Credential, ServerConfig};
 use conn_state::{ThreadState, TimelineEntry};
+use futures::{SinkExt as _, StreamExt as _};
 use gpui_kit::test::{TestEventExt as _, TestQueryExt as _, TestWindowExt as _};
 use gpui_kit::{AppContext as _, Entity, MouseButton, Pixels, Point, TestAppContext, Window, px};
+use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::Message;
 
-use super::{center_by_label, kitchen_sink_shell, kitchen_sink_thread, mount_app, press};
+use super::{
+    center_by_label, kitchen_sink_shell, kitchen_sink_thread, linked_mini_shell, mount_app,
+    mount_app_with_server, press,
+};
 use crate::app::ConnApp;
 use crate::chat::image_viewer::{TestLoad, ViewerItem, png_for_test};
 
@@ -336,4 +345,156 @@ fn another_thread_on_screen_drops_the_viewer(cx: &mut TestAppContext) {
         window.render_frame(cx);
     });
     assert!(!viewer_open(cx, &app), "the viewer belongs to its thread");
+}
+
+/// A loopback server that answers every request with a failure and reports each request's tag
+/// and payload, so a test sees which environment a download went to.
+fn spawn_recording_server() -> (
+    url::Url,
+    std::sync::mpsc::Receiver<(String, serde_json::Value)>,
+) {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let addr = crate::live::RT.block_on(async {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("a loopback listener");
+        let addr = listener.local_addr().expect("a listener address");
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                        return;
+                    };
+                    while let Some(Ok(Message::Text(text))) = ws.next().await {
+                        for frame in conn_wire::decode_client_message(&text).unwrap_or_default() {
+                            if let conn_wire::FromClient::Request(req) = frame {
+                                let _ = tx.send((req.tag.clone(), req.payload.clone()));
+                                let reply = conn_wire::FromServer::Exit {
+                                    request_id: req.id,
+                                    exit: conn_wire::Exit::die(conn_wire::error_defect(
+                                        "TestError",
+                                        "no attachment here",
+                                    )),
+                                };
+                                let _ = ws
+                                    .send(Message::Text(
+                                        conn_wire::encode_server_frame(&reply).into(),
+                                    ))
+                                    .await;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    });
+    (
+        url::Url::parse(&format!("http://{addr}")).expect("a loopback URL"),
+        rx,
+    )
+}
+
+/// Waits for an `assets.createUrl` for attachment `id` on the server, running the app's tasks
+/// meanwhile; other requests, such as the thumbnails' own downloads, are skipped.
+fn saw_attachment_request(
+    cx: &mut TestAppContext,
+    requests: &std::sync::mpsc::Receiver<(String, serde_json::Value)>,
+    id: &str,
+) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        cx.run_until_parked();
+        while let Ok((tag, payload)) = requests.try_recv() {
+            if tag == "assets.createUrl" && payload["resource"]["attachmentId"] == id {
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+/// A thread of a linked environment keeps its pictures on that environment: the viewer asks
+/// the linked connection for the opened picture and for each one it steps to, never the
+/// primary connection.
+#[gpui_kit::test]
+fn a_linked_threads_viewer_downloads_from_its_own_environment(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (primary_url, primary_requests) = spawn_recording_server();
+    let (mini_url, mini_requests) = spawn_recording_server();
+    let (window, app) = mount_app_with_server(
+        cx,
+        Some(crate::live::StartupServer {
+            config: ServerConfig {
+                http_base_url: primary_url,
+                credential: Credential::Bearer("primary-token".to_owned()),
+            },
+            label: Some("primary".to_owned()),
+            orbit_server_id: Some("primary".to_owned()),
+        }),
+    );
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.connect_linked_for_test(
+                "mini",
+                ServerConfig {
+                    http_base_url: mini_url,
+                    credential: Credential::Bearer("mini-token".to_owned()),
+                },
+                cx,
+            );
+            app.add_linked_shell_for_test(
+                "mini",
+                "mini",
+                linked_mini_shell("/tmp/mini", "Mini"),
+                cx,
+            );
+            app.set_thread_for_test("thread-mini".to_owned(), image_thread(2), cx);
+        })
+    });
+    assert_eq!(
+        cx.read(|cx| app.read(cx).thread_environment_for_test("thread-mini")),
+        Some("mini".to_owned()),
+        "the thread belongs to the linked environment"
+    );
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read(|cx| app.read(cx).linked_connected_for_test("mini")) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        cx.read(|cx| app.read(cx).linked_connected_for_test("mini")),
+        "the linked environment connects"
+    );
+    // Pictures the thread's thumbnails never ask for, so a request for one is the viewer's.
+    let gallery = (0..2)
+        .map(|index| {
+            ViewerItem::new(
+                &format!("gallery-{index}"),
+                &format!("gallery-{index}.png"),
+                "image/png",
+            )
+        })
+        .collect();
+    open(cx, window, &app, gallery);
+    assert!(
+        saw_attachment_request(cx, &mini_requests, "gallery-0"),
+        "the opened picture comes from the thread's own environment"
+    );
+    // Stepping to the next picture asks the same environment.
+    press(cx, window, "right");
+    assert!(
+        saw_attachment_request(cx, &mini_requests, "gallery-1"),
+        "the next picture comes from the thread's own environment"
+    );
+    while let Ok((tag, payload)) = primary_requests.try_recv() {
+        assert!(
+            tag != "assets.createUrl",
+            "the primary was asked for a picture: {payload}"
+        );
+    }
 }

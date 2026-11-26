@@ -1247,7 +1247,9 @@ impl ConnApp {
             .focused(cx)
             .or_else(|| Some(self.focus_handle.clone()));
         let thread_id = self.layout.selected_thread_id.clone();
-        let connection = self.connection.clone();
+        // The thread's own connection: a linked environment's attachments live on that
+        // environment, not on the primary connection. Stepping through the gallery reuses it.
+        let connection = self.context_connection();
         let tokens = self.tokens.clone();
         let open = ViewerOpen {
             items,

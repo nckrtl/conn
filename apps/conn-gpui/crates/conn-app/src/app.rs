@@ -36,6 +36,7 @@ use crate::theme::{apply_kit_theme, hsla};
 use gpui_kit::prelude::FluentBuilder as _;
 
 mod child_approvals;
+pub(crate) mod details_schedules;
 pub(crate) mod details_tasks;
 mod hover_prefetch;
 mod linked;
@@ -5781,13 +5782,12 @@ impl ConnApp {
         };
         if let Some(cwd) = cwd {
             self.thread_details.vcs_loading = true;
-            let conn = connection.clone();
             cx.spawn(async move |this, cx| {
                 let payload = conn_contract::VcsRefreshStatusPayload {
                     cwd,
                     local_only: Some(true),
                 };
-                let result = conn
+                let result = connection
                     .call::<_, conn_contract::VcsStatusResult>("vcs.refreshStatus", &payload)
                     .await;
                 let _ = this.update(cx, |app, cx| {
@@ -5804,28 +5804,8 @@ impl ConnApp {
             })
             .detach();
         }
-        // First `scheduledTasks.subscribe` snapshot, then stop the stream.
-        let (stream_id, mut rx) =
-            connection.stream_json("scheduledTasks.subscribe", serde_json::json!({}));
-        cx.spawn(async move |this, cx| {
-            let first = rx.recv().await;
-            connection.cancel_stream(stream_id);
-            let _ = this.update(cx, |app, cx| {
-                match first.map(serde_json::from_value::<conn_state::ScheduledTaskListResult>) {
-                    Some(Ok(list)) => {
-                        app.thread_details.tasks = list.tasks.into_iter().flatten().collect();
-                        app.thread_details.tasks_error = None;
-                    }
-                    Some(Err(e)) => {
-                        app.thread_details.tasks_error =
-                            Some(format!("Failed to load scheduled tasks: {e}"));
-                    }
-                    None => {}
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        // The scheduled tasks arrive on the live `scheduledTasks.subscribe` stream that
+        // `sync_details_schedules` keeps open on the thread's own connection.
     }
 
     pub(crate) fn open_details_copy_menu(
@@ -5970,9 +5950,13 @@ impl ConnApp {
         payload: serde_json::Value,
         cx: &mut Context<'_, Self>,
     ) {
-        let Some(connection) = self.connection.clone() else {
+        // The tasks live on the thread's environment: act there, never on the primary server.
+        let Some(connection) = self.details_schedule_connection() else {
             return;
         };
+        if self.thread_details.busy_task_id.is_some() {
+            return;
+        }
         self.thread_details.busy_task_id = Some(task_id);
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -7937,6 +7921,7 @@ fn agent_panel_tab(panel: conn_contract::AgentPanelKind) -> RightPanelTab {
 impl Render for ConnApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.sync_details_task_history(cx);
+        self.sync_details_schedules(cx);
         self.refresh_workspace_images();
         RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Another thread on screen drops the viewer, as web drops its preview.

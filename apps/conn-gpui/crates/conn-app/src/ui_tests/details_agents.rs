@@ -11,7 +11,7 @@ const REMOTE_TITLE: &str = "Set up executor v2 + Orbit MCP for conn machine";
 const LOCAL_TITLE: &str = "Inspect sidebar card hover styles";
 
 /// `2026-11-26T09:15:30.000Z` for a Unix time in seconds.
-fn iso(secs: i64) -> String {
+pub(super) fn iso(secs: i64) -> String {
     let (days, rem) = (secs.div_euclid(86_400), secs.rem_euclid(86_400));
     // Civil date from a day count (Howard Hinnant's `civil_from_days`).
     let z = days + 719_468;
@@ -31,7 +31,7 @@ fn iso(secs: i64) -> String {
     )
 }
 
-fn now_secs() -> i64 {
+pub(super) fn now_secs() -> i64 {
     crate::sidebar::thread_list::current_unix_secs()
 }
 

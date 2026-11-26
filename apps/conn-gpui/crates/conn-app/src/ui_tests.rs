@@ -35,6 +35,7 @@ mod browser_history;
 mod browser_inline_logins;
 mod browser_passkeys;
 mod details_agents;
+mod details_schedules;
 pub(crate) mod details_tasks;
 mod floating_surfaces;
 mod hover_prefetch;

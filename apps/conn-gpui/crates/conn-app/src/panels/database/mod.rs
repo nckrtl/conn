@@ -60,6 +60,10 @@ const TABLE_LIST_WIDTH_PX: f32 = 208.0;
 const RESULT_TABS_HEIGHT_PX: f32 = 44.0;
 /// Height of the SQL editor, including the result duration.
 const SQL_EDITOR_HEIGHT_PX: f32 = 96.0;
+/// Outer left padding of the SQL editor; with the editor's own inset the text sits 16px in.
+const SQL_EDITOR_PAD_START_PX: f32 = 3.0;
+/// Top padding of the SQL editor so its first line centres on the table search text.
+const SQL_EDITOR_PAD_TOP_PX: f32 = 7.0;
 /// Placeholder shown in the SQL editor (`DatabasePanel.tsx`).
 const SQL_PLACEHOLDER: &str = "select * from users limit 100";
 const PILL_RADIUS_PX: f32 = 9999.0;
@@ -1424,8 +1428,13 @@ impl DatabasePanel {
                     .min_h_0()
                     .w_full()
                     .overflow_y_scroll()
-                    .px(px(ROW_PAD_START_PX))
-                    .py(px(12.0))
+                    // The editor adds ~13px of its own inner padding: this puts the query text
+                    // 16px from the column edge, and its first line on the table search text's
+                    // vertical centre.
+                    .pl(px(SQL_EDITOR_PAD_START_PX))
+                    .pr(px(ROW_PAD_START_PX))
+                    .pt(px(SQL_EDITOR_PAD_TOP_PX))
+                    .pb(px(12.0))
                     .font_family(SharedString::from(MONO_FONT))
                     .child(
                         Editor::new(&self.sql_input)
@@ -1478,7 +1487,8 @@ impl DatabasePanel {
         )
         .h(px(RESULT_TABS_HEIGHT_PX))
         .gap(px(10.0))
-        .pl(px(12.0))
+        // The first tab label starts on the SQL query's left edge too.
+        .pl(px(views::RESULT_FIRST_COLUMN_PAD_START_PX))
         .pr(px(8.0));
 
         let result_body: AnyElement = if self.tab == "rows" {

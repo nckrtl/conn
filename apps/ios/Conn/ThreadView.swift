@@ -41,6 +41,8 @@ struct ThreadView: View {
     @State private var stickToBottom = true
     /// When this thread opened. Content that lands during the push jumps to the end unanimated.
     @State private var openedAt = Date.distantPast
+    /// The open whose first frame was logged (`logFirstFrame`); a class, so body may set it.
+    @State private var frameLogged = FrameLog()
     @State private var settled: Bool
     @State private var showingRename = false
     @State private var renameDraft = ""
@@ -556,6 +558,7 @@ struct ThreadView: View {
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 48)
                     } else {
+                        let _ = logFirstFrame(snapshot)
                         let items = renderItems(for: snapshot)
                         let anchorCandidates = Set(items.prefix(12).map(\.id))
                         // What follows a "Worked for" row sits a paragraph gap below it, not the
@@ -853,6 +856,16 @@ struct ThreadView: View {
         let updatedAt: String?
     }
 
+    /// Logs the first frame that draws this thread's messages, once per open.
+    private func logFirstFrame(_ snapshot: FfiThreadSnapshot) {
+        guard openedAt != .distantPast,
+              frameLogged.thread != threadId || frameLogged.openedAt != openedAt else { return }
+        frameLogged.thread = threadId
+        frameLogged.openedAt = openedAt
+        let ms = Int(Date().timeIntervalSince(openedAt) * 1000)
+        CoreStore.openLog.info("frame thread=\(threadId, privacy: .public) entries=\(snapshot.entries.count) capsule=\(turnSubagents.count) ms=\(ms)")
+    }
+
     /// The subagents of the latest turn (those after the last user message) plus any still running
     /// from an earlier turn, so a reply never hides live agents (mobile's `deriveThreadTurnSubagents`).
     private var turnSubagents: [TurnSubagent] {
@@ -1125,4 +1138,10 @@ private struct ThreadEdgePopGesture: UIViewControllerRepresentable {
             return navigationController.viewControllers.count > 1 && navigationController.transitionCoordinator == nil
         }
     }
+}
+
+/// Which open of a thread already logged its first frame.
+private final class FrameLog {
+    var thread: String?
+    var openedAt: Date?
 }

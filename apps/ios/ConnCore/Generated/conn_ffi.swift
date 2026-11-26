@@ -866,6 +866,12 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
     func serverUrl()  -> String
     
     /**
+     * Keeps a few recent threads subscribed while `true` (the app is in the foreground), so
+     * opening one shows its latest state at once; `false` drops them until the next `true`.
+     */
+    func setForeground(foreground: Bool) 
+    
+    /**
      * Moves `thread_id` into (`settled = true`) or out of (`settled = false`) the Settled shelf
      * (`thread.settle` / `thread.unsettle`).
      *
@@ -1501,6 +1507,19 @@ open func serverUrl() -> String  {
 }
     
     /**
+     * Keeps a few recent threads subscribed while `true` (the app is in the foreground), so
+     * opening one shows its latest state at once; `false` drops them until the next `true`.
+     */
+open func setForeground(foreground: Bool)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_conncore_set_foreground(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(foreground),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Moves `thread_id` into (`settled = true`) or out of (`settled = false`) the Settled shelf
      * (`thread.settle` / `thread.unsettle`).
      *
@@ -1666,6 +1685,11 @@ public func FfiConverterTypeConnCore_lower(_ value: ConnCore) -> UInt64 {
 public protocol ConnSessionProtocol: AnyObject, Sendable {
     
     /**
+     * The app went to the background: stop the warm thread streams until [`Self::foreground`].
+     */
+    func background() 
+    
+    /**
      * Reads only the completed inbox file. Message database opening and backfill run separately.
      */
     func cachedShell(identity: String) async  -> FfiShellSnapshot?
@@ -1817,6 +1841,17 @@ public convenience init(gatewayUrl: String?, cacheDirectory: String?, listener: 
 
     
 
+    
+    /**
+     * The app went to the background: stop the warm thread streams until [`Self::foreground`].
+     */
+open func background()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_connsession_background(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
     
     /**
      * Reads only the completed inbox file. Message database opening and backfill run separately.
@@ -2781,6 +2816,10 @@ public protocol OfflineReaderProtocol: AnyObject, Sendable {
     
     func promptWindow(thread: String, id: String, online: Bool) async throws  -> FfiThreadSnapshot
     
+    /**
+     * The thread as last seen: its saved rendered state (run state, work groups, subagents,
+     * requests), else its latest saved messages.
+     */
     func recent(thread: String) async throws  -> FfiThreadSnapshot
     
     func retainsThread(thread: String)  -> Bool
@@ -2923,6 +2962,10 @@ open func promptWindow(thread: String, id: String, online: Bool)async throws  ->
         )
 }
     
+    /**
+     * The thread as last seen: its saved rendered state (run state, work groups, subagents,
+     * requests), else its latest saved messages.
+     */
 open func recent(thread: String)async throws  -> FfiThreadSnapshot  {
     return
         try  await uniffiRustCallAsync(
@@ -18676,6 +18719,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_conncore_server_url() != 43789) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_conncore_set_foreground() != 6752) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_conncore_settle_thread() != 64028) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18748,7 +18794,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_offlinereader_prompt_window() != 2929) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_offlinereader_recent() != 57075) {
+    if (uniffi_conn_ffi_checksum_method_offlinereader_recent() != 17942) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_offlinereader_retains_thread() != 10877) {
@@ -18842,6 +18888,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_ffitextfits_fits() != 56087) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_connsession_background() != 59524) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_cached_shell() != 29377) {

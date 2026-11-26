@@ -18,7 +18,7 @@ use crate::types::{
 };
 
 /// The open question the panel above the composer asks (mobile's `activePendingUserInput`).
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct FfiPendingQuestion {
     /// The question's timeline entry, which the feed leaves out while the panel shows it.
     pub entry_id: String,

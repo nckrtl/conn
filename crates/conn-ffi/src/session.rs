@@ -996,6 +996,8 @@ pub struct ConnSession {
     machine: Mutex<Machine<Arc<ConnCore>>>,
     /// Where this session keeps its offline thread cache, if anywhere.
     cache_dir: Option<PathBuf>,
+    /// The app is in the background: connections keep no warm threads.
+    in_background: std::sync::atomic::AtomicBool,
     /// The current attempt's offline reader.
     offline: Mutex<Option<(u64, Arc<OfflineReader>)>>,
     this: Weak<ConnSession>,
@@ -1018,9 +1020,27 @@ impl ConnSession {
             listener,
             machine: Mutex::new(Machine::new()),
             cache_dir,
+            in_background: std::sync::atomic::AtomicBool::new(false),
             offline: Mutex::new(None),
             this: this.clone(),
         })
+    }
+
+    /// Hands an attempt's new connection to the machine, in the app's current phase.
+    fn attach_core(
+        &self,
+        id: u64,
+        core: Arc<ConnCore>,
+        server_url: String,
+        environment_id: Option<String>,
+    ) {
+        if self
+            .in_background
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            core.set_foreground(false);
+        }
+        self.step(|m| m.attached(id, core, server_url, environment_id));
     }
 
     /// Runs one machine step, carries out its effects, then publishes the new state.
@@ -1194,7 +1214,7 @@ impl ConnSession {
                         server_id,
                         server_url,
                         ..
-                    } => self.step(|m| m.attached(id, core, server_url, Some(server_id))),
+                    } => self.attach_core(id, core, server_url, Some(server_id)),
                     FfiOrbitConnectOutcome::Failed {
                         reason: FfiOrbitConnectFailure::GatewayUnreachable,
                         message,
@@ -1225,7 +1245,7 @@ impl ConnSession {
                     {
                         Ok(core) => {
                             let url = core.server_url();
-                            self.step(|m| m.attached(id, core, url, Some(environment_id)));
+                            self.attach_core(id, core, url, Some(environment_id));
                         }
                         Err(err) => {
                             let message = err.to_string();
@@ -1257,7 +1277,7 @@ impl ConnSession {
                 match ConnCore::start_checked(server_url, credential, listener, None, expected) {
                     Ok(core) => {
                         let url = core.server_url();
-                        self.step(|m| m.attached(id, core, url, None));
+                        self.attach_core(id, core, url, None);
                     }
                     Err(err) => self.step(|m| m.start_failed(id, err.to_string(), None)),
                 }
@@ -1336,7 +1356,7 @@ impl ConnSession {
                 Ok(core) => {
                     let url = core.server_url();
                     let env = environment_id.clone();
-                    self.step(|m| m.attached(id, core, url, Some(env)));
+                    self.attach_core(id, core, url, Some(env));
                     return;
                 }
                 Err(err) => {
@@ -1574,7 +1594,21 @@ impl ConnSession {
     }
 
     pub fn foreground(&self) {
+        self.in_background
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Some(core) = self.core() {
+            core.set_foreground(true);
+        }
         self.step(Machine::foreground);
+    }
+
+    /// The app went to the background: stop the warm thread streams until [`Self::foreground`].
+    pub fn background(&self) {
+        self.in_background
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(core) = self.core() {
+            core.set_foreground(false);
+        }
     }
 
     /// Where a link for `environment_id` opens: here only when it is this session's already

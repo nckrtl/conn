@@ -101,7 +101,9 @@ pub enum FfiSendMode {
 }
 
 /// User decision for a pending approval request (`runtime-request.respond`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum, serde::Serialize, serde::Deserialize,
+)]
 pub enum FfiApprovalDecision {
     Accept,
     AcceptForSession,
@@ -191,7 +193,9 @@ pub struct FfiShellSnapshot {
 }
 
 /// Status of a tool call or work item row (mirrors [`conn_state::ItemStatus`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum, serde::Serialize, serde::Deserialize,
+)]
 pub enum FfiItemStatus {
     Running,
     Completed,
@@ -209,7 +213,9 @@ impl From<ItemStatus> for FfiItemStatus {
 }
 
 /// Fine-grained turn item status (mirrors [`conn_state::TurnItemStatus`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum, serde::Serialize, serde::Deserialize,
+)]
 pub enum FfiTurnItemStatus {
     Idle,
     Pending,
@@ -237,7 +243,9 @@ impl From<TurnItemStatus> for FfiTurnItemStatus {
 }
 
 /// Status of a secret request timeline card (mirrors [`conn_state::SecretRequestStatus`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum, serde::Serialize, serde::Deserialize,
+)]
 pub enum FfiSecretRequestStatus {
     Pending,
     Saved,
@@ -257,7 +265,7 @@ impl From<SecretRequestStatus> for FfiSecretRequestStatus {
 }
 
 /// Attachment summary carried on user and queued user timeline entries.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct FfiAttachment {
     pub id: String,
     pub name: String,
@@ -295,7 +303,7 @@ impl From<&ChatAttachment> for FfiAttachment {
 }
 
 /// One selectable option in an [`FfiUserInputQuestion`].
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct FfiUserInputOption {
     pub label: String,
     pub description: String,
@@ -306,7 +314,7 @@ pub struct FfiUserInputOption {
 }
 
 /// One question in an [`FfiTimelineEntry::UserInputRequest`].
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct FfiUserInputQuestion {
     pub id: String,
     pub header: String,
@@ -318,7 +326,7 @@ pub struct FfiUserInputQuestion {
 }
 
 /// One answered question on a settled [`FfiTimelineEntry::UserInputRequest`].
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct FfiUserInputAnswer {
     pub question_id: String,
     pub question: String,
@@ -355,7 +363,7 @@ pub struct FfiUserInputSubmission {
 }
 
 /// One changed file summary inside an [`FfiTimelineEntry::TurnCheckpoint`].
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct FfiTurnCheckpointFile {
     pub path: String,
     pub kind: String,
@@ -364,7 +372,7 @@ pub struct FfiTurnCheckpointFile {
 }
 
 /// Timing and grouping metadata for a contiguous run of `Thinking` / `Tool` entries.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct FfiWorkGroupTiming {
     /// Stable group id matching desktop (`work-group-<first_entry_id>`).
     pub id: String,
@@ -381,7 +389,7 @@ pub struct FfiWorkGroupTiming {
 }
 
 /// One flattened timeline row emitted in [`FfiThreadSnapshot`].
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum, serde::Serialize, serde::Deserialize)]
 pub enum FfiTimelineEntry {
     User {
         id: String,
@@ -503,7 +511,7 @@ pub enum FfiTimelineEntry {
 }
 
 /// Point-in-time snapshot of one subscribed thread emitted to [`crate::CoreListener::on_thread`].
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct FfiThreadSnapshot {
     pub history_cursor: Option<String>,
     pub server_page: bool,

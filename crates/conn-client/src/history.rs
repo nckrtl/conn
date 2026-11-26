@@ -160,6 +160,7 @@ impl Connection {
         let http = self.http.clone();
         let bearer = self.bearer.read().ok().and_then(|g| g.clone());
 
+        let path = url.path().rsplit('/').next().unwrap_or_default().to_owned();
         self.run_on_tokio(
             async move {
                 let mut req = http
@@ -174,6 +175,7 @@ impl Connection {
                     req = req.bearer_auth(token);
                 }
 
+                let started = std::time::Instant::now();
                 let resp = req.send().await.map_err(|err| {
                     ClientError::Connection(format!("thread history request: {err}"))
                 })?;
@@ -200,6 +202,11 @@ impl Connection {
                 let bytes = resp.bytes().await.map_err(|err| {
                     ClientError::Connection(format!("thread history body: {err}"))
                 })?;
+                crate::perf_log!(
+                    "client.history kind={path} bytes={} ms={:.1}",
+                    bytes.len(),
+                    crate::perf::ms_since(started)
+                );
                 Ok(serde_json::from_slice(&bytes)?)
             },
             "thread history",

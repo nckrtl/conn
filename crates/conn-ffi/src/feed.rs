@@ -6,7 +6,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct FfiReviewExcerpt {
     pub context_id: String,
     pub file_path: String,
@@ -15,7 +15,7 @@ pub struct FfiReviewExcerpt {
     pub diff: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum, serde::Serialize, serde::Deserialize)]
 pub enum FfiFeedDetail {
     Message {
         sender: Option<String>,

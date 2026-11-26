@@ -51,8 +51,10 @@
 		B795481020E8CC028303C92C /* ComposerDraft.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BE9E75FB8EF9857CA143CC1 /* ComposerDraft.swift */; };
 		B8E6DB9174EF25FDECBED71A /* KeychainStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1124C8596181165D405995EB /* KeychainStore.swift */; };
 		B8F6A10847DC5E66A913CBDF /* CoreFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = CE790160CB877B8F694F27DE /* CoreFoundation.framework */; };
+		C23BD6A458851AA1494AE9C5 /* PrettyJSONTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 27FB848CF1FE14FE7EEDC47A /* PrettyJSONTests.swift */; };
 		D4A0816AB5172F4F926124FE /* InboxView.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED2E8A42C2F26EBE74993384 /* InboxView.swift */; };
 		D669CE38457AD8AFBFBD9307 /* ComposerIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 61AAE18F6C2B21A8330B1E7B /* ComposerIdentityTests.swift */; };
+		DE8DC8C0D1F634DCC5FBE7E8 /* ThreadAgentsSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3C77ED76CA868A8641563437 /* ThreadAgentsSheet.swift */; };
 		E00624BFC10B35AF8A078566 /* ConnSymbolNames.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D3FE73635BB92AB18553D21 /* ConnSymbolNames.swift */; };
 		E35DDD6B7B13228C6407AF5D /* Security.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 0372F9496D36F878DF86AD20 /* Security.framework */; };
 		EC602C005CDBAD412B78016A /* VoiceDictationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F44243218813D735ECAC6D0A /* VoiceDictationTests.swift */; };
@@ -87,12 +89,14 @@
 		195AC4C2F3764E276F2218A3 /* ModelPickerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerSheet.swift; sourceTree = "<group>"; };
 		1B9E5245F4E95FC79202BCF9 /* ConnUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = ConnUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		1CE3181F6E68461F996404BA /* conn_ffi.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = conn_ffi.swift; sourceTree = "<group>"; };
+		27FB848CF1FE14FE7EEDC47A /* PrettyJSONTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrettyJSONTests.swift; sourceTree = "<group>"; };
 		293A0DC9F8A7EF5B24D84EC7 /* PushRegistration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PushRegistration.swift; sourceTree = "<group>"; };
 		2A101A8DA8F4F68706844776 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		2CBCA439230E858AF2DE3142 /* ThreadCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadCard.swift; sourceTree = "<group>"; };
 		2FD75455596219E78B67B80B /* ConnCore.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = ConnCore.xcframework; path = build/ConnCore.xcframework; sourceTree = "<group>"; };
 		3341300D754CB97F598B98C8 /* NewThreadView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NewThreadView.swift; sourceTree = "<group>"; };
 		362BABC1D0CE218BFEC81CE0 /* ThreadMessages.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadMessages.swift; sourceTree = "<group>"; };
+		3C77ED76CA868A8641563437 /* ThreadAgentsSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadAgentsSheet.swift; sourceTree = "<group>"; };
 		3D3FE73635BB92AB18553D21 /* ConnSymbolNames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnSymbolNames.swift; sourceTree = "<group>"; };
 		3F9B5C07BE44FE6255C87CAB /* ConnTests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = ConnTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		3FD5FA009FB12D3D66A47B57 /* ThreadText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadText.swift; sourceTree = "<group>"; };
@@ -195,6 +199,7 @@
 			children = (
 				61AAE18F6C2B21A8330B1E7B /* ComposerIdentityTests.swift */,
 				C7D72460260524F38C5ECA13 /* DictationStreamTests.swift */,
+				27FB848CF1FE14FE7EEDC47A /* PrettyJSONTests.swift */,
 				F44243218813D735ECAC6D0A /* VoiceDictationTests.swift */,
 			);
 			path = ConnTests;
@@ -254,6 +259,7 @@
 				FAACE0A20EBC8600175A4B2C /* SettingsMicrophoneView.swift */,
 				F7425B395B824B6191534A3E /* SettingsView.swift */,
 				E0F3FADEDA515DE053342539 /* TasksTab.swift */,
+				3C77ED76CA868A8641563437 /* ThreadAgentsSheet.swift */,
 				68138261D10D816E0BD5FD86 /* ThreadAttachments.swift */,
 				2CBCA439230E858AF2DE3142 /* ThreadCard.swift */,
 				362BABC1D0CE218BFEC81CE0 /* ThreadMessages.swift */,
@@ -405,6 +411,7 @@
 			files = (
 				D669CE38457AD8AFBFBD9307 /* ComposerIdentityTests.swift in Sources */,
 				B50687C226DB3E32F98DE264 /* DictationStreamTests.swift in Sources */,
+				C23BD6A458851AA1494AE9C5 /* PrettyJSONTests.swift in Sources */,
 				EC602C005CDBAD412B78016A /* VoiceDictationTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -440,6 +447,7 @@
 				988FE5A4514654703768C2B5 /* SettingsMicrophoneView.swift in Sources */,
 				2CB7DF35B882E4F49849D0B6 /* SettingsView.swift in Sources */,
 				53C3272026A88E6B1AA893D4 /* TasksTab.swift in Sources */,
+				DE8DC8C0D1F634DCC5FBE7E8 /* ThreadAgentsSheet.swift in Sources */,
 				8FA657D971422A96A54C6D92 /* ThreadAttachments.swift in Sources */,
 				9500C781677466778D393FAD /* ThreadCard.swift in Sources */,
 				0E762194DEB1EEC9949DAFB1 /* ThreadMessages.swift in Sources */,
@@ -514,7 +522,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 89;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				DEVELOPMENT_TEAM = 9SVJ4SYB9B;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -618,7 +626,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 8;
+				CURRENT_PROJECT_VERSION = 89;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				DEVELOPMENT_TEAM = 9SVJ4SYB9B;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

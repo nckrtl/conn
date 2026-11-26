@@ -47,6 +47,7 @@ pub mod thread_feed;
 pub mod thread_models;
 pub mod thread_search;
 mod timeline;
+pub mod warm;
 
 pub use conn_contract::{
     AnnotationCapture, AnnotationRecord, AnnotationRecordSource, AnnotationStatus,

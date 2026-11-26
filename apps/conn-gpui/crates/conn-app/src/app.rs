@@ -1457,8 +1457,14 @@ impl ConnApp {
         let environment_id = self.environment_id();
         let panel_owner = self.thread_panels.owner().cloned();
         let linked_environment = self.context_environment();
+        let terminal_thread = thread_id
+            .clone()
+            .or_else(|| self.draft.as_ref().map(|draft| draft.draft_id.clone()));
+        let terminal_target = self.terminal_target(terminal_thread.as_deref(), root.clone());
+        let terminal_connection = self.context_connection();
         let (history_key, history_hostname) = self.browser_history_context(project_id.as_deref());
         self.right_panel.update(cx, |panel, cx| {
+            panel.set_terminal_target(terminal_target, terminal_connection, cx);
             panel.set_environment(environment_id, cx);
             panel.set_browser_history_context(history_key, history_hostname, cx);
             panel.set_owner(panel_owner, cx);
@@ -6360,6 +6366,7 @@ impl ConnApp {
             .right_panel
             .read(cx)
             .browser_titles(self.right_panel_tabs.browser_ids(), cx);
+        let terminal_machine = self.right_panel.read(cx).terminal_machine(cx);
         let header = render_panel_header(
             PanelHeaderProps {
                 open_tabs: &open_tabs,
@@ -6371,6 +6378,7 @@ impl ConnApp {
                 add_menu_open: self.right_panel_add_menu_open,
                 available_tabs: &available_tabs,
                 has_project: self.shown_thread_has_project(),
+                terminal_machine: terminal_machine.as_deref(),
                 tokens: &self.tokens,
             },
             PanelHeaderCallbacks {

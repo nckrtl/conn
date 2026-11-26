@@ -26,10 +26,11 @@ pub(crate) mod linked_items;
 mod mcp;
 mod pull_request;
 mod tasks;
-mod terminal;
+pub(crate) mod terminal;
 pub(crate) mod terminal_demo;
 pub(crate) mod terminal_drawer;
 mod terminal_palette;
+pub(crate) mod terminal_target;
 mod tree;
 #[cfg(feature = "zed-files")]
 pub(crate) mod zed_preview;
@@ -723,6 +724,23 @@ impl RightPanel {
             .update(cx, |panel, cx| panel.queue_sql(owner, sql, cx))
     }
 
+    /// Points the Terminal at the shown thread: its machine, folder and the connection of its
+    /// environment. The thread's own terminal session shows; other threads' sessions stay put.
+    pub fn set_terminal_target(
+        &mut self,
+        target: terminal_target::TerminalTarget,
+        connection: Option<Connection>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.terminal
+            .update(cx, |p, cx| p.set_target(target, connection, cx));
+    }
+
+    /// The machine the shown thread's terminal runs on, for the tab title (`Terminal · agent`).
+    pub fn terminal_machine(&self, cx: &App) -> Option<String> {
+        self.terminal.read(cx).machine_label().map(str::to_owned)
+    }
+
     /// The shown thread's panel owner, for what waits per thread (the Database query). Set it
     /// before [`Self::set_context`], so a waiting query never lands in another project.
     pub fn set_owner(&mut self, owner: Option<conn_state::PanelOwner>, cx: &mut Context<'_, Self>) {
@@ -944,8 +962,6 @@ impl RightPanel {
                 .update(cx, |p, cx| p.set_workspace_root(workspace_root.clone(), cx));
             self.diff
                 .update(cx, |p, cx| p.set_workspace_root(workspace_root.clone(), cx));
-            self.terminal
-                .update(cx, |p, cx| p.set_workspace_root(workspace_root, cx));
         }
         if self.thread_id != thread_id {
             self.files
@@ -1309,6 +1325,7 @@ impl RightPanel {
 
         let active = self.displayed_surface(self.surface(), self.tabs.tabs(), cx);
         let browser_titles = self.browser_titles(self.tabs.browser_ids(), cx);
+        let terminal_machine = self.terminal_machine(cx);
         render_panel_header(
             PanelHeaderProps {
                 open_tabs: self.tabs.tabs(),
@@ -1320,6 +1337,7 @@ impl RightPanel {
                 add_menu_open: self.add_menu_open,
                 available_tabs: &RightPanelTab::MENU_ORDER,
                 has_project: true,
+                terminal_machine: terminal_machine.as_deref(),
                 tokens: &self.tokens,
             },
             callbacks,

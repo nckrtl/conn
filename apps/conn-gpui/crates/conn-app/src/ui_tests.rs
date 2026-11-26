@@ -43,6 +43,7 @@ mod preview_host;
 mod queue_tray;
 #[cfg(target_os = "macos")]
 mod selection_perf;
+mod terminal_environment;
 
 const TEST_WINDOW_WIDTH: f32 = 1440.0;
 const TEST_WINDOW_HEIGHT: f32 = 900.0;

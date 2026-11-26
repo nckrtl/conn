@@ -1,11 +1,16 @@
-//! Real local PTY terminal surface powered by `alacritty_terminal` 0.26 and a custom GPUI Element.
+//! Terminal surface powered by `alacritty_terminal` 0.26 and a custom GPUI Element.
 //!
-//! Starts the user's login shell lazily on first display in `workspace_root` (fallback `$HOME`),
-//! repaints only on PTY output (no continuous animation/blink loop), and kills the PTY child
-//! process when dropped.
+//! The terminal belongs to the thread on screen. A thread on this Mac's own server gets the
+//! user's login shell in a local PTY, started lazily on first display in the thread's folder
+//! (fallback `$HOME`). A thread on a linked environment gets a shell on that machine instead:
+//! the panel attaches to the thread's `terminal.*` RPCs on that environment's connection and
+//! feeds the output into the same emulator. Sessions are kept per environment and thread.
+//! Repaints happen only on output (no continuous animation/blink loop), and a local PTY child is
+//! killed when its session is dropped.
 
 use crate::a11y::ConnA11yExt as _;
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -20,7 +25,11 @@ use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::tty;
-use alacritty_terminal::vte::ansi::{CursorShape, CursorStyle as AnsiCursorStyle};
+use alacritty_terminal::vte::ansi::{
+    CursorShape, CursorStyle as AnsiCursorStyle, Processor as AnsiProcessor,
+};
+use conn_client::Connection;
+use conn_contract::TerminalAttachStreamEvent;
 use conn_state::terminal_settings::{CursorStyle as TerminalCursorStyle, TerminalSettings};
 use conn_theme::Tokens;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
@@ -40,6 +49,9 @@ use super::color::{Rgb8, rgb8_to_hsla, to_hsla};
 use super::header::superhero_icon;
 use super::terminal_palette::{
     KeyInput, TerminalKeyAction, TerminalPalette, dim_rgb8, encode_terminal_key,
+};
+use super::terminal_target::{
+    DEFAULT_TERMINAL_ID, SessionKey, TerminalTarget, attach_input, write_chunks,
 };
 
 const TERMINAL_PAD_START_PX: f32 = 16.0;
@@ -106,6 +118,8 @@ enum TermNote {
     Wakeup,
     Exited,
     Copy(String),
+    /// A remote terminal broke: the server refused it, or the connection to it ended.
+    Failed(String),
 }
 
 struct SharedState {
@@ -137,7 +151,9 @@ impl EventListener for Listener {
     }
 }
 
-/// Live PTY session owned by [`TerminalPanel`]. Kills the child process on drop.
+/// Live terminal session owned by [`TerminalPanel`]: a local PTY, or a shell on a linked
+/// environment ([`RemoteLink`]). Kills a local child process on drop; a remote shell keeps
+/// running on its server and the next attach picks it up again.
 struct TerminalSession {
     term: Arc<FairMutex<Term<Listener>>>,
     shared: Arc<SharedState>,
@@ -146,7 +162,66 @@ struct TerminalSession {
     size: GridSize,
     exited: bool,
     failed: Option<String>,
+    /// Set when the shell runs on the thread's server.
+    remote: Option<RemoteLink>,
     _events_task: Task<()>,
+}
+
+/// A request for the server that owns a remote terminal, sent in order.
+enum RemoteOp {
+    Write(String),
+    Resize { cols: u16, rows: u16 },
+    Clear,
+}
+
+/// The connection to a terminal on the thread's own server (`terminal.attach` stream plus
+/// `terminal.write`, `.resize` and `.clear` calls). Dropping it ends the stream.
+struct RemoteLink {
+    connection: Connection,
+    ops: mpsc::UnboundedSender<RemoteOp>,
+    _reader: Task<()>,
+    _writer: Task<()>,
+}
+
+impl TerminalSession {
+    /// A session with an empty screen and no shell yet.
+    fn empty(
+        config: Config,
+        size: GridSize,
+        key: SessionKey,
+        cx: &mut Context<'_, TerminalPanel>,
+    ) -> Self {
+        let (notes_tx, mut notes_rx) = mpsc::unbounded_channel();
+        let shared = Arc::new(SharedState {
+            dirty: AtomicBool::new(false),
+            sender: OnceLock::new(),
+            notes: notes_tx,
+        });
+        let term = Arc::new(FairMutex::new(Term::new(
+            config,
+            &size,
+            Listener(shared.clone()),
+        )));
+        let events_task = cx.spawn(async move |this, cx| {
+            while let Some(note) = notes_rx.recv().await {
+                let alive = this.update(cx, |panel, cx| panel.handle_note(&key, note, cx));
+                if alive.is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            term,
+            shared,
+            #[cfg(unix)]
+            child_pid: None,
+            size,
+            exited: false,
+            failed: None,
+            remote: None,
+            _events_task: events_task,
+        }
+    }
 }
 
 impl Drop for TerminalSession {
@@ -178,12 +253,16 @@ struct DrawnAt {
     cell_height: Pixels,
 }
 
-/// Interactive terminal panel backed by `alacritty_terminal`.
+/// Interactive terminal panel backed by `alacritty_terminal`. It shows the session of the thread
+/// on screen ([`TerminalTarget`]); sessions of other threads stay alive beside it.
 pub(crate) struct TerminalPanel {
     tokens: Tokens,
     palette: TerminalPalette,
-    workspace_root: Option<String>,
-    session: Option<TerminalSession>,
+    /// The thread on screen: its session key, folder, machine name and where its shell runs.
+    target: TerminalTarget,
+    /// The connection of the thread's environment, for a remote shell.
+    connection: Option<Connection>,
+    sessions: HashMap<SessionKey, TerminalSession>,
     focus: FocusHandle,
     marked: String,
     scroll_remainder: f32,
@@ -203,8 +282,8 @@ pub(crate) const CURSOR_BLINK_MS: u64 = 530;
 impl fmt::Debug for TerminalPanel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("TerminalPanel")
-            .field("workspace_root", &self.workspace_root)
-            .field("started", &self.session.is_some())
+            .field("target", &self.target)
+            .field("sessions", &self.sessions.len())
             .finish_non_exhaustive()
     }
 }
@@ -215,8 +294,9 @@ impl TerminalPanel {
         Self {
             tokens,
             palette,
-            workspace_root: None,
-            session: None,
+            target: TerminalTarget::default(),
+            connection: None,
+            sessions: HashMap::new(),
             focus: cx.focus_handle(),
             marked: String::new(),
             scroll_remainder: 0.0,
@@ -234,26 +314,94 @@ impl TerminalPanel {
         cx.notify();
     }
 
-    pub(crate) fn set_workspace_root(
+    /// The session of the thread on screen.
+    fn session(&self) -> Option<&TerminalSession> {
+        self.sessions.get(&self.target.key)
+    }
+
+    fn session_mut(&mut self) -> Option<&mut TerminalSession> {
+        self.sessions.get_mut(&self.target.key)
+    }
+
+    /// Points the terminal at the thread on screen: its machine, folder and connection. The
+    /// thread's own session shows (a new one starts on the next [`Self::ensure_started`]); the
+    /// sessions of other threads are kept but never shown here.
+    pub(crate) fn set_target(
         &mut self,
-        workspace_root: Option<String>,
+        target: TerminalTarget,
+        connection: Option<Connection>,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.workspace_root == workspace_root {
+        // A session that ran over a connection the thread no longer has (the link was renewed)
+        // starts again over the new one; its shell kept running on the server.
+        let stale: Vec<SessionKey> = self
+            .sessions
+            .iter()
+            .filter(|(key, session)| {
+                session.remote.as_ref().is_some_and(|link| {
+                    **key == target.key
+                        && connection
+                            .as_ref()
+                            .is_some_and(|new| !new.same_connection(&link.connection))
+                })
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in stale {
+            self.sessions.remove(&key);
+        }
+        if self.target == target && same_connection(self.connection.as_ref(), connection.as_ref()) {
             return;
         }
-        self.workspace_root = workspace_root;
+        self.target = target;
+        self.connection = connection;
         cx.notify();
     }
 
-    /// Gives a running terminal the cursor shape from Settings, once per change.
+    /// Test helper: what the panel shows now.
+    #[cfg(test)]
+    pub(crate) fn target_for_test(&self) -> &TerminalTarget {
+        &self.target
+    }
+
+    /// Test helper: every session, with where its shell runs (`local` or `remote`), by key.
+    #[cfg(test)]
+    pub(crate) fn sessions_for_test(&self) -> Vec<(SessionKey, &'static str)> {
+        let mut sessions: Vec<_> = self
+            .sessions
+            .iter()
+            .map(|(key, session)| {
+                let backend = if session.remote.is_some() {
+                    "remote"
+                } else {
+                    "local"
+                };
+                (key.clone(), backend)
+            })
+            .collect();
+        sessions.sort_by(|a, b| format!("{:?}", a.0).cmp(&format!("{:?}", b.0)));
+        sessions
+    }
+
+    /// Test helper: the thread on screen waits for its server's connection.
+    #[cfg(test)]
+    pub(crate) fn waiting_for_connection_for_test(&self) -> bool {
+        self.waiting_for_connection()
+    }
+
+    /// The machine the shown terminal runs on, for the header (`Terminal · agent`).
+    pub(crate) fn machine_label(&self) -> Option<&str> {
+        self.target.label.as_deref()
+    }
+
+    /// Gives running terminals the cursor shape from Settings, once per change.
     fn apply_cursor_settings(&mut self, settings: &TerminalSettings) {
         let wanted = (settings.cursor_style, settings.cursor_blink);
         if self.applied_cursor == Some(wanted) {
             return;
         }
         self.applied_cursor = Some(wanted);
-        if let Some(session) = &self.session {
+        for session in self.sessions.values() {
             session.term.lock().set_options(terminal_config(settings));
         }
     }
@@ -287,13 +435,34 @@ impl TerminalPanel {
         }));
     }
 
-    /// Lazily spawns the user's login shell on first display of the Terminal tab.
+    /// Whether the thread on screen waits for its server's connection before its shell can start.
+    fn waiting_for_connection(&self) -> bool {
+        self.target.remote && self.connection.is_none() && self.session().is_none()
+    }
+
+    /// Lazily starts the thread's shell on first display of the Terminal tab: a local PTY, or a
+    /// shell on the thread's server. A remote thread whose server is not connected yet waits; it
+    /// never falls back to this Mac.
     pub(crate) fn ensure_started(&mut self, cx: &mut Context<'_, Self>) {
-        if self.session.is_some() {
+        if self.session().is_some() {
             return;
         }
-        let cwd = resolve_cwd(self.workspace_root.as_deref());
-        self.session = Some(self.start_session(cwd, cx));
+        self.start_current(false, cx);
+    }
+
+    /// Starts the shell for the thread on screen. `fresh` makes a remote shell start over.
+    fn start_current(&mut self, fresh: bool, cx: &mut Context<'_, Self>) {
+        let key = self.target.key.clone();
+        let session = if self.target.remote {
+            let Some(connection) = self.connection.clone() else {
+                return;
+            };
+            self.start_remote_session(&key, connection, fresh, cx)
+        } else {
+            let cwd = resolve_cwd(self.target.cwd.as_deref());
+            self.start_session(&key, cwd, cx)
+        };
+        self.sessions.insert(key, session);
         cx.notify();
     }
 
@@ -302,59 +471,35 @@ impl TerminalPanel {
         window.focus(&self.focus, cx);
     }
 
-    /// Restarts the login shell in the current workspace root.
+    /// Restarts the shell of the thread on screen in its folder.
     fn restart_session(&mut self, cx: &mut Context<'_, Self>) {
-        let cwd = resolve_cwd(self.workspace_root.as_deref());
-        self.session = Some(self.start_session(cwd, cx));
-        cx.notify();
+        self.sessions.remove(&self.target.key.clone());
+        self.start_current(true, cx);
     }
 
     /// Clears the terminal screen and scrollback (equivalent to Ctrl+L / clear).
     fn clear_terminal(&mut self, cx: &mut Context<'_, Self>) {
-        if let Some(session) = &self.session {
+        if let Some(session) = self.session() {
             let mut term = session.term.lock();
             term.grid_mut().clear_history();
             term.scroll_display(Scroll::Bottom);
             drop(term);
+            if let Some(link) = &session.remote {
+                let _ = link.ops.send(RemoteOp::Clear);
+            }
             self.write_bytes(b"\x0c".to_vec());
             cx.notify();
         }
     }
 
-    fn start_session(&self, cwd: PathBuf, cx: &mut Context<'_, Self>) -> TerminalSession {
-        let size = GridSize::default();
-        let (notes_tx, mut notes_rx) = mpsc::unbounded_channel();
-        let shared = Arc::new(SharedState {
-            dirty: AtomicBool::new(false),
-            sender: OnceLock::new(),
-            notes: notes_tx,
-        });
+    fn start_session(
+        &self,
+        key: &SessionKey,
+        cwd: PathBuf,
+        cx: &mut Context<'_, Self>,
+    ) -> TerminalSession {
         let config = terminal_config(&crate::terminal_settings::current(cx));
-        let term = Arc::new(FairMutex::new(Term::new(
-            config,
-            &size,
-            Listener(shared.clone()),
-        )));
-
-        let events_task = cx.spawn(async move |this, cx| {
-            while let Some(note) = notes_rx.recv().await {
-                let alive = this.update(cx, |panel, cx| panel.handle_note(note, cx));
-                if alive.is_err() {
-                    break;
-                }
-            }
-        });
-
-        let mut session = TerminalSession {
-            term,
-            shared,
-            #[cfg(unix)]
-            child_pid: None,
-            size,
-            exited: false,
-            failed: None,
-            _events_task: events_task,
-        };
+        let mut session = TerminalSession::empty(config, GridSize::default(), key.clone(), cx);
 
         if let Err(err) = spawn_pty(&mut session, cwd) {
             session.exited = true;
@@ -364,39 +509,101 @@ impl TerminalPanel {
         session
     }
 
-    fn handle_note(&mut self, note: TermNote, cx: &mut Context<'_, Self>) {
+    /// Joins (or starts) the thread's terminal on its own server, in the thread's folder. The
+    /// server keeps the shell and its scrollback; the first snapshot repaints the screen.
+    fn start_remote_session(
+        &self,
+        key: &SessionKey,
+        connection: Connection,
+        fresh: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> TerminalSession {
+        let config = terminal_config(&crate::terminal_settings::current(cx));
+        let mut session = TerminalSession::empty(config, GridSize::default(), key.clone(), cx);
+        let Some(thread_id) = key.thread.clone() else {
+            session.exited = true;
+            session.failed = Some("open a thread to use its terminal".to_owned());
+            return session;
+        };
+        let input = attach_input(
+            &thread_id,
+            self.target.cwd.as_deref(),
+            session.size.cols,
+            session.size.rows,
+        );
+        let (ops_tx, ops_rx) = mpsc::unbounded_channel();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let reader = remote_reader(
+            cx,
+            connection.clone(),
+            input,
+            fresh,
+            session.term.clone(),
+            session.shared.clone(),
+            ready_tx,
+        );
+        let writer = remote_writer(
+            cx,
+            connection.clone(),
+            thread_id,
+            session.shared.notes.clone(),
+            ops_rx,
+            ready_rx,
+        );
+        session.remote = Some(RemoteLink {
+            connection,
+            ops: ops_tx,
+            _reader: reader,
+            _writer: writer,
+        });
+        session
+    }
+
+    fn handle_note(&mut self, key: &SessionKey, note: TermNote, cx: &mut Context<'_, Self>) {
+        let Some(session) = self.sessions.get_mut(key) else {
+            return;
+        };
         match note {
             TermNote::Wakeup => {
-                if let Some(session) = &self.session {
-                    session.shared.dirty.store(false, Ordering::Release);
-                }
+                session.shared.dirty.store(false, Ordering::Release);
             }
             TermNote::Exited => {
-                if let Some(session) = &mut self.session {
-                    session.exited = true;
-                }
+                session.exited = true;
+            }
+            TermNote::Failed(why) => {
+                session.exited = true;
+                session.failed = Some(why);
             }
             TermNote::Copy(text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
             }
         }
-        cx.notify();
+        if *key == self.target.key {
+            cx.notify();
+        }
     }
 
     fn write_bytes(&self, bytes: Vec<u8>) {
         if bytes.is_empty() {
             return;
         }
-        if let Some(session) = &self.session
-            && !session.exited
-            && let Some(sender) = session.shared.sender.get()
-        {
+        let Some(session) = self.session() else {
+            return;
+        };
+        if session.exited {
+            return;
+        }
+        if let Some(link) = &session.remote {
+            for chunk in write_chunks(&bytes) {
+                let _ = link.ops.send(RemoteOp::Write(chunk));
+            }
+        } else if let Some(sender) = session.shared.sender.get() {
             let _ = sender.send(Msg::Input(Cow::Owned(bytes)));
         }
     }
 
     fn resize(&mut self, next: GridSize) {
-        let Some(session) = &mut self.session else {
+        let Some(session) = self.session_mut() else {
             return;
         };
         if session.size == next {
@@ -404,10 +611,15 @@ impl TerminalPanel {
         }
         session.size = next;
         session.term.lock().resize(next);
-        if !session.exited
-            && let Some(sender) = session.shared.sender.get()
-        {
-            let _ = sender.send(Msg::Resize(next.window_size()));
+        if !session.exited {
+            if let Some(link) = &session.remote {
+                let _ = link.ops.send(RemoteOp::Resize {
+                    cols: next.cols,
+                    rows: next.rows,
+                });
+            } else if let Some(sender) = session.shared.sender.get() {
+                let _ = sender.send(Msg::Resize(next.window_size()));
+            }
         }
     }
 
@@ -424,7 +636,7 @@ impl TerminalPanel {
         if command {
             match k.key.as_str() {
                 "c" => {
-                    if let Some(session) = &self.session
+                    if let Some(session) = self.session()
                         && let Some(text) = session.term.lock().selection_to_string()
                         && !text.is_empty()
                     {
@@ -447,7 +659,7 @@ impl TerminalPanel {
             return;
         }
 
-        let Some(session) = &self.session else {
+        let Some(session) = self.session() else {
             return;
         };
         if session.exited {
@@ -497,7 +709,7 @@ impl TerminalPanel {
     }
 
     fn scroll_to_bottom(&self) {
-        if let Some(session) = &self.session {
+        if let Some(session) = self.session() {
             let mut term = session.term.lock();
             if term.grid().display_offset() != 0 {
                 term.scroll_display(Scroll::Bottom);
@@ -506,7 +718,7 @@ impl TerminalPanel {
     }
 
     fn select_all(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(session) = &self.session else {
+        let Some(session) = self.session() else {
             return;
         };
         let mut term = session.term.lock();
@@ -526,12 +738,12 @@ impl TerminalPanel {
 
     fn cell_at(&self, position: Point<Pixels>, clamp: bool) -> Option<(usize, usize, Side)> {
         let at = self.drawn_at?;
-        let size = self.session.as_ref()?.size;
+        let size = self.session()?.size;
         map_point_to_cell(position, at, size, clamp)
     }
 
     fn grid_point(&self, col: usize, row: usize) -> Option<GridPoint> {
-        let session = self.session.as_ref()?;
+        let session = self.session()?;
         let offset = session.term.lock().grid().display_offset() as i32;
         Some(GridPoint::new(GridLine(row as i32 - offset), Column(col)))
     }
@@ -552,7 +764,7 @@ impl TerminalPanel {
         let Some(grid_pt) = self.grid_point(col, row) else {
             return;
         };
-        if let Some(session) = &self.session {
+        if let Some(session) = self.session() {
             let mut term = session.term.lock();
             match (
                 event.click_count,
@@ -588,7 +800,7 @@ impl TerminalPanel {
         let Some(grid_pt) = self.grid_point(col, row) else {
             return;
         };
-        if let Some(session) = &self.session
+        if let Some(session) = self.session()
             && let Some(selection) = session.term.lock().selection.as_mut()
         {
             selection.update(grid_pt, side);
@@ -605,18 +817,21 @@ impl TerminalPanel {
     }
 
     fn scrolled(&mut self, event: &ScrollEvent, cx: &mut Context<'_, Self>) {
-        let Some(session) = &self.session else {
+        let Some((term, cell_height)) = self
+            .session()
+            .map(|session| (session.term.clone(), session.size.cell_height))
+        else {
             return;
         };
         let delta_lines = match event.delta {
             ScrollDelta::Lines(delta) => delta.y,
-            ScrollDelta::Pixels(delta) => f32::from(delta.y) / session.size.cell_height.max(1.0),
+            ScrollDelta::Pixels(delta) => f32::from(delta.y) / cell_height.max(1.0),
         };
         self.scroll_remainder += delta_lines;
         let whole = self.scroll_remainder.trunc() as i32;
         if whole != 0 {
             self.scroll_remainder -= whole as f32;
-            session.term.lock().scroll_display(Scroll::Delta(whole));
+            term.lock().scroll_display(Scroll::Delta(whole));
             cx.notify();
         }
         cx.stop_propagation();
@@ -714,7 +929,7 @@ impl EntityInputHandler for TerminalPanel {
     }
 
     fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> bool {
-        self.session.as_ref().is_some_and(|s| !s.exited)
+        self.session().is_some_and(|s| !s.exited)
     }
 }
 
@@ -727,15 +942,26 @@ impl Render for TerminalPanel {
         let focused = self.focus.is_focused(window);
         let entity = cx.entity();
 
-        let status_banner = self.session.as_ref().and_then(|s| {
-            if !s.exited {
-                return None;
-            }
-            Some(match &s.failed {
-                Some(why) => format!("Shell failed to start: {why}"),
-                None => "Shell process exited.".to_owned(),
+        let machine = self.target.label.clone();
+        let remote = self.target.remote;
+        let waiting = self.waiting_for_connection();
+        let status_banner = if waiting {
+            Some(match &machine {
+                Some(name) => format!("Connecting to {name}…"),
+                None => "Connecting to this thread's machine…".to_owned(),
             })
-        });
+        } else {
+            self.session().and_then(|s| {
+                if !s.exited {
+                    return None;
+                }
+                Some(match &s.failed {
+                    Some(why) if remote => format!("Terminal unavailable: {why}"),
+                    Some(why) => format!("Shell failed to start: {why}"),
+                    None => "Shell process exited.".to_owned(),
+                })
+            })
+        };
 
         // The first terminal row centres on the floating toolbar: its top padding is the toolbar's
         // centre line minus half a cell, so it follows the font size and line height.
@@ -756,6 +982,17 @@ impl Render for TerminalPanel {
             .bg(control_bg)
             .border_1()
             .border_color(control_border)
+            .when_some(machine, |el, name| {
+                el.child(
+                    div()
+                        .id("terminal-machine-label")
+                        .a11y_group("panel.terminal.machine", format!("Terminal on {name}"))
+                        .px(px(8.0))
+                        .text_size(px(12.0))
+                        .text_color(muted)
+                        .child(name),
+                )
+            })
             .child(
                 div()
                     .id("terminal-clear-btn")
@@ -902,6 +1139,207 @@ fn spawn_pty(session: &mut TerminalSession, cwd: PathBuf) -> std::io::Result<()>
     let _ = session.shared.sender.set(event_loop.channel());
     let _reader = event_loop.spawn();
     Ok(())
+}
+
+// ---------------------------------------------------------------- terminal on the thread's server
+
+/// What one `terminal.attach` event did to the screen.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct RemoteOutcome {
+    /// The server has the terminal: writes and resizes may go out now.
+    ready: bool,
+    /// The screen changed.
+    redraw: bool,
+    /// The shell ended or the server refused it.
+    end: Option<RemoteEnd>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RemoteEnd {
+    Exited,
+    Failed(String),
+}
+
+/// Replaces the screen with what the server remembers of the terminal.
+fn replace_screen(term: &FairMutex<Term<Listener>>, processor: &mut AnsiProcessor, history: &str) {
+    let mut term = term.lock();
+    // RIS resets the emulator, then the scrollback goes (`ESC [ 3 J`).
+    processor.advance(&mut *term, b"\x1bc\x1b[3J");
+    processor.advance(&mut *term, history.as_bytes());
+}
+
+/// Feeds one event of the terminal's stream into the emulator.
+fn apply_remote_event(
+    term: &FairMutex<Term<Listener>>,
+    processor: &mut AnsiProcessor,
+    event: TerminalAttachStreamEvent,
+) -> RemoteOutcome {
+    use conn_contract::TerminalSessionStatus as Status;
+    match event {
+        TerminalAttachStreamEvent::Snapshot(event) => {
+            let snapshot = event.snapshot;
+            replace_screen(term, processor, &snapshot.history);
+            let end = match snapshot.status {
+                Status::Exited => Some(RemoteEnd::Exited),
+                Status::Error => {
+                    Some(RemoteEnd::Failed(snapshot.error.unwrap_or_else(|| {
+                        "the terminal failed to start".to_owned()
+                    })))
+                }
+                Status::Starting | Status::Running => None,
+            };
+            RemoteOutcome {
+                ready: true,
+                redraw: true,
+                end,
+            }
+        }
+        TerminalAttachStreamEvent::Restarted(event) => {
+            replace_screen(term, processor, &event.snapshot.history);
+            RemoteOutcome {
+                ready: true,
+                redraw: true,
+                end: None,
+            }
+        }
+        TerminalAttachStreamEvent::Output(event) => {
+            processor.advance(&mut *term.lock(), event.data.as_bytes());
+            RemoteOutcome {
+                redraw: true,
+                ..RemoteOutcome::default()
+            }
+        }
+        TerminalAttachStreamEvent::Cleared(_) => {
+            let mut term = term.lock();
+            term.grid_mut().clear_history();
+            term.scroll_display(Scroll::Bottom);
+            RemoteOutcome {
+                redraw: true,
+                ..RemoteOutcome::default()
+            }
+        }
+        TerminalAttachStreamEvent::Exited(_) | TerminalAttachStreamEvent::Closed(_) => {
+            RemoteOutcome {
+                end: Some(RemoteEnd::Exited),
+                ..RemoteOutcome::default()
+            }
+        }
+        TerminalAttachStreamEvent::Error(event) => RemoteOutcome {
+            end: Some(RemoteEnd::Failed(event.message)),
+            ..RemoteOutcome::default()
+        },
+        _ => RemoteOutcome::default(),
+    }
+}
+
+/// Reads the thread's terminal from its server into `term` until the session is dropped.
+fn remote_reader(
+    cx: &Context<'_, TerminalPanel>,
+    connection: Connection,
+    input: conn_contract::TerminalAttachInput,
+    fresh: bool,
+    term: Arc<FairMutex<Term<Listener>>>,
+    shared: Arc<SharedState>,
+    ready: tokio::sync::oneshot::Sender<()>,
+) -> Task<()> {
+    cx.background_executor().spawn(async move {
+        if fresh {
+            // A restart ends the old shell first, so the attach below starts a new one.
+            let _ = connection
+                .call_json(
+                    "terminal.close",
+                    serde_json::json!({
+                        "threadId": input.thread_id,
+                        "terminalId": input.terminal_id,
+                        "deleteHistory": true,
+                    }),
+                )
+                .await;
+        }
+        let Ok(payload) = serde_json::to_value(&input) else {
+            return;
+        };
+        let (_stream, mut events) = connection.stream_json("terminal.attach", payload);
+        let mut ready = Some(ready);
+        let mut processor = AnsiProcessor::new();
+        let wake = Listener(shared.clone());
+        while let Some(raw) = events.recv().await {
+            let Ok(event) = serde_json::from_value::<TerminalAttachStreamEvent>(raw) else {
+                continue;
+            };
+            let outcome = apply_remote_event(&term, &mut processor, event);
+            if outcome.ready
+                && let Some(ready) = ready.take()
+            {
+                let _ = ready.send(());
+            }
+            if outcome.redraw {
+                wake.send_event(TermEvent::Wakeup);
+            }
+            match outcome.end {
+                Some(RemoteEnd::Exited) => {
+                    let _ = shared.notes.send(TermNote::Exited);
+                }
+                Some(RemoteEnd::Failed(why)) => {
+                    let _ = shared.notes.send(TermNote::Failed(why));
+                }
+                None => {}
+            }
+        }
+        let _ = shared.notes.send(TermNote::Failed(
+            "the connection to this terminal ended".to_owned(),
+        ));
+    })
+}
+
+/// Sends the session's input, resizes and clears to the server in order, once it has the
+/// terminal.
+fn remote_writer(
+    cx: &Context<'_, TerminalPanel>,
+    connection: Connection,
+    thread_id: String,
+    notes: mpsc::UnboundedSender<TermNote>,
+    mut ops: mpsc::UnboundedReceiver<RemoteOp>,
+    ready: tokio::sync::oneshot::Receiver<()>,
+) -> Task<()> {
+    cx.background_executor().spawn(async move {
+        if ready.await.is_err() {
+            return;
+        }
+        let session = serde_json::json!({
+            "threadId": thread_id,
+            "terminalId": DEFAULT_TERMINAL_ID,
+        });
+        while let Some(op) = ops.recv().await {
+            let mut payload = session.clone();
+            let (tag, input) = match op {
+                RemoteOp::Write(data) => ("terminal.write", Some(data)),
+                RemoteOp::Resize { cols, rows } => {
+                    payload["cols"] = cols.into();
+                    payload["rows"] = rows.into();
+                    ("terminal.resize", None)
+                }
+                RemoteOp::Clear => ("terminal.clear", None),
+            };
+            if let Some(data) = input {
+                payload["data"] = data.into();
+            }
+            if let Err(err) = connection.call_json(tag, payload).await
+                && tag == "terminal.write"
+            {
+                let _ = notes.send(TermNote::Failed(err.to_string()));
+            }
+        }
+    })
+}
+
+/// Whether two optional connections are the same one.
+fn same_connection(a: Option<&Connection>, b: Option<&Connection>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a.same_connection(b),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------- custom GPUI element
@@ -1097,7 +1535,7 @@ impl Element for TerminalElement {
 
         let panel = self.panel.read(cx);
         let palette = panel.palette.clone();
-        let Some(session) = &panel.session else {
+        let Some(session) = panel.session() else {
             return PrepaintedTerminal {
                 backgrounds: Vec::new(),
                 lines: Vec::new(),
@@ -1436,6 +1874,87 @@ mod tests {
         assert_eq!(
             map_point_to_cell(point(px(-50.0), px(-50.0)), drawn, grid, true),
             Some((0, 0, Side::Left))
+        );
+    }
+}
+
+#[cfg(test)]
+mod remote_tests {
+    use super::*;
+    use conn_contract::from_json;
+    use serde_json::json;
+
+    fn test_term() -> (Arc<FairMutex<Term<Listener>>>, Arc<SharedState>) {
+        let (notes, _rx) = mpsc::unbounded_channel();
+        let shared = Arc::new(SharedState {
+            dirty: AtomicBool::new(false),
+            sender: OnceLock::new(),
+            notes,
+        });
+        let term = Arc::new(FairMutex::new(Term::new(
+            Config::default(),
+            &GridSize::default(),
+            Listener(shared.clone()),
+        )));
+        (term, shared)
+    }
+
+    fn event(value: serde_json::Value) -> TerminalAttachStreamEvent {
+        from_json(value).expect("a terminal stream event")
+    }
+
+    fn first_row(term: &FairMutex<Term<Listener>>) -> String {
+        let term = term.lock();
+        (0..10)
+            .map(|col| term.grid()[GridLine(0)][Column(col)].c)
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
+    }
+
+    fn snapshot(history: &str, status: &str) -> serde_json::Value {
+        json!({
+            "type": "snapshot",
+            "snapshot": {
+                "threadId": "t", "terminalId": "term-1", "cwd": "/srv", "worktreePath": null,
+                "status": status, "pid": 1, "history": history, "exitCode": null,
+                "exitSignal": null, "label": "zsh", "updatedAt": "2026-11-26T10:00:00.000Z"
+            }
+        })
+    }
+
+    #[test]
+    fn a_snapshot_and_output_reach_the_screen() {
+        let (term, _shared) = test_term();
+        let mut processor = AnsiProcessor::new();
+        let outcome =
+            apply_remote_event(&term, &mut processor, event(snapshot("agent$ ", "running")));
+        assert!(outcome.ready && outcome.redraw && outcome.end.is_none());
+        assert_eq!(first_row(&term), "agent$");
+        let output = event(json!({
+            "type": "output", "threadId": "t", "terminalId": "term-1", "data": "ls"
+        }));
+        let outcome = apply_remote_event(&term, &mut processor, output);
+        assert!(outcome.redraw && !outcome.ready);
+        assert_eq!(first_row(&term), "agent$ ls");
+        // A later snapshot (a re-attach) replaces the screen instead of adding to it.
+        apply_remote_event(&term, &mut processor, event(snapshot("fresh", "running")));
+        assert_eq!(first_row(&term), "fresh");
+    }
+
+    #[test]
+    fn an_exited_or_failed_terminal_ends_the_session() {
+        let (term, _shared) = test_term();
+        let mut processor = AnsiProcessor::new();
+        let outcome = apply_remote_event(&term, &mut processor, event(snapshot("", "exited")));
+        assert_eq!(outcome.end, Some(RemoteEnd::Exited));
+        let error = event(json!({
+            "type": "error", "threadId": "t", "terminalId": "term-1", "message": "no such folder"
+        }));
+        let outcome = apply_remote_event(&term, &mut processor, error);
+        assert_eq!(
+            outcome.end,
+            Some(RemoteEnd::Failed("no such folder".to_owned()))
         );
     }
 }

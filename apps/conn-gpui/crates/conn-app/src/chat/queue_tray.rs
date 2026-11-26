@@ -1,8 +1,8 @@
 //! The queued-message tray above the composer.
 //!
 //! Messages sent while a turn runs wait in the thread's queue. They are not timeline items: they
-//! sit in a rounded tray whose bottom edge tucks behind the composer card, so tray and composer
-//! read as one stacked unit. Each row is one queued message, top to bottom in the order the server
+//! sit in a rounded tray, inset from the composer card's sides, whose bottom edge tucks behind the
+//! card: a card peeking out from behind the prompt box. Each row is one queued message, top to bottom in the order the server
 //! sends them, with `Steer` (send it into the running turn now), a trash button, and a `…` menu
 //! (`Edit`, `Move up`, `Move down`). A row also drags up or down to change its place.
 //!
@@ -39,6 +39,9 @@ const MAX_VISIBLE_ROWS: f32 = 4.5;
 /// How far the tray's bottom edge runs behind the composer card. It covers the composer's
 /// rounded top corners, so the tray's sides carry on down behind them.
 const TUCK_PX: f32 = 16.0;
+/// How far the tray's left and right edges sit inside the composer's. Clear of the composer's
+/// 16px corner curve, so the tucked part never shows past it.
+pub(super) const TRAY_INSET_PX: f32 = 20.0;
 /// Corner radius of the tray: the composer's.
 const TRAY_RADIUS_PX: f32 = 16.0;
 /// How far from the composer's fill toward the border colour the light tray's fill sits.
@@ -764,7 +767,8 @@ impl ChatView {
             .id("chat-queue-tray")
             .a11y_group("chat.queue", "Queued messages")
             .relative()
-            .w_full()
+            // Narrower than the composer: a card peeking out from behind it.
+            .mx(px(TRAY_INSET_PX))
             // Runs behind the composer card, which paints over the tucked part.
             .mb(px(-TUCK_PX))
             .pb(px(TUCK_PX))

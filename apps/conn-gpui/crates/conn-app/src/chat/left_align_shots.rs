@@ -248,7 +248,7 @@ fn render_timeline_warning_screenshots() {
 
 /// A live turn (a settled thought and tool, then a running tool) with two messages queued behind
 /// it.
-fn queued_thread(count: u32) -> ThreadState {
+fn queued_thread(count: u32, first: usize) -> ThreadState {
     let mut thread = ThreadState::new("thread-selected");
     thread.synchronized = true;
     thread.working = true;
@@ -301,7 +301,7 @@ fn queued_thread(count: u32) -> ThreadState {
     for n in 1..=count {
         thread
             .entries
-            .push(queued(n, QUEUED[(n as usize - 1) % QUEUED.len()]));
+            .push(queued(n, QUEUED[(n as usize - 1 + first) % QUEUED.len()]));
     }
     for (id, start) in [("think-1", 0), ("tool-1", 3_000), ("tool-2", 9_000)] {
         thread.entry_timings.insert(
@@ -316,7 +316,8 @@ fn queued_thread(count: u32) -> ThreadState {
     thread
 }
 
-/// Renders a live work group with one queued message, and with six, in the queue tray.
+/// Renders a live work group with queued messages in the tray: one short, three (one of them
+/// long), and one long.
 ///
 /// `CONN_THREAD_SHOTS_DIR=<dir> cargo test -p conn-app render_queue_tray_screenshots -- --ignored`
 #[test]
@@ -325,11 +326,11 @@ fn render_queue_tray_screenshots() {
     let Some(dir) = std::env::var_os("CONN_THREAD_SHOTS_DIR") else {
         return;
     };
-    for count in [1, 6] {
+    for (name, count, first) in [("queue-1", 1, 0), ("queue-3", 3, 0), ("queue-1-long", 1, 2)] {
         render_pngs(
             Path::new(&dir),
-            &format!("queue-{count}"),
-            &|| queued_thread(count),
+            name,
+            &|| queued_thread(count, first),
             &|_, _| {},
         );
     }

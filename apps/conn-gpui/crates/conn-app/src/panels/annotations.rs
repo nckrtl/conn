@@ -18,14 +18,16 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    AnyElement, BoxShadow, Context, Entity, FontWeight, MouseButton, MouseDownEvent, ParentElement,
-    SharedString, Styled, Subscription, Window, deferred, div, point, px,
+    AnyElement, BoxShadow, Context, Entity, FontWeight, ParentElement, SharedString, Styled,
+    Subscription, Window, deferred, div, point, px,
 };
 
-use super::chrome::{self, ConnTooltipExt as _};
+use super::chrome::{self, ConnTooltipExt as _, FloatingSurfaceExt as _};
 use super::color::to_hsla;
-use super::header::superhero_icon;
+use super::header::{dropdown_glass_shadow, superhero_icon};
 use crate::a11y::ConnA11yExt as _;
+use crate::settings::controls::pill_switch_labeled;
+use gpui_kit::TestSupportExt as _;
 
 const UI_TEXT_PX: f32 = 13.0;
 const UI_LINE_HEIGHT_PX: f32 = 20.0;
@@ -195,7 +197,7 @@ impl AnnotationUiState {
         }
         self.annotating = !self.annotating;
         if self.annotating {
-            self.queue_open = false;
+            // The popover stays open: its Annotate switch shows the mode it just turned on.
             self.confirming_remove = false;
         } else {
             self.hovered_element = None;
@@ -460,7 +462,120 @@ pub(crate) enum QueuePopoverAnchor {
     LeftOfRail,
 }
 
-/// Renders the Conn-styled floating Annotation Queue popover (`AnnotationQueuePopover.tsx`).
+/// Conn's `isAnnotationToggleShortcut` (`apps/web/src/annotations/browserAnnotationKeyboard.ts`):
+/// `Cmd/Ctrl+Shift+A`, without Option. The page overlay binds the same chord.
+#[must_use]
+pub(crate) fn is_annotation_toggle_shortcut(keystroke: &gpui_kit::Keystroke) -> bool {
+    let m = &keystroke.modifiers;
+    (m.platform || m.control) && m.shift && !m.alt && keystroke.key.eq_ignore_ascii_case("a")
+}
+
+/// `rounded-bubble` radius of Conn's floating thread cards (the Details card, `CARD_RADIUS_PX`).
+const POPOVER_RADIUS_PX: f32 = 14.0;
+/// Rows inside a floating card: `rounded-lg`, `px-2.5` (the Details card's `ROW_*` tokens).
+const POPOVER_ROW_RADIUS_PX: f32 = 8.0;
+const POPOVER_ROW_PAD_X_PX: f32 = 10.0;
+/// The numbered circle in front of each annotation. Its outer size is fixed.
+pub(crate) const NUMBER_BADGE_PX: f32 = 18.0;
+/// The number inside the circle. Small enough that two digits keep room on both sides.
+const NUMBER_BADGE_TEXT_PX: f32 = 9.0;
+
+/// Fill of a floating thread card, as in the Details card: raised in Dark, popover in Light.
+fn popover_surface(tokens: &Tokens) -> conn_theme::Rgba {
+    match tokens.appearance {
+        Appearance::Dark => tokens.shell_raised,
+        Appearance::Light => tokens.popover,
+    }
+}
+
+/// The name of an annotation's state and its status dot, mapped as T3's `StatusDotBadge` does:
+/// done is success, working is info. A question gets the warning colour. `Waiting` is the resting
+/// state, so it shows no dot.
+pub(crate) fn annotation_status(
+    qstate: AnnotationQueueState,
+    tokens: &Tokens,
+) -> (&'static str, Option<conn_theme::Rgba>) {
+    match qstate {
+        AnnotationQueueState::Done => ("Done", Some(tokens.success)),
+        AnnotationQueueState::Working => ("Working", Some(tokens.info)),
+        AnnotationQueueState::Question => ("Question", Some(tokens.warning)),
+        AnnotationQueueState::Waiting => ("Waiting", None),
+    }
+}
+
+/// One switch row of the popover: title, subline and Conn's settings pill switch. The whole row
+/// toggles; the switch itself stays the accessible control.
+fn annotation_switch_row(
+    slug: &'static str,
+    title: &'static str,
+    subline: String,
+    checked: bool,
+    enabled: bool,
+    tokens: &Tokens,
+    on_toggle: Rc<dyn Fn(&mut Window, &mut gpui_kit::App)>,
+) -> AnyElement {
+    let fg = to_hsla(tokens.popover_foreground);
+    let muted = to_hsla(tokens.muted_foreground);
+    let hover_bg = to_hsla(tokens.shell_highlight);
+
+    let switch = {
+        let on_toggle = on_toggle.clone();
+        pill_switch_labeled(
+            SharedString::from(format!("annotations-{slug}-switch")),
+            title,
+            checked,
+            tokens,
+            move |window, cx| {
+                if enabled {
+                    // The row's own click must not toggle a second time.
+                    cx.stop_propagation();
+                    on_toggle(window, cx);
+                }
+            },
+        )
+    };
+
+    h_flex()
+        .id(SharedString::from(format!("annotations-{slug}-row")))
+        .test_support()
+        .items_center()
+        .justify_between()
+        .gap(px(12.0))
+        .px(px(POPOVER_ROW_PAD_X_PX))
+        .py(px(6.0))
+        .rounded(px(POPOVER_ROW_RADIUS_PX))
+        .when(enabled, |el| {
+            el.cursor_pointer()
+                .hover(move |s| s.bg(hover_bg))
+                .on_click(move |_, window, cx| on_toggle(window, cx))
+        })
+        .when(!enabled, |el| el.opacity(0.5))
+        .child(
+            v_flex()
+                .min_w_0()
+                .flex_1()
+                .child(
+                    div()
+                        .text_size(px(UI_TEXT_PX))
+                        .line_height(px(18.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .text_color(fg)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .text_size(px(SM_TEXT_PX))
+                        .line_height(px(SM_LINE_HEIGHT_PX))
+                        .text_color(muted)
+                        .child(subline),
+                ),
+        )
+        .child(switch)
+        .into_any_element()
+}
+
+/// Renders the Conn-styled floating Annotation Queue popover (`AnnotationQueuePopover.tsx`),
+/// on the surface, border, radius, section and heading tokens of the thread Details card.
 pub(crate) fn render_queue_popover(
     state: &AnnotationUiState,
     tokens: &Tokens,
@@ -481,31 +596,17 @@ pub(crate) fn render_queue_popover(
         .map(|r| r.id.clone())
         .collect();
 
-    let popover_bg = to_hsla(tokens.popover);
+    let surface = popover_surface(tokens);
+    let card_bg = to_hsla(surface);
     let fg = to_hsla(tokens.popover_foreground);
     let muted = to_hsla(tokens.muted_foreground);
-    let border = to_hsla(tokens.border);
+    let border = to_hsla(tokens.foreground.with_alpha(0.08));
     let divider = to_hsla(tokens.glass_divider);
     let hover_bg = to_hsla(tokens.shell_highlight);
     let primary = to_hsla(tokens.primary);
     let primary_fg = to_hsla(tokens.primary_foreground);
     let success_fg = to_hsla(tokens.success_foreground);
-    let warning_fg = to_hsla(tokens.warning_foreground);
     let destructive = to_hsla(tokens.destructive);
-    let switch_on = to_hsla(tokens.switch_on);
-    let switch_off = chrome::alpha(tokens.foreground, 0.18);
-
-    let shadow_alpha = match tokens.appearance {
-        Appearance::Dark => 0.36,
-        Appearance::Light => 0.14,
-    };
-    let shadow = BoxShadow {
-        color: gpui_kit::hsla(0.0, 0.0, 0.0, shadow_alpha),
-        offset: point(px(0.0), px(8.0)),
-        blur_radius: px(24.0),
-        spread_radius: px(-4.0),
-        inset: false,
-    };
 
     let mut header_actions = h_flex().items_center().gap(px(4.0));
     if state.watching {
@@ -532,7 +633,7 @@ pub(crate) fn render_queue_popover(
                     format!("Clear {} done annotations", done_ids.len()),
                 )
                 .size(px(24.0))
-                .rounded(px(6.0))
+                .rounded(px(POPOVER_ROW_RADIUS_PX))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -553,7 +654,7 @@ pub(crate) fn render_queue_popover(
                     format!("Remove {} idle annotations", idle_ids.len()),
                 )
                 .size(px(24.0))
-                .rounded(px(6.0))
+                .rounded(px(POPOVER_ROW_RADIUS_PX))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -571,7 +672,7 @@ pub(crate) fn render_queue_popover(
                 .id("ann-queue-close")
                 .a11y_button("annotations.queue.close", "Close annotations queue")
                 .size(px(24.0))
-                .rounded(px(6.0))
+                .rounded(px(POPOVER_ROW_RADIUS_PX))
                 .flex()
                 .items_center()
                 .justify_center()
@@ -582,106 +683,46 @@ pub(crate) fn render_queue_popover(
         );
     }
 
-    let annotate_action_label = if state.annotating {
-        "Stop annotating"
-    } else if state.subject == AnnotationSubject::Page {
-        "Annotate page"
-    } else {
-        "Annotate screen"
-    };
-    let on_toggle_annotating = callbacks.on_toggle_annotating.clone();
-
     let mut card = v_flex()
         .id("annotations-queue-popover")
+        .test_support()
         .a11y_group("annotations.queue.popover", "Annotations queue")
         .w(px(POPOVER_WIDTH_PX))
-        .rounded(px(12.0))
-        .bg(popover_bg)
+        .rounded(px(POPOVER_RADIUS_PX))
+        .overflow_hidden()
+        .bg(card_bg)
         .border_1()
         .border_color(border)
         .text_color(fg)
-        .shadow(vec![shadow])
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .shadow(vec![dropdown_glass_shadow(tokens)])
+        .floating_surface()
+        // Section heading, as the Details card's `Automations` heading.
         .child(
             h_flex()
-                .items_start()
+                .items_center()
                 .justify_between()
                 .gap(px(8.0))
-                .px(px(12.0))
-                .pt(px(10.0))
-                .pb(px(8.0))
-                .child(
-                    v_flex()
-                        .min_w_0()
-                        .flex_1()
-                        .child(
-                            div()
-                                .text_size(px(UI_TEXT_PX))
-                                .line_height(px(UI_LINE_HEIGHT_PX))
-                                .font_weight(FontWeight::MEDIUM)
-                                .child("Annotations"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(SM_TEXT_PX))
-                                .line_height(px(SM_LINE_HEIGHT_PX))
-                                .text_color(muted)
-                                .child(if state.annotating {
-                                    format!(
-                                        "Click the {} to drop a pin · Esc to stop",
-                                        state.subject.noun()
-                                    )
-                                } else {
-                                    format!(
-                                        "Pin feedback directly on the {}",
-                                        state.subject.noun()
-                                    )
-                                }),
-                        ),
-                )
-                .child(header_actions),
-        )
-        // Quick toggle row for starting/stopping annotation mode right from the popover.
-        .child(
-            div()
-                .px(px(12.0))
-                .pb(px(8.0))
+                .px(px(8.0))
+                .py(px(8.0))
                 .child(
                     div()
-                        .id("ann-queue-toggle-mode")
-                        .a11y_button("annotations.queue.toggle-mode", annotate_action_label)
-                        .h(px(28.0))
-                        .w_full()
-                        .rounded(px(7.0))
-                        .px(px(10.0))
+                        .id("annotations-queue-heading")
+                        .test_support()
+                        .a11y(
+                            gpui_kit::Role::Heading,
+                            "annotations.queue.heading",
+                            "Annotations",
+                        )
+                        .min_h(px(28.0))
                         .flex()
-                        .flex_row()
                         .items_center()
-                        .justify_center()
-                        .gap(px(6.0))
-                        .text_size(px(SM_TEXT_PX))
+                        .px(px(POPOVER_ROW_PAD_X_PX))
+                        .text_size(px(UI_TEXT_PX))
                         .font_weight(FontWeight::MEDIUM)
-                        .border_1()
-                        .border_color(if state.annotating { primary } else { border })
-                        .bg(if state.annotating {
-                            chrome::alpha(tokens.primary, 0.16)
-                        } else {
-                            to_hsla(tokens.shell_control)
-                        })
-                        .text_color(if state.annotating { primary } else { fg })
-                        .when(state.project_ready, |el| {
-                            el.cursor_pointer()
-                                .hover(move |s| s.bg(hover_bg))
-                                .on_click(move |_, window, cx| on_toggle_annotating(window, cx))
-                        })
-                        .when(!state.project_ready, |el| el.opacity(0.5))
-                        .child(superhero_icon(
-                            "superhero/comment-text.svg",
-                            13.0,
-                            if state.annotating { primary } else { fg },
-                        ))
-                        .child(annotate_action_label),
-                ),
+                        .text_color(muted)
+                        .child("Annotations"),
+                )
+                .child(header_actions),
         );
 
     if state.confirming_remove && !idle_ids.is_empty() {
@@ -698,7 +739,7 @@ pub(crate) fn render_queue_popover(
                 .items_center()
                 .justify_between()
                 .gap(px(8.0))
-                .px(px(12.0))
+                .px(px(18.0))
                 .py(px(8.0))
                 .child(
                     div()
@@ -754,7 +795,7 @@ pub(crate) fn render_queue_popover(
     if !state.project_ready {
         card = card.child(
             div()
-                .px(px(12.0))
+                .px(px(18.0))
                 .py(px(12.0))
                 .text_size(px(UI_TEXT_PX))
                 .line_height(px(UI_LINE_HEIGHT_PX))
@@ -764,14 +805,13 @@ pub(crate) fn render_queue_popover(
     } else if state.annotations.is_empty() {
         card = card.child(
             div()
-                .px(px(12.0))
+                .px(px(18.0))
                 .py(px(12.0))
                 .text_size(px(UI_TEXT_PX))
                 .line_height(px(UI_LINE_HEIGHT_PX))
                 .text_color(muted)
                 .child(format!(
-                    "No annotations yet. Click Annotate {}, then click anywhere on the {}.",
-                    state.subject.noun(),
+                    "No annotations yet. Turn on Annotate, then click anywhere on the {}.",
                     state.subject.noun(),
                 )),
         );
@@ -781,8 +821,14 @@ pub(crate) fn render_queue_popover(
             .a11y_group("panel.annotations.queue", "Annotation queue")
             .max_h(px(260.0))
             .overflow_y_scroll()
-            .p(px(6.0))
+            .px(px(8.0))
+            .py(px(8.0))
             .gap(px(2.0));
+
+        // The status dot's cutout ring takes the card's colour, and the row's hover colour
+        // while the row is hovered.
+        let ring = to_hsla(surface);
+        let hover_ring = to_hsla(chrome::composite_over(tokens.shell_highlight, surface));
 
         for record in &state.annotations {
             let qstate = annotation_state(record);
@@ -796,14 +842,7 @@ pub(crate) fn render_queue_popover(
                     (primary, primary_fg)
                 }
             };
-            let (state_icon, state_label, state_color) = match qstate {
-                AnnotationQueueState::Done => ("superhero/check.svg", "Done", success_fg),
-                AnnotationQueueState::Working => ("superhero/spinner.svg", "Working", primary),
-                AnnotationQueueState::Question => {
-                    ("superhero/question.svg", "Question", warning_fg)
-                }
-                AnnotationQueueState::Waiting => ("superhero/circle-dot.svg", "Waiting", muted),
-            };
+            let (state_label, state_dot) = annotation_status(qstate, tokens);
             let mut subtitle = record
                 .summary
                 .as_deref()
@@ -829,61 +868,77 @@ pub(crate) fn render_queue_popover(
                 }
             }
 
-            let mut row_right = h_flex().flex_shrink_0().items_center().gap(px(4.0)).child(
-                h_flex()
-                    .items_center()
-                    .gap(px(3.0))
-                    .text_size(px(11.0))
-                    .text_color(state_color)
-                    .child(superhero_icon(state_icon, 11.0, state_color))
-                    .child(state_label),
-            );
-            if qstate != AnnotationQueueState::Working {
-                let on_remove = callbacks.on_remove_ids.clone();
-                let rid = record.id.clone();
-                row_right = row_right.child(
-                    div()
-                        .id(SharedString::from(format!("ann-item-del-{rid}")))
-                        .a11y_button(
-                            SharedString::from(format!("annotations.item.{number}.remove")),
-                            format!("Remove annotation #{number}"),
+            let row_group = SharedString::from(format!("ann-row-group-{}", record.id));
+            // The number circle keeps its outer size; the number is small enough to have room.
+            // The status dot sits on the circle's top right, on the circle's edge.
+            let badge = div()
+                .id(SharedString::from(format!("ann-badge-{}", record.id)))
+                .test_support()
+                .relative()
+                .mt(px(1.0))
+                .size(px(NUMBER_BADGE_PX))
+                .flex_shrink_0()
+                .rounded(px(9999.0))
+                .bg(badge_bg)
+                .text_color(badge_fg)
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(NUMBER_BADGE_TEXT_PX))
+                .font_weight(FontWeight::SEMIBOLD)
+                .conn_fast_tooltip(state_label, tokens)
+                .child(number.to_string())
+                .when_some(state_dot, |el, dot| {
+                    el.child(
+                        chrome::status_dot_cutout(
+                            to_hsla(dot),
+                            ring,
+                            Some((row_group.clone(), hover_ring)),
+                            false,
                         )
-                        .size(px(20.0))
-                        .rounded(px(5.0))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(hover_bg))
-                        .on_click(move |_, window, cx| on_remove(vec![rid.clone()], window, cx))
-                        .child(superhero_icon("superhero/close.svg", 11.0, muted)),
-                );
-            }
+                        .id(SharedString::from(format!("ann-status-dot-{}", record.id)))
+                        .test_support()
+                        .top(px(-2.4))
+                        .right(px(-2.4)),
+                    )
+                });
+
+            let on_remove = callbacks.on_remove_ids.clone();
+            let rid = record.id.clone();
+            let remove = (qstate != AnnotationQueueState::Working).then(|| {
+                div()
+                    .id(SharedString::from(format!("ann-item-del-{rid}")))
+                    .a11y_button(
+                        SharedString::from(format!("annotations.item.{number}.remove")),
+                        format!("Remove annotation #{number}"),
+                    )
+                    .flex_shrink_0()
+                    .size(px(20.0))
+                    .rounded(px(5.0))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover_bg))
+                    .on_click(move |_, window, cx| on_remove(vec![rid.clone()], window, cx))
+                    .child(superhero_icon("superhero/close.svg", 11.0, muted))
+            });
 
             let row = h_flex()
                 .id(SharedString::from(format!("ann-row-{}", record.id)))
-                .a11y_group(format!("panel.annotations.row.{}", record.id), "Annotation")
+                .test_support()
+                .a11y_group(
+                    format!("panel.annotations.row.{}", record.id),
+                    format!("Annotation #{number}, {state_label}"),
+                )
+                .group(row_group)
                 .items_start()
                 .gap(px(8.0))
-                .rounded(px(8.0))
-                .px(px(6.0))
+                .rounded(px(POPOVER_ROW_RADIUS_PX))
+                .px(px(POPOVER_ROW_PAD_X_PX))
                 .py(px(6.0))
                 .hover(move |s| s.bg(hover_bg))
-                .child(
-                    div()
-                        .mt(px(1.0))
-                        .size(px(18.0))
-                        .flex_shrink_0()
-                        .rounded(px(9999.0))
-                        .bg(badge_bg)
-                        .text_color(badge_fg)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_size(px(10.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(number.to_string()),
-                )
+                .child(badge)
                 .child(
                     v_flex()
                         .flex_1()
@@ -911,7 +966,7 @@ pub(crate) fn render_queue_popover(
                             )
                         }),
                 )
-                .child(row_right);
+                .children(remove);
 
             list = list.child(row);
         }
@@ -926,7 +981,7 @@ pub(crate) fn render_queue_popover(
         }
         card = card.child(div().w_full().h(px(1.0)).bg(divider)).child(
             div()
-                .px(px(12.0))
+                .px(px(18.0))
                 .py(px(8.0))
                 .text_size(px(SM_TEXT_PX))
                 .line_height(px(SM_LINE_HEIGHT_PX))
@@ -936,7 +991,7 @@ pub(crate) fn render_queue_popover(
     } else if counts.waiting > 0 {
         let on_send = callbacks.on_send_waiting.clone();
         card = card.child(div().w_full().h(px(1.0)).bg(divider)).child(
-            div().px(px(12.0)).py(px(8.0)).child(
+            div().px(px(8.0)).py(px(8.0)).child(
                 div()
                     .id("ann-queue-send-waiting")
                     .a11y_button(
@@ -945,7 +1000,7 @@ pub(crate) fn render_queue_popover(
                     )
                     .h(px(28.0))
                     .w_full()
-                    .rounded(px(7.0))
+                    .rounded(px(POPOVER_ROW_RADIUS_PX))
                     .bg(primary)
                     .text_color(primary_fg)
                     .flex()
@@ -963,75 +1018,34 @@ pub(crate) fn render_queue_popover(
         );
     }
 
-    // Watch switch row.
-    let on_watch = callbacks.on_toggle_watch.clone();
-    let knob_bg = to_hsla(tokens.background);
-    let watch_switch = div()
-        .id("ann-queue-watch-switch")
-        .a11y_button(
-            "annotations.queue.watch",
-            if state.watching {
-                "Disable watch mode"
-            } else {
-                "Enable watch mode"
-            },
-        )
-        .w(px(32.0))
-        .h(px(18.0))
-        .flex_shrink_0()
-        .rounded(px(9999.0))
-        .p(px(2.0))
-        .flex()
-        .items_center()
-        .bg(if state.watching {
-            switch_on
-        } else {
-            switch_off
-        })
-        .when(state.watching, |el| el.justify_end())
-        .when(!state.watching, |el| el.justify_start())
-        .child(div().size(px(14.0)).rounded(px(9999.0)).bg(knob_bg));
-
+    // The two switches, together as one group: Annotate (the mode) and Watch.
+    let annotate_subline = match state.subject {
+        AnnotationSubject::Page => "Click elements on the page to leave an annotation".to_owned(),
+        AnnotationSubject::Device => "Click the screen to leave an annotation".to_owned(),
+    };
     card = card.child(div().w_full().h(px(1.0)).bg(divider)).child(
-        h_flex()
-            .id("ann-queue-watch-row")
-            .a11y_switch(
-                "panel.annotations.queue.watch",
-                "Watch for annotations",
-                state.watching,
-            )
-            .items_center()
-            .justify_between()
-            .gap(px(12.0))
-            .px(px(12.0))
+        v_flex()
+            .id("annotations-queue-switches")
+            .px(px(8.0))
             .py(px(8.0))
-            .when(state.project_ready, |el| {
-                el.cursor_pointer()
-                    .hover(move |s| s.bg(hover_bg))
-                    .on_click(move |_, window, cx| on_watch(window, cx))
-            })
-            .when(!state.project_ready, |el| el.opacity(0.5))
-            .child(
-                v_flex()
-                    .min_w_0()
-                    .flex_1()
-                    .child(
-                        div()
-                            .text_size(px(UI_TEXT_PX))
-                            .line_height(px(18.0))
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(fg)
-                            .child("Watch"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(SM_TEXT_PX))
-                            .line_height(px(SM_LINE_HEIGHT_PX))
-                            .text_color(muted)
-                            .child("Send new annotations automatically"),
-                    ),
-            )
-            .child(watch_switch),
+            .child(annotation_switch_row(
+                "annotate",
+                "Annotate",
+                annotate_subline,
+                state.annotating,
+                state.project_ready,
+                tokens,
+                callbacks.on_toggle_annotating.clone(),
+            ))
+            .child(annotation_switch_row(
+                "watch",
+                "Watch",
+                "Send new annotations automatically".to_owned(),
+                state.watching,
+                state.project_ready,
+                tokens,
+                callbacks.on_toggle_watch.clone(),
+            )),
     );
 
     let positioned = match anchor {
@@ -1342,9 +1356,7 @@ pub(crate) fn render_pin_composer(
         .gap(px(8.0))
         .text_color(fg)
         .shadow(vec![shadow])
-        .on_mouse_down(MouseButton::Left, |_: &MouseDownEvent, _, cx| {
-            cx.stop_propagation();
-        })
+        .floating_surface()
         .child(
             h_flex()
                 .items_start()

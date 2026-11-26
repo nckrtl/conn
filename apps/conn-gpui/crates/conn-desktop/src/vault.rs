@@ -23,6 +23,8 @@ pub const VAULT_BINARY: &str = "/Applications/Vault.app/Contents/MacOS/Vault";
 
 /// Touch ID or master-password unlock can take a while before Vault replies.
 const TIMEOUT: Duration = Duration::from_secs(120);
+/// Upper bound for a login status check, which never prompts the user.
+const STATUS_DEADLINE: Duration = Duration::from_secs(15);
 /// Maximum accepted reply frame length (64 KiB, matching Conn's `MAX_FRAME`).
 const MAX_FRAME: usize = 64 * 1024;
 
@@ -431,11 +433,26 @@ impl VaultClient {
     }
 
     /// Queries whether Vault is currently unlocked without prompting.
+    ///
+    /// A status check never waits for Touch ID or a master password, so the whole exchange
+    /// (spawning the relay, the reply, and stopping the relay) is capped at [`STATUS_DEADLINE`]
+    /// instead of the 120 second unlock allowance. A relay that never answers then ends in an
+    /// error the caller can show and retry, rather than an endless "checking" state.
     pub async fn login_status(&self) -> VaultLoginsResponse {
-        match self
-            .send_request("login", "status", None, None, None, false)
-            .await
+        let deadline = self.timeout.min(STATUS_DEADLINE);
+        let reply = match tokio::time::timeout(
+            deadline,
+            self.send_request("login", "status", None, None, None, false),
+        )
+        .await
         {
+            Ok(reply) => reply,
+            Err(_) => Err(VaultError::new(
+                VaultErrorKind::Error,
+                "Vault did not answer in time.",
+            )),
+        };
+        match reply {
             Ok(reply) => match reply.status.as_deref() {
                 Some("unlocked") => VaultLoginsResponse {
                     status: VaultLoginsStatus::Ok,
@@ -734,6 +751,93 @@ mod tests {
         std::fs::write(&path, full)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
         Ok((dir, path))
+    }
+
+    /// A relay that answers a login `status` request with `locked`, then keeps stdin and stdout
+    /// open like the real `Vault --conn-bridge` does until its parent hangs up.
+    const LOCKED_STATUS_RELAY: &str = r#"
+import json, struct, sys, time
+
+raw_len = sys.stdin.buffer.read(4)
+size = struct.unpack("<I", raw_len)[0]
+req = json.loads(sys.stdin.buffer.read(size).decode("utf-8"))
+assert req["kind"] == "login" and req["mode"] == "status", req
+assert req["allowUnlock"] is False, req
+for key in ("url", "itemID", "field"):
+    assert key not in req, req
+
+body = json.dumps({"id": req["id"], "status": "locked"}).encode("utf-8")
+sys.stdout.buffer.write(struct.pack("<I", len(body)) + body)
+sys.stdout.buffer.flush()
+time.sleep(60)
+"#;
+
+    #[tokio::test]
+    async fn login_status_returns_locked_promptly_while_the_relay_stays_open()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, bin) = write_fake_vault(LOCKED_STATUS_RELAY)?;
+        let client = VaultClient::with_binary(&bin).with_timeout(Duration::from_secs(20));
+
+        let started = std::time::Instant::now();
+        let response = client.login_status().await;
+        assert_eq!(response.status, VaultLoginsStatus::Locked);
+        assert!(response.items.is_empty());
+        assert_eq!(response.error, None);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "login_status waited for the relay to exit: {:?}",
+            started.elapsed()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn login_status_gives_up_when_the_relay_never_answers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let script = r#"
+import sys, time
+
+sys.stdin.buffer.read(4)
+time.sleep(60)
+"#;
+        let (_dir, bin) = write_fake_vault(script)?;
+        let client = VaultClient::with_binary(&bin).with_timeout(Duration::from_millis(400));
+
+        let started = std::time::Instant::now();
+        let response = client.login_status().await;
+        assert_eq!(response.status, VaultLoginsStatus::Error);
+        assert!(response.error.is_some());
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "login_status ignored its deadline: {:?}",
+            started.elapsed()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn login_status_skips_frames_for_other_requests() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let script = r#"
+import json, struct, sys
+
+raw_len = sys.stdin.buffer.read(4)
+size = struct.unpack("<I", raw_len)[0]
+req = json.loads(sys.stdin.buffer.read(size).decode("utf-8"))
+
+def send(reply):
+    body = json.dumps(reply).encode("utf-8")
+    sys.stdout.buffer.write(struct.pack("<I", len(body)) + body)
+    sys.stdout.buffer.flush()
+
+send({"id": "00000000-0000-4000-8000-000000000000", "status": "locked"})
+send({"id": req["id"], "status": "unlocked"})
+"#;
+        let (_dir, bin) = write_fake_vault(script)?;
+        let client = VaultClient::with_binary(&bin).with_timeout(Duration::from_secs(20));
+        let response = client.login_status().await;
+        assert_eq!(response.status, VaultLoginsStatus::Ok);
+        Ok(())
     }
 
     #[tokio::test]

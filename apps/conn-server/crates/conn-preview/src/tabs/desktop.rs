@@ -269,8 +269,19 @@ impl Preview {
         self.0.relay.tabs(environment_id, thread)
     }
 
-    /// Sends an agent call to a desktop tab when T3 would. `None`: this server's browser
-    /// takes it.
+    /// The desktop tab an agent's call without a tab goes to, if a desktop hosts one for the
+    /// thread.
+    pub fn desktop_default_tab(
+        &self,
+        environment_id: &str,
+        thread: &str,
+        agent: &str,
+    ) -> Option<String> {
+        self.0.relay.default_tab(environment_id, thread, agent)
+    }
+
+    /// Sends an agent call to a desktop tab (see `crate::relay` for when). `None`: this
+    /// server's browser takes it.
     pub async fn relay(&self, call: RelayCall<'_>) -> Option<Result<Relayed, RelayFailure>> {
         self.0.relay.invoke(call).await
     }

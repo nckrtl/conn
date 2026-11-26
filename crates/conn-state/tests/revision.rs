@@ -25,7 +25,7 @@ fn cache_overlap_preserves_live_body_revision_and_server_cursor() {
     let notice = |id: &str, text: &str| TimelineEntry::Notice {
         id: id.to_owned(),
         text: text.to_owned(),
-        is_error: false,
+        level: conn_state::NoticeLevel::Info,
     };
     let mut state = ThreadState::new("thread");
     state.entries.push(notice("2", "live"));

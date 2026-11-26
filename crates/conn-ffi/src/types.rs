@@ -1256,10 +1256,10 @@ pub(crate) fn map_timeline_entry_with_context(
                 completed_at: completed_at.clone(),
             }
         }
-        TimelineEntry::Notice { id, text, is_error } => FfiTimelineEntry::Notice {
+        TimelineEntry::Notice { id, text, level } => FfiTimelineEntry::Notice {
             id: id.clone(),
             text: text.clone(),
-            is_error: *is_error,
+            is_error: level.is_error(),
         },
     }
 }
@@ -1652,7 +1652,7 @@ mod tests {
         let error_notice = TimelineEntry::Notice {
             id: "n1".to_owned(),
             text: "Timed out".to_owned(),
-            is_error: true,
+            level: conn_state::NoticeLevel::Error,
         };
         assert_eq!(
             map_timeline_entry_with_context(&error_notice, &approvals, &timings),
@@ -1667,7 +1667,7 @@ mod tests {
         let plain_notice = TimelineEntry::Notice {
             id: "n2".to_owned(),
             text: "Context compacted".to_owned(),
-            is_error: false,
+            level: conn_state::NoticeLevel::Info,
         };
         assert_eq!(
             map_timeline_entry_with_context(&plain_notice, &approvals, &timings),

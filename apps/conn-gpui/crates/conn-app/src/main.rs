@@ -17,6 +17,7 @@ mod live;
 mod menus;
 mod orbit_sync;
 mod palette;
+mod preview_host;
 mod runtime_warmup;
 mod settings;
 mod shell;

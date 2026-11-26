@@ -16,7 +16,9 @@ use gpui_kit::{
     SharedString, Styled, deferred, div, point, px, relative,
 };
 
-use super::super::chrome::{self, ROW_PAD_START_PX, UI_LINE_HEIGHT_PX, UI_TEXT_PX, XS_TEXT_PX};
+use super::super::chrome::{
+    self, FloatingSurfaceExt as _, ROW_PAD_START_PX, UI_LINE_HEIGHT_PX, UI_TEXT_PX, XS_TEXT_PX,
+};
 use super::super::color::to_hsla;
 use super::super::header::superhero_icon;
 use super::DatabasePanel;
@@ -61,7 +63,7 @@ pub(crate) fn render_connection_menu(
         .border_1()
         .border_color(divider)
         .shadow(vec![shadow])
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        .floating_surface();
 
     let selected_id = selected.map(|conn| conn.id.as_str());
     if !connections.is_empty() {
@@ -161,12 +163,7 @@ pub(crate) fn render_connection_menu(
             list = list.child(menu_action(
                 "db-menu-unlock-vault",
                 "Unlock Vault…",
-                Box::new(|panel, _, cx| {
-                    panel.menu_open = false;
-                    panel.allow_unlock_next = true;
-                    panel.load_vault_databases(true, cx);
-                    cx.notify();
-                }),
+                Box::new(|panel, _, cx| panel.unlock_vault(cx)),
             ));
         }
         Some(VaultErrorKind::Error) => {
@@ -183,11 +180,7 @@ pub(crate) fn render_connection_menu(
             list = list.child(menu_action(
                 "db-menu-retry-vault",
                 "Retry Vault",
-                Box::new(|panel, _, cx| {
-                    panel.menu_open = false;
-                    panel.load_vault_databases(true, cx);
-                    cx.notify();
-                }),
+                Box::new(|panel, _, cx| panel.retry_vault(cx)),
             ));
         }
         _ => {}

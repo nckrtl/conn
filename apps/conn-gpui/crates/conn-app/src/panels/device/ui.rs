@@ -15,8 +15,8 @@ use gpui_kit::{
 };
 
 use super::super::chrome::{
-    self, ConnTooltipExt as _, MenuEntry, UI_LINE_HEIGHT_PX, UI_TEXT_PX, XS_LINE_HEIGHT_PX,
-    XS_TEXT_PX,
+    self, ConnTooltipExt as _, FloatingSurfaceExt as _, MenuEntry, UI_LINE_HEIGHT_PX, UI_TEXT_PX,
+    XS_LINE_HEIGHT_PX, XS_TEXT_PX,
 };
 use super::super::color::to_hsla;
 use super::super::header::{CONTROL_RADIUS_PX, superhero_icon};
@@ -595,7 +595,7 @@ pub(super) fn device_dropdown_menu(
         .border_1()
         .border_color(divider)
         .shadow(vec![shadow])
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        .floating_surface();
 
     for entry in entries {
         match entry {
@@ -797,7 +797,7 @@ pub(super) fn device_discovery_warning(
                     .text_size(px(XS_TEXT_PX))
                     .line_height(px(XS_LINE_HEIGHT_PX))
                     .text_color(muted)
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .floating_surface()
                     .child(diagnostic.detail.clone()),
             )
             .with_priority(3),

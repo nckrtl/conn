@@ -1294,7 +1294,7 @@ mod tests {
             state.entries.push(TimelineEntry::Notice {
                 id: format!("notice-{index}"),
                 text: "tool status".to_owned(),
-                is_error: false,
+                level: conn_state::NoticeLevel::Info,
             });
         }
         let messages = capture_chat(&state.entries);

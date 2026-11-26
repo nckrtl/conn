@@ -20,6 +20,7 @@ use conn_contract::{
     VcsListRefsInput, VcsListRefsResult,
 };
 use conn_theme::{Appearance, Tokens, color_mix_srgb};
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -30,10 +31,10 @@ use gpui_kit::{
 };
 use serde_json::{Value, json};
 
-use super::chrome::ConnTooltipExt as _;
+use super::chrome::{ConnTooltipExt as _, FloatingSurfaceExt as _, PILL_RADIUS_PX};
 use super::color::to_hsla;
 use super::diff_parser::{DiffFile, DiffLine, DiffLineKind, parse_unified_diff};
-use super::header::{CONTROL_RADIUS_PX, superhero_icon};
+use super::header::superhero_icon;
 use super::highlight::{HighlightSpan, highlight_lines};
 use crate::a11y::ConnA11yExt as _;
 
@@ -50,6 +51,10 @@ const TOOLBAR_PAD_END_PX: f32 = 11.5;
 const TOOLBAR_HEIGHT_PX: f32 = 32.0;
 const TOOLBAR_INNER_PAD_PX: f32 = 3.0;
 const TOOLBAR_BTN_SIZE_PX: f32 = 24.0;
+/// The scope and base-ref triggers on the left of the toolbar.
+const SCOPE_CONTROL_HEIGHT_PX: f32 = 28.0;
+/// Fully rounded, like the control group on the right (`--toolbar-control-radius`).
+const SCOPE_CONTROL_RADIUS_PX: f32 = PILL_RADIUS_PX;
 /// File header height, border included. The sticky overlay and the in-list header share it.
 const FILE_HEADER_HEIGHT_PX: f32 = 32.0;
 /// Space under each file's last line. Its bottom edge is the 1px line before the next header.
@@ -1044,15 +1049,16 @@ impl DiffPanel {
         let can_pick_scope = has_git || has_turns;
         let scope_label = self.scope.label();
         let mut scope_slot = div().relative().child(
-            // Scope trigger pill matching `DiffPanel.tsx` (`size="xs" variant="secondary"`, 6px radius).
+            // Scope trigger: `DiffPanel.tsx` uses `size="xs" variant="secondary"` (8px radius); Nick asked for the toolbar pill so it matches the control group on the right.
             h_flex()
                 .id("diff-scope-trigger")
                 .a11y_button("diff.scope.trigger", format!("Diff scope: {scope_label}"))
-                .h(px(28.0))
+                .test_support()
+                .h(px(SCOPE_CONTROL_HEIGHT_PX))
                 .px(px(8.0))
                 .gap(px(4.0))
                 .items_center()
-                .rounded(px(CONTROL_RADIUS_PX))
+                .rounded(px(SCOPE_CONTROL_RADIUS_PX))
                 .bg(control_bg)
                 .border_1()
                 .border_color(control_border)
@@ -1099,7 +1105,7 @@ impl DiffPanel {
                 .shadow_md()
                 .p(px(4.0))
                 .gap(px(2.0))
-                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+                .floating_surface();
 
             if has_git {
                 for (id, label, icon, target) in [
@@ -1342,11 +1348,12 @@ impl DiffPanel {
                         "diff.base-ref.trigger",
                         format!("Compare base {base_label} to {head_label}"),
                     )
-                    .h(px(28.0))
+                    .test_support()
+                    .h(px(SCOPE_CONTROL_HEIGHT_PX))
                     .px(px(8.0))
                     .gap(px(4.0))
                     .items_center()
-                    .rounded(px(CONTROL_RADIUS_PX))
+                    .rounded(px(SCOPE_CONTROL_RADIUS_PX))
                     .bg(control_bg)
                     .border_1()
                     .border_color(control_border)
@@ -1391,7 +1398,7 @@ impl DiffPanel {
                     .shadow_md()
                     .p(px(4.0))
                     .gap(px(2.0))
-                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+                    .floating_surface();
 
                 let auto_selected = self.base_ref.is_none();
                 menu = menu.child(
@@ -1524,7 +1531,7 @@ impl DiffPanel {
                             .h(px(TOOLBAR_HEIGHT_PX))
                             .px(px(TOOLBAR_INNER_PAD_PX))
                             .gap(px(2.0))
-                            .rounded(px(9999.0))
+                            .rounded(px(PILL_RADIUS_PX))
                             .bg(control_bg)
                             .border_1()
                             .border_color(control_border)
@@ -1534,7 +1541,7 @@ impl DiffPanel {
                                     .id("diff-refresh-btn")
                                     .a11y_button("diff.refresh", "Refresh diff")
                                     .size(px(TOOLBAR_BTN_SIZE_PX))
-                                    .rounded(px(9999.0))
+                                    .rounded(px(PILL_RADIUS_PX))
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -1552,7 +1559,7 @@ impl DiffPanel {
                                     .id("diff-whitespace-btn")
                                     .a11y_button("diff.whitespace", "Ignore whitespace")
                                     .size(px(TOOLBAR_BTN_SIZE_PX))
-                                    .rounded(px(9999.0))
+                                    .rounded(px(PILL_RADIUS_PX))
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -1587,7 +1594,7 @@ impl DiffPanel {
                                         "Toggle split or unified diff",
                                     )
                                     .size(px(TOOLBAR_BTN_SIZE_PX))
-                                    .rounded(px(9999.0))
+                                    .rounded(px(PILL_RADIUS_PX))
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -1611,7 +1618,7 @@ impl DiffPanel {
                                     .id("diff-wrap-btn")
                                     .a11y_button("panel.diff.wrap", "Toggle line wrap")
                                     .size(px(TOOLBAR_BTN_SIZE_PX))
-                                    .rounded(px(9999.0))
+                                    .rounded(px(PILL_RADIUS_PX))
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -1633,7 +1640,7 @@ impl DiffPanel {
                                     .id("diff-tree-toggle-btn")
                                     .a11y_button("panel.diff.tree-toggle", "Toggle file tree")
                                     .size(px(TOOLBAR_BTN_SIZE_PX))
-                                    .rounded(px(9999.0))
+                                    .rounded(px(PILL_RADIUS_PX))
                                     .flex()
                                     .items_center()
                                     .justify_center()
@@ -2569,6 +2576,40 @@ diff --git a/c.rs b/c.rs
         let theme = conn_theme::theme_by_id("dark-ocean").expect("dark-ocean is built in");
         let tokens = Tokens::derive(&theme);
         cx.new(|_| DiffPanel::new(tokens, None))
+    }
+
+    #[gpui_kit::test]
+    fn left_toolbar_controls_are_pills_like_the_right_group(cx: &mut gpui_kit::TestAppContext) {
+        use gpui_kit::test::TestWindowExt as _;
+        let panel = cx.update(|cx| {
+            gpui_kit::init(cx);
+            let theme = conn_theme::theme_by_id("dark-ocean").expect("dark-ocean is built in");
+            let tokens = Tokens::derive(&theme);
+            gpui_kit::open_window(Default::default(), cx, |_, cx| {
+                cx.new(|_| {
+                    let mut panel = DiffPanel::new(tokens, None);
+                    panel.workspace_root = Some("/project".to_owned());
+                    panel.state = DiffLoadState::Empty;
+                    panel
+                })
+            })
+            .expect("test window opens")
+        });
+        let (window, _panel) = panel;
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            let height = px(SCOPE_CONTROL_HEIGHT_PX);
+            for id in ["diff-scope-trigger", "diff-base-ref-trigger"] {
+                let bounds = window.find(id).bounds();
+                assert_eq!(bounds.size.height, height, "{id} height");
+                // GPUI clamps a corner radius to half the shorter side, so the corner is half
+                // the height exactly when the radius is at least that.
+                let corner = px(SCOPE_CONTROL_RADIUS_PX).min(bounds.size.height / 2.0);
+                assert_eq!(corner, bounds.size.height / 2.0, "{id} is a pill");
+            }
+            assert_eq!(SCOPE_CONTROL_RADIUS_PX, PILL_RADIUS_PX);
+        })
+        .unwrap();
     }
 
     #[gpui_kit::test]

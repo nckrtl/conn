@@ -5,3 +5,4 @@ Provider brand marks copied from Conn (`apps/web/src/components/Icons.tsx`: `Cla
 - `grok.svg`: the two paths of `grokClient.icon` in Conn `packages/provider-grok/src/client.ts` (`viewBox 0 0 24 24`), drawn in the picker's foreground color where Conn uses `#0F0F0F` (light) and `#F5F5F5` (dark).
 - `conn-mark.svg` viewBox is padded to `-51 -51 542 542` (440 drawn of 542, about 13 of 16 units), matching the web fix, so the mark has the footprint of the superheroicons beside it (`thinking.svg` draws 1.5 to 14.5 of 16).
 - `vault-mark.svg`, `vault-key.svg`: the Vault mark and the fallback key glyph from the Vault Chrome extension's inline picker (`ChromeExtension/picker.html`, `picker.js` `keyIcon()`), drawn in the Browser panel's login picker as the extension draws them.
+- `vault.png`: the Vault app icon from Conn `apps/web/src/database/vault-icon.png`, shown beside Vault databases in the Database panel.

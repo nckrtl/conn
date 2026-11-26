@@ -28,7 +28,8 @@ use super::format::{
 };
 use super::insights::{InsightsCallbacks, render_insights_strip};
 use crate::panels::chrome::{
-    self, ConnTooltipExt as _, UI_LINE_HEIGHT_PX, UI_TEXT_PX, XS_LINE_HEIGHT_PX, XS_TEXT_PX,
+    self, ConnTooltipExt as _, FloatingSurfaceExt as _, UI_LINE_HEIGHT_PX, UI_TEXT_PX,
+    XS_LINE_HEIGHT_PX, XS_TEXT_PX,
 };
 use crate::panels::color::to_hsla;
 use crate::panels::header::superhero_icon;
@@ -345,7 +346,7 @@ fn render_settings_menu(
         .border_1()
         .border_color(divider)
         .shadow(vec![shadow])
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        .floating_surface();
 
     menu = menu.child(group_label("Lanes"));
     for lane in TaskLane::ALL {

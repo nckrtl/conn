@@ -337,7 +337,7 @@ struct TimelineEntryRow: View {
         case let .queuedUser(_, _, _, text, date, agent, files):
             ThreadMessage(text: text, date: date, agent: agent, files: files,
                           detail: detail, store: store, threadId: threadId, onOpenThread: onOpenThread)
-        case let .assistant(_, markdown, streaming, timestamp, _, status):
+        case let .assistant(_, markdown, streaming, _, _, status):
             // The copy and time row sits a paragraph gap under the text, less its own 24 pt row's
             // inset above the time glyphs.
             VStack(alignment: .leading, spacing: 6) {
@@ -347,10 +347,7 @@ struct TimelineEntryRow: View {
                     Label("Response interrupted", systemImage: "exclamationmark.circle").font(.caption)
                         .foregroundStyle(theme.mutedForeground)
                 }
-                // The time under the text on the left, the size of a user message's time.
-                if !streaming {
-                    MessageFooter(text: markdown, timestamp: timestamp, trailingCopy: true)
-                }
+
             }
             .copyOnTap(streaming ? "" : markdown)
 

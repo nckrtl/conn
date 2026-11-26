@@ -558,6 +558,10 @@ impl ConnApp {
         self.threads
             .entry(thread_id.to_owned())
             .or_insert_with(|| ThreadState::new(thread_id.to_owned()));
+        // A hover prefetch of this thread becomes the open stream: the client holds it already, so
+        // this subscribe sends nothing again.
+        self.speculative.promote(thread_id);
+        self.launched_threads.remove(thread_id);
         connection.subscribe_thread(thread_id);
         self.subscribed_thread_id = Some(thread_id.to_owned());
         self.linked.subscribed_env = environment;
@@ -1434,12 +1438,22 @@ impl ConnApp {
                 }
                 changed
             }
+            // A late item of a stream dropped with its reducer finds nobody to apply to.
+            ClientEvent::Thread { thread_id, .. }
+                if self.thread_item_is_orphaned(Some(&environment_id), &thread_id) =>
+            {
+                false
+            }
             ClientEvent::Thread { thread_id, item } => {
                 self.apply_cache_stream(&environment_id, &thread_id, item);
                 false
             }
             ClientEvent::StreamEnded { tag, key, error } => {
-                if tag == "orchestration.subscribeThread" && self.threads.contains_key(&key) {
+                // A stream nobody wants any more (closed thread, dropped prefetch) stays down.
+                if tag == "orchestration.subscribeThread"
+                    && self.threads.contains_key(&key)
+                    && self.thread_stream_wanted(&key)
+                {
                     if let Some(error) = error {
                         eprintln!("thread stream {key} ended: {error}");
                     }

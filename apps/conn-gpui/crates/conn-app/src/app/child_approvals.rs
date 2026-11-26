@@ -25,6 +25,13 @@ pub(super) struct ChildApprovals {
     errors: HashMap<String, String>,
 }
 
+impl ChildApprovals {
+    /// Whether a child approval holds `thread_id`'s stream.
+    pub(super) fn holds(&self, thread_id: &str) -> bool {
+        self.subscribed.contains_key(thread_id)
+    }
+}
+
 struct ChildSubscription {
     connection: Connection,
     ready: bool,
@@ -85,10 +92,9 @@ impl ConnApp {
         let (add, stale) = plan_subscriptions(&wanted, &current);
         for id in stale {
             let subscription = self.child_approvals.subscribed.remove(&id);
-            // The open thread keeps its own stream.
+            // The open thread, the offline cache and a hover prefetch keep their own streams.
             if let Some(subscription) = subscription
-                && self.subscribed_thread_id.as_deref() != Some(id.as_str())
-                && !self.offline.watching(self.cache_env(&id), &id)
+                && !self.thread_stream_wanted(&id)
             {
                 subscription.connection.unsubscribe_thread(&id);
             }

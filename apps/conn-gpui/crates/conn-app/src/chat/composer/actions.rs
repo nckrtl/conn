@@ -34,10 +34,11 @@ const ALTERNATE_SHORTCUT_LABEL: &str = "⌘Enter";
 /// Conn's `settings.followUpBehavior`: what a send does while a turn is running.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum FollowUpBehavior {
-    /// Send into the running turn (`steer_active`). Conn's default.
-    #[default]
+    /// Send into the running turn (`steer_active`).
     Steer,
-    /// Wait until the running turn ends (`queue_after_active`).
+    /// Wait until the running turn ends (`queue_after_active`). The default (Nick,
+    /// 2026-11-26): a follow-up queues behind the running turn unless steering is chosen.
+    #[default]
     Queue,
 }
 
@@ -571,6 +572,7 @@ mod tests {
             can_interrupt: true,
             prompt_has_text: true,
             has_sendable_content: true,
+            follow_up: FollowUpBehavior::Steer,
             ..idle()
         };
         let steer = send_state(resolve_primary_action(&input));

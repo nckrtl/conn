@@ -31,9 +31,9 @@ use crate::sidebar::thread_menu::{
 use crate::theme::{hsla, hsla_alpha};
 
 /// Height of one queued message row.
-pub(super) const ROW_HEIGHT_PX: f32 = 34.0;
+pub(super) const ROW_HEIGHT_PX: f32 = 30.0;
 /// Padding between the tray's edge and its rows.
-const TRAY_PAD_PX: f32 = 4.0;
+const TRAY_PAD_PX: f32 = 2.0;
 /// The tray shows this many rows, then scrolls. The half row says there is more below.
 const MAX_VISIBLE_ROWS: f32 = 4.5;
 /// How far the tray's bottom edge runs behind the composer card. It covers the composer's
@@ -45,7 +45,12 @@ pub(super) const TRAY_INSET_PX: f32 = 20.0;
 /// Corner radius of the tray: the composer's.
 const TRAY_RADIUS_PX: f32 = 16.0;
 /// How far from the composer's fill toward the border colour the light tray's fill sits.
-const LIGHT_FILL_MIX: f32 = 0.55;
+const LIGHT_FILL_MIX: f32 = 0.75;
+/// How far the dark tray's fill sits from `shell_raised` toward the page background, so the
+/// tray reads as set back behind the composer.
+const DARK_FILL_MIX: f32 = 0.5;
+/// Text opacity of a queued message's preview: dimmer than the composer's text.
+const ROW_TEXT_ALPHA: f32 = 0.7;
 /// An optimistic order the server has not confirmed is dropped after this long.
 const ORDER_OVERRIDE_TTL: Duration = Duration::from_secs(5);
 
@@ -316,7 +321,15 @@ pub(super) fn tray_surface_colors(tokens: &Tokens) -> (Hsla, Hsla) {
                 a: 1.0,
             })
         }
-        conn_theme::Appearance::Dark => hsla(tokens.shell_raised),
+        conn_theme::Appearance::Dark => {
+            let (raised, page) = (tokens.shell_raised, tokens.background);
+            hsla(conn_theme::Rgba {
+                r: raised.r + (page.r - raised.r) * DARK_FILL_MIX,
+                g: raised.g + (page.g - raised.g) * DARK_FILL_MIX,
+                b: raised.b + (page.b - raised.b) * DARK_FILL_MIX,
+                a: 1.0,
+            })
+        }
     };
     (fill, hsla(tokens.shell_inner_border))
 }
@@ -868,30 +881,22 @@ impl ChatView {
                 "Start a turn with this message"
             };
             let run_for_steer = run_id.clone();
-            let steer = div()
-                .id(SharedString::from(format!("chat-queue-steer-{id}")))
-                .a11y_button(
-                    SharedString::from(format!("chat.queue.steer.{id}")),
-                    "Steer",
-                )
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .h(px(24.0))
-                .px(px(6.0))
-                .rounded(px(6.0))
-                .text_color(muted)
-                .when(has_run_id, |el| {
-                    el.cursor_pointer()
-                        .hover(move |s| s.bg(hover_bg).text_color(fg))
-                        .on_click(cx.listener(move |view, _, _, cx| {
-                            view.steer_queued_run(&run_for_steer, cx);
-                        }))
-                })
-                .conn_tooltip(steer_tooltip, tokens)
-                .child(icons::icon(icons::REPLY_INDENT, 12.0, muted))
-                .child("Steer");
+            // Steer is an icon-only button (arrow up: send it now), like the trash and more
+            // buttons beside it; the tooltip says what it does.
+            let steer = icon_button(
+                format!("chat-queue-steer-{id}"),
+                format!("chat.queue.steer.{id}"),
+                "Steer",
+            )
+            .when(has_run_id, |el| {
+                el.cursor_pointer()
+                    .hover(move |s| s.bg(hover_bg).text_color(fg))
+                    .on_click(cx.listener(move |view, _, _, cx| {
+                        view.steer_queued_run(&run_for_steer, cx);
+                    }))
+            })
+            .conn_tooltip(steer_tooltip, tokens)
+            .child(icons::icon(icons::ARROW_UP, 14.0, muted));
             #[cfg(test)]
             let steer = gpui_kit::TestSupportExt::test_support(steer);
 
@@ -961,7 +966,9 @@ impl ChatView {
             .h(px(ROW_HEIGHT_PX))
             .pl(px(10.0))
             .pr(px(4.0))
-            .rounded(px(8.0))
+            // Concentric with the tray: its corner radius less the padding between them, so a
+            // row's hover follows the tray's rounded corners.
+            .rounded(px(TRAY_RADIUS_PX - TRAY_PAD_PX))
             .when(is_editing, |el| el.bg(hsla_alpha(tokens.primary, 0.12)))
             .when(!is_editing, |el| el.hover(move |s| s.bg(hover_bg)))
             .when(is_dragged, |el| el.opacity(0.4))
@@ -977,7 +984,7 @@ impl ChatView {
                     .truncate()
                     .text_size(px(13.0))
                     .line_height(px(18.0))
-                    .text_color(fg)
+                    .text_color(hsla_alpha(tokens.foreground, ROW_TEXT_ALPHA))
                     .child(label.clone()),
             )
             .child(actions)

@@ -22,7 +22,7 @@ use crate::live::RT;
 
 /// A queued row is `ROW_HEIGHT_PX` tall, and the tray's bottom edge runs `TUCK_PX` behind the
 /// composer card (`chat/queue_tray.rs`).
-const ROW_HEIGHT: f32 = 34.0;
+const ROW_HEIGHT: f32 = 30.0;
 const TUCK: f32 = 16.0;
 /// How far the tray's sides sit inside the composer's.
 const TRAY_INSET: f32 = 20.0;

@@ -4,6 +4,9 @@ pub(crate) mod drafts;
 pub(crate) mod hover_card;
 pub(crate) mod hover_card_state;
 pub(crate) mod rail;
+pub(crate) mod submenu_placement;
+#[cfg(test)]
+mod submenu_shots;
 pub(crate) mod thread_list;
 pub(crate) mod thread_menu;
 pub(crate) mod tree;

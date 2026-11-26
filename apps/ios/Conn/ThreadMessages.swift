@@ -26,9 +26,9 @@ struct AgentSummary: View {
                 Text(title).fontWeight(.medium)
             } else {
                 Button { expanded.toggle() } label: {
-                    // The title's glyphs sit as far above the preview's as below the card's top
-                    // edge: the title line's own extra room and descent already make that gap.
-                    VStack(alignment: .leading, spacing: 0) {
+                    // The preview sits where the expanded text starts (the outer 6 pt), so
+                    // expanding doesn't shift it.
+                    VStack(alignment: .leading, spacing: 6) {
                         Text(title).fontWeight(.medium)
                             .frame(maxWidth: .infinity, alignment: .leading)
                         if !expanded { previewText }

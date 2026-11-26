@@ -112,15 +112,28 @@ struct WorkGroupCard: View {
         }
         // The feed pulls the next item up to a paragraph gap (ThreadView `foldGap`).
         .accessibilityIdentifier("thread.workGroup.\(group.id)")
-        .onAppear { anchor() }
-        .onChange(of: group.durationMs) { anchor() }
+        .onAppear { anchor(fresh: false) }
+        .onChange(of: group.durationMs) { anchor(fresh: true) }
     }
 
-    private func anchor() {
-        if group.hasActive, let ms = group.durationMs {
-            startedAt = Date(timeIntervalSinceNow: -Double(ms) / 1000)
+    /// The feed is lazy: a row scrolled away and back is rebuilt, and the last snapshot's elapsed
+    /// time is old by then. Only a new elapsed value moves the start; a rebuild reuses the known one.
+    private func anchor(fresh: Bool) {
+        guard group.hasActive, let ms = group.durationMs else { return }
+        if !fresh, let known = WorkGroupClock.starts[group.id] {
+            startedAt = known
+            return
         }
+        let start = Date(timeIntervalSinceNow: -Double(ms) / 1000)
+        WorkGroupClock.starts[group.id] = start
+        startedAt = start
     }
+}
+
+/// When each running work group started, kept across the lazy feed's rebuilds of its row.
+@MainActor
+enum WorkGroupClock {
+    static var starts: [String: Date] = [:]
 }
 
 /// The working divider when no work group is running yet: the same row and rule as a group's.

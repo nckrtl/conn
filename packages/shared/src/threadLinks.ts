@@ -5,12 +5,22 @@ import * as Schema from "effect/Schema";
 import { DEFAULT_HOSTED_APP_URL } from "./connectAuth.ts";
 
 export const THREAD_LINK_PROTOCOL = "t3-thread";
+/**
+ * The schemes of `conn://thread/<environmentId>/<threadId>`, which the Conn Server and the native
+ * desktop write. `conn-dev` is the development build's scheme. A sanitizer allows these as schemes
+ * only; `parseThreadLinkHref` decides which of their links are thread links.
+ */
+export const CONN_THREAD_LINK_PROTOCOLS = ["conn", "conn-dev"] as const;
+const CONN_THREAD_PREFIXES = CONN_THREAD_LINK_PROTOCOLS.map((scheme) => `${scheme}://thread/`);
 const V1_PREFIX = `${THREAD_LINK_PROTOCOL}://v1/`;
 const V2_PREFIX = `${THREAD_LINK_PROTOCOL}://v2/`;
 const HOSTED_PREFIX = `${DEFAULT_HOSTED_APP_URL}/threads/`;
 const HOSTED_SEGMENT = "[A-Za-z0-9_%-]+";
 const HOSTED_LINK = `${HOSTED_PREFIX.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}${HOSTED_SEGMENT}/${HOSTED_SEGMENT}`;
-const THREAD_HREF = String.raw`t3-thread:\/\/v[12]\/`;
+// The scheme is case-insensitive in a URL, and `parse_thread_link` in conn_desktop reads it so.
+// Spelled out in classes, because Hermes lacks inline flag groups.
+const THREAD_HREF = String.raw`(?:t3-thread:\/\/v[12]\/|[Cc][Oo][Nn][Nn](?:-[Dd][Ee][Vv])?:\/\/[Tt][Hh][Rr][Ee][Aa][Dd]\/)`;
+const CONN_THREAD_TERMINATOR = /[\s<>)"']/u;
 // A label stops at any bracket, so a run of unclosed brackets is scanned once, not once per bracket.
 const LABEL = String.raw`[^[\]\n]*`;
 // Earlier alternatives claim text so later ones cannot match inside it: an escaped character opens
@@ -67,11 +77,37 @@ function parseHostedThreadLink(href: string): ThreadLink | null {
 }
 
 /**
+ * `conn://thread/<environmentId>/<threadId>`, read as `parse_thread_link` in conn_desktop reads it:
+ * a case-insensitive scheme, surrounding whitespace ignored, a query or fragment ignored, a
+ * trailing slash ignored, and no id with a slash in it. Both ids are required.
+ */
+function parseConnThreadLink(href: string): ThreadLink | null {
+  const trimmed = href.trim();
+  const lowered = trimmed.toLowerCase();
+  const prefix = CONN_THREAD_PREFIXES.find((candidate) => lowered.startsWith(candidate));
+  if (prefix === undefined) return null;
+  const rest = trimmed.slice(prefix.length);
+  if (CONN_THREAD_TERMINATOR.test(rest)) return null;
+  const path = rest.split(/[?#]/u)[0] ?? "";
+  const slash = path.indexOf("/");
+  if (slash < 0) return null;
+  const environmentSegment = path.slice(0, slash);
+  const threadSegment = path.slice(slash + 1).replace(/\/+$/u, "");
+  if (environmentSegment === "" || threadSegment === "" || threadSegment.includes("/")) return null;
+  const environmentId = Option.getOrNull(decodeEnvironmentId(environmentSegment));
+  const threadId = Option.getOrNull(decodeThreadId(threadSegment));
+  return environmentId === null || threadId === null ? null : { environmentId, threadId };
+}
+
+/**
  * The ids as written. Thread ids can hold percent escapes of their own, so they are not decoded,
- * except in a hosted link, which escapes them itself.
+ * except in a hosted link, which escapes them itself. Reads `conn://thread/<env>/<thread>`,
+ * `t3-thread://v2/<env>/<thread>` and `t3-thread://v1/<thread>`, and the hosted link.
  */
 export function parseThreadLinkHref(href: string): ThreadLink | null {
   if (href.startsWith(HOSTED_PREFIX)) return parseHostedThreadLink(href);
+  const connLink = parseConnThreadLink(href);
+  if (connLink !== null) return connLink;
   if (href.startsWith(V1_PREFIX)) {
     const threadId = Option.getOrNull(decodeThreadId(href.slice(V1_PREFIX.length)));
     return threadId === null ? null : { environmentId: null, threadId };
@@ -155,8 +191,14 @@ export function formatHostedThreadLink(
   return cleaned ? `[${cleaned}](${href})` : href;
 }
 
+const CONN_THREAD_MENTION = /conn(?:-dev)?:\/\/thread\//iu;
+
 export function hasThreadLinks(markdown: string): boolean {
-  return markdown.includes(`${THREAD_LINK_PROTOCOL}://v`) || markdown.includes(HOSTED_PREFIX);
+  return (
+    markdown.includes(`${THREAD_LINK_PROTOCOL}://v`) ||
+    markdown.includes(HOSTED_PREFIX) ||
+    CONN_THREAD_MENTION.test(markdown)
+  );
 }
 
 /** Every thread the markdown's links can name, so their titles are keyed reads. */

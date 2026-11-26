@@ -39,6 +39,7 @@ mod selection_menu_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod selection_shots;
 mod spinner;
+pub(crate) mod thread_links;
 mod thumb_cache;
 
 /// A sent image thumbnail: attachment id and decode size.
@@ -169,6 +170,9 @@ pub(crate) enum ChatEvent {
         /// The draft an approval send left in the composer (see [`ChatView::settle_held_draft`]).
         held_draft: Option<HeldDraft>,
     },
+    /// A thread link chip in a message was clicked: open the thread it names, switching
+    /// environment when it lives on another one.
+    OpenThreadLink(thread_links::ThreadLink),
     /// Continue an interrupted thread (`Resume thread`).
     Resume,
     /// Start a new thread that implements the proposed plan.
@@ -310,6 +314,9 @@ pub(crate) struct ChatView {
     link_menu_focus_pending: bool,
     /// Pull requests the open thread links, to offer `Unlink from thread` on their links.
     linked_pull_requests: Vec<link_menu::LinkedPullRequest>,
+    /// The threads a thread link chip looks its title up in, and the fingerprint it was built from.
+    thread_directory: Option<Rc<thread_links::ThreadDirectory>>,
+    thread_directory_fingerprint: u64,
     /// The editor picked in the `Open in` card, for `Open in <editor>` on a file link.
     preferred_editor: Option<crate::header::details_card::EditorTarget>,
     link_command_seq: u64,
@@ -565,6 +572,8 @@ impl ChatView {
             link_menu_focus: cx.focus_handle(),
             link_menu_focus_pending: false,
             linked_pull_requests: Vec::new(),
+            thread_directory: None,
+            thread_directory_fingerprint: 0,
             preferred_editor: None,
             link_command_seq: 0,
             project_id: None,
@@ -1273,6 +1282,7 @@ impl ChatView {
         let entity_link = cx.entity().downgrade();
         let entity_hover = cx.entity().downgrade();
         let entity_template = cx.entity().downgrade();
+        let entity_thread = cx.entity().downgrade();
         markdown::MarkdownOptions {
             surface: markdown::MarkdownSurface::Chat,
             heading_style: markdown::HeadingStyle::Scale,
@@ -1298,6 +1308,9 @@ impl ChatView {
                     markdown::LinkMenuTarget::File(path) => {
                         view.open_file_menu(path, position, window, cx);
                     }
+                    // A thread chip has no menu; the click is swallowed so the right-click
+                    // does not open it.
+                    markdown::LinkMenuTarget::Thread(_) => {}
                 });
             })),
             on_link_hover: Some(Rc::new(move |event, _window, cx| {
@@ -1308,10 +1321,38 @@ impl ChatView {
                     view.use_artifact_template(&template, window, cx);
                 });
             })),
+            thread_directory: self.thread_directory.clone(),
+            on_open_thread: Some(Rc::new(move |link, _window, cx| {
+                let _ = entity_thread.update(cx, |_view, cx| {
+                    cx.emit(ChatEvent::OpenThreadLink(link));
+                });
+            })),
             prose: None,
             // The caller of a row sets its scope: only assistant text takes part in selection.
             selection: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn thread_directory_for_test(&self) -> Option<Rc<thread_links::ThreadDirectory>> {
+        self.thread_directory.clone()
+    }
+
+    /// Replaces the threads thread link chips look their title up in. `fingerprint` says whether
+    /// they changed since the last call, so the directory is built only then.
+    pub(crate) fn set_thread_directory(
+        &mut self,
+        fingerprint: u64,
+        build: impl FnOnce() -> thread_links::ThreadDirectory,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.thread_directory.is_some() && self.thread_directory_fingerprint == fingerprint {
+            return;
+        }
+        self.thread_directory = Some(Rc::new(build()));
+        self.thread_directory_fingerprint = fingerprint;
+        // Cached rows measured their chips with the old titles.
+        cx.notify();
     }
 
     /// Opens the message menu in this view when a message's text is right-clicked.

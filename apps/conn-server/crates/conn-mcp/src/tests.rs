@@ -788,7 +788,7 @@ async fn an_agent_delegates_a_task_and_is_woken() {
         mine["threads"][0]["link"]
             .as_str()
             .unwrap()
-            .starts_with("[Parent](t3-thread://v2/env-test/")
+            .starts_with("[Parent](conn://thread/env-test/")
     );
     let caps = c.ok("orchestrator_capabilities", json!({})).await;
     assert_eq!(

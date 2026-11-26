@@ -41,12 +41,82 @@ pub enum DeepLink {
     WorkspaceRoot(String),
 }
 
-/// Parses a `conn://`, `conn-dev://`, `t3code://`, or `t3code-dev://` URL.
+/// A thread a link names: `conn://thread/<environmentId>/<threadId>`, or the older
+/// `t3-thread://v2/<environmentId>/<threadId>` (`t3-thread://v1/<threadId>` has no environment).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreadLink {
+    /// The environment the thread lives on; `None` for a `v1` link, which names none.
+    pub environment_id: Option<String>,
+    pub thread_id: String,
+}
+
+const THREAD_LINK_PREFIXES: [&str; 4] = [
+    "conn://thread/",
+    "conn-dev://thread/",
+    "t3-thread://v2/",
+    "t3-thread://v1/",
+];
+
+/// Where a thread link written in text ends: whitespace, an angle bracket or a closing
+/// parenthesis, which Markdown puts around a link and no id holds.
+pub fn is_thread_link_terminator(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '<' | '>' | ')' | '"' | '\'')
+}
+
+/// The `conn://thread/<environmentId>/<threadId>` link for a thread: what "Copy thread link"
+/// writes. The ids go in as written, as the Conn Server writes them in its own links.
+#[must_use]
+pub fn format_thread_link(environment_id: &str, thread_id: &str) -> String {
+    format!("conn://thread/{environment_id}/{thread_id}")
+}
+
+/// Reads a whole string as a thread link of either scheme, or `None`. The ids are taken as
+/// written: a thread id can hold a percent escape of its own. A query or fragment is ignored,
+/// and a `conn://thread/<id>` link with one segment is a deep link (see [`parse_deep_link`]),
+/// not a thread link.
+#[must_use]
+pub fn parse_thread_link(raw: &str) -> Option<ThreadLink> {
+    let raw = raw.trim();
+    let prefix = THREAD_LINK_PREFIXES.iter().find(|prefix| {
+        raw.get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+    })?;
+    let rest = &raw[prefix.len()..];
+    if rest.chars().any(is_thread_link_terminator) {
+        return None;
+    }
+    let rest = rest.split(['?', '#']).next().unwrap_or_default();
+    if prefix.ends_with("/v1/") {
+        let thread_id = rest.trim_end_matches('/');
+        return (!thread_id.is_empty() && !thread_id.contains('/')).then(|| ThreadLink {
+            environment_id: None,
+            thread_id: thread_id.to_owned(),
+        });
+    }
+    let (environment_id, thread_id) = rest.split_once('/')?;
+    let thread_id = thread_id.trim_end_matches('/');
+    if environment_id.is_empty() || thread_id.is_empty() || thread_id.contains('/') {
+        return None;
+    }
+    Some(ThreadLink {
+        environment_id: Some(environment_id.to_owned()),
+        thread_id: thread_id.to_owned(),
+    })
+}
+
+/// Parses a `conn://`, `conn-dev://`, `t3code://`, or `t3code-dev://` URL, or a thread link
+/// ([`parse_thread_link`]).
 ///
 /// Returns `None` for non-Conn URLs, malformed percent-encoding, or unrelated routes (such as
 /// sign-in callbacks like `conn://app/welcome`).
 #[must_use]
 pub fn parse_deep_link(raw: &str) -> Option<DeepLink> {
+    if let Some(link) = parse_thread_link(raw) {
+        return Some(DeepLink::Thread {
+            thread_id: link.thread_id,
+            environment_id: link.environment_id,
+        });
+    }
     let parsed = url::Url::parse(raw.trim()).ok()?;
     if !ACCEPTED_SCHEMES.contains(&parsed.scheme()) {
         return None;
@@ -615,6 +685,91 @@ mod tests {
         assert_eq!(parse_deep_link("https://workspace/orbit"), None);
         assert_eq!(parse_deep_link("t3code://workspace/%E0%A4%A"), None);
         assert_eq!(parse_deep_link("conn://app/welcome"), None);
+    }
+
+    fn link(environment_id: Option<&str>, thread_id: &str) -> Option<ThreadLink> {
+        Some(ThreadLink {
+            environment_id: environment_id.map(str::to_owned),
+            thread_id: thread_id.to_owned(),
+        })
+    }
+
+    #[test]
+    fn parses_the_conn_thread_link() {
+        assert_eq!(
+            parse_thread_link("conn://thread/env-1/thr-9"),
+            link(Some("env-1"), "thr-9")
+        );
+        assert_eq!(
+            parse_thread_link("  conn://thread/env-1/thr-9/  "),
+            link(Some("env-1"), "thr-9")
+        );
+        assert_eq!(
+            parse_thread_link("conn://thread/env-1/thr-9?x=1#top"),
+            link(Some("env-1"), "thr-9")
+        );
+        assert_eq!(
+            parse_thread_link("CONN://thread/env-1/thr-9"),
+            link(Some("env-1"), "thr-9")
+        );
+    }
+
+    #[test]
+    fn parses_the_older_t3_thread_links() {
+        assert_eq!(
+            parse_thread_link("t3-thread://v2/env-1/thr-9"),
+            link(Some("env-1"), "thr-9")
+        );
+        assert_eq!(
+            parse_thread_link("t3-thread://v1/thr-9"),
+            link(None, "thr-9")
+        );
+    }
+
+    #[test]
+    fn thread_link_ids_are_taken_as_written() {
+        assert_eq!(
+            parse_thread_link("conn://thread/env-1/a%2Fb%41"),
+            link(Some("env-1"), "a%2Fb%41")
+        );
+    }
+
+    #[test]
+    fn rejects_what_is_not_a_whole_thread_link() {
+        for raw in [
+            "conn://thread/thr-9",
+            "conn://thread//thr-9",
+            "conn://thread/env-1/",
+            "conn://thread/env-1/a/b",
+            "conn://thread/",
+            "conn://workspace/env-1/thr-9",
+            "t3-thread://v2/env-1",
+            "t3-thread://v3/env-1/thr-9",
+            "https://example.com/thread/env-1/thr-9",
+            "see conn://thread/env-1/thr-9",
+            "conn://thread/env-1/thr-9)",
+            "é",
+            "",
+        ] {
+            assert_eq!(parse_thread_link(raw), None, "{raw}");
+        }
+    }
+
+    #[test]
+    fn formats_the_conn_thread_link_and_reads_it_back() {
+        let text = format_thread_link("env-1", "thr-9");
+        assert_eq!(text, "conn://thread/env-1/thr-9");
+        assert_eq!(parse_thread_link(&text), link(Some("env-1"), "thr-9"));
+    }
+
+    #[test]
+    fn deep_links_accept_both_thread_link_schemes() {
+        let expected = Some(DeepLink::Thread {
+            thread_id: "thr-9".to_owned(),
+            environment_id: Some("env-1".to_owned()),
+        });
+        assert_eq!(parse_deep_link("conn://thread/env-1/thr-9"), expected);
+        assert_eq!(parse_deep_link("t3-thread://v2/env-1/thr-9"), expected);
     }
 
     #[test]

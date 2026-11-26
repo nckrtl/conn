@@ -43,6 +43,9 @@ mod preview;
 mod rail_workspaces;
 mod sidebar_keys;
 mod sidebar_more;
+mod thread_links;
+#[cfg(test)]
+mod thread_links_tests;
 mod thread_panels;
 
 pub(crate) use self::sidebar_more::PressMode;
@@ -580,6 +583,9 @@ impl ConnApp {
                 }
                 crate::chat::ChatEvent::ForkFromRun { run_id } => {
                     app.fork_selected_from_run(run_id, cx);
+                }
+                crate::chat::ChatEvent::OpenThreadLink(link) => {
+                    app.open_thread_link(link, cx);
                 }
                 crate::chat::ChatEvent::OpenFile(location) => {
                     app.show_source_location(location, cx)
@@ -1265,6 +1271,7 @@ impl ConnApp {
         }
         self.refresh_selected_outline(cx);
         self.sync_chat_environment(cx);
+        self.sync_thread_directory(cx);
         let child_approvals = self.sync_child_approvals();
         self.sync_files_subscription();
         let selected = self.layout.selected_thread_id.as_deref();
@@ -5281,6 +5288,10 @@ impl ConnApp {
             }
             ThreadMenuAction::CopyThread => self.copy_to_clipboard(thread.title, cx),
             ThreadMenuAction::CopyThreadId => self.copy_to_clipboard(thread.id, cx),
+            ThreadMenuAction::CopyThreadLink => {
+                let link = self.thread_link_for(&thread.id);
+                self.copy_to_clipboard(link, cx);
+            }
             ThreadMenuAction::ProjectSettings => {
                 if self.settings_modal.is_none() {
                     self.open_settings(window, cx);

@@ -145,6 +145,8 @@ pub(crate) struct ThreadDetailsState {
     pub(crate) tasks: Vec<ScheduledTask>,
     pub(crate) tasks_error: Option<String>,
     pub(crate) task_history: Option<crate::app::details_tasks::TaskHistoryRead>,
+    /// The live scheduled-tasks stream of the open thread's environment.
+    pub(crate) schedules: Option<crate::app::details_schedules::ScheduleSubscription>,
     pub(crate) busy_task_id: Option<String>,
     pub(crate) git_init_pending: bool,
     pub(crate) prs_expanded: bool,
@@ -803,12 +805,7 @@ pub(crate) fn render_thread_details_card(
     body = body.when_some(tasks_section, |el, rows| el.child(rows));
 
     // Automations section (auto-hidden when nothing is bound and there is no error).
-    let bound: Vec<&ScheduledTask> = props
-        .state
-        .tasks
-        .iter()
-        .filter(|t| t.thread_id.as_deref() == Some(thread.id.as_str()))
-        .collect();
+    let bound = bound_tasks(&props.state.tasks, &thread.id);
     if !bound.is_empty() || props.state.tasks_error.is_some() {
         body = body.child(render_automations_section(props, &bound, cx));
     }
@@ -1359,6 +1356,89 @@ fn render_version_control_section(
     })
 }
 
+/// The tasks bound to `thread_id` (`ThreadAutomationsPanel`: `task.threadId === threadId`).
+#[must_use]
+pub(crate) fn bound_tasks<'a>(
+    tasks: &'a [ScheduledTask],
+    thread_id: &str,
+) -> Vec<&'a ScheduledTask> {
+    tasks
+        .iter()
+        .filter(|task| task.thread_id.as_deref() == Some(thread_id))
+        .collect()
+}
+
+/// Conn's `relativeLabel` for a time `diff_secs` from now: `in 5m`, `in 3h`, `2h ago`.
+fn relative_label(diff_secs: i64) -> String {
+    if diff_secs <= 0 {
+        let elapsed = -diff_secs;
+        return match elapsed {
+            0..60 => "just now".to_owned(),
+            60..3_600 => format!("{}m ago", elapsed / 60),
+            3_600..86_400 => format!("{}h ago", elapsed / 3_600),
+            _ => format!("{}d ago", elapsed / 86_400),
+        };
+    }
+    let minutes = (diff_secs + 59) / 60;
+    if minutes < 2 {
+        return "in under a minute".to_owned();
+    }
+    if minutes < 60 {
+        return format!("in {minutes}m");
+    }
+    let hours = (minutes + 30) / 60;
+    if hours < 24 {
+        return format!("in {hours}h");
+    }
+    format!("in {}d", (hours + 12) / 24)
+}
+
+/// The schedule line of a task row (`taskScheduleLine`): the schedule, then the policy that
+/// blocks it, else `next in 3h`, else `paused`.
+#[must_use]
+pub(crate) fn task_schedule_line(task: &ScheduledTask, now_secs: i64) -> String {
+    let mut line = schedule_label(&task.schedule);
+    if let Some(reason) = &task.blocked_by_policy {
+        line.push_str(&format!(" · {reason}"));
+    } else if task.enabled {
+        let next = task
+            .next_run_at
+            .as_deref()
+            .and_then(crate::sidebar::thread_list::parse_iso8601_unix_secs);
+        if let Some(next) = next {
+            line.push_str(&format!(" · next {}", relative_label(next - now_secs)));
+        }
+    } else {
+        line.push_str(" · paused");
+    }
+    line
+}
+
+/// The last run of a task in words (`RUN_STATUS_LABELS`), with its age and error.
+#[must_use]
+pub(crate) fn task_last_run_text(task: &ScheduledTask, now_secs: i64) -> String {
+    let status = match task.last_run_status {
+        ScheduledTaskRunStatus::Never => return "Never run".to_owned(),
+        ScheduledTaskRunStatus::Running => "Running",
+        ScheduledTaskRunStatus::Succeeded => "Last run succeeded",
+        ScheduledTaskRunStatus::Failed => "Last run failed",
+    };
+    let mut text = status.to_owned();
+    let at = task
+        .last_run_at
+        .as_deref()
+        .and_then(crate::sidebar::thread_list::parse_iso8601_unix_secs);
+    if let Some(at) = at
+        && task.last_run_status != ScheduledTaskRunStatus::Running
+    {
+        text.push_str(&format!(" {}", relative_label(at - now_secs)));
+    }
+    if let Some(error) = task.last_run_error.as_deref().filter(|e| !e.is_empty()) {
+        text.push_str(&format!(": {error}"));
+    }
+    text
+}
+
 fn status_dot_color(status: ScheduledTaskRunStatus, tokens: &Tokens) -> Hsla {
     match status {
         ScheduledTaskRunStatus::Never => hsla_alpha(tokens.muted_foreground, 0.40),
@@ -1372,7 +1452,7 @@ fn render_automations_section(
     props: &DetailsCardProps<'_>,
     tasks: &[&ScheduledTask],
     cx: &mut Context<'_, ConnApp>,
-) -> gpui_kit::Stateful<gpui_kit::Div> {
+) -> AnyElement {
     let tokens = props.tokens;
     let muted = hsla(tokens.muted_foreground);
     let highlight = hsla(tokens.shell_highlight);
@@ -1398,16 +1478,14 @@ fn render_automations_section(
         }))
         .conn_tooltip("Manage scheduled tasks", tokens)
         .child(icons::concept("superhero/adjust.svg", ICON_PX, muted))
+        .test_support()
         .into_any_element();
     let mut list = div().flex().flex_col();
     for task in tasks {
         let dot = status_dot_color(task.last_run_status, tokens);
-        let mut schedule = schedule_label(&task.schedule);
-        if !task.enabled {
-            schedule.push_str(" · paused");
-        } else if let Some(reason) = &task.blocked_by_policy {
-            schedule.push_str(&format!(" · {reason}"));
-        }
+        let now = current_unix_secs();
+        let schedule = task_schedule_line(task, now);
+        let last_run = task_last_run_text(task, now);
         let busy = props.state.busy_task_id.as_deref() == Some(task.id.as_str());
         let running = task.last_run_status == ScheduledTaskRunStatus::Running;
         let is_webhook = matches!(task.schedule, conn_state::ScheduledTaskSchedule::Webhook(_));
@@ -1421,8 +1499,9 @@ fn render_automations_section(
             )))
             .a11y_group(
                 format!("thread-details.task.{}", task.id),
-                format!("Scheduled task {}, {schedule}", task.title),
+                format!("Scheduled task {}, {schedule}, {last_run}", task.title),
             )
+            .test_support()
             .flex()
             .flex_row()
             .items_center()
@@ -1432,7 +1511,7 @@ fn render_automations_section(
             .py(px(6.0))
             .rounded(px(ROW_RADIUS_PX))
             .hover(move |s| s.bg(highlight))
-            .conn_tooltip(format!("{}\n{schedule}", task.title), tokens)
+            .conn_tooltip(format!("{}\n{schedule}\n{last_run}", task.title), tokens)
             .child(
                 div()
                     .relative()
@@ -1480,6 +1559,7 @@ fn render_automations_section(
                         format!("thread-details.task.{}.run", task.id),
                         format!("Run {} now", task.title),
                     )
+                    .test_support()
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1514,6 +1594,7 @@ fn render_automations_section(
                     switch_label,
                     enabled,
                 )
+                .test_support()
                 .child(crate::settings::controls::pill_switch(
                     SharedString::from(format!("thread-details-task-switch-{}", task.id)),
                     enabled,
@@ -1538,6 +1619,7 @@ fn render_automations_section(
         Some(manage),
         tokens,
     )
+    .test_support()
     .child(div().max_h(px(216.0)).child(list));
     if let Some(error) = &props.state.tasks_error {
         s = s.child(
@@ -1554,7 +1636,7 @@ fn render_automations_section(
                 .child(error.clone()),
         );
     }
-    s
+    s.into_any_element()
 }
 
 fn lineage_row(

@@ -145,6 +145,33 @@ pub struct VaultLoginItem {
     pub title: String,
     pub username: Option<String>,
     pub source: String,
+    /// The site icon Vault stores for this login, as PNG bytes (already base64-decoded and
+    /// checked). `None` when Vault sent none, or sent one that failed the checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_png: Option<Vec<u8>>,
+}
+
+/// Longest accepted `icon` text. Vault sends at most 8,000 characters (a 6,000-byte PNG).
+const MAX_ICON_BASE64: usize = 12_000;
+/// Largest accepted decoded icon.
+const MAX_ICON_BYTES: usize = 9_000;
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+
+/// Decodes the optional `icon` of a Vault login suggestion: standard base64 of a PNG, within the
+/// size limits. Anything else gives `None`, and the login is still listed.
+#[must_use]
+pub fn decode_login_icon(icon: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    if icon.is_empty() || icon.len() > MAX_ICON_BASE64 {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(icon)
+        .ok()?;
+    (bytes.len() > PNG_SIGNATURE.len()
+        && bytes.len() <= MAX_ICON_BYTES
+        && bytes.starts_with(&PNG_SIGNATURE))
+    .then_some(bytes)
 }
 
 /// Result of querying Vault login status or suggestions for a page URL.
@@ -243,6 +270,9 @@ struct WireSuggestion {
     name: String,
     #[serde(default)]
     username: String,
+    /// Optional base64 PNG of the site's icon (Vault build 139 and later).
+    #[serde(default)]
+    icon: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -510,6 +540,7 @@ impl VaultClient {
                                 Some(s.username)
                             },
                             source: "vault".to_owned(),
+                            icon_png: s.icon.as_deref().and_then(decode_login_icon),
                         })
                         .collect();
                     VaultLoginsResponse {
@@ -964,6 +995,85 @@ sys.stdout.buffer.flush()
             )
             .await;
         assert_eq!(mismatch, VaultLoginFillLookup::OriginMismatch);
+        Ok(())
+    }
+
+    /// A 1 × 1 PNG, base64.
+    const TINY_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn a_login_icon_is_a_small_base64_png_or_nothing() {
+        use base64::Engine as _;
+        let png = decode_login_icon(TINY_PNG).expect("a valid icon");
+        assert!(png.starts_with(&PNG_SIGNATURE));
+
+        assert_eq!(decode_login_icon(""), None, "empty");
+        assert_eq!(decode_login_icon("not base64 !!"), None, "invalid base64");
+        let text = base64::engine::general_purpose::STANDARD.encode(b"GIF89a plus more bytes");
+        assert_eq!(decode_login_icon(&text), None, "not a PNG");
+        let signature_only = base64::engine::general_purpose::STANDARD.encode(PNG_SIGNATURE);
+        assert_eq!(decode_login_icon(&signature_only), None, "no image data");
+        let mut huge = PNG_SIGNATURE.to_vec();
+        huge.resize(MAX_ICON_BYTES + 1, 0);
+        let huge = base64::engine::general_purpose::STANDARD.encode(huge);
+        assert!(huge.len() > MAX_ICON_BASE64);
+        assert_eq!(decode_login_icon(&huge), None, "oversized");
+        let mut largest = PNG_SIGNATURE.to_vec();
+        largest.resize(MAX_ICON_BYTES, 0);
+        let largest = base64::engine::general_purpose::STANDARD.encode(largest);
+        assert!(largest.len() <= MAX_ICON_BASE64);
+        assert!(decode_login_icon(&largest).is_some(), "the largest allowed");
+    }
+
+    #[tokio::test]
+    async fn logins_carry_an_icon_only_when_vault_sent_a_valid_one()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let script = format!(
+            r#"
+import json, struct, sys
+
+size = struct.unpack("<I", sys.stdin.buffer.read(4))[0]
+req = json.loads(sys.stdin.buffer.read(size).decode("utf-8"))
+reply = {{
+    "id": req["id"],
+    "status": "suggestions",
+    "suggestions": [
+        {{"id": "AAA", "name": "With icon", "username": "a@example.com", "icon": "{TINY_PNG}"}},
+        {{"id": "BBB", "name": "No icon", "username": "b@example.com"}},
+        {{"id": "CCC", "name": "Bad icon", "username": "c@example.com", "icon": "!!not-base64!!"}},
+        {{"id": "DDD", "name": "Wrong type", "username": "d@example.com", "icon": "R0lGODlhAQABAAAAACw="}},
+    ],
+}}
+body = json.dumps(reply).encode("utf-8")
+sys.stdout.buffer.write(struct.pack("<I", len(body)) + body)
+sys.stdout.buffer.flush()
+"#
+        );
+        let (_dir, bin) = write_fake_vault(&script)?;
+        let client = VaultClient::with_binary(&bin);
+        let logins = client.list_logins("https://example.com/login", false).await;
+        assert_eq!(logins.status, VaultLoginsStatus::Ok);
+        let icons: Vec<(&str, bool)> = logins
+            .items
+            .iter()
+            .map(|item| (item.title.as_str(), item.icon_png.is_some()))
+            .collect();
+        assert_eq!(
+            icons,
+            vec![
+                ("With icon", true),
+                ("No icon", false),
+                ("Bad icon", false),
+                ("Wrong type", false),
+            ],
+            "a bad icon never drops the login"
+        );
+        assert!(
+            logins.items[0]
+                .icon_png
+                .as_deref()
+                .is_some_and(|png| png.starts_with(&PNG_SIGNATURE))
+        );
         Ok(())
     }
 }

@@ -878,8 +878,12 @@ struct ThreadView: View {
     private func floatingControl() -> some View {
         let agents = turnSubagents
         let showsJump = snapshot != nil && (!stickToBottom || readingWindow != nil)
-        if showsJump || !agents.isEmpty {
+        // A cached or restored feed the live projection hasn't replaced yet, while connected or
+        // connecting (never while the offline pill shows).
+        let syncing = snapshot.map { !$0.synchronized } ?? false && !store.showsOffline && readingWindow == nil
+        if showsJump || !agents.isEmpty || syncing {
             HStack(spacing: 16) {
+                if syncing { syncingCapsule }
                 if !agents.isEmpty { agentsCapsule(agents) }
                 if showsJump {
                     Button {
@@ -900,6 +904,23 @@ struct ThreadView: View {
             }
             .frame(maxWidth: .infinity)
         }
+    }
+
+    /// "Syncing" while the feed still shows cached state, in the agents capsule's style.
+    private var syncingCapsule: some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.mini).tint(theme.mutedForeground)
+            Text("Syncing")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(theme.foreground)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 38.5)
+        .glassEffect(.regular, in: .capsule)
+        .frame(height: 44)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Syncing the latest messages")
+        .accessibilityIdentifier("thread.syncing")
     }
 
     private func agentsCapsule(_ agents: [TurnSubagent]) -> some View {
@@ -1048,8 +1069,11 @@ private struct TimelineEdges: Equatable {
 
     init(_ geometry: ScrollGeometry) {
         top = Int(min(160, geometry.contentOffset.y + geometry.contentInsets.top))
-        nearEnd = geometry.visibleRect.maxY >= geometry.contentSize.height - 80
-        atEnd = geometry.visibleRect.maxY >= geometry.contentSize.height - 8
+        // The visible rect runs under the composer and keyboard inset; measure where the content
+        // the reader can see ends, or "at the end" holds while scrolled up by the whole inset.
+        let readableBottom = geometry.contentOffset.y + geometry.containerSize.height - geometry.contentInsets.bottom
+        nearEnd = readableBottom >= geometry.contentSize.height - 80
+        atEnd = readableBottom >= geometry.contentSize.height - 8
     }
 }
 

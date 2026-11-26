@@ -106,9 +106,8 @@ struct WorkGroupCard: View {
                     Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
                     }
                 }
-                // The last rule to the message reads as a paragraph gap; under "Working for" the
-                // live row follows at the plain gap instead.
-                .padding(.bottom, group.hasActive ? 0 : FoldRow.leading(size))
+                // The message follows the last rule by the plain gap: the same distance as from a
+                // message's last line down to its own rule above the copy and time row.
             }
         }
         // The feed pulls the next item up to a paragraph gap (ThreadView `foldGap`).

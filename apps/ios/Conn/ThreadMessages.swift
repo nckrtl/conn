@@ -103,10 +103,13 @@ struct MessageReveal<Content: View>: View {
         return date.formatted(.dateTime.day().month(.abbreviated)) + ", " + time
     }
     @ScaledMetric(relativeTo: .body) private var messageSize: CGFloat = ThreadText.size
+    private var previewInset: CGFloat { trailing ? 0 : 14 }
 
     var body: some View {
         VStack(alignment: trailing ? .trailing : .leading, spacing: (messageSize * 0.85 - 1) / 2) {
             content
+                // Agent text has no bubble: pad the preview so its rounded corners clear the glyphs.
+                .padding(previewInset)
                 .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 20, style: .continuous))
                 // A long press shows when it was sent, Copy and Select text (like ChatGPT).
                 .contextMenu {
@@ -119,6 +122,7 @@ struct MessageReveal<Content: View>: View {
                         }
                     }
                 }
+                .padding(-previewInset)
                 .sheet(isPresented: $selecting) { SelectTextSheet(text: text) }
                 .contentShape(Rectangle())
                 .simultaneousGesture(TapGesture().onEnded {

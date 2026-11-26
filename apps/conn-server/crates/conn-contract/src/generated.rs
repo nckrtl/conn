@@ -13969,6 +13969,8 @@ pub enum AgentPanelKind {
     Diff,
     #[serde(rename = "files")]
     Files,
+    #[serde(rename = "terminal")]
+    Terminal,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

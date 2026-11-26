@@ -578,6 +578,18 @@ impl PreviewHost {
         });
     }
 
+    /// The browser tab whose record on `environment`'s server is `record`, for an agent's
+    /// `panel_open` that names a desktop tab.
+    pub(crate) fn browser_tab_of(&self, environment: &str, record: &str) -> Option<BrowserTabId> {
+        self.tabs.iter().find_map(|(id, hosted)| {
+            (hosted.environment == environment
+                && locked(&hosted.state.snapshot)
+                    .as_ref()
+                    .is_some_and(|s| s.tab_id == record))
+            .then_some(*id)
+        })
+    }
+
     /// The hosted tabs, each with its server tab id once it has a record.
     #[cfg(test)]
     pub(crate) fn hosted_for_test(&self) -> Vec<(BrowserTabId, Option<String>)> {

@@ -93,6 +93,8 @@ const PANEL_OPENERS: Record<
     useRightPanelStore.getState().open(threadRef, "files");
     return opened;
   },
+  // Conn GPUI opens its Terminal panel for agents; this desktop's terminals start from the user.
+  terminal: () => ({ error: "This Conn cannot open a terminal panel for agents." }),
 };
 
 const NOT_ON_THREAD =

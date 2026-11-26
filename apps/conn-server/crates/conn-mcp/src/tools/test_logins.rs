@@ -3,6 +3,7 @@
 use super::{Args, Cx, ToolError, ToolResult, internal, str_arg};
 use conn_contract::{SaveTestLoginInput, TestLoginSummaryCreatedBy, from_json, to_json};
 use conn_features::test_logins::TestLogins;
+use conn_preview::relay::RelayCall;
 use serde_json::{Value, json};
 
 fn store<'a>(cx: &'a Cx<'_>) -> Result<&'a TestLogins, ToolError> {
@@ -110,11 +111,43 @@ pub(super) async fn fill(cx: &Cx<'_>, args: &Args) -> ToolResult {
     let Some(login) = list.items.into_iter().find(|login| login.id == item) else {
         return Ok(fill_result("item_not_found"));
     };
-    let page = preview.status(
-        &caller.thread_id,
-        &caller.provider_session_id,
-        str_arg(args, "tabId"),
-    );
+    // A desktop tab of the thread serves the fill, as it serves every other browser call (see
+    // `conn_preview::relay`); the server's own browser only when no desktop tab does.
+    let environment = cx.config().environment_id.clone();
+    let relay = |operation: &'static str, input: Value, tab: Option<String>| {
+        let (preview, caller, environment) = (&preview, &caller, &environment);
+        async move {
+            preview
+                .relay(RelayCall {
+                    environment_id: environment,
+                    thread: &caller.thread_id,
+                    agent: &caller.provider_session_id,
+                    operation,
+                    input,
+                    tab: tab.as_deref(),
+                    timeout_ms: None,
+                    update_current_tab: operation != "status",
+                    desktop_default: true,
+                })
+                .await
+        }
+    };
+    let desktop = relay(
+        "status",
+        json!({}),
+        str_arg(args, "tabId").map(str::to_owned),
+    )
+    .await;
+    let on_desktop = desktop.is_some();
+    let page = match desktop {
+        Some(Ok(relayed)) => relayed.value,
+        Some(Err(_)) => return Ok(fill_result("tab_unavailable")),
+        None => preview.status(
+            &caller.thread_id,
+            &caller.provider_session_id,
+            str_arg(args, "tabId"),
+        ),
+    };
     let (Some(url), Some(tab)) = (
         page["url"].as_str().filter(|u| !u.is_empty()),
         page["tabId"].as_str().filter(|t| !t.is_empty()),
@@ -157,16 +190,26 @@ pub(super) async fn fill(cx: &Cx<'_>, args: &Args) -> ToolResult {
     let Some(value) = value.filter(|v| !v.is_empty()) else {
         return Ok(fill_result("no_value"));
     };
-    let filled = preview
-        .invoke(
-            &caller.thread_id,
-            &caller.provider_session_id,
-            "credentialFill",
-            json!({"tabId": tab, "initiator": "agent", "field": field, "expectedOrigin": origin,
-                "fieldExpression": expression, "value": value}),
-        )
-        .await
-        .map_err(|error| ToolError::Message(error.to_string()))?;
+    let input = json!({"initiator": "agent", "field": field, "expectedOrigin": origin,
+        "fieldExpression": expression, "value": value});
+    let filled = if on_desktop {
+        match relay("credentialFill", input, Some(tab.to_owned())).await {
+            Some(Ok(relayed)) => relayed.value,
+            Some(Err(_)) | None => return Ok(fill_result("tab_unavailable")),
+        }
+    } else {
+        let mut input = input;
+        input["tabId"] = json!(tab);
+        preview
+            .invoke(
+                &caller.thread_id,
+                &caller.provider_session_id,
+                "credentialFill",
+                input,
+            )
+            .await
+            .map_err(|error| ToolError::Message(error.to_string()))?
+    };
     let status = filled["status"].as_str().unwrap_or("insert_failed");
     Ok(fill_result(status))
 }

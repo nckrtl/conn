@@ -385,6 +385,11 @@ async fn download(
     result
 }
 
+/// Entries an archive may hold. T3 sets no bound; Chrome for Testing's Linux archives hold 287
+/// (157.0.8103.78), the macOS ones 16. The SHA-256 pin already fixes what is unpacked, so this
+/// only bounds the work, with room for later releases.
+const MAX_ARCHIVE_ENTRIES: usize = 4096;
+
 fn extract(zip_path: &Path, output: &Path, platform: &str) -> Result<(), Error> {
     let file = std::fs::File::open(zip_path).map_err(super::err)?;
     let mut zip = zip::ZipArchive::new(file).map_err(super::err)?;
@@ -392,7 +397,7 @@ fn extract(zip_path: &Path, output: &Path, platform: &str) -> Result<(), Error> 
     let mut executable = false;
     let mut total = 0u64;
     let unsafe_entry = || failure("The archive contains an unexpected or unsafe entry.");
-    if zip.len() > 256 {
+    if zip.len() > MAX_ARCHIVE_ENTRIES {
         return Err(unsafe_entry());
     }
     for i in 0..zip.len() {
@@ -544,6 +549,45 @@ mod tests {
                 "{name}"
             );
             assert!(!root.join("escape").exists());
+            let _ = std::fs::remove_dir_all(output);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    /// Chrome for Testing's Linux archive holds 287 entries, which an old 256-entry cap refused
+    /// as "unexpected or unsafe" on every Linux server.
+    #[test]
+    fn archive_extraction_accepts_linux_sized_archives_and_bounds_entries() {
+        let root = std::env::temp_dir().join(format!(
+            "conn-preview-archive-size-{}",
+            conn_support::uuid_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        for (entries, accepted) in [(287, true), (MAX_ARCHIVE_ENTRIES + 1, false)] {
+            let archive = root.join("browser.zip");
+            let mut writer = zip::ZipWriter::new(std::fs::File::create(&archive).unwrap());
+            let options = zip::write::SimpleFileOptions::default().unix_permissions(0o755);
+            writer
+                .start_file(
+                    "chrome-headless-shell-linux64/chrome-headless-shell",
+                    options,
+                )
+                .unwrap();
+            writer.write_all(b"fixture browser").unwrap();
+            writer
+                .add_directory("chrome-headless-shell-linux64/locales/", options)
+                .unwrap();
+            for i in 2..entries {
+                writer
+                    .start_file(
+                        format!("chrome-headless-shell-linux64/locales/{i}.pak"),
+                        options,
+                    )
+                    .unwrap();
+            }
+            writer.finish().unwrap();
+            let output = root.join("output");
+            let result = extract(&archive, &output, "linux64");
+            assert_eq!(result.is_ok(), accepted, "{entries} entries: {result:?}");
             let _ = std::fs::remove_dir_all(output);
         }
         std::fs::remove_dir_all(root).unwrap();

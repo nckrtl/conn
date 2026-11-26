@@ -565,6 +565,15 @@ impl DesktopTabRunner {
                 self.navigate(&*cdp, input, timeout).await?;
                 self.status().await
             }
+            // This host serves one tab, so `open` on it is showing that tab: it loads the address
+            // the agent gave, else answers with the tab as it is. Servers before Conn Server 0.5.4
+            // send `open` for a named desktop tab instead of turning it into a navigation.
+            PreviewAutomationOperation::Open => {
+                if open_names_a_target(input) {
+                    self.navigate(&*cdp, input, timeout).await?;
+                }
+                self.status().await
+            }
             PreviewAutomationOperation::Click
             | PreviewAutomationOperation::Type
             | PreviewAutomationOperation::Hover
@@ -729,18 +738,9 @@ impl DesktopTabRunner {
         input: &Value,
         timeout: u64,
     ) -> Result<(), OperationError> {
-        let url = input
-            .get("url")
-            .and_then(Value::as_str)
-            .or_else(|| {
-                let target = input.get("target")?;
-                (target.get("kind").and_then(Value::as_str) == Some("url"))
-                    .then(|| target.get("url").and_then(Value::as_str))
-                    .flatten()
-            })
-            .ok_or_else(|| {
-                OperationError::execution("Not supported on desktop tabs yet. Navigate with a URL.")
-            })?;
+        let url = navigation_url(input).ok_or_else(|| {
+            OperationError::execution("Not supported on desktop tabs yet. Navigate with a URL.")
+        })?;
         let url = normalize_preview_url(url).map_err(OperationError::execution)?;
         let loaded = Arc::new(Notify::new());
         let flag = Arc::new(AtomicBool::new(false));
@@ -786,6 +786,22 @@ impl DesktopTabRunner {
                 )
             })
     }
+}
+
+/// The address a `navigate` loads: its `url`, else a `target` of kind `url`.
+fn navigation_url(input: &Value) -> Option<&str> {
+    input.get("url").and_then(Value::as_str).or_else(|| {
+        let target = input.get("target")?;
+        (target.get("kind").and_then(Value::as_str) == Some("url"))
+            .then(|| target.get("url").and_then(Value::as_str))
+            .flatten()
+    })
+}
+
+/// Whether an `open` names somewhere to go: a `url`, or any `target` (a target this host cannot
+/// load, such as a port, fails as `navigate` does rather than being dropped).
+fn open_names_a_target(input: &Value) -> bool {
+    input.get("url").and_then(Value::as_str).is_some() || input.get("target").is_some()
 }
 
 /// `new URL(url).origin`, for the credential origin check.

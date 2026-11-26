@@ -3035,7 +3035,7 @@ async fn panel_open_delivers_each_panel_to_the_callers_desktop_and_stays_hidden(
     );
     assert_eq!(result["shownOn"], "GPUI");
     drop(files);
-    for panel in ["database", "mcp", "diff", "files", "browser"] {
+    for panel in ["database", "mcp", "diff", "files", "terminal", "browser"] {
         let mut args = json!({"panel":panel,"focusWindow":false});
         if panel == "database" {
             args["sql"] = json!("select 1");
@@ -3054,16 +3054,19 @@ async fn panel_open_delivers_each_panel_to_the_callers_desktop_and_stays_hidden(
         });
         assert_eq!(result, json!({"panel":panel,"shownOn":"Mac"}));
     }
-    let (code, _) = agent
-        .failure(
-            "panel_open",
-            json!({"panel":"browser","url":"https://example.com"}),
+    // A tabId must name one of the thread's desktop tabs; nothing is asked of the desktop.
+    let unknown = agent
+        .request(
+            "tools/call",
+            json!({"name":"panel_open","arguments":{"panel":"browser","tabId":"server-tab"}}),
         )
         .await;
-    assert_eq!(
-        code, "capability_denied",
-        "browser automation is explicitly unavailable"
+    assert_eq!(unknown["result"]["isError"], true, "{unknown}");
+    assert!(
+        error_text(&unknown).contains("not a desktop browser tab"),
+        "{unknown}"
     );
+    assert!(desktop.try_recv().is_err());
     let rejected = agent
         .request(
             "tools/call",
@@ -6785,6 +6788,143 @@ async fn preview_open_sends_t3s_open_to_a_desktop_that_does_not_host_tabs() {
     let log = rig.log.lock().unwrap();
     assert_eq!(log[before].1, "navigate", "{log:?}");
     assert_eq!(log[before].3, json!({"url":"http://localhost:4001"}));
+}
+
+/// A thread whose desktop registered a tab but holds no tab-hosting panel subscription here (a
+/// linked environment's panel stream that lags, or an older desktop): `preview_open` without a
+/// tab still drives the desktop tab and never opens the server's headless browser.
+#[tokio::test]
+async fn preview_open_without_a_tab_prefers_a_registered_desktop_tab_over_the_server_browser() {
+    let rig = desktop_rig("desktop-open-default").await;
+    let mut agent = rig.agent().await;
+    assert!(!rig.broker.has_desktop());
+    rig.host("s1", "desk-1");
+    let reply = agent
+        .request("tools/call", json!({"name":"preview_open","arguments":{}}))
+        .await;
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let reply = agent
+        .request(
+            "tools/call",
+            json!({"name":"preview_open","arguments":{"url":"http://localhost:4002"}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    let log = rig.log.lock().unwrap();
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert_eq!((log[0].0.as_str(), log[0].1.as_str()), ("desk-1", "status"));
+    assert_eq!(
+        (log[1].0.as_str(), log[1].1.as_str()),
+        ("desk-1", "navigate")
+    );
+    assert_eq!(log[1].3, json!({"url":"http://localhost:4002"}));
+}
+
+/// `panel_open` for the browser with a url shows the Browser panel, waits for the thread's desktop
+/// tab, and loads the page there; with a tabId it shows that desktop tab. Either way the tab is
+/// the agent's current one afterwards, and the server's own browser is never used.
+#[tokio::test]
+async fn panel_open_browser_with_url_or_tab_drives_the_threads_desktop_tab() {
+    let rig = desktop_rig("desktop-panel-open").await;
+    let mut agent = rig.agent().await;
+    let mut gpui = rig.broker.subscribe_tab_host().unwrap();
+    let call = agent.request(
+        "tools/call",
+        json!({"name":"panel_open","arguments":{"panel":"browser","url":"http://localhost:5173","focusWindow":false}}),
+    );
+    let desktop = async {
+        let request = gpui.recv().await.unwrap();
+        assert_eq!(request.panel.panel, conn_contract::AgentPanelKind::Browser);
+        assert_eq!(request.panel.tab_id, None);
+        assert!(!request.panel.focus_window);
+        // The panel makes the thread's tab, which registers after the panel answers.
+        rig.broker.respond(
+            from_json(
+                json!({"requestId":request.panel.request_id,"ok":true,"deviceName":"GPUI Mac"}),
+            )
+            .unwrap(),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        rig.host("s1", "desk-1");
+    };
+    let (reply, ()) = tokio::join!(call, desktop);
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    assert_eq!(
+        reply["result"]["structuredContent"],
+        json!({"panel":"browser","shownOn":"GPUI Mac","tabId":"desk-1"})
+    );
+    {
+        let log = rig.log.lock().unwrap();
+        assert_eq!(log[0].1, "navigate", "{log:?}");
+        assert_eq!(log[0].3, json!({"url":"http://localhost:5173"}));
+    }
+    rig.host("s1", "desk-2");
+    let call = agent.request(
+        "tools/call",
+        json!({"name":"panel_open","arguments":{"panel":"browser","tabId":"desk-1"}}),
+    );
+    let desktop = async {
+        let request = gpui.recv().await.unwrap();
+        assert_eq!(request.panel.tab_id.as_deref(), Some("desk-1"));
+        rig.broker.respond(
+            from_json(
+                json!({"requestId":request.panel.request_id,"ok":true,"deviceName":"GPUI Mac"}),
+            )
+            .unwrap(),
+        );
+    };
+    let (reply, ()) = tokio::join!(call, desktop);
+    assert_eq!(
+        reply["result"]["structuredContent"]["tabId"], "desk-1",
+        "{reply}"
+    );
+    // desk-1 is current, though desk-2 registered last.
+    let reply = agent
+        .request(
+            "tools/call",
+            json!({"name":"preview_snapshot","arguments":{}}),
+        )
+        .await;
+    assert_eq!(reply["result"]["isError"], false, "{reply}");
+    assert_eq!(rig.log.lock().unwrap().last().unwrap().0, "desk-1");
+}
+
+/// `fill_credential` fills the thread's desktop tab, as `panel_open` promises: it reads the
+/// desktop page's address for the origin check and sends the fill there, never to the server's
+/// own browser. The secret goes to the desktop and never back to the agent.
+#[tokio::test]
+async fn fill_credential_fills_the_threads_desktop_tab() {
+    let rig = desktop_rig("desktop-fill").await;
+    let mut agent = rig.agent().await;
+    rig.host("s1", "desk-1");
+    let saved = agent
+        .ok(
+            "save_test_login",
+            json!({"url": "http://desktop", "username": "tester", "password": "fixture-only"}),
+        )
+        .await;
+    let result = agent
+        .ok(
+            "fill_credential",
+            json!({"itemId": saved["id"], "field": "password"}),
+        )
+        .await;
+    assert!(!result.to_string().contains("fixture-only"), "{result}");
+    let log = rig.log.lock().unwrap();
+    let operations: Vec<_> = log.iter().map(|entry| entry.1.as_str()).collect();
+    assert_eq!(operations, ["status", "credentialFill"], "{log:?}");
+    let (tab, _, request_tab, input) = &log[1];
+    assert_eq!(
+        (tab.as_str(), request_tab.as_deref()),
+        ("desk-1", Some("desk-1"))
+    );
+    assert_eq!(input["expectedOrigin"], "http://desktop");
+    assert_eq!(input["value"], "fixture-only");
+    assert_eq!(input["field"], "password");
+    assert!(
+        input.get("tabId").is_none(),
+        "the tab travels apart: {input}"
+    );
 }
 
 /// A desktop that hosts tabs but has none for the thread yet is asked to open its Browser panel;

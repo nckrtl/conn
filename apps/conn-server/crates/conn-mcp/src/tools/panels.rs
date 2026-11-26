@@ -39,20 +39,18 @@ pub(super) async fn open(cx: &Cx<'_>, args: &Args) -> ToolResult {
             "No Conn desktop app is connected to this server, so nothing can show the browser. Ask the user to open Conn on their Mac.",
         ));
     }
-    if browser && (args.contains_key("url") || args.contains_key("tabId")) {
-        return Err(fail(
-            "capability_denied",
-            "This server does not support desktop browser tabs yet. Open the browser panel without url or tabId; browser automation needs the desktop preview relay.",
-        ));
-    }
     let panel_kind = match panel {
         "browser" => AgentPanelKind::Browser,
         "database" => AgentPanelKind::Database,
         "mcp" => AgentPanelKind::Mcp,
         "diff" => AgentPanelKind::Diff,
         "files" => AgentPanelKind::Files,
+        "terminal" => AgentPanelKind::Terminal,
         _ => return Err(super::internal("Unknown panel kind")),
     };
+    if browser && (args.contains_key("url") || args.contains_key("tabId")) {
+        return browser_tab(cx, broker, caller, args).await;
+    }
     let request = AgentPanelRequest {
         request_id: "pending".into(),
         thread_id: caller.thread_id.clone(),
@@ -70,6 +68,95 @@ pub(super) async fn open(cx: &Cx<'_>, args: &Args) -> ToolResult {
         .await
         .map_err(|e| ToolError::Message(e.message))?;
     Ok(json!({"panel":panel,"shownOn":shown.device_name.unwrap_or_else(|| "Conn desktop".into())}))
+}
+
+/// How long `panel_open` waits for the desktop tab the Browser panel makes to register.
+const DESKTOP_TAB_WAIT: Duration = Duration::from_secs(10);
+
+/// `panel_open` for the browser with a `url` or a `tabId`: the thread's desktop tab, through the
+/// desktop relay (`conn_preview::relay`). `tabId` shows that desktop tab; `url` shows the Browser
+/// panel (which makes the thread's tab if it has none) and loads the page in the thread's desktop
+/// tab. Either way the tab becomes the agent's current one, so `preview_*` calls without a
+/// `tabId` drive it. Never falls back to the server's own browser.
+async fn browser_tab(
+    cx: &Cx<'_>,
+    broker: &conn_features::panels::PanelBroker,
+    caller: &crate::ThreadCaller,
+    args: &Args,
+) -> ToolResult {
+    use conn_preview::relay::{RelayCall, RelayFailure};
+    let preview = cx.config().preview.as_ref().ok_or_else(|| {
+        fail(
+            "capability_denied",
+            "This server has no browser relay, so it cannot reach desktop browser tabs. Open the browser panel without url or tabId.",
+        )
+    })?;
+    let environment = cx.config().environment_id.as_str();
+    let thread = caller.thread_id.as_str();
+    let hosted = || preview.desktop_tabs(environment, thread);
+    let tab = str_arg(args, "tabId");
+    if let Some(tab) = tab
+        && !hosted().iter().any(|h| h.tab == tab)
+    {
+        return Err(ToolError::Message(format!(
+            "Tab {tab} is not a desktop browser tab of this thread. Use a desktop tab from preview_status tabs, or pass url."
+        )));
+    }
+    let request = AgentPanelRequest {
+        request_id: "pending".into(),
+        thread_id: thread.to_owned(),
+        panel: AgentPanelKind::Browser,
+        tab_id: tab.map(str::to_owned),
+        sql: None,
+        connection: None,
+        run: None,
+        mcp_server: None,
+        mcp_call: None,
+        focus_window: bool_arg(args, "focusWindow").unwrap_or(true),
+    };
+    let shown = broker
+        .show(request, Duration::from_secs(15))
+        .await
+        .map_err(|e| ToolError::Message(e.message))?;
+    let deadline = tokio::time::Instant::now() + DESKTOP_TAB_WAIT;
+    while hosted().is_empty() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    if hosted().is_empty() {
+        return Err(ToolError::Message(
+            "The Conn desktop showed the browser panel, but no desktop tab registered for this thread. It may run an older Conn.".into(),
+        ));
+    }
+    let (operation, input) = match str_arg(args, "url") {
+        Some(url) => ("navigate", json!({ "url": url })),
+        None => ("status", json!({})),
+    };
+    let relayed = preview
+        .relay(RelayCall {
+            environment_id: environment,
+            thread,
+            agent: &caller.provider_session_id,
+            operation,
+            input,
+            tab,
+            timeout_ms: None,
+            update_current_tab: true,
+            desktop_default: true,
+        })
+        .await
+        .ok_or_else(|| ToolError::Message("No desktop browser tab serves this thread.".into()))?
+        .map_err(|RelayFailure { tag, message }| ToolError::Preview { tag, message })?;
+    let tab = relayed
+        .value
+        .get("tabId")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        .or(relayed.tab);
+    Ok(json!({
+        "panel": "browser",
+        "shownOn": shown.device_name.unwrap_or_else(|| "Conn desktop".into()),
+        "tabId": tab,
+    }))
 }
 
 pub(super) async fn database_query(cx: &Cx<'_>, args: &Args) -> ToolResult {

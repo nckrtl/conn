@@ -889,7 +889,7 @@ impl ConnApp {
             self.linked.restore_cached(environment_id);
         } else {
             if let Some(set) = self.linked.set.as_mut() {
-                self.offline.disconnected(environment_id);
+                self.offline.forget_environment(environment_id);
                 set.disconnect(environment_id);
             }
             self.linked.statuses.remove(environment_id);
@@ -1198,7 +1198,7 @@ impl ConnApp {
                 continue;
             }
             if let Some(set) = self.linked.set.as_mut() {
-                self.offline.disconnected(environment_id);
+                self.offline.forget_environment(environment_id);
                 set.disconnect(environment_id);
             }
             self.linked.statuses.remove(environment_id);
@@ -1225,7 +1225,7 @@ impl ConnApp {
         self.linked.missing_since_ms = verdict.missing_since_ms;
         for environment_id in &verdict.gone {
             if let Some(set) = self.linked.set.as_mut() {
-                self.offline.disconnected(environment_id);
+                self.offline.forget_environment(environment_id);
                 set.disconnect(environment_id);
             }
             changed |= self.linked.shells.remove(environment_id);
@@ -1463,7 +1463,7 @@ impl ConnApp {
                     self.orbit.sessions.remove_bearer(&environment_id);
                     self.orbit.persist_sessions();
                     if let Some(set) = self.linked.set.as_mut() {
-                        self.offline.disconnected(&environment_id);
+                        self.offline.forget_environment(&environment_id);
                         set.disconnect(&environment_id);
                     }
                 }

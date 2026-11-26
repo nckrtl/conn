@@ -43,6 +43,8 @@ mod linked;
 mod offline;
 mod preview;
 mod rail_workspaces;
+#[cfg(test)]
+mod reconnect_tests;
 mod sidebar_keys;
 mod sidebar_more;
 mod thread_links;

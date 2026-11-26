@@ -57,7 +57,7 @@ pub(crate) fn mount_app(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Con
 }
 
 /// [`mount_app`] that connects at launch to `server`, as the live app does to a saved server.
-fn mount_app_with_server(
+pub(crate) fn mount_app_with_server(
     cx: &mut TestAppContext,
     server: Option<crate::live::StartupServer>,
 ) -> (AnyWindowHandle, Entity<ConnApp>) {

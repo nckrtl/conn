@@ -123,22 +123,27 @@ impl Offline {
                 .join(id.map_or_else(|| "shell".to_owned(), key)),
         )
     }
+    /// `env`'s connection dropped and is reconnecting. Its watched streams stay: the client
+    /// resubscribes them itself from their cursors. Forgetting them would make the next shell
+    /// update refresh every watched thread from a full snapshot at once, on a server that has
+    /// just restarted, ahead of the thread the user has open and any send.
     pub(super) fn disconnected(&mut self, env: &str) {
         self.snapshots.retain(|(owner, _), _| owner != env);
         self.snapshot_cursors.retain(|(owner, _), _| owner != env);
         self.commits.retain(|(owner, _), _| owner != env);
         self.backfills.retain(|job| job.key.0 != env);
-        self.subscriptions.retain(|(owner, _), _| owner != env);
-        if self
-            .loading_outline
-            .as_ref()
-            .is_some_and(|key| key.0 == env)
-        {
-            self.loading_outline = None;
+        // Outlines already read stay read, and queued ones stay queued. Only the one in flight is
+        // dropped, and asked for again by the next reconcile.
+        if let Some(key) = self.loading_outline.take_if(|key| key.0 == env) {
             self.outline_epoch = self.outline_epoch.wrapping_add(1);
+            self.outline_requested.remove(&key);
         }
-        self.outline_queue.retain(|key| key.0 != env);
-        self.outline_requested.retain(|(owner, _), _| owner != env);
+    }
+
+    /// `env`'s connection is gone for good (unlinked, signed out). Its watched streams go with it.
+    pub(super) fn forget_environment(&mut self, env: &str) {
+        self.disconnected(env);
+        self.subscriptions.retain(|(owner, _), _| owner != env);
     }
 
     pub(super) fn watching(&self, env: Option<&str>, id: &str) -> bool {
@@ -146,6 +151,12 @@ impl Offline {
             self.subscriptions
                 .contains_key(&(env.to_owned(), id.to_owned()))
         })
+    }
+    /// Turns the cache on at `dir`, as the live app's config directory does.
+    #[cfg(test)]
+    pub(super) fn enable_for_test(&mut self, dir: PathBuf, db: MessageCache) {
+        self.dir = Some(dir);
+        self.db = Some(db);
     }
     #[cfg(test)]
     pub(super) fn watch_for_test(&mut self, env: &str, id: &str, connection: Connection) {
@@ -887,8 +898,16 @@ impl ConnApp {
                 continue;
             }
             self.queue_outline(&pair);
-            if !self.offline.subscriptions.contains_key(&pair)
-                && let Some(connection) = self.cache_connection(&pair.0)
+            // A watch survives reconnects of its connection (the client resubscribes it from its
+            // cursor); only a new connection for the environment needs a new subscription.
+            let Some(connection) = self.cache_connection(&pair.0) else {
+                continue;
+            };
+            if !self
+                .offline
+                .subscriptions
+                .get(&pair)
+                .is_some_and(|held| held.same_connection(&connection))
             {
                 connection.refresh_thread(&pair.1);
                 self.offline.subscriptions.insert(pair, connection);

@@ -1446,6 +1446,8 @@ fn thread_hover_card_opens_for_the_hovered_row_and_closes_for_menus(cx: &mut Tes
 fn hover_card_model_lists_only_the_fields_the_thread_has() {
     use conn_contract::OrchestrationV2ProviderFailureClass as FailureClass;
 
+    use conn_state::providers::ModelCatalog;
+
     use crate::sidebar::hover_card_state::{HoverError, hover_card_model};
 
     let shell = kitchen_sink_shell();
@@ -1457,8 +1459,8 @@ fn hover_card_model_lists_only_the_fields_the_thread_has() {
         .expect("kitchen-sink thread");
     let project = shell.project("proj-parity");
 
-    let plain = hover_card_model(&thread, project, None);
-    assert_eq!(plain.project.as_deref(), Some("conn-gpui"));
+    let plain = hover_card_model(&thread, project, None, &ModelCatalog::default());
+    assert_eq!(plain.project, "conn-gpui");
     assert_eq!(plain.branch.as_deref(), Some("feat/parity-check"));
     assert_eq!(plain.model, "claude-sonnet-4-6");
     assert_eq!(plain.environment, None);
@@ -1474,7 +1476,7 @@ fn hover_card_model_lists_only_the_fields_the_thread_has() {
     ]));
     thread.last_error = Some(Some("boom".to_owned()));
     thread.last_error_class = Some(Some(FailureClass::UsageLimit));
-    let rich = hover_card_model(&thread, project, Some("Mac mini"));
+    let rich = hover_card_model(&thread, project, Some("Mac mini"), &ModelCatalog::default());
     assert_eq!(rich.environment.as_deref(), Some("Mac mini"));
     assert_eq!(rich.subagents, Some(2));
     assert_eq!(rich.handed_off_from.as_deref(), Some("Codex"));
@@ -1482,15 +1484,194 @@ fn hover_card_model_lists_only_the_fields_the_thread_has() {
 
     thread.last_error_class = Some(Some(FailureClass::ProviderError));
     assert_eq!(
-        hover_card_model(&thread, project, None).error,
+        hover_card_model(&thread, project, None, &ModelCatalog::default()).error,
         Some(HoverError::Failed)
     );
     thread.last_error = Some(Some("  ".to_owned()));
-    assert_eq!(hover_card_model(&thread, project, None).error, None);
+    assert_eq!(
+        hover_card_model(&thread, project, None, &ModelCatalog::default()).error,
+        None
+    );
+}
+
+/// One Claude provider whose models the hover card names the way the composer does.
+fn claude_catalog() -> conn_state::providers::ModelCatalog {
+    let provider = from_json(json!({
+        "instanceId": "claude-default",
+        "driver": "claudeAgent",
+        "displayName": "Claude",
+        "enabled": true,
+        "installed": true,
+        "status": "ready",
+        "auth": {"status": "authenticated"},
+        "checkedAt": "2026-11-21T00:00:00Z",
+        "models": [{
+            "slug": "claude-opus-5-5",
+            "name": "Claude Opus 5.5",
+            "isCustom": false,
+            "capabilities": null
+        }],
+    }))
+    .expect("a provider");
+    conn_state::providers::ModelCatalog::from_providers(&[Some(provider)])
+}
+
+#[test]
+fn hover_card_names_the_model_like_the_composer() {
+    use conn_state::providers::ModelCatalog;
+
+    use crate::sidebar::hover_card_state::hover_card_model;
+
+    let mut thread = kitchen_sink_shell()
+        .threads
+        .iter()
+        .find(|t| t.id == "thread-selected")
+        .cloned()
+        .expect("kitchen-sink thread");
+    thread.model_selection.model = serde_json::Value::String("claude-opus-5-5".to_owned());
+    let named = hover_card_model(&thread, None, None, &claude_catalog());
+    assert_eq!(named.model, "Opus 5.5");
+    // A model the catalog lacks keeps its slug.
+    let unknown = hover_card_model(&thread, None, None, &ModelCatalog::default());
+    assert_eq!(unknown.model, "claude-opus-5-5");
+}
+
+/// The row and the hover card show the same project: an Orbit filing (`orbitProject` metadata)
+/// first, then the Conn project, else `No project`.
+#[gpui_kit::test]
+fn hover_card_shows_the_project_the_row_shows(cx: &mut TestAppContext) {
+    use crate::sidebar::ThreadProject;
+    use crate::sidebar::hover_card_state::hover_card_model;
+
+    let spec = |id: &'static str, project_id: &'static str| ThreadSeedSpec {
+        id,
+        project_id,
+        title: id,
+        status: "completed",
+        activity_run_status: None,
+        pinned_at: None,
+        settled_at: None,
+        pending_kind: None,
+    };
+    // A short list, so every row is on screen.
+    let parity = kitchen_sink_shell();
+    let mut shell = ShellState::from_parts(parity.projects, Vec::new(), Vec::new(), Some(1));
+    // Filed in Orbit only: the thread's Conn project is gone, as for a scratch thread.
+    let mut orbit_only = make_thread_shell(spec("thread-orbit-only", "proj-gone"));
+    orbit_only.orbit_project = Some(Some(conn_contract::OrbitProjectRef {
+        id: 12,
+        slug: "orbit".to_owned(),
+    }));
+    // Filed in Orbit and also in a Conn project: the filing wins, as on the row.
+    let mut both = make_thread_shell(spec("thread-orbit-both", "proj-parity"));
+    both.orbit_project = Some(Some(conn_contract::OrbitProjectRef {
+        id: 12,
+        slug: "orbit".to_owned(),
+    }));
+    let conn_only = make_thread_shell(spec("thread-conn-only", "proj-parity"));
+    let neither = make_thread_shell(spec("thread-neither", "proj-gone"));
+    shell.threads.extend([orbit_only, both, conn_only, neither]);
+
+    let expected = [
+        ("thread-orbit-only", "orbit"),
+        ("thread-orbit-both", "orbit"),
+        ("thread-conn-only", "conn-gpui"),
+        ("thread-neither", "No project"),
+    ];
+    let (window, app) = mount_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(shell.clone(), cx);
+            app.set_thread_for_test("thread-conn-only".to_owned(), kitchen_sink_thread(), cx);
+        })
+    });
+    for (id, name) in expected {
+        let thread = shell.find_thread(id).expect("thread");
+        let project = shell.project(&thread.project_id);
+        assert_eq!(ThreadProject::of(thread, project).name(), name, "{id}");
+        let catalog = conn_state::providers::ModelCatalog::default();
+        assert_eq!(
+            hover_card_model(thread, project, None, &catalog).project,
+            name,
+            "{id}: the card model"
+        );
+        cx.update(|cx| app.update(cx, |app, cx| app.open_thread_hover_for_test(id, cx)));
+        // The row is measured, then the card is laid out beside it.
+        for _ in 0..3 {
+            let _ = cx.update_window(window, |_, w, cx| w.render_frame(cx));
+            cx.run_until_parked();
+        }
+        assert!(
+            labelled(cx, window, &format!("Project {name}")),
+            "{id}: the card names the project {name}"
+        );
+    }
+}
+
+/// The server config of a machine with Claude and Codex: `claude-opus-5-5` is `Opus 5.5`.
+fn fixture_server_config() -> std::sync::Arc<conn_state::providers::ServerConfigState> {
+    let snapshot: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../crates/conn-state/tests/fixtures/server-config-snapshot.json"
+    ))
+    .expect("fixture is JSON");
+    let mut state = conn_state::providers::ServerConfigState::new();
+    state.apply(serde_json::from_value(snapshot).expect("snapshot event"));
+    std::sync::Arc::new(state)
+}
+
+/// A thread filed in Orbit only (`orbitProject` metadata): it has no Conn project.
+fn orbit_filed_thread() -> ThreadShell {
+    let mut thread = make_thread_shell(ThreadSeedSpec {
+        id: "thread-orbit-filed",
+        project_id: "proj-gone",
+        title: "Orbit Actions Migration Status",
+        status: "completed",
+        activity_run_status: None,
+        pinned_at: None,
+        settled_at: None,
+        pending_kind: None,
+    });
+    thread.orbit_project = Some(Some(conn_contract::OrbitProjectRef {
+        id: 12,
+        slug: "orbit".to_owned(),
+    }));
+    thread.provider_instance_id = "claudeAgent".to_owned();
+    thread.model_selection.model = serde_json::Value::String("claude-opus-5-5".to_owned());
+    thread
+}
+
+#[gpui_kit::test]
+fn hover_card_shows_the_orbit_project_and_the_model_name_the_composer_shows(
+    cx: &mut TestAppContext,
+) {
+    let (window, app) = mount_app(cx);
+    let parity = kitchen_sink_shell();
+    let shell = ShellState::from_parts(
+        parity.projects,
+        vec![orbit_filed_thread()],
+        Vec::new(),
+        Some(1),
+    );
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(shell, cx);
+            app.set_server_config_for_test(fixture_server_config(), cx);
+            app.open_thread_hover_for_test("thread-orbit-filed", cx);
+        })
+    });
+    for _ in 0..3 {
+        let _ = cx.update_window(window, |_, w, cx| w.render_frame(cx));
+        cx.run_until_parked();
+    }
+    assert!(labelled(cx, window, "Project orbit"));
+    assert!(!labelled(cx, window, "Project No project"));
+    assert!(labelled(cx, window, "Model Opus 5.5"));
 }
 
 #[gpui_kit::test]
 fn thread_hover_card_top_is_level_with_the_hovered_row(cx: &mut TestAppContext) {
+    use conn_state::providers::ModelCatalog;
+
     use crate::sidebar::hover_card_state::{card_height, hover_card_model};
 
     let (window, app) = mount_app(cx);
@@ -1514,7 +1695,12 @@ fn thread_hover_card_top_is_level_with_the_hovered_row(cx: &mut TestAppContext) 
         .find(|t| t.id == "thread-failed")
         .cloned()
         .expect("thread");
-    let model = hover_card_model(&thread, shell.project("proj-parity"), None);
+    let model = hover_card_model(
+        &thread,
+        shell.project("proj-parity"),
+        None,
+        &ModelCatalog::default(),
+    );
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.set_shell(shell, cx);
@@ -4875,6 +5061,76 @@ fn render_no_project_panel_screenshots() {
                 .save(dir.join(format!("menu-{label}-{theme_label}.png")))
                 .expect("a saved PNG");
         }
+    }
+}
+
+/// Renders the hover card of an Orbit-filed thread offscreen, in Dark Ocean and Light. It opens
+/// no window on screen and takes no focus.
+///
+/// `CONN_HOVERCARD_SHOTS_DIR=<dir> cargo test -p conn-app render_hover_card_orbit_project_screenshots -- --ignored`
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "writes PNGs; set CONN_HOVERCARD_SHOTS_DIR"]
+fn render_hover_card_orbit_project_screenshots() {
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, Bounds, Point, WindowBounds, WindowOptions, px, size};
+    let Some(dir) = std::env::var_os("CONN_HOVERCARD_SHOTS_DIR") else {
+        return;
+    };
+    let dir = std::path::Path::new(&dir);
+    std::fs::create_dir_all(dir).expect("an output folder");
+    let mut ctx = headless_shot_context();
+    for (theme_id, theme_label) in [("dark-ocean", "dark"), ("t3-code-light", "light")] {
+        let theme = conn_theme::theme_by_id(theme_id).expect("a built-in theme");
+        let tokens = conn_theme::Tokens::derive(&theme);
+        let (window, app) = ctx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::fonts::register(cx);
+            crate::theme::apply_kit_theme(&tokens, cx);
+            crate::app::register_keybindings(cx);
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        Point::default(),
+                        size(px(900.0), px(380.0)),
+                    ))),
+                    focus: false,
+                    show: false,
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| {
+                    let tokens = tokens.clone();
+                    cx.new(|cx| ConnApp::new(theme.id, tokens, None, window, cx))
+                },
+            )
+            .expect("a window")
+        });
+        ctx.update(|cx| {
+            app.update(cx, |app, cx| {
+                let parity = two_project_shell();
+                let mut shell = ShellState::from_parts(
+                    parity.projects,
+                    vec![orbit_filed_thread()],
+                    Vec::new(),
+                    Some(1),
+                );
+                shell.synchronized = true;
+                app.set_shell(shell, cx);
+                app.set_server_config_for_test(fixture_server_config(), cx);
+                app.learn_primary_environment_for_test("env-a", cx);
+                app.open_thread_hover_for_test("thread-orbit-filed", cx);
+            });
+        });
+        for _ in 0..5 {
+            ctx.update_window(window, |_, w, c| w.render_frame(c))
+                .expect("a frame");
+            ctx.run_until_parked();
+        }
+        let image = ctx.capture_screenshot(window).expect("a screenshot");
+        image
+            .save(dir.join(format!("hover-card-orbit-{theme_label}.png")))
+            .expect("a saved PNG");
     }
 }
 

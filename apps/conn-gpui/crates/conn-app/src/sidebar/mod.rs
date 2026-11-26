@@ -220,6 +220,51 @@ pub(crate) fn render_project_favicon(project: &ProjectShell, size_px: f32, token
     render_project_monogram(&project.title, size_px, tokens)
 }
 
+/// The project a thread shows, for its sidebar row and its hover card. One resolution, so the
+/// two cannot drift: an Orbit filing (`orbitProject` metadata) wins over the Conn project.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ThreadProject<'a> {
+    /// Filed under an Orbit project, by the user or the Orbit Gateway librarian.
+    Orbit(&'a conn_contract::OrbitProjectRef),
+    /// A Conn project.
+    Conn(&'a ProjectShell),
+    None,
+}
+
+impl<'a> ThreadProject<'a> {
+    /// What the sidebar shows for `thread`, whose Conn project is `project`.
+    #[must_use]
+    pub(crate) fn of(
+        thread: &'a conn_state::ThreadShell,
+        project: Option<&'a ProjectShell>,
+    ) -> Self {
+        if let Some(filing) = thread_list::filing(thread) {
+            return Self::Orbit(filing);
+        }
+        project.map_or(Self::None, Self::Conn)
+    }
+
+    /// The project name the hover card shows.
+    #[must_use]
+    pub(crate) fn name(&self) -> &str {
+        match self {
+            Self::Orbit(filing) => &filing.slug,
+            Self::Conn(project) => &project.title,
+            Self::None => "No project",
+        }
+    }
+
+    /// The project's icon: the Orbit slug's monogram, the Conn project's icon, else the
+    /// "No project" monogram.
+    #[must_use]
+    pub(crate) fn favicon(&self, size_px: f32, tokens: &Tokens) -> Div {
+        match self {
+            Self::Conn(project) => render_project_favicon(project, size_px, tokens),
+            Self::Orbit(_) | Self::None => render_project_monogram(self.name(), size_px, tokens),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use conn_contract::ProjectIconColor;

@@ -4765,6 +4765,17 @@ impl ConnApp {
         self.thread_menu.is_some() || self.renaming_thread_id.is_some() || self.pointer_captured()
     }
 
+    /// Test helper: the provider catalog this machine reports.
+    #[cfg(test)]
+    pub(crate) fn set_server_config_for_test(
+        &mut self,
+        config: std::sync::Arc<conn_state::providers::ServerConfigState>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.server_config = config;
+        self.push_server_config(cx);
+    }
+
     #[cfg(test)]
     pub(crate) fn open_thread_hover_for_test(
         &mut self,
@@ -7938,6 +7949,7 @@ impl Render for ConnApp {
             .open_for()
             .filter(|_| !self.thread_hover_suppressed());
         let hover_environment_label = self.hover_environment_label(hover_open_for);
+        let hover_server_config = self.active_server_config();
         let machine_icons = self.linked.machine_icons();
         let scratch_projects = self.scratch_project_ids();
         if self.layout.sidebar_open {
@@ -8004,6 +8016,7 @@ impl Render for ConnApp {
                     &ThreadHoverView {
                         open_for: hover_open_for,
                         environment_label: hover_environment_label.as_deref(),
+                        catalog: hover_server_config.catalog(),
                         origins: Some(self.linked.origins()),
                         machine_icons: &machine_icons,
                         scratch_projects: &scratch_projects,

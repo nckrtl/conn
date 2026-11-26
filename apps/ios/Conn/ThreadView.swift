@@ -27,6 +27,10 @@ struct ThreadView: View {
     private static let titleInset: CGFloat = 16 + 44 + 16
     @State private var showsAgents = false
     @Namespace private var floatingGlass
+    /// The composer's top edge on screen, the bottom of the readable feed.
+    @State private var composerTop: CGFloat = .greatestFiniteMagnitude
+    /// 0: at the end (within 24 pt); 1: within 100 pt; 2: further up.
+    @State private var endBand = 0
     @State private var historyNotice: String?
     @State private var scrollTarget: String?
     @State private var historyRequest = UUID()
@@ -389,6 +393,7 @@ struct ThreadView: View {
             timeline(proxy)
                 .safeAreaBar(edge: .bottom, spacing: 0) {
                     composerArea(proxy)
+                        .onGeometryChange(for: CGFloat.self) { $0.frame(in: .global).minY } action: { composerTop = $0 }
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { old, new in
                             if old != new && stickToBottom && !userScrolling && readingWindow == nil {
                                 proxy.scrollTo("timeline-bottom", anchor: .bottom)
@@ -623,6 +628,14 @@ struct ThreadView: View {
                 Color.clear
                     .frame(height: 1)
                     .id("timeline-bottom")
+                    // How far the feed's end sits above the composer, measured on screen: 0 at the
+                    // end (within 24 pt), 1 within 100 pt, 2 further. The lazy stack drops the
+                    // marker when it scrolls far away, which counts as far.
+                    .onGeometryChange(for: Int.self) { proxy in
+                        let gap = proxy.frame(in: .global).minY - composerTop
+                        return gap <= 24 ? 0 : gap <= 100 ? 1 : 2
+                    } action: { endBand = $0 }
+                    .onDisappear { endBand = 2 }
             }
             .scrollTargetLayout()
             // A tap on the feed puts the keyboard away; simultaneous, so links, cards and buttons still
@@ -660,7 +673,7 @@ struct ThreadView: View {
             if phase == .idle {
                 // Re-pin only when the scroll settles at the very end, not merely near it: a short
                 // drag up used to land within the 80 pt "near end" and re-pin at release.
-                if userScrolling { stickToBottom = TimelineEdges(context.geometry).atEnd }
+                if userScrolling { stickToBottom = endBand == 0 }
                 userScrolling = false
                 if requestedByScroll {
                     requestedByScroll = false
@@ -670,10 +683,12 @@ struct ThreadView: View {
         }
         .onScrollGeometryChange(for: TimelineEdges.self, of: { TimelineEdges($0) }) { previous, edges in
             if userScrolling {
-                // Mid-gesture the pin can only be dropped, never taken back.
-                if !edges.atEnd { stickToBottom = false }
                 if edges.top < previous.top && !paging { requestedByScroll = true }
             }
+        }
+        // Mid-gesture the pin can only be dropped, never taken back.
+        .onChange(of: endBand) { _, band in
+            if userScrolling && band != 0 { stickToBottom = false }
         }
         .scrollDismissesKeyboard(.interactively)
         .onChange(of: scrollFingerprint) { old, _ in
@@ -894,7 +909,8 @@ struct ThreadView: View {
     @ViewBuilder
     private func floatingControl() -> some View {
         let agents = turnSubagents
-        let showsJump = snapshot != nil && (!stickToBottom || readingWindow != nil)
+        // Shown once the reader is more than 100 pt above the end, hidden within it.
+        let showsJump = snapshot != nil && (endBand == 2 || readingWindow != nil)
         // A cached or restored feed the live projection hasn't replaced yet, while connected or
         // connecting (never while the offline pill shows).
         let syncing = snapshot.map { !$0.synchronized } ?? false && !store.showsOffline && readingWindow == nil
@@ -1086,17 +1102,9 @@ private struct TimelineFrames: PreferenceKey {
 
 private struct TimelineEdges: Equatable {
     let top: Int
-    let nearEnd: Bool
-    /// Settled at the very end (8 pt of slack), the only place that re-pins to the tail.
-    let atEnd: Bool
 
     init(_ geometry: ScrollGeometry) {
         top = Int(min(160, geometry.contentOffset.y + geometry.contentInsets.top))
-        // The visible rect runs under the composer and keyboard inset; measure where the content
-        // the reader can see ends, or "at the end" holds while scrolled up by the whole inset.
-        let readableBottom = geometry.contentOffset.y + geometry.containerSize.height - geometry.contentInsets.bottom
-        nearEnd = readableBottom >= geometry.contentSize.height - 80
-        atEnd = readableBottom >= geometry.contentSize.height - 8
     }
 }
 

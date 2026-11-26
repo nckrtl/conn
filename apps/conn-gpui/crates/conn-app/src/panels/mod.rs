@@ -143,6 +143,10 @@ pub struct RightPanel {
     /// What a new browser tab starts with.
     connection: Option<Connection>,
     environment_id: Option<String>,
+    /// The browser history's project key, and the host its environment runs on. Every browser tab
+    /// reads and feeds the history under them.
+    history_project: Option<String>,
+    history_hostname: Option<String>,
     annotations: Option<(Vec<AnnotationRecord>, bool, bool)>,
     api: Entity<ApiPanel>,
     database: Entity<DatabasePanel>,
@@ -313,6 +317,8 @@ impl RightPanel {
             preview_handles: None,
             connection,
             environment_id: None,
+            history_project: None,
+            history_hostname: None,
             annotations: None,
             api,
             database,
@@ -434,6 +440,7 @@ impl RightPanel {
         .detach();
         let (project, root) = (self.project_id.clone(), self.workspace_root.clone());
         let environment = self.environment_id.clone();
+        let history = (self.history_project.clone(), self.history_hostname.clone());
         let annotations = self.annotations.clone();
         let host_handle = self
             .preview_handles
@@ -453,6 +460,8 @@ impl RightPanel {
             if let Some(environment) = environment {
                 b.set_environment(environment, cx);
             }
+            // Before the pending address: opening it records the visit under the project.
+            b.set_history_context(history.0, history.1, cx);
             if let Some((records, watching, ready)) = annotations {
                 b.sync_annotations(records, watching, ready, cx);
             }
@@ -863,6 +872,31 @@ impl RightPanel {
             browser.update(cx, |b, cx| b.set_environment(environment_id.clone(), cx));
         }
         self.environment_id = Some(environment_id);
+    }
+
+    /// Names the project the browser history is kept under (the sidebar's project grouping: git
+    /// clones share one key) and the host the environment runs on. Every browser tab, now and
+    /// later, reads and feeds the history under them.
+    pub fn set_browser_history_context(
+        &mut self,
+        project: Option<String>,
+        hostname: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.history_project == project && self.history_hostname == hostname {
+            return;
+        }
+        self.history_project = project;
+        self.history_hostname = hostname;
+        for (_, browser) in &self.browsers {
+            browser.update(cx, |b, cx| {
+                b.set_history_context(
+                    self.history_project.clone(),
+                    self.history_hostname.clone(),
+                    cx,
+                );
+            });
+        }
     }
 
     /// Updates the active project, workspace root, and thread context.

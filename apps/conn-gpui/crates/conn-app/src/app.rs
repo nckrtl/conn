@@ -1261,6 +1261,42 @@ impl ConnApp {
         self.files_subscription = next;
     }
 
+    /// What the Browser panel keeps its history under for `project_id`: the sidebar's project
+    /// grouping key (git clones share one, a plain folder is scoped to its server, so it waits for
+    /// the server's config) and the host the server runs on, so a page on that host is the page on
+    /// `localhost`.
+    fn browser_history_context(
+        &self,
+        project_id: Option<&str>,
+    ) -> (Option<String>, Option<String>) {
+        let environment = self.context_environment();
+        let key = project_id.and_then(|id| {
+            let project = self.shell.project(id)?;
+            let config = self.active_server_config();
+            conn_state::project_groups::project_group_key(
+                project,
+                config.environment_id(),
+                self.shell.projects.iter().filter(|candidate| {
+                    self.linked_environment_of_project(&candidate.id) == environment.as_deref()
+                }),
+            )
+        });
+        let hostname = self
+            .context_server_url(environment.as_deref())
+            .and_then(|raw| url::Url::parse(raw).ok())
+            .and_then(|url| url.host_str().map(str::to_owned));
+        (key, hostname)
+    }
+
+    /// The project of the open thread, else of the open draft.
+    fn context_project_id(&self) -> Option<String> {
+        let selected = self.layout.selected_thread_id.as_deref();
+        selected
+            .and_then(|id| self.shell.find_thread(id))
+            .map(|thread| thread.project_id.clone())
+            .or_else(|| self.draft.as_ref().map(|draft| draft.project_id.clone()))
+    }
+
     /// Pushes the selected thread's timeline (or active draft state) into the chat view and right panel.
     fn sync_chat(&mut self, cx: &mut Context<'_, Self>) {
         if self.sync_panel_owner() {
@@ -1320,8 +1356,10 @@ impl ConnApp {
         let environment_id = self.environment_id();
         let panel_owner = self.thread_panels.owner().cloned();
         let linked_environment = self.context_environment();
+        let (history_key, history_hostname) = self.browser_history_context(project_id.as_deref());
         self.right_panel.update(cx, |panel, cx| {
             panel.set_environment(environment_id, cx);
+            panel.set_browser_history_context(history_key, history_hostname, cx);
             panel.set_owner(panel_owner, cx);
             panel.set_linked_environment(linked_environment, cx);
             panel.set_context(project_id.clone(), panel_root, thread_id, shell_thread, cx);
@@ -1687,6 +1725,12 @@ impl ConnApp {
         });
         self.right_panel.update(cx, |panel, cx| {
             panel.set_server_config(std::sync::Arc::clone(&config), cx)
+        });
+        // A plain folder's history key needs the server's environment id, which arrives here.
+        let (history_key, history_hostname) =
+            self.browser_history_context(self.context_project_id().as_deref());
+        self.right_panel.update(cx, |panel, cx| {
+            panel.set_browser_history_context(history_key, history_hostname, cx)
         });
         let primary_config = std::sync::Arc::clone(&self.server_config);
         if let Some(modal) = &self.settings_modal {

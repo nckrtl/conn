@@ -78,6 +78,11 @@ pub(super) const COMPOSER_MAX_LINES: usize = 8;
 
 /// Composer card corner radius matching Conn's `rounded-2xl` (`16px`).
 const COMPOSER_RADIUS_PX: f32 = 16.0;
+/// Composer card shadow: a large blur, a low alpha and a small upward offset.
+const COMPOSER_SHADOW_BLUR_PX: f32 = 32.0;
+const COMPOSER_SHADOW_OFFSET_Y_PX: f32 = -4.0;
+const COMPOSER_SHADOW_ALPHA_DARK: f32 = 0.32;
+const COMPOSER_SHADOW_ALPHA_LIGHT: f32 = 0.12;
 /// Bottom gap below the composer card when the context strip is hidden: the card's bottom
 /// lines up with the bottom of the sidebar's last line (Conn's `sm:h-[1.25rem]` was 4px lower).
 const COMPOSER_BOTTOM_SPACER_PX: f32 =
@@ -2691,6 +2696,7 @@ impl Render for Composer {
             } else {
                 card_border
             })
+            .shadow(vec![composer_card_shadow(&tokens)])
             .overflow_hidden();
 
         if is_editing_queued {
@@ -3242,6 +3248,27 @@ pub(crate) fn composer_surface_colors(tokens: &Tokens) -> (gpui_kit::Hsla, gpui_
     (bg, hsla(tokens.shell_inner_border))
 }
 
+/// The composer card's soft ambient shadow.
+///
+/// It lifts the card off the queue tray that tucks behind it, and off the timeline. The offset
+/// is a little upward so the shadow also falls onto the tray. gpui-kit and the theme have no
+/// shadow token (`apply_kit_theme` turns the kit's shadows off), so this builds a `BoxShadow`
+/// the way the popovers' `dropdown_glass_shadow` does. Dark needs a higher alpha to show.
+#[must_use]
+pub(crate) fn composer_card_shadow(tokens: &Tokens) -> gpui_kit::BoxShadow {
+    let alpha = match tokens.appearance {
+        Appearance::Dark => COMPOSER_SHADOW_ALPHA_DARK,
+        Appearance::Light => COMPOSER_SHADOW_ALPHA_LIGHT,
+    };
+    gpui_kit::BoxShadow {
+        color: gpui_kit::hsla(0.0, 0.0, 0.0, alpha),
+        offset: gpui_kit::point(px(0.0), px(COMPOSER_SHADOW_OFFSET_Y_PX)),
+        blur_radius: px(COMPOSER_SHADOW_BLUR_PX),
+        spread_radius: px(0.0),
+        inset: false,
+    }
+}
+
 /// Microphone button styled like Conn's `ComposerSpeechButton` wired to local Operator dictation.
 fn render_microphone_button<FClick>(
     state: &DictationState,
@@ -3436,6 +3463,30 @@ fn append_transcript(existing: &str, transcript: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_composer_card_has_a_soft_outer_shadow_in_dark_and_light() {
+        for id in ["dark-ocean", "t3-code-light"] {
+            let theme = conn_theme::theme_by_id(id).expect("a built-in theme");
+            let shadow = composer_card_shadow(&Tokens::derive(&theme));
+            assert!(!shadow.inset, "{id}: an outer shadow");
+            assert!(f32::from(shadow.blur_radius) >= 24.0, "{id}: a large blur");
+            assert!(
+                shadow.color.a > 0.05 && shadow.color.a <= 0.35,
+                "{id}: low but visible alpha, got {}",
+                shadow.color.a
+            );
+            assert!(
+                f32::from(shadow.offset.y) <= 0.0 && f32::from(shadow.offset.y) >= -12.0,
+                "{id}: a small upward offset, so it falls onto the tray"
+            );
+        }
+        let alpha = |id: &str| {
+            let theme = conn_theme::theme_by_id(id).expect("a built-in theme");
+            composer_card_shadow(&Tokens::derive(&theme)).color.a
+        };
+        assert!(alpha("dark-ocean") > alpha("t3-code-light"));
+    }
 
     #[test]
     fn infer_mime_and_byte_size_formatting() {

@@ -377,6 +377,10 @@ impl ChatView {
         cx: &mut Context<'_, Self>,
     ) -> Vec<AnyElement> {
         use super::attachment_thumb::{AttachmentKind, attachment_kind, gallery_columns, runs_by};
+        // Every image of the message, in attach order: a tile opens the viewer on its own place.
+        let gallery: std::rc::Rc<[super::image_viewer::ViewerItem]> =
+            super::image_viewer::gallery_items(attachments).into();
+        let mut images_before = 0;
         // One column count for the whole message, so every run's tiles are the same size.
         let columns = gallery_columns(
             attachments
@@ -391,7 +395,16 @@ impl ChatView {
                 let run = &attachments[range];
                 match kind {
                     AttachmentKind::Image => {
-                        self.render_image_gallery(key, start, run, columns, cx)
+                        let first_image = images_before;
+                        images_before += run.len();
+                        self.render_image_gallery(
+                            key,
+                            (start, first_image),
+                            run,
+                            columns,
+                            &gallery,
+                            cx,
+                        )
                     }
                     AttachmentKind::Video => self.render_video_run(key, start, run),
                     AttachmentKind::File => self.render_file_rows(key, start, run, cx),
@@ -410,14 +423,20 @@ impl ChatView {
     /// is still being fitted to its caption, so it reserved tile heights for the cap width and
     /// left a blank band under tiles that then painted narrower. A flex cell gets its width first
     /// and its 4:3 height from that width.
+    ///
+    /// `place` is where the run starts: its index among the message's attachments, and among
+    /// its images. A tile is a button that opens the full-image viewer on its own image of
+    /// `viewer_items`.
     fn render_image_gallery(
         &self,
         key: &str,
-        start: usize,
+        place: (usize, usize),
         run: &[conn_contract::ChatAttachment],
         columns: usize,
+        viewer_items: &std::rc::Rc<[super::image_viewer::ViewerItem]>,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
+        let (start, first_image) = place;
         use super::attachment_thumb::{
             GALLERY_INSET_PX, gallery_cell, gallery_tile, gallery_tile_target, tile_radii,
         };
@@ -438,10 +457,30 @@ impl ChatView {
                 let idx = start + offset;
                 let loaded = self.attachment_image(image, target, cx);
                 let radii = tile_radii(offset, run.len(), columns);
+                let (open_gallery, ordinal) = (viewer_items.clone(), first_image + offset);
+                // Focusable, so Tab reaches it and Enter or Space opens it (a keyboard click).
+                let open = div()
+                    .id((SharedString::from(format!("att-open-{key}")), idx))
+                    .a11y_button(
+                        format!("chat.attachment.{key}.{idx}.open"),
+                        format!("Preview {}", image.name),
+                    )
+                    .tab_index(0)
+                    .absolute()
+                    .inset_0()
+                    .cursor_pointer()
+                    .on_click(
+                        cx.listener(move |this, _: &gpui_kit::ClickEvent, _window, cx| {
+                            this.open_image_viewer(&open_gallery, ordinal, cx);
+                        }),
+                    );
+                #[cfg(test)]
+                let open = gpui_kit::TestSupportExt::test_support(open);
                 let cell = gallery_cell((SharedString::from(format!("att-{key}")), idx))
                     .flex_1()
                     .conn_tooltip(image.name.clone(), &self.tokens)
-                    .child(gallery_tile(loaded, &self.tokens, radii));
+                    .child(gallery_tile(loaded, &self.tokens, radii))
+                    .child(open);
                 let cell = cell.a11y_group(
                     format!("chat.attachment.{key}.{idx}"),
                     format!("Attachment {}", image.name),
@@ -1925,12 +1964,37 @@ impl ChatView {
             meta_parts.push(format!("on {}", remote.label));
         }
         meta_parts.extend(model_text);
+        // A task on another machine has the driver `remote` here, a label and not a provider, so the
+        // mark comes from the instance and model it runs.
+        let (provider_key, provider_label) = subagent_provider(
+            role,
+            self.subagent_models.get(id),
+            self.server_config.catalog(),
+        );
+        let provider_mark = div()
+            .id(SharedString::from(format!("subagent-provider-{id}")))
+            .a11y(
+                gpui_kit::Role::Image,
+                format!("chat.subagent.{id}.provider"),
+                provider_label,
+            )
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .child(crate::icons::provider_mark(
+                &provider_key,
+                CARD_ICON_PX,
+                muted,
+            ));
+        #[cfg(test)]
+        let provider_mark = gpui_kit::TestSupportExt::test_support(provider_mark);
         if elapsed.is_none() {
             meta_parts.push(status_label.to_owned());
         }
         let mut header = card_header(false)
             .child(icon_with_dot(
-                crate::icons::provider_mark(role, CARD_ICON_PX, muted),
+                provider_mark.into_any_element(),
                 dot.map(|core| (core, colors.surface())),
             ))
             .child(
@@ -2634,10 +2698,43 @@ pub(super) fn outline_button_surface(
         .hover(move |s| s.bg(hover_bg))
 }
 
+/// The provider id the subagent card's mark is drawn from, and the mark's accessibility label
+/// (`Agent` for a provider with no mark of its own).
+///
+/// The subagent's driver names the provider, except for a task on another machine: its driver is
+/// `remote`. Then the provider comes from the model catalog, the instance id, or the model slug,
+/// in that order.
+fn subagent_provider(
+    role: &str,
+    model: Option<&conn_state::SubagentModel>,
+    catalog: &conn_state::providers::ModelCatalog,
+) -> (String, &'static str) {
+    let catalog_driver = model.and_then(|model| {
+        let slug = model.model.as_deref()?;
+        catalog
+            .find_model(model.instance_id.as_deref(), slug)
+            .map(|found| found.driver.as_str())
+    });
+    let candidates = [
+        Some(role),
+        catalog_driver,
+        model.and_then(|model| model.instance_id.as_deref()),
+        model.and_then(|model| model.model.as_deref()),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find_map(|candidate| {
+            crate::icons::provider_brand(candidate)
+                .map(|brand| (candidate.to_owned(), brand.label()))
+        })
+        .unwrap_or_else(|| (role.to_owned(), "Agent"))
+}
+
 /// `<model> · <effort>` for a subagent card, for example `Opus 5.5 · medium`. The model name is the
 /// composer's trigger label; the effort is the composer's effort label, lowercased. A model the
 /// catalog does not list shows its slug and the raw reasoning option.
-fn subagent_model_text(
+pub(crate) fn subagent_model_text(
     catalog: &conn_state::providers::ModelCatalog,
     model: &conn_state::SubagentModel,
 ) -> Option<String> {
@@ -2675,7 +2772,7 @@ fn subagent_model_text(
 
 #[cfg(test)]
 mod subagent_model_tests {
-    use super::subagent_model_text;
+    use super::{subagent_model_text, subagent_provider};
     use conn_state::SubagentModel;
     use conn_state::providers::ModelCatalog;
     use std::collections::HashMap;
@@ -2703,6 +2800,56 @@ mod subagent_model_tests {
         assert_eq!(
             subagent_model_text(&catalog, &SubagentModel::default()),
             None
+        );
+    }
+
+    fn model(instance: &str, slug: &str) -> SubagentModel {
+        SubagentModel {
+            model: Some(slug.to_owned()),
+            instance_id: Some(instance.to_owned()),
+            options: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn the_driver_names_the_provider_mark() {
+        let catalog = ModelCatalog::default();
+        assert_eq!(subagent_provider("claudeAgent", None, &catalog).1, "Claude");
+        assert_eq!(subagent_provider("codex", None, &catalog).1, "OpenAI");
+        assert_eq!(subagent_provider("grok", None, &catalog).1, "Grok");
+        assert_eq!(
+            subagent_provider("antigravity", None, &catalog).1,
+            "Antigravity"
+        );
+    }
+
+    #[test]
+    fn a_remote_task_takes_its_provider_from_the_instance_and_model() {
+        let catalog = ModelCatalog::default();
+        let claude = model("claudeAgent", "claude-opus-5-5");
+        assert_eq!(
+            subagent_provider("remote", Some(&claude), &catalog),
+            ("claudeAgent".to_owned(), "Claude")
+        );
+        // A custom instance id says nothing; the model slug does.
+        let codex = model("work-box", "gpt-5.5");
+        assert_eq!(
+            subagent_provider("remote", Some(&codex), &catalog).1,
+            "OpenAI"
+        );
+    }
+
+    #[test]
+    fn an_unknown_provider_keeps_the_agent_glyph() {
+        let catalog = ModelCatalog::default();
+        let unknown = model("mystery", "mystery-1");
+        assert_eq!(
+            subagent_provider("remote", Some(&unknown), &catalog),
+            ("remote".to_owned(), "Agent")
+        );
+        assert_eq!(
+            subagent_provider("remote", None, &catalog),
+            ("remote".to_owned(), "Agent")
         );
     }
 }

@@ -82,7 +82,7 @@ impl ConnApp {
         self.panel_saves.written = Some(saved.clone());
         for (id, url) in self.thread_panels.restore(saved) {
             self.right_panel
-                .update(cx, |panel, cx| panel.navigate_browser(id, url, cx));
+                .update(cx, |panel, cx| panel.restore_browser(id, url, cx));
         }
     }
 

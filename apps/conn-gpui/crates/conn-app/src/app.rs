@@ -37,6 +37,7 @@ use gpui_kit::prelude::FluentBuilder as _;
 
 mod child_approvals;
 pub(crate) mod details_tasks;
+mod hover_prefetch;
 mod linked;
 mod offline;
 mod preview;
@@ -379,6 +380,9 @@ pub(crate) struct ConnApp {
     rail_menu: Option<crate::sidebar::rail::RailMenuAnchor>,
     /// The workspace editor (`WorkspaceDialog`), open from the rail's `+` or a tile's `Edit…`.
     workspace_editor: Option<Entity<crate::workspace_editor::WorkspaceEditor>>,
+    /// The full-image viewer, open from a sent message's thumbnail.
+    image_viewer: Option<Entity<crate::chat::image_viewer::ImageViewer>>,
+    image_viewer_subscription: Option<gpui_kit::Subscription>,
     /// The workspace the editor edits; none while it creates one.
     workspace_editor_target: Option<String>,
     /// Each workspace's badge image, decoded once from its data URL.
@@ -412,6 +416,10 @@ pub(crate) struct ConnApp {
     linked: linked::LinkedEnvironments,
     /// Child threads subscribed for their approvals (`app/child_approvals.rs`).
     child_approvals: child_approvals::ChildApprovals,
+    /// Thread stream started by sidebar hover (`app/hover_prefetch.rs`).
+    speculative: hover_prefetch::SpeculativeThreads<Connection>,
+    /// Threads a draft launch subscribed directly, until they are opened.
+    launched_threads: HashSet<String>,
     /// Live control socket server handle (dropped on app exit).
     _control_server: Option<conn_desktop::control::ControlServerHandle>,
     /// Background task draining `conn://` URLs and Unix control socket requests.
@@ -594,6 +602,9 @@ impl ConnApp {
                 }
                 crate::chat::ChatEvent::OpenThreadLink(link) => {
                     app.open_thread_link(link, cx);
+                }
+                crate::chat::ChatEvent::OpenImageViewer { images, index } => {
+                    app.open_image_viewer(images.clone(), *index, window, cx);
                 }
                 crate::chat::ChatEvent::OpenFile(location) => {
                     app.show_source_location(location, cx)
@@ -824,6 +835,8 @@ impl ConnApp {
             thread_menu: None,
             rail_menu: None,
             workspace_editor: None,
+            image_viewer: None,
+            image_viewer_subscription: None,
             workspace_editor_target: None,
             workspace_images: HashMap::new(),
             rail_gesture: crate::sidebar::rail::RailGesture::default(),
@@ -842,6 +855,8 @@ impl ConnApp {
             offline,
             linked: linked::LinkedEnvironments::load(),
             child_approvals: child_approvals::ChildApprovals::default(),
+            speculative: hover_prefetch::SpeculativeThreads::default(),
+            launched_threads: HashSet::new(),
             _control_server: None,
             _activation_task: None,
             subscribed_thread_id: None,
@@ -1225,6 +1240,92 @@ impl ConnApp {
             && self.command_palette.is_none()
             && self.settings_modal.is_none()
             && self.workspace_editor.is_none()
+            && self.image_viewer.is_none()
+    }
+
+    /// Opens the full-image viewer on `items[index]`. It takes the keyboard and gives it back to
+    /// what had it when it closes.
+    fn open_image_viewer(
+        &mut self,
+        items: Vec<crate::chat::image_viewer::ViewerItem>,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        use crate::chat::image_viewer::{ImageViewer, ImageViewerEvent, ViewerOpen};
+        if items.is_empty() {
+            return;
+        }
+        // One viewer at a time: a second open (a double click) replaces the first.
+        self.close_image_viewer(false, window, cx);
+        let return_focus = window
+            .focused(cx)
+            .or_else(|| Some(self.focus_handle.clone()));
+        let thread_id = self.layout.selected_thread_id.clone();
+        // The thread's own connection: a linked environment's attachments live on that
+        // environment, not on the primary connection. Stepping through the gallery reuses it.
+        let connection = self.context_connection();
+        let tokens = self.tokens.clone();
+        let open = ViewerOpen {
+            items,
+            index,
+            connection,
+            thread_id,
+            return_focus,
+        };
+        let viewer = cx.new(|cx| ImageViewer::new(open, tokens, window, cx));
+        let sub = cx.subscribe_in(
+            &viewer,
+            window,
+            |app, _viewer, event: &ImageViewerEvent, window, cx| match event {
+                ImageViewerEvent::Close => app.close_image_viewer(true, window, cx),
+            },
+        );
+        self.image_viewer_subscription = Some(sub);
+        self.image_viewer = Some(viewer);
+        self.sync_browser_visibility(cx);
+        cx.notify();
+    }
+
+    /// Closes the image viewer. `restore` gives the keyboard back to what had it before; a thread
+    /// switch skips that, as the old composer is gone.
+    fn close_image_viewer(
+        &mut self,
+        restore: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(viewer) = self.image_viewer.take() else {
+            return;
+        };
+        self.image_viewer_subscription = None;
+        let focus = viewer.update(cx, |viewer, cx| {
+            viewer.release_images(cx);
+            viewer.take_return_focus()
+        });
+        let focus = focus
+            .filter(|_| restore)
+            .unwrap_or_else(|| self.focus_handle.clone());
+        window.focus(&focus, cx);
+        self.sync_browser_visibility(cx);
+        cx.notify();
+    }
+
+    /// Routes a key to the open image viewer: Escape, arrows and zoom keys. Returns whether it
+    /// was used. The palette and Settings, opened on top of it, keep their own keys.
+    fn handle_image_viewer_key(
+        &mut self,
+        event: &gpui_kit::KeyDownEvent,
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        if self.command_palette.is_some() || self.settings_modal.is_some() {
+            return false;
+        }
+        let Some(viewer) = self.image_viewer.clone() else {
+            return false;
+        };
+        viewer.update(cx, |viewer, cx| viewer.handle_key(event, window, cx))
     }
 
     fn sync_browser_visibility(&self, cx: &mut Context<'_, Self>) {
@@ -1267,6 +1368,42 @@ impl ConnApp {
             );
         }
         self.files_subscription = next;
+    }
+
+    /// What the Browser panel keeps its history under for `project_id`: the sidebar's project
+    /// grouping key (git clones share one, a plain folder is scoped to its server, so it waits for
+    /// the server's config) and the host the server runs on, so a page on that host is the page on
+    /// `localhost`.
+    fn browser_history_context(
+        &self,
+        project_id: Option<&str>,
+    ) -> (Option<String>, Option<String>) {
+        let environment = self.context_environment();
+        let key = project_id.and_then(|id| {
+            let project = self.shell.project(id)?;
+            let config = self.active_server_config();
+            conn_state::project_groups::project_group_key(
+                project,
+                config.environment_id(),
+                self.shell.projects.iter().filter(|candidate| {
+                    self.linked_environment_of_project(&candidate.id) == environment.as_deref()
+                }),
+            )
+        });
+        let hostname = self
+            .context_server_url(environment.as_deref())
+            .and_then(|raw| url::Url::parse(raw).ok())
+            .and_then(|url| url.host_str().map(str::to_owned));
+        (key, hostname)
+    }
+
+    /// The project of the open thread, else of the open draft.
+    fn context_project_id(&self) -> Option<String> {
+        let selected = self.layout.selected_thread_id.as_deref();
+        selected
+            .and_then(|id| self.shell.find_thread(id))
+            .map(|thread| thread.project_id.clone())
+            .or_else(|| self.draft.as_ref().map(|draft| draft.project_id.clone()))
     }
 
     /// Pushes the selected thread's timeline (or active draft state) into the chat view and right panel.
@@ -1328,8 +1465,10 @@ impl ConnApp {
         let environment_id = self.environment_id();
         let panel_owner = self.thread_panels.owner().cloned();
         let linked_environment = self.context_environment();
+        let (history_key, history_hostname) = self.browser_history_context(project_id.as_deref());
         self.right_panel.update(cx, |panel, cx| {
             panel.set_environment(environment_id, cx);
+            panel.set_browser_history_context(history_key, history_hostname, cx);
             panel.set_owner(panel_owner, cx);
             panel.set_linked_environment(linked_environment, cx);
             panel.set_context(project_id.clone(), panel_root, thread_id, shell_thread, cx);
@@ -1593,6 +1732,9 @@ impl ConnApp {
                     }
                 }
             }
+            // A late item of a stream dropped with its reducer finds nobody to apply to.
+            ClientEvent::Thread { thread_id, .. }
+                if self.thread_item_is_orphaned(self.server_url.as_deref(), &thread_id) => {}
             ClientEvent::Thread { thread_id, item } => {
                 let perf_kind = self
                     .perf_open
@@ -1648,7 +1790,11 @@ impl ConnApp {
                         (None, None) => {}
                     }
                 }
-                if tag == "orchestration.subscribeThread" && self.threads.contains_key(&key) {
+                // A stream nobody wants any more (closed thread, dropped prefetch) stays down.
+                if tag == "orchestration.subscribeThread"
+                    && self.threads.contains_key(&key)
+                    && self.thread_stream_wanted(&key)
+                {
                     if let Some(error) = error {
                         eprintln!("thread stream {key} ended: {error}");
                     }
@@ -1696,6 +1842,12 @@ impl ConnApp {
         self.right_panel.update(cx, |panel, cx| {
             panel.set_server_config(std::sync::Arc::clone(&config), cx)
         });
+        // A plain folder's history key needs the server's environment id, which arrives here.
+        let (history_key, history_hostname) =
+            self.browser_history_context(self.context_project_id().as_deref());
+        self.right_panel.update(cx, |panel, cx| {
+            panel.set_browser_history_context(history_key, history_hostname, cx)
+        });
         let primary_config = std::sync::Arc::clone(&self.server_config);
         if let Some(modal) = &self.settings_modal {
             let shells = self
@@ -1729,6 +1881,15 @@ impl ConnApp {
 
     /// Resubscribes ended thread streams whose thread the shell now lists.
     fn resubscribe_ended_threads(&mut self) {
+        let released: Vec<String> = self
+            .ended_threads
+            .iter()
+            .filter(|id| !self.thread_stream_wanted(id))
+            .cloned()
+            .collect();
+        for id in released {
+            self.ended_threads.remove(&id);
+        }
         let ready: Vec<String> = self
             .ended_threads
             .iter()
@@ -2884,6 +3045,7 @@ impl ConnApp {
                         }
                         app.record_launched_thread(&final_thread_id, &project_id);
                         app.ended_threads.remove(&final_thread_id);
+                        app.claim_launched_stream(&final_thread_id);
                         connection.subscribe_thread(&final_thread_id);
                         app.chat.update(cx, |chat, cx| chat.set_error(None, cx));
                         app.sync_chat(cx);
@@ -3725,6 +3887,7 @@ impl ConnApp {
             "chatMetrics": chat_metrics,
             "palette": self.command_palette.is_some(),
             "settings": self.settings_modal.is_some(),
+            "imageViewer": self.image_viewer.is_some(),
         })
     }
 
@@ -4493,6 +4656,7 @@ impl ConnApp {
         self.settings_modal.is_some()
             || self.command_palette.is_some()
             || self.workspace_editor.is_some()
+            || self.image_viewer.is_some()
             || self.thread_menu.is_some()
             || self.rail_menu.is_some()
             || self.sidebar_filter_menu_open
@@ -4603,6 +4767,26 @@ impl ConnApp {
         }
         self.sync_chat(cx);
         cx.notify();
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn image_viewer_for_test(
+        &self,
+    ) -> Option<Entity<crate::chat::image_viewer::ImageViewer>> {
+        self.image_viewer.clone()
+    }
+
+    /// Test helper: opens the viewer on `items[index]` without a thumbnail click.
+    #[cfg(test)]
+    pub(crate) fn open_image_viewer_for_test(
+        &mut self,
+        items: Vec<crate::chat::image_viewer::ViewerItem>,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.open_image_viewer(items, index, window, cx);
     }
 
     #[cfg(test)]
@@ -4771,6 +4955,17 @@ impl ConnApp {
     #[must_use]
     pub(crate) fn thread_hover_suppressed(&self) -> bool {
         self.thread_menu.is_some() || self.renaming_thread_id.is_some() || self.pointer_captured()
+    }
+
+    /// Test helper: the provider catalog this machine reports.
+    #[cfg(test)]
+    pub(crate) fn set_server_config_for_test(
+        &mut self,
+        config: std::sync::Arc<conn_state::providers::ServerConfigState>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.server_config = config;
+        self.push_server_config(cx);
     }
 
     #[cfg(test)]
@@ -6020,6 +6215,8 @@ impl ConnApp {
                     thread,
                     state: &self.thread_details,
                     task_links: self.selected_timeline().map(|t| &t.task_links),
+                    timeline: self.selected_timeline(),
+                    catalog: self.server_config.catalog(),
                     environment_label: &environment_label,
                     max_height: (viewport_h
                         - self.geometry.header_height_px
@@ -7115,6 +7312,7 @@ impl ConnApp {
         self.ended_threads.clear();
         self.subscribed_thread_id = None;
         self.reset_child_approvals();
+        self.reset_speculative();
         self.subscribed_annotation_project = None;
         self.files_subscription = None;
         self.annotations.clear();
@@ -7691,6 +7889,9 @@ impl ConnApp {
         if let Some(palette) = &self.command_palette {
             palette.update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
         }
+        if let Some(viewer) = &self.image_viewer {
+            viewer.update(cx, |v, cx| v.set_tokens(tokens.clone(), cx));
+        }
         if let Some(editor) = &self.workspace_editor {
             editor.update(cx, |e, cx| e.set_tokens(tokens.clone(), cx));
         }
@@ -7746,6 +7947,12 @@ impl Render for ConnApp {
         self.sync_details_task_history(cx);
         self.refresh_workspace_images();
         RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Another thread on screen drops the viewer, as web drops its preview.
+        if self.image_viewer.as_ref().is_some_and(|viewer| {
+            viewer.read(cx).thread_id() != self.layout.selected_thread_id.as_deref()
+        }) {
+            self.close_image_viewer(false, window, cx);
+        }
         self.sync_thread_menu_focus(window, cx);
         self.sync_undo_notice_focus(window, cx);
         #[cfg(feature = "zed-files")]
@@ -7765,6 +7972,10 @@ impl Render for ConnApp {
             .capture_key_down(
                 cx.listener(|app, event: &gpui_kit::KeyDownEvent, window, cx| {
                     if std::mem::take(&mut app.keystroke_consumed) {
+                        return;
+                    }
+                    if app.handle_image_viewer_key(event, window, cx) {
+                        cx.stop_propagation();
                         return;
                     }
                     if std::env::var_os("CONN_GPUI_FRAME_LOG").is_some() {
@@ -7946,6 +8157,7 @@ impl Render for ConnApp {
             .open_for()
             .filter(|_| !self.thread_hover_suppressed());
         let hover_environment_label = self.hover_environment_label(hover_open_for);
+        let hover_server_config = self.active_server_config();
         let machine_icons = self.linked.machine_icons();
         let scratch_projects = self.scratch_project_ids();
         if self.layout.sidebar_open {
@@ -8012,6 +8224,7 @@ impl Render for ConnApp {
                     &ThreadHoverView {
                         open_for: hover_open_for,
                         environment_label: hover_environment_label.as_deref(),
+                        catalog: hover_server_config.catalog(),
                         origins: Some(self.linked.origins()),
                         machine_icons: &machine_icons,
                         scratch_projects: &scratch_projects,
@@ -8158,6 +8371,9 @@ impl Render for ConnApp {
             ));
         }
 
+        if let Some(viewer) = &self.image_viewer {
+            root = root.child(crate::chat::image_viewer::render_overlay(viewer));
+        }
         if let Some(modal) = &self.settings_modal {
             root = root.child(crate::settings::render_overlay(modal));
         }

@@ -7,6 +7,7 @@ mod attachment_thumb;
 mod cache;
 mod card_face;
 mod cards;
+pub(crate) use cards::subagent_model_text;
 mod child_approvals;
 pub(crate) use self::child_approvals::ChildApprovalCard;
 mod color;
@@ -26,6 +27,9 @@ mod draft_hero;
 mod embedded_document;
 mod embedded_mount;
 mod icons;
+pub(crate) mod image_viewer;
+#[cfg(test)]
+mod image_viewer_shots;
 mod inline_code;
 #[cfg(test)]
 mod left_align_shots;
@@ -223,6 +227,11 @@ pub(crate) enum ChatEvent {
     },
     /// Open a workspace-relative file in the right panel's File preview tab.
     OpenFile(conn_contract::source::SourceLocation),
+    /// Open the full-image viewer on `images[index]` (a sent message's thumbnail was clicked).
+    OpenImageViewer {
+        images: Vec<image_viewer::ViewerItem>,
+        index: usize,
+    },
     /// Show a web link in the Browser panel (`Open in integrated browser`).
     OpenInBrowser(String),
     /// Switch the thread's runtime permission mode (`thread.runtime-mode.set`).
@@ -2698,14 +2707,9 @@ impl ChatView {
                     hsla(self.tokens.muted_foreground),
                 ));
 
-            // The divider only separates the header from its expanded work-log rows. Collapsed,
-            // the message follows the header directly, so the line stays transparent (same 1px,
-            // so expanding does not shift the layout).
-            let fold_divider = if manually_expanded {
-                hsla(self.tokens.shell_divider)
-            } else {
-                gpui_kit::transparent_black()
-            };
+            // Collapsed or expanded, a divider separates the "Worked for" header from what
+            // follows (Nick, 2026-11-26: the collapsed header reads better with its line).
+            let fold_divider = hsla(self.tokens.shell_divider);
             #[cfg(test)]
             let fold_btn = gpui_kit::TestSupportExt::test_support(fold_btn);
             let header = div()
@@ -2713,9 +2717,7 @@ impl ChatView {
                 .w_full()
                 .min_w_0()
                 .pt(px(4.0))
-                // Collapsed, the message follows the header closely; expanded, the divider
-                // keeps its 8px of room above it.
-                .pb(px(if manually_expanded { 8.0 } else { 0.0 }))
+                .pb(px(8.0))
                 .border_b_1()
                 .border_color(fold_divider)
                 .child(div().flex().flex_row().items_center().child(fold_btn));

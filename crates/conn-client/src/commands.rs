@@ -480,6 +480,28 @@ pub fn cancel_queued_run(
     }))
 }
 
+/// `queued-run.reorder`: move a queued run to sit right before `before_run_id`, or to the end of
+/// the queue when `before_run_id` is `None`. The server renumbers the queue and delivers it in
+/// that order.
+///
+/// # Errors
+///
+/// Returns [`serde_json::Error`] if the command payload cannot be decoded as
+/// [`OrchestrationV2Command`].
+pub fn reorder_queued_run(
+    thread_id: &str,
+    run_id: &str,
+    before_run_id: Option<&str>,
+) -> Result<OrchestrationV2Command, serde_json::Error> {
+    conn_contract::from_json(json!({
+        "type": "queued-run.reorder",
+        "commandId": new_id("cmd"),
+        "threadId": thread_id,
+        "runId": run_id,
+        "beforeRunId": before_run_id,
+    }))
+}
+
 /// `thread.interaction-mode.set`: switch the thread between `"default"` and `"plan"`.
 ///
 /// # Errors
@@ -798,6 +820,14 @@ mod tests {
             "queued-run.cancel decodes"
         );
         assert!(
+            reorder_queued_run("t1", "run-q1", Some("run-q2")).is_ok(),
+            "queued-run.reorder before another run decodes"
+        );
+        assert!(
+            reorder_queued_run("t1", "run-q1", None).is_ok(),
+            "queued-run.reorder to the end decodes"
+        );
+        assert!(
             set_model_selection("t1", "claudeAgent", "haiku", None).is_ok(),
             "thread.model-selection.set decodes"
         );
@@ -982,6 +1012,22 @@ mod tests {
             serde_json::to_value(&settings).is_ok_and(|v| v["omitProviders"] == true),
             "the config stream carries the result"
         );
+    }
+
+    #[test]
+    fn a_queue_reorder_names_the_run_to_move_and_the_run_it_goes_before() {
+        let wire = |before| {
+            reorder_queued_run("t1", "run-a", before)
+                .and_then(serde_json::to_value)
+                .expect("a reorder command")
+        };
+        let before_b = wire(Some("run-b"));
+        assert_eq!(before_b["type"], "queued-run.reorder");
+        assert_eq!(before_b["threadId"], "t1");
+        assert_eq!(before_b["runId"], "run-a");
+        assert_eq!(before_b["beforeRunId"], "run-b");
+        // `null` is how the server is told to move the run to the end of the queue.
+        assert!(wire(None)["beforeRunId"].is_null());
     }
 
     #[test]

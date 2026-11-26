@@ -20,8 +20,17 @@ use super::markdown::{MarkdownBlock, parse_markdown};
 /// Maximum characters stored for a single-line TOC turn preview.
 const TOC_PREVIEW_MAX_CHARS: usize = 96;
 
-/// A longer queue shows its first messages and a toggle that shows the rest (web `QUEUE_VISIBLE_ROWS`).
-pub(super) const QUEUE_VISIBLE_ROWS: usize = 3;
+/// One queued message, as the tray above the composer shows it.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct QueuedRunRef<'a> {
+    /// The timeline entry id.
+    pub(super) id: &'a str,
+    /// The queued run, which the queue commands name. Empty for an optimistic placeholder the
+    /// server has not confirmed yet.
+    pub(super) run_id: &'a str,
+    pub(super) text: &'a str,
+    pub(super) attachment_count: usize,
+}
 
 /// One cached timeline row ready for virtualized rendering.
 #[derive(Clone, Debug)]
@@ -71,17 +80,6 @@ pub(super) enum VirtualItem {
         row_idx: usize,
         grouped_with_previous: bool,
         grouped_with_next: bool,
-    },
-    QueuedUser {
-        row_idx: usize,
-        /// Index among the queued messages, and how many there are (the web `Queued message n of N`).
-        position: usize,
-        total: usize,
-    },
-    /// The `Show all N queued` / `Show fewer` toggle under a queue longer than
-    /// `QUEUE_VISIBLE_ROWS` (web `QueuedRunsControl`).
-    QueuedToggle {
-        total: usize,
     },
     Assistant {
         row_idx: usize,
@@ -136,25 +134,6 @@ impl VirtualItem {
                 *grouped_with_previous as u8,
                 *grouped_with_next as u8
             ),
-            Self::QueuedUser {
-                row_idx,
-                position,
-                total,
-            } => match &rows[*row_idx].entry {
-                TimelineEntry::QueuedUser {
-                    id,
-                    run_id,
-                    text,
-                    attachments,
-                    ..
-                } => format!(
-                    "qu:{id}:{run_id}:{:016x}:{}:{position}:{total}",
-                    fnv1a64(text.as_bytes()),
-                    attachments.len()
-                ),
-                other => format!("qu:{}", other.id()),
-            },
-            Self::QueuedToggle { total } => format!("qt:{total}"),
             Self::Assistant {
                 row_idx,
                 followed_by_work,
@@ -233,9 +212,9 @@ impl VirtualItem {
                         .iter()
                         .any(|r| r.entry.id() == target_id)
             }
-            Self::Approval { row_idx }
-            | Self::Notice { row_idx }
-            | Self::QueuedUser { row_idx, .. } => rows[*row_idx].entry.id() == target_id,
+            Self::Approval { row_idx } | Self::Notice { row_idx } => {
+                rows[*row_idx].entry.id() == target_id
+            }
             Self::Card { row_idx } => {
                 let id = rows[*row_idx].entry.id();
                 target_id == id || target_id.starts_with(&format!("{id}:"))
@@ -243,10 +222,7 @@ impl VirtualItem {
             Self::ChangedFiles { run_id, .. } => {
                 target_id.strip_prefix("changed-files:") == Some(run_id.as_str())
             }
-            Self::LoadEarlier { .. }
-            | Self::QueuedToggle { .. }
-            | Self::WorktreeSetup { .. }
-            | Self::Working => false,
+            Self::LoadEarlier { .. } | Self::WorktreeSetup { .. } | Self::Working => false,
         }
     }
 }
@@ -430,6 +406,26 @@ impl RowCache {
     /// Returns the lightweight turn TOC outline.
     pub(super) fn toc(&self) -> &[TocEntry] {
         &self.toc
+    }
+
+    /// The queued messages, in delivery order. They are not timeline items: the tray above the
+    /// composer draws them.
+    pub(super) fn queued_runs(&self) -> impl Iterator<Item = QueuedRunRef<'_>> {
+        self.rows.iter().filter_map(|row| match &row.entry {
+            TimelineEntry::QueuedUser {
+                id,
+                run_id,
+                text,
+                attachments,
+                ..
+            } => Some(QueuedRunRef {
+                id,
+                run_id,
+                text,
+                attachment_count: attachments.len(),
+            }),
+            _ => None,
+        })
     }
 
     /// Returns how many assistant rows currently hold parsed Markdown blocks.
@@ -664,7 +660,6 @@ impl RowCache {
             usize::MAX
         };
         let mut base_items: Vec<VirtualItem> = Vec::with_capacity(rows.len());
-        let mut queued_items: Vec<VirtualItem> = Vec::new();
         let mut idx = 0usize;
 
         while idx < rows.len() {
@@ -715,12 +710,8 @@ impl RowCache {
                     });
                     idx += 1;
                 }
+                // Queued messages draw in the tray above the composer, not in the timeline.
                 TimelineEntry::QueuedUser { .. } => {
-                    queued_items.push(VirtualItem::QueuedUser {
-                        row_idx: idx,
-                        position: queued_items.len(),
-                        total: 0,
-                    });
                     idx += 1;
                 }
                 TimelineEntry::Assistant {
@@ -783,8 +774,6 @@ impl RowCache {
                     rows.get(row_end.saturating_sub(1))?.entry.id()
                 }
                 VirtualItem::LoadEarlier { .. }
-                | VirtualItem::QueuedUser { .. }
-                | VirtualItem::QueuedToggle { .. }
                 | VirtualItem::ChangedFiles { .. }
                 | VirtualItem::WorktreeSetup { .. }
                 | VirtualItem::Working => return None,
@@ -941,20 +930,6 @@ impl RowCache {
             && !worktree_placed
         {
             items.push(VirtualItem::WorktreeSetup { fingerprint });
-        }
-
-        // Queued user messages always render at the bottom of the timeline, after Working.
-        let queued_total = queued_items.len();
-        for item in &mut queued_items {
-            if let VirtualItem::QueuedUser { total, .. } = item {
-                *total = queued_total;
-            }
-        }
-        items.extend(queued_items);
-        if queued_total > QUEUE_VISIBLE_ROWS {
-            items.push(VirtualItem::QueuedToggle {
-                total: queued_total,
-            });
         }
 
         let item_keys = items.iter().map(|item| item.stable_key(rows)).collect();
@@ -1518,7 +1493,7 @@ mod tests {
     }
 
     #[test]
-    fn renders_queued_user_items_after_working_and_invalidates_on_edit() {
+    fn queued_messages_leave_the_timeline_and_stay_in_the_cached_rows() {
         let mut cache = RowCache::default();
         let entries = vec![
             TimelineEntry::User {
@@ -1551,42 +1526,24 @@ mod tests {
             false,
             false,
         );
+        // The queue draws in the tray above the composer, so the timeline ends at `Working`.
         assert_eq!(
             cache.items().len(),
-            3,
-            "expected User, Working, then QueuedUser at the tail"
+            2,
+            "expected User, then Working, and no row for the queued message"
         );
         assert!(
             matches!(cache.items()[1], VirtualItem::Working),
-            "Working row should precede queued messages"
-        );
-        assert!(
-            matches!(cache.items()[2], VirtualItem::QueuedUser { row_idx: 1, .. }),
-            "QueuedUser should sit at the bottom after Working"
+            "the timeline ends at the Working row"
         );
         assert_eq!(
             cache.toc().len(),
             1,
             "queued messages should not be counted as sent TOC turns"
         );
-
-        // Same-length edit must still trigger a splice at the queued item's index.
-        let mut edited = entries;
-        if let TimelineEntry::QueuedUser { text, .. } = &mut edited[1] {
-            *text = "WXYZ".to_owned();
-        }
-        let stats = cache.sync(
-            &edited,
-            &empty_timings(),
-            &empty_checkpoints(),
-            true,
-            false,
-            false,
-        );
-        assert_eq!(
-            stats.splice_start, 2,
-            "editing queued text to same length must invalidate its VirtualItem key"
-        );
+        // The tray reads the queued messages from the cached rows, in order.
+        let queued: Vec<&str> = cache.queued_runs().map(|queued| queued.run_id).collect();
+        assert_eq!(queued, vec!["run-q1"]);
     }
 
     #[test]

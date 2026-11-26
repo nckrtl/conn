@@ -36,6 +36,7 @@ pub(crate) mod markdown;
 mod provider_banner;
 mod question_logic;
 mod question_panel;
+mod queue_tray;
 mod request_stack;
 pub(crate) mod selection;
 #[cfg(test)]
@@ -67,8 +68,8 @@ use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FollowMode, FontWeight,
     InteractiveElement, IntoElement, ListAlignment, ListOffset, ListState, ParentElement, Render,
-    SharedString, StatefulInteractiveElement, Styled, Subscription, Transformation, Window, div,
-    list, percentage, px, relative,
+    SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div, list, px,
+    relative,
 };
 
 use self::cache::{CachedRow, RowCache, VirtualItem};
@@ -78,7 +79,6 @@ pub(crate) use self::composer::{BranchAction, BranchContext, SendDispatch};
 use self::composer::{Composer, ComposerEvent};
 use self::spinner::{SHIMMER_STEP_INTERVAL, TurningArc, shimmer_text};
 use crate::a11y::ConnA11yExt as _;
-use crate::panels::chrome::ConnTooltipExt as _;
 
 /// Centered chat content lane width matching Conn's `--chat-content-max-width` (`46rem`).
 const CHAT_CONTENT_MAX_WIDTH_PX: f32 = 736.0;
@@ -96,8 +96,6 @@ const WORK_ICON_PX: f32 = 16.0;
 const WORK_ICON_GAP_PX: f32 = 10.0;
 /// Where a work-log label starts, from the row's left edge; expanded details line up under it.
 const WORK_LABEL_INDENT_PX: f32 = WORK_ICON_PX + WORK_ICON_GAP_PX;
-/// `expanded_ids` key for the queue's `Show all N queued` toggle.
-const QUEUE_EXPANDED_KEY: &str = "queued-list";
 /// User bubble radius matching Conn's `--radius-bubble: calc(var(--radius) + 6px)` (`8px + 6px`).
 const BUBBLE_RADIUS_PX: f32 = 14.0;
 /// Tight corner radius where consecutive user bubbles meet (`rounded-tr-md` / `rounded-br-md`).
@@ -257,6 +255,12 @@ pub(crate) enum ChatEvent {
         text: String,
         attachments: Option<Vec<ChatAttachment>>,
     },
+    /// Move a queued message to sit before `before_run_id`, or to the end of the queue when that
+    /// is `None` (`queued-run.reorder`).
+    ReorderQueuedMessage {
+        run_id: String,
+        before_run_id: Option<String>,
+    },
 }
 
 /// GPUI entity rendering the Conn chat card (timeline + composer).
@@ -307,6 +311,8 @@ pub(crate) struct ChatView {
     toc_hovered_slot: Option<usize>,
     toc_pinned_slot: Option<usize>,
     editing_queued_run_id: Option<String>,
+    /// The queued-message tray above the composer: its menu, drag and scroll.
+    queue: queue_tray::QueueState,
     composer: Entity<Composer>,
     _input_sub: Subscription,
     /// Live connection for card actions (answers, secrets, omitted tool output).
@@ -569,6 +575,7 @@ impl ChatView {
             toc_hovered_slot: None,
             toc_pinned_slot: None,
             editing_queued_run_id: None,
+            queue: queue_tray::QueueState::new(),
             composer,
             _input_sub: input_sub,
             connection,
@@ -694,27 +701,6 @@ impl ChatView {
     #[must_use]
     pub(crate) fn error_for_test(&self) -> Option<String> {
         self.error_banner.clone()
-    }
-
-    /// Bounds of the first queued message's list row, and the kind of the row right above it.
-    #[cfg(test)]
-    pub(crate) fn first_queued_row_for_test(
-        &self,
-    ) -> Option<(gpui_kit::Bounds<gpui_kit::Pixels>, &'static str)> {
-        let items = self.cache.items();
-        let ix = items
-            .iter()
-            .position(|item| matches!(item, VirtualItem::QueuedUser { .. }))?;
-        let above = match ix.checked_sub(1).and_then(|prev| items.get(prev)) {
-            Some(VirtualItem::Working) => "working",
-            Some(VirtualItem::WorkGroup {
-                has_active: true, ..
-            }) => "live-work-group",
-            Some(VirtualItem::WorkGroup { .. }) => "work-group",
-            Some(_) => "other",
-            None => "none",
-        };
-        Some((self.list_state.bounds_for_item(ix)?, above))
     }
 
     #[cfg(test)]
@@ -1065,6 +1051,7 @@ impl ChatView {
                 self.has_more_history,
                 self.loading_earlier,
             );
+            self.reconcile_queue_state(cx);
             if let Some((perf_thread, opened_at)) = &self.perf_open
                 && perf_thread == &thread.thread_id
             {
@@ -2014,62 +2001,6 @@ impl ChatView {
                     div().into_any_element()
                 }
             }
-            VirtualItem::QueuedUser {
-                row_idx,
-                position,
-                total,
-            } => {
-                let collapsed = *total > cache::QUEUE_VISIBLE_ROWS && !self.queue_expanded();
-                if collapsed && *position >= cache::QUEUE_VISIBLE_ROWS - 1 {
-                    // Hidden behind the toggle: a zero-height row keeps the list indices stable.
-                    div().into_any_element()
-                } else if let TimelineEntry::QueuedUser {
-                    id,
-                    run_id,
-                    text,
-                    attachments,
-                    created_at,
-                    ..
-                } = &rows[*row_idx].entry
-                {
-                    // The toggle sits 8px (`gap-2`) under the last shown row, not 12px.
-                    let last_shown = if collapsed {
-                        *position == cache::QUEUE_VISIBLE_ROWS - 2
-                    } else {
-                        *position + 1 == *total
-                    };
-                    let above_toggle = last_shown && *total > cache::QUEUE_VISIBLE_ROWS;
-                    // Only the first queued message needs room above it: later ones sit under
-                    // the 12px bottom pad of the queued message before them.
-                    let top_pad = if *position == 0 {
-                        let items = self.cache.items();
-                        let first = items
-                            .iter()
-                            .position(|item| matches!(item, VirtualItem::QueuedUser { .. }));
-                        queued_first_row_top_pad(
-                            first
-                                .and_then(|ix| ix.checked_sub(1))
-                                .and_then(|ix| items.get(ix)),
-                        )
-                    } else {
-                        0.0
-                    };
-                    self.render_queued_user_row(
-                        id,
-                        run_id,
-                        text,
-                        attachments,
-                        created_at,
-                        above_toggle,
-                        top_pad,
-                        window,
-                        cx,
-                    )
-                } else {
-                    div().into_any_element()
-                }
-            }
-            VirtualItem::QueuedToggle { total } => self.render_queued_toggle(*total, cx),
             VirtualItem::Assistant {
                 row_idx,
                 followed_by_work,
@@ -2696,306 +2627,6 @@ impl ChatView {
             );
         }
         row.into_any_element()
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "renders one queued message from its fields, plus whether the toggle follows it"
-    )]
-    fn render_queued_user_row(
-        &self,
-        id: &str,
-        run_id: &str,
-        text: &str,
-        attachments: &[ChatAttachment],
-        created_at: &str,
-        above_toggle: bool,
-        top_pad: f32,
-        window: &Window,
-        cx: &mut Context<'_, Self>,
-    ) -> AnyElement {
-        let is_editing =
-            !run_id.is_empty() && self.editing_queued_run_id.as_deref() == Some(run_id);
-        let fg = hsla(self.tokens.foreground);
-        let muted = hsla(self.tokens.muted_foreground);
-        let hover_bg = hsla(self.tokens.shell_highlight);
-        let bubble_border = queued_bubble_border(&self.tokens, is_editing);
-        let preview: String = text.chars().take(120).collect();
-
-        let bubble = div()
-            .id(SharedString::from(format!("chat-queued-{id}")))
-            .a11y(
-                gpui_kit::Role::Article,
-                SharedString::from(format!("chat.message.queued.{id}")),
-                format!("Queued message: {preview}"),
-            )
-            // Half-transparent over the timeline: a darker fill than a sent bubble, so a queued
-            // message reads as not yet sent.
-            .bg(hsla_alpha(self.tokens.shell_raised, QUEUED_BUBBLE_FILL_ALPHA))
-            .border_1()
-            .border_color(bubble_border);
-        let key = format!("queued-{id}");
-        let bubble = self.render_message_body(
-            bubble,
-            MessageBody {
-                caption_key: &key,
-                attachment_key: &key,
-                text,
-                attachments,
-                review_comments: &[],
-                notes: &[],
-                selection: None,
-            },
-            window,
-            cx,
-        )
-        // Dimmed text, set after the body's own colour so it wins.
-        .text_color(hsla_alpha(
-            self.tokens.message_foreground,
-            QUEUED_TEXT_ALPHA,
-        ));
-
-        #[cfg(test)]
-        let bubble = gpui_kit::TestSupportExt::test_support(bubble);
-
-        let mut actions = div()
-            .flex()
-            .flex_row()
-            .items_center()
-            .justify_end()
-            .gap(px(2.0))
-            .pr(px(4.0))
-            .text_size(px(12.0))
-            .line_height(px(16.0))
-            .text_color(muted);
-
-        if let Some(timestamp) = format_queued_timestamp(created_at) {
-            actions = actions.child(
-                div()
-                    .mr(px(4.0))
-                    .text_size(px(12.0))
-                    .line_height(px(16.0))
-                    .text_color(muted)
-                    .child(timestamp),
-            );
-        }
-
-        let has_run_id = !run_id.is_empty();
-        if is_editing {
-            actions = actions
-                .child(
-                    div()
-                        .px(px(4.0))
-                        .text_color(fg)
-                        .child("Editing in the composer"),
-                )
-                .child(
-                    div()
-                        .id(SharedString::from(format!("queued-cancel-edit-{id}")))
-                        .a11y_button(
-                            SharedString::from(format!("chat.queued.cancel-edit.{id}")),
-                            "Cancel editing queued message",
-                        )
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .h(px(22.0))
-                        .px(px(6.0))
-                        .rounded(px(6.0))
-                        .cursor_pointer()
-                        .text_color(muted)
-                        .hover(move |s| s.bg(hover_bg).text_color(fg))
-                        .on_click(cx.listener(|view, _, window, cx| {
-                            view.cancel_edit_queued(window, cx);
-                        }))
-                        .child("Cancel"),
-                );
-        } else {
-            let send_tooltip = if self.working {
-                "Send into the current turn"
-            } else {
-                "Start a turn with this message"
-            };
-            let run_id_for_send = run_id.to_owned();
-            let send_now_btn = div()
-                .id(SharedString::from(format!("queued-send-now-{id}")))
-                .a11y_button(
-                    SharedString::from(format!("chat.queued.send-now.{id}")),
-                    "Send now",
-                )
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(4.0))
-                .h(px(22.0))
-                .px(px(6.0))
-                .rounded(px(6.0))
-                .text_color(muted)
-                .when(has_run_id, |el| {
-                    el.cursor_pointer()
-                        .hover(move |s| s.bg(hover_bg).text_color(fg))
-                        .on_click(cx.listener(move |_, _, _, cx| {
-                            cx.emit(ChatEvent::PromoteQueuedMessage {
-                                run_id: run_id_for_send.clone(),
-                            });
-                        }))
-                })
-                .conn_tooltip(send_tooltip, &self.tokens)
-                .child(icons::icon(icons::ARROW_UP, 12.0, muted))
-                .child("Send now");
-
-            let entry_id_for_edit = id.to_owned();
-            let run_id_for_edit = run_id.to_owned();
-            let text_for_edit = text.to_owned();
-            let attachments_for_edit = attachments.to_vec();
-            let edit_btn = div()
-                .id(SharedString::from(format!("queued-edit-{id}")))
-                .a11y_button(
-                    SharedString::from(format!("chat.queued.edit.{id}")),
-                    "Edit queued message",
-                )
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(22.0))
-                .rounded(px(6.0))
-                .when(has_run_id, |el| {
-                    el.cursor_pointer()
-                        .hover(move |s| s.bg(hover_bg).text_color(fg))
-                        .on_click(cx.listener(move |view, _, window, cx| {
-                            view.begin_edit_queued(
-                                entry_id_for_edit.clone(),
-                                run_id_for_edit.clone(),
-                                text_for_edit.clone(),
-                                attachments_for_edit.clone(),
-                                window,
-                                cx,
-                            );
-                        }))
-                })
-                .conn_tooltip("Edit in the composer", &self.tokens)
-                .child(icons::icon(icons::EDIT, 12.0, muted));
-
-            let run_id_for_cancel = run_id.to_owned();
-            let cancel_btn = div()
-                .id(SharedString::from(format!("queued-remove-{id}")))
-                .a11y_button(
-                    SharedString::from(format!("chat.queued.remove.{id}")),
-                    "Remove queued message",
-                )
-                .flex()
-                .items_center()
-                .justify_center()
-                .size(px(22.0))
-                .rounded(px(6.0))
-                .when(has_run_id, |el| {
-                    el.cursor_pointer()
-                        .hover(move |s| s.bg(hover_bg).text_color(fg))
-                        .on_click(cx.listener(move |view, _, window, cx| {
-                            if view.editing_queued_run_id.as_deref()
-                                == Some(run_id_for_cancel.as_str())
-                            {
-                                view.cancel_edit_queued(window, cx);
-                            }
-                            cx.emit(ChatEvent::CancelQueuedMessage {
-                                run_id: run_id_for_cancel.clone(),
-                            });
-                        }))
-                })
-                .conn_tooltip("Remove from queue", &self.tokens)
-                .child(icons::icon(icons::CLOSE, 12.0, muted));
-
-            actions = actions
-                .child(send_now_btn)
-                .child(edit_btn)
-                .child(cancel_btn);
-        }
-
-        div()
-            .flex()
-            .flex_col()
-            .items_end()
-            .gap(px(4.0))
-            .w_full()
-            .pt(px(top_pad))
-            .pb(px(if above_toggle { 8.0 } else { 12.0 }))
-            // The `Queued` label sits right-aligned above the bubble, like a steer's `Steer`.
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .items_end()
-                    .w_full()
-                    .child(self.render_queued_marker(id))
-                    .child(bubble),
-            )
-            .child(actions)
-            .into_any_element()
-    }
-
-    /// Whether a queue longer than `QUEUE_VISIBLE_ROWS` shows every message.
-    fn queue_expanded(&self) -> bool {
-        self.expanded_ids.contains(QUEUE_EXPANDED_KEY)
-    }
-
-    /// Toggles `Show all N queued` / `Show fewer` and remeasures the queue rows.
-    fn toggle_queue_expanded(&mut self, cx: &mut Context<'_, Self>) {
-        if !self.expanded_ids.remove(QUEUE_EXPANDED_KEY) {
-            self.expanded_ids.insert(QUEUE_EXPANDED_KEY.to_owned());
-        }
-        let items = self.cache.items();
-        if let Some(first) = items
-            .iter()
-            .position(|item| matches!(item, VirtualItem::QueuedUser { .. }))
-        {
-            self.list_state.remeasure_items(first..items.len());
-        }
-        cx.notify();
-    }
-
-    /// The web `QueuedRunsControl` toggle: right-aligned `text-xs` muted `InlineButton` with a
-    /// chevron that turns 180° when the whole queue shows.
-    fn render_queued_toggle(&self, total: usize, cx: &mut Context<'_, Self>) -> AnyElement {
-        let expanded = self.queue_expanded();
-        let fg = hsla(self.tokens.foreground);
-        let muted = hsla(self.tokens.muted_foreground);
-        let label = if expanded {
-            "Show fewer".to_owned()
-        } else {
-            format!("Show all {total} queued")
-        };
-        let chevron = icons::icon(icons::CARET_DOWN, 14.0, muted);
-        let chevron = if expanded {
-            chevron.with_transformation(Transformation::rotate(percentage(0.5)))
-        } else {
-            chevron
-        };
-        div()
-            .flex()
-            .flex_row()
-            .justify_end()
-            .w_full()
-            .pr(px(4.0))
-            .pb(px(16.0))
-            .child(
-                div()
-                    .id("chat-queued-toggle")
-                    .a11y_button(SharedString::from("chat.queued.toggle"), label.clone())
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(2.0))
-                    .text_size(px(12.0))
-                    .line_height(px(16.0))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(muted)
-                    .cursor_pointer()
-                    .hover(move |s| s.text_color(fg).underline())
-                    .on_click(cx.listener(|view, _, _, cx| view.toggle_queue_expanded(cx)))
-                    .child(label)
-                    .child(chevron),
-            )
-            .into_any_element()
     }
 
     /// Renders a turn's grouped thinking/tool work entries.
@@ -3860,11 +3491,7 @@ impl ChatView {
             })
             .unwrap_or_else(|| "Working...".to_owned());
         let has_live_work_group = matches!(
-            self.cache
-                .items()
-                .iter()
-                .rev()
-                .find(|item| !matches!(item, VirtualItem::QueuedUser { .. })),
+            self.cache.items().last(),
             Some(VirtualItem::WorkGroup {
                 has_active: true,
                 ..
@@ -3959,6 +3586,7 @@ impl Render for ChatView {
                 .child(self.render_empty_no_thread(cx));
         }
 
+        self.clear_stale_queue_drag(cx);
         self.refresh_request_stack();
         let draft_key = if let Some(draft) = &self.draft {
             Some(composer_state::new_thread_draft_key(&draft.draft_id))
@@ -4118,6 +3746,8 @@ impl Render for ChatView {
 
         let provider_banner = self.render_provider_banner(cx);
         let request_stack = self.render_request_stack(window, cx);
+        let queue_tray = self.render_queue_tray(cx);
+        let queue_menu = self.render_queue_menu(window, cx);
 
         // The lane floats over the timeline's bottom edge; the timeline pads its last row by the
         // measured height so the final message still scrolls fully above the card.
@@ -4168,6 +3798,8 @@ impl Render for ChatView {
                     .size_full(),
                 )
                 .when_some(request_stack, |lane, stack| lane.child(stack))
+                // The queued messages sit in a tray whose bottom edge tucks behind the composer.
+                .when_some(queue_tray, |lane, tray| lane.child(tray))
                 .child(self.composer.clone()),
         );
 
@@ -4189,6 +3821,7 @@ impl Render for ChatView {
             .child(div().absolute().inset_0().flex().flex_col().child(timeline))
             .child(composer_lane)
             .when_some(link_menu, |root, menu| root.child(menu))
+            .when_some(queue_menu, |root, menu| root.child(menu))
             .when_some(link_preview, |root, card| root.child(card))
             .when_some(provider_banner, |root, banner| {
                 root.child(
@@ -4205,30 +3838,6 @@ impl Render for ChatView {
                 )
             })
     }
-}
-
-/// Formats an ISO-8601 queued message timestamp as local `HH:MM` (falling back to UTC `HH:MM`).
-#[must_use]
-fn format_queued_timestamp(iso: &str) -> Option<String> {
-    let epoch_ms = conn_state::parse_iso8601_epoch_ms(iso)?;
-    let epoch_secs = epoch_ms.div_euclid(1000);
-    #[cfg(unix)]
-    {
-        let raw_time = epoch_secs as libc::time_t;
-        let mut local_tm = std::mem::MaybeUninit::<libc::tm>::zeroed();
-        // SAFETY: `raw_time` is a valid `time_t` by value and `local_tm` is valid writable
-        // stack storage; `localtime_r` is thread-safe and returns null on failure.
-        let ptr = unsafe { libc::localtime_r(&raw_time, local_tm.as_mut_ptr()) };
-        if !ptr.is_null() {
-            // SAFETY: `localtime_r` succeeded and initialized `local_tm`.
-            let tm = unsafe { local_tm.assume_init() };
-            return Some(format!("{:02}:{:02}", tm.tm_hour, tm.tm_min));
-        }
-    }
-    let day_secs = epoch_secs.rem_euclid(86_400);
-    let hour = day_secs / 3600;
-    let minute = (day_secs % 3600) / 60;
-    Some(format!("{hour:02}:{minute:02}"))
 }
 
 /// Current wall-clock timestamp in Unix epoch milliseconds.
@@ -4494,25 +4103,9 @@ mod worked_label_tests {
     use conn_state::{ItemStatus, ThreadState, TimelineEntry};
 
     use super::{
-        format_fold_label, format_queued_timestamp, format_working_elapsed,
-        latest_actionable_plan_markdown, live_thought_preview,
+        format_fold_label, format_working_elapsed, latest_actionable_plan_markdown,
+        live_thought_preview,
     };
-
-    #[test]
-    fn formats_queued_timestamp_as_hh_mm() {
-        let formatted = format_queued_timestamp("2026-11-22T12:34:56.000Z");
-        assert!(
-            formatted
-                .as_deref()
-                .is_some_and(|s| s.len() == 5 && s.as_bytes()[2] == b':'),
-            "expected HH:MM timestamp, got {formatted:?}"
-        );
-        assert_eq!(
-            format_queued_timestamp("not-a-date"),
-            None,
-            "invalid ISO timestamp should return None"
-        );
-    }
 
     #[test]
     fn formats_worked_duration_labels() {
@@ -4872,40 +4465,6 @@ mod notice_icon_tests {
     }
 }
 
-/// Colour of a queued bubble's solid 1px border: the opaque raised surface colour, a step lighter
-/// than the half-transparent fill. A message being edited keeps the primary tint.
-pub(crate) fn queued_bubble_border(tokens: &Tokens, is_editing: bool) -> gpui_kit::Hsla {
-    if is_editing {
-        hsla_alpha(tokens.primary, 0.60)
-    } else {
-        hsla(tokens.shell_raised)
-    }
-}
-
-/// The timeline's normal gap between items, which the first queued message keeps from whatever
-/// sits above it.
-pub(crate) const QUEUED_FIRST_GAP_PX: f32 = 16.0;
-
-/// Top padding for the first queued message, so it sits `QUEUED_FIRST_GAP_PX` under the item
-/// above. The live `Working for …` row and a work group end with a small bottom pad of their
-/// own, which this tops up; messages and notices already end with the full gap.
-fn queued_first_row_top_pad(previous: Option<&VirtualItem>) -> f32 {
-    match previous {
-        // `render_working_row` ends with a 4px bottom pad.
-        Some(VirtualItem::Working) => QUEUED_FIRST_GAP_PX - 4.0,
-        // A work group ends with 6px while live and 12px once done.
-        Some(VirtualItem::WorkGroup { has_active, .. }) => {
-            QUEUED_FIRST_GAP_PX - if *has_active { 6.0 } else { 12.0 }
-        }
-        _ => 0.0,
-    }
-}
-
-/// Fill opacity of a queued message's bubble over the timeline (a sent bubble is opaque).
-const QUEUED_BUBBLE_FILL_ALPHA: f32 = 0.45;
-/// Text opacity of a queued message, so it reads as not yet sent.
-const QUEUED_TEXT_ALPHA: f32 = 0.6;
-
 #[cfg(test)]
 mod left_align_tests {
     use conn_state::{ItemStatus, ThreadState, TimelineEntry};
@@ -5008,22 +4567,5 @@ mod left_align_tests {
             near("inline code chip", chip_left);
         })
         .expect("a window");
-    }
-}
-
-#[cfg(test)]
-mod queued_gap_tests {
-    use super::cache::VirtualItem;
-    use super::{QUEUED_FIRST_GAP_PX, queued_first_row_top_pad};
-
-    #[test]
-    fn the_first_queued_row_tops_up_the_pad_of_the_item_above_to_one_gap() {
-        // The working row ends with 4px, a live work group with 6px, a settled one with 12px.
-        assert_eq!(
-            queued_first_row_top_pad(Some(&VirtualItem::Working)) + 4.0,
-            QUEUED_FIRST_GAP_PX
-        );
-        assert_eq!(queued_first_row_top_pad(None), 0.0);
-        assert!((QUEUED_FIRST_GAP_PX - 16.0).abs() < f32::EPSILON);
     }
 }

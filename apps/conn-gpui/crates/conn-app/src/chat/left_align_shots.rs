@@ -248,7 +248,7 @@ fn render_timeline_warning_screenshots() {
 
 /// A live turn (a settled thought and tool, then a running tool) with two messages queued behind
 /// it.
-fn queued_thread() -> ThreadState {
+fn queued_thread(count: u32) -> ThreadState {
     let mut thread = ThreadState::new("thread-selected");
     thread.synchronized = true;
     thread.working = true;
@@ -289,9 +289,20 @@ fn queued_thread() -> ThreadState {
         },
         tool("tool-1", "cargo test -p conn-state", ItemStatus::Completed),
         tool("tool-2", "cargo test -p conn-app", ItemStatus::Running),
-        queued(1, "After that, also run clippy with warnings denied."),
-        queued(2, "Then open a PR with screenshots."),
     ];
+    const QUEUED: [&str; 6] = [
+        "After that, also run clippy with warnings denied.",
+        "Then open a PR with screenshots.",
+        "Check that the light theme shows the tray clearly, with the same width as the composer and a tucked bottom edge, and tell me what you see",
+        "Rename the helper so it says what it does",
+        "Add a test for the empty queue",
+        "Last one: delete the scratch files",
+    ];
+    for n in 1..=count {
+        thread
+            .entries
+            .push(queued(n, QUEUED[(n as usize - 1) % QUEUED.len()]));
+    }
     for (id, start) in [("think-1", 0), ("tool-1", 3_000), ("tool-2", 9_000)] {
         thread.entry_timings.insert(
             id.to_owned(),
@@ -305,16 +316,21 @@ fn queued_thread() -> ThreadState {
     thread
 }
 
-/// Renders a live work group followed by two queued messages.
+/// Renders a live work group with one queued message, and with six, in the queue tray.
 ///
-/// `CONN_THREAD_SHOTS_DIR=<dir> CONN_THREAD_SHOTS_PREFIX=queued cargo test -p conn-app
-/// render_queued_label_screenshots -- --ignored`
+/// `CONN_THREAD_SHOTS_DIR=<dir> cargo test -p conn-app render_queue_tray_screenshots -- --ignored`
 #[test]
 #[ignore = "writes PNGs; set CONN_THREAD_SHOTS_DIR"]
-fn render_queued_label_screenshots() {
+fn render_queue_tray_screenshots() {
     let Some(dir) = std::env::var_os("CONN_THREAD_SHOTS_DIR") else {
         return;
     };
-    let prefix = std::env::var("CONN_THREAD_SHOTS_PREFIX").unwrap_or_else(|_| "queued".to_owned());
-    render_pngs(Path::new(&dir), &prefix, &queued_thread, &|_, _| {});
+    for count in [1, 6] {
+        render_pngs(
+            Path::new(&dir),
+            &format!("queue-{count}"),
+            &|| queued_thread(count),
+            &|_, _| {},
+        );
+    }
 }

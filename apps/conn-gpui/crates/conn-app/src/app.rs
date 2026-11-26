@@ -639,6 +639,12 @@ impl ConnApp {
                 } => {
                     app.edit_queued_message(run_id, text, attachments.as_deref(), cx);
                 }
+                crate::chat::ChatEvent::ReorderQueuedMessage {
+                    run_id,
+                    before_run_id,
+                } => {
+                    app.reorder_queued_message(run_id, before_run_id.as_deref(), cx);
+                }
             },
         )
         .detach();
@@ -3482,6 +3488,51 @@ impl ConnApp {
                     }
                     app.chat.update(cx, |chat, cx| {
                         chat.set_error(Some(format!("Could not remove queued message: {msg}")), cx);
+                    });
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Moves a queued message before `before_run_id`, or to the end of the queue
+    /// (`queued-run.reorder`). The server renumbers the queue and sends the messages in that order.
+    pub(crate) fn reorder_queued_message(
+        &mut self,
+        run_id: &str,
+        before_run_id: Option<&str>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let (Some(connection), Some(thread_id)) = (
+            self.context_connection(),
+            self.layout.selected_thread_id.clone(),
+        ) else {
+            return;
+        };
+        let command = match crate::commands::reorder_queued_run(&thread_id, run_id, before_run_id) {
+            Ok(cmd) => cmd,
+            Err(err) => {
+                eprintln!("queue: could not build queued-run.reorder: {err}");
+                self.chat
+                    .update(cx, |chat, cx| chat.queue_reorder_failed(cx));
+                return;
+            }
+        };
+        let generation = self.connection_gen;
+        cx.spawn(async move |this, cx| {
+            if let Err(err) = connection.dispatch_command(command).await {
+                let msg = crate::commands::format_client_error(&err);
+                eprintln!("queue: queued-run.reorder failed: {msg}");
+                let _ = this.update(cx, |app, cx| {
+                    if app.connection_gen != generation {
+                        return;
+                    }
+                    app.chat.update(cx, |chat, cx| {
+                        chat.queue_reorder_failed(cx);
+                        chat.set_error(
+                            Some(format!("Could not reorder queued message: {msg}")),
+                            cx,
+                        );
                     });
                 });
             }

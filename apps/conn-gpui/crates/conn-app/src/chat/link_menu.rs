@@ -426,9 +426,9 @@ impl ChatView {
         cx.notify();
     }
 
-    /// Whether a link or message menu is open.
+    /// Whether a link, message or queued-message menu is open.
     pub(crate) fn has_open_menu(&self) -> bool {
-        self.link_menu.is_some()
+        self.link_menu.is_some() || self.queue.has_open_menu()
     }
 
     /// Closes the menu and hands the keyboard back.

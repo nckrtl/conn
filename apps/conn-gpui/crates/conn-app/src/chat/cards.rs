@@ -772,17 +772,6 @@ impl ChatView {
         )
     }
 
-    /// The same marker for a queued message: `Clock` + `Queued`, right-aligned above its bubble.
-    pub(super) fn render_queued_marker(&self, id: &str) -> AnyElement {
-        self.render_intent_marker(
-            format!("queued-marker-{id}"),
-            format!("chat.queued.marker.{id}"),
-            icons::CLOCK,
-            "Queued",
-            "Waiting in the queue until the agent is free",
-        )
-    }
-
     /// A small muted icon + label right-aligned above a user bubble (`Steer`, `Queued`).
     fn render_intent_marker(
         &self,

@@ -12,8 +12,8 @@ use tokio::sync::broadcast;
 use super::gateway::{GatewayRequest, GatewayTransport, OrbitGateway};
 use super::tasks::{
     OrbitEnvironment, TaskDetail, TaskInsights, TaskInsightsQuery, TasksListQuery, TasksPage,
-    decode_environments, decode_error_envelope, decode_task_detail, decode_task_insights,
-    decode_tasks_page,
+    decode_environments, decode_error_envelope, decode_task_insights, decode_tasks_page,
+    try_decode_task_detail,
 };
 
 /// Unified classification for Orbit Gateway errors across Tasks, Profile, Fleet, and Thread Start.
@@ -146,7 +146,7 @@ impl OrbitTasksClient {
     async fn read<T>(
         &self,
         request: GatewayRequest,
-        decode: fn(&Value) -> Option<T>,
+        decode: impl FnOnce(&Value) -> Result<T, String>,
     ) -> TasksResult<T> {
         let path = request.path.clone();
         let response = self
@@ -175,9 +175,14 @@ impl OrbitTasksClient {
                 ),
             });
         }
-        decode(&json).ok_or_else(|| TasksError {
+        decode(&json).map_err(|detail| TasksError {
             reason: TasksErrorReason::InvalidResponse,
-            message: format!("The Orbit Gateway sent an unexpected {path} response."),
+            message: if detail.is_empty() {
+                format!("The Orbit Gateway sent an unexpected {path} response.")
+            } else {
+                // The field path and cause make the next contract change easy to find.
+                format!("The Orbit Gateway sent an unexpected {path} response ({detail}).")
+            },
         })
     }
 
@@ -199,7 +204,10 @@ impl OrbitTasksClient {
         if let Some(cursor) = &query.cursor {
             request = request.with_query("cursor", cursor.clone());
         }
-        self.read(request, decode_tasks_page).await
+        self.read(request, |json| {
+            decode_tasks_page(json).ok_or_else(String::new)
+        })
+        .await
     }
 
     /// Every page of the board, following `next_cursor` (at most `max_pages` pages).
@@ -230,7 +238,7 @@ impl OrbitTasksClient {
     pub async fn get_task(&self, task_id: i64) -> TasksResult<TaskDetail> {
         self.read(
             GatewayRequest::get(format!("/tasks/{task_id}")),
-            decode_task_detail,
+            try_decode_task_detail,
         )
         .await
     }
@@ -243,13 +251,18 @@ impl OrbitTasksClient {
         if let Some(project) = query.project {
             request = request.with_query("project_id", project.to_string());
         }
-        self.read(request, decode_task_insights).await
+        self.read(request, |json| {
+            decode_task_insights(json).ok_or_else(String::new)
+        })
+        .await
     }
 
     /// `GET /conn/environments`: the Conn servers this Node may pair with.
     pub async fn environments(&self) -> TasksResult<Vec<OrbitEnvironment>> {
-        self.read(GatewayRequest::get("/environments"), decode_environments)
-            .await
+        self.read(GatewayRequest::get("/environments"), |json| {
+            decode_environments(json).ok_or_else(String::new)
+        })
+        .await
     }
 
     /// Tells subscribers to read again: a Reverb notice, a reconnect, or a poll tick.
@@ -676,6 +689,30 @@ mod tests {
             vec![5753]
         );
         assert_eq!(page.skipped, 3);
+    }
+
+    #[tokio::test]
+    async fn names_the_failing_field_in_a_detail_decode_error() {
+        let mut data = detail();
+        data["project"] = json!({ "slug": "x", "name": "x" });
+        let error = client(Canned::new(200, json!({ "data": data })))
+            .get_task(5753)
+            .await
+            .expect_err("project id is required");
+        assert_eq!(error.reason, TasksErrorReason::InvalidResponse);
+        assert_eq!(
+            error.message,
+            "The Orbit Gateway sent an unexpected /tasks/5753 response (data.project: missing field `id`)."
+        );
+        let error = client(Canned::new(200, json!({ "nope": 1 })))
+            .get_task(5753)
+            .await
+            .expect_err("no data");
+        assert!(
+            error.message.contains("(data: missing field)"),
+            "{}",
+            error.message
+        );
     }
 
     #[tokio::test]

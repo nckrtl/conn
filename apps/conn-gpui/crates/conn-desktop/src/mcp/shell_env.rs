@@ -6,8 +6,11 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::time::Duration;
 
+use tokio::io::AsyncReadExt as _;
 use tokio::process::Command;
 use tokio::sync::OnceCell;
+
+use crate::child_reaper::OwnedChild;
 
 /// The variables taken from the login shell (Conn's `LOGIN_SHELL_ENV_NAMES`).
 const LOGIN_SHELL_ENV_NAMES: &[&str] = &[
@@ -68,8 +71,15 @@ async fn read_login_shell() -> HashMap<String, String> {
     let Ok(child) = command.spawn() else {
         return HashMap::new();
     };
-    match tokio::time::timeout(LOGIN_SHELL_TIMEOUT, child.wait_with_output()).await {
-        Ok(Ok(output)) => parse_capture(&String::from_utf8_lossy(&output.stdout)),
+    let mut child = OwnedChild::new(child);
+    let Some(mut stdout) = child.child().stdout.take() else {
+        return HashMap::new();
+    };
+    // Read to EOF and never await the exit, which needs SIGCHLD; the embedded Chromium can
+    // disable it. Dropping `child` kills the shell if it lingers and lets the reaper collect it.
+    let mut output = Vec::new();
+    match tokio::time::timeout(LOGIN_SHELL_TIMEOUT, stdout.read_to_end(&mut output)).await {
+        Ok(Ok(_)) => parse_capture(&String::from_utf8_lossy(&output)),
         _ => HashMap::new(),
     }
 }

@@ -536,6 +536,83 @@ final class CoreStore {
         }
     }
 
+    /// Queued runs shown hidden or with new text while their action is on its way, by run id.
+    private(set) var queuedOverrides: [String: QueuedOverride] = [:]
+    /// Queued runs whose Send now or Remove is on its way.
+    private(set) var queuedBusy: Set<String> = []
+
+    /// Send now: steers the running turn, or starts the queued run when the thread is idle.
+    /// The core picks, as desktop does. A failure shows under the composer.
+    func sendQueuedNow(threadId: String, runId: String) async {
+        guard status == .connected, let core, !queuedBusy.contains(runId) else { return }
+        queuedBusy.insert(runId)
+        defer { queuedBusy.remove(runId) }
+        do {
+            try await core.sendQueuedNow(threadId: threadId, runId: runId)
+        } catch {
+            composerDraft(.thread(threadId)).error = "Send now failed: " + connectionMessage(error)
+        }
+    }
+
+    /// Remove: the row goes at once and comes back if the server refuses.
+    func removeQueuedMessage(threadId: String, runId: String) async {
+        guard status == .connected, let core, !queuedBusy.contains(runId) else { return }
+        let draft = composerDraft(.thread(threadId))
+        if draft.queuedEdit?.runId == runId { draft.cancelQueuedEdit() }
+        queuedBusy.insert(runId)
+        queuedOverrides[runId] = .removed
+        defer { queuedBusy.remove(runId) }
+        do {
+            try await core.cancelQueuedMessage(threadId: threadId, runId: runId)
+        } catch {
+            queuedOverrides[runId] = nil
+            draft.error = "Could not remove queued message: " + connectionMessage(error)
+        }
+    }
+
+    /// Save in queued edit mode (desktop `submit` while `editing_queued`): the earlier draft comes
+    /// back at once and the row shows the new text. If the server refuses, the row shows its old
+    /// text again and, unless something new was typed, the edit reopens with what was written.
+    func saveQueuedEdit(threadId: String) async {
+        let draft = composerDraft(.thread(threadId))
+        guard status == .connected, let core, let edit = draft.queuedEdit, !draft.locked else { return }
+        let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        let newFiles = draft.files
+        let kept = edit.keptAttachmentIds
+        draft.error = nil
+        draft.queuedEdit = nil
+        draft.text = edit.savedText
+        draft.files = edit.savedFiles
+        queuedOverrides[edit.runId] = .edited(text)
+        do {
+            try await core.editQueuedMessage(
+                threadId: threadId, runId: edit.runId, text: text, keptAttachmentIds: kept,
+                files: newFiles.map { FfiComposerFile(path: $0.url.path, name: $0.name, mimeType: $0.mime) })
+        } catch {
+            queuedOverrides[edit.runId] = nil
+            if draft.queuedEdit == nil, draft.text == edit.savedText {
+                draft.queuedEdit = edit
+                draft.text = text
+                draft.files = newFiles
+            }
+            draft.error = "Could not update queued message: " + connectionMessage(error)
+        }
+    }
+
+    /// Drops the overrides the server's queue now agrees with: a removed run gone, an edited run
+    /// gone or showing its new text.
+    func settleQueuedOverrides(_ queue: [QueuedMessage]) {
+        let texts = Dictionary(queue.map { ($0.runId, $0.text) }, uniquingKeysWith: { first, _ in first })
+        for (runId, override) in queuedOverrides {
+            switch override {
+            case .removed where texts[runId] == nil: queuedOverrides[runId] = nil
+            case let .edited(text) where texts[runId] == nil || texts[runId] == text: queuedOverrides[runId] = nil
+            default: break
+            }
+        }
+    }
+
     func respondApproval(threadId: String, requestId: String, decision: FfiApprovalDecision) async {
         guard status == .connected, let core else { return }
         do {

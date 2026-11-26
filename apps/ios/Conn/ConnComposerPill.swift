@@ -31,7 +31,7 @@ struct ConnComposerPill<Trailing: View>: View {
     private static var spring: Animation { .spring(duration: 0.4, bounce: 0) }
 
     /// Lab `data-expanded`: the text view has focus, or the draft has text or an attachment.
-    private var expanded: Bool { inputFocused || !draft.text.isEmpty || !draft.files.isEmpty }
+    private var expanded: Bool { inputFocused || !draft.text.isEmpty || !draft.files.isEmpty || draft.queuedEdit != nil }
 
     var body: some View {
         let _ = BodyCount.tick("Composer")
@@ -69,6 +69,8 @@ struct ConnComposerPill<Trailing: View>: View {
                 .padding(.bottom, 6)
             }
             VStack(alignment: .leading, spacing: 0) {
+                // Desktop: the edit header is the composer card's top row.
+                ComposerQueuedEditBar(draft: draft)
                 if let error = draft.error {
                     Text(error)
                         .font(.footnote)
@@ -164,6 +166,8 @@ struct ConnComposerPill<Trailing: View>: View {
             .padding(.bottom, keyboardUp ? ComposerSheet.bottomBleed : 0)
             .glassEffect(.regular, in: shape)
             .overlay(alignment: .top) { ComposerSheetEdge(shape: shape, color: theme.border, visible: keyboardUp) }
+            // Desktop: the composer card's border turns primary at 45% while a queued message is open.
+            .overlay { if draft.queuedEdit != nil { shape.strokeBorder(theme.primary.opacity(0.45), lineWidth: 1) } }
             .padding(.horizontal, keyboardUp ? -ComposerSheet.screenInset : 0)
             .padding(.bottom, keyboardUp ? -ComposerSheet.bottomBleed : 0)
         }
@@ -175,6 +179,10 @@ struct ConnComposerPill<Trailing: View>: View {
             setKeyboardUp(false, note)
         }
         .onChange(of: draft.text) { dictation.error = nil }
+        .onChange(of: draft.focusRequest) {
+            selection = TextSelection(insertionPoint: draft.text.endIndex)
+            inputFocused = true
+        }
         .sheet(isPresented: $showingPhotos) {
             ComposerPhotosPicker(draft: draft, limits: limits) { showingPhotos = false }
         }

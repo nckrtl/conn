@@ -452,6 +452,11 @@ uint64_t uniffi_conn_ffi_fn_method_conncore_answer_secret_request(uint64_t ptr, 
 uint64_t uniffi_conn_ffi_fn_method_conncore_attachment_url(uint64_t ptr, RustBuffer id, RustBuffer name, RustBuffer mime, int8_t mcp_app
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_CANCEL_QUEUED_MESSAGE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_CANCEL_QUEUED_MESSAGE
+uint64_t uniffi_conn_ffi_fn_method_conncore_cancel_queued_message(uint64_t ptr, RustBuffer thread_id, RustBuffer run_id
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_CLOSE_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_CLOSE_THREAD
 void uniffi_conn_ffi_fn_method_conncore_close_thread(uint64_t ptr, RustBuffer thread_id, RustCallStatus *_Nonnull out_status
@@ -475,6 +480,11 @@ void uniffi_conn_ffi_fn_method_conncore_disconnect(uint64_t ptr, RustCallStatus 
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_DISMISS_USER_INPUT
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_DISMISS_USER_INPUT
 uint64_t uniffi_conn_ffi_fn_method_conncore_dismiss_user_input(uint64_t ptr, RustBuffer thread_id, RustBuffer request_id
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_EDIT_QUEUED_MESSAGE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_EDIT_QUEUED_MESSAGE
+uint64_t uniffi_conn_ffi_fn_method_conncore_edit_queued_message(uint64_t ptr, RustBuffer thread_id, RustBuffer run_id, RustBuffer text, RustBuffer kept_attachment_ids, RustBuffer files
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_ENSURE_SCRATCH_PROJECT
@@ -565,6 +575,11 @@ uint64_t uniffi_conn_ffi_fn_method_conncore_scan_thread_workspace_models(uint64_
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SEND_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SEND_MESSAGE
 uint64_t uniffi_conn_ffi_fn_method_conncore_send_message(uint64_t ptr, RustBuffer thread_id, RustBuffer text, RustBuffer mode
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SEND_QUEUED_NOW
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SEND_QUEUED_NOW
+uint64_t uniffi_conn_ffi_fn_method_conncore_send_queued_now(uint64_t ptr, RustBuffer thread_id, RustBuffer run_id
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SERVER_URL
@@ -1593,6 +1608,12 @@ uint16_t uniffi_conn_ffi_checksum_method_conncore_attachment_url(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_CANCEL_QUEUED_MESSAGE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_CANCEL_QUEUED_MESSAGE
+uint16_t uniffi_conn_ffi_checksum_method_conncore_cancel_queued_message(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_CLOSE_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_CLOSE_THREAD
 uint16_t uniffi_conn_ffi_checksum_method_conncore_close_thread(void
@@ -1620,6 +1641,12 @@ uint16_t uniffi_conn_ffi_checksum_method_conncore_disconnect(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_DISMISS_USER_INPUT
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_DISMISS_USER_INPUT
 uint16_t uniffi_conn_ffi_checksum_method_conncore_dismiss_user_input(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_EDIT_QUEUED_MESSAGE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_EDIT_QUEUED_MESSAGE
+uint16_t uniffi_conn_ffi_checksum_method_conncore_edit_queued_message(void
     
 );
 #endif
@@ -1728,6 +1755,12 @@ uint16_t uniffi_conn_ffi_checksum_method_conncore_scan_thread_workspace_models(v
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SEND_MESSAGE
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SEND_MESSAGE
 uint16_t uniffi_conn_ffi_checksum_method_conncore_send_message(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SEND_QUEUED_NOW
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SEND_QUEUED_NOW
+uint16_t uniffi_conn_ffi_checksum_method_conncore_send_queued_now(void
     
 );
 #endif

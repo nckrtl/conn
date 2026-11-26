@@ -124,6 +124,12 @@ enum PumpControl {
     },
     /// The app came to the foreground (`true`) or went to the background (`false`).
     SetForeground(bool),
+    /// A queued run's files as the thread knows them; `None` once it left the queue.
+    QueuedAttachments {
+        thread_id: String,
+        run_id: String,
+        reply: oneshot::Sender<Option<Vec<conn_contract::ChatAttachment>>>,
+    },
     ResolveLaunchDefaults {
         project_id: String,
         reply: oneshot::Sender<LaunchDefaults>,
@@ -433,6 +439,26 @@ impl ConnCore {
             .ok()
             .and_then(|map| map.get(thread_id).cloned())
             .unwrap_or_default()
+    }
+
+    /// Deletes a send's staged uploads once its command settled; the server keeps its own copies.
+    fn delete_pending_uploads(&self, attachments: Vec<conn_contract::ChatAttachment>) {
+        if attachments.is_empty() {
+            return;
+        }
+        let connection = self.connection.clone();
+        self.runtime_handle.spawn(async move {
+            // The server expires pending uploads. A lost cleanup reply must never hold a draft.
+            let _ = tokio::time::timeout(Duration::from_secs(5), async {
+                for attachment in &attachments {
+                    let id = crate::FfiAttachment::from(attachment).id;
+                    let _ = connection
+                        .call_json("attachments.delete", json!({"attachmentId": id}))
+                        .await;
+                }
+            })
+            .await;
+        });
     }
 
     fn ensure_connected(&self) -> Result<(), FfiError> {
@@ -843,21 +869,7 @@ impl ConnCore {
                 accepted: result.is_ok(),
             });
         }
-        if !attachments.is_empty() {
-            let connection = self.connection.clone();
-            self.runtime_handle.spawn(async move {
-                // The server expires pending uploads. A lost cleanup reply must never hold a draft.
-                let _ = tokio::time::timeout(Duration::from_secs(5), async {
-                    for attachment in &attachments {
-                        let id = crate::FfiAttachment::from(attachment).id;
-                        let _ = connection
-                            .call_json("attachments.delete", json!({"attachmentId": id}))
-                            .await;
-                    }
-                })
-                .await;
-            });
-        }
+        self.delete_pending_uploads(attachments);
         result
     }
 
@@ -1101,6 +1113,93 @@ impl ConnCore {
         let command = conn_client::commands::stop_thread(&thread_id)
             .map_err(|err| map_build_error("thread.stop", err))?;
         self.dispatch_command(command).await
+    }
+
+    /// `Send now` on a queued message: steers the active run when there is one, else starts the
+    /// queued run (desktop `promote_queued_message`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+    pub async fn send_queued_now(&self, thread_id: String, run_id: String) -> Result<(), FfiError> {
+        self.ensure_connected()?;
+        let meta = self.thread_run_meta(&thread_id);
+        let command =
+            crate::queued::send_now_command(&thread_id, &run_id, meta.active_run_id.as_deref())
+                .map_err(|err| map_build_error("queued send-now", err))?;
+        self.dispatch_command(command).await
+    }
+
+    /// Removes a queued message from the queue (`queued-run.cancel`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+    pub async fn cancel_queued_message(
+        &self,
+        thread_id: String,
+        run_id: String,
+    ) -> Result<(), FfiError> {
+        let command = conn_client::commands::cancel_queued_run(&thread_id, &run_id)
+            .map_err(|err| map_build_error("queued-run.cancel", err))?;
+        self.dispatch_command(command).await
+    }
+
+    /// Saves an edited queued message (`queued-run.edit`). `kept_attachment_ids` lists the
+    /// message's files still wanted (`None` keeps them all); `files` are new ones to upload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FfiError::InvalidInput`] for blank text, a file that cannot be uploaded, or a run
+    /// that left the queue while its files changed; otherwise the mapped transport/RPC error.
+    pub async fn edit_queued_message(
+        &self,
+        thread_id: String,
+        run_id: String,
+        text: String,
+        kept_attachment_ids: Option<Vec<String>>,
+        files: Vec<FfiComposerFile>,
+    ) -> Result<(), FfiError> {
+        self.ensure_connected()?;
+        let text = text.trim().to_owned();
+        // `conn-server` refuses a queued message without text.
+        if text.is_empty() {
+            return Err(FfiError::InvalidInput {
+                message: "A queued message needs text.".to_owned(),
+            });
+        }
+        let existing = if kept_attachment_ids.is_some() || !files.is_empty() {
+            let (reply, rx) = oneshot::channel();
+            self.ctrl_tx
+                .send(PumpControl::QueuedAttachments {
+                    thread_id: thread_id.clone(),
+                    run_id: run_id.clone(),
+                    reply,
+                })
+                .map_err(|_| FfiError::Closed)?;
+            rx.await.map_err(|_| FfiError::Closed)?
+        } else {
+            None
+        };
+        let mut uploaded = Vec::new();
+        let result = async {
+            self.composer_limits()
+                .upload(&self.connection, files, &mut uploaded, None)
+                .await?;
+            let attachments =
+                crate::queued::edit_attachments(existing, kept_attachment_ids, uploaded.clone())?;
+            let command = conn_client::commands::edit_queued_run(
+                &thread_id,
+                &run_id,
+                &text,
+                attachments.as_deref(),
+            )
+            .map_err(|err| map_build_error("queued-run.edit", err))?;
+            self.dispatch_command(command).await
+        }
+        .await;
+        self.delete_pending_uploads(uploaded);
+        result
     }
 
     /// Moves `thread_id` into (`settled = true`) or out of (`settled = false`) the Settled shelf
@@ -1637,6 +1736,24 @@ impl PumpState {
                         self.coalescer.force_thread(&thread_id);
                     }
                 }
+                true
+            }
+            PumpControl::QueuedAttachments {
+                thread_id,
+                run_id,
+                reply,
+            } => {
+                let files = self.threads.get(&thread_id).and_then(|state| {
+                    state.entries.iter().find_map(|entry| match entry {
+                        conn_state::TimelineEntry::QueuedUser {
+                            run_id: queued,
+                            attachments,
+                            ..
+                        } if *queued == run_id => Some(attachments.clone()),
+                        _ => None,
+                    })
+                });
+                let _ = reply.send(files);
                 true
             }
             PumpControl::ResolveLaunchDefaults { project_id, reply } => {
@@ -2839,6 +2956,72 @@ mod tests {
         futures::executor::block_on(core.delete_thread("thread-1".to_owned()))?;
         let call = next_call();
         assert_eq!(call.payload["type"], json!("thread.delete"));
+
+        // 14b. Queued messages: Send now steers the active run, or starts the run when idle.
+        futures::executor::block_on(
+            core.send_queued_now("thread-1".to_owned(), "run-queued-1".to_owned()),
+        )?;
+        let call = next_call();
+        assert_eq!(
+            call.payload["type"],
+            json!("queued-message.promote-to-steer")
+        );
+        assert_eq!(call.payload["queuedRunId"], json!("run-queued-1"));
+        assert_eq!(call.payload["targetRunId"], json!("run-active-1"));
+
+        futures::executor::block_on(
+            core.send_queued_now("thread-idle".to_owned(), "run-queued-2".to_owned()),
+        )?;
+        let call = next_call();
+        assert_eq!(call.payload["type"], json!("queued-run.start"));
+        assert_eq!(call.payload["runId"], json!("run-queued-2"));
+
+        futures::executor::block_on(
+            core.cancel_queued_message("thread-1".to_owned(), "run-queued-1".to_owned()),
+        )?;
+        let call = next_call();
+        assert_eq!(call.payload["type"], json!("queued-run.cancel"));
+        assert_eq!(call.payload["threadId"], json!("thread-1"));
+        assert_eq!(call.payload["runId"], json!("run-queued-1"));
+
+        // Unchanged files stay off the command, so the server keeps them.
+        futures::executor::block_on(core.edit_queued_message(
+            "thread-1".to_owned(),
+            "run-queued-1".to_owned(),
+            "  Edited text ".to_owned(),
+            None,
+            Vec::new(),
+        ))?;
+        let call = next_call();
+        assert_eq!(call.payload["type"], json!("queued-run.edit"));
+        assert_eq!(call.payload["runId"], json!("run-queued-1"));
+        assert_eq!(call.payload["text"], json!("Edited text"));
+        assert!(
+            call.payload.get("attachments").is_none(),
+            "{}",
+            call.payload
+        );
+
+        let blank = futures::executor::block_on(core.edit_queued_message(
+            "thread-1".to_owned(),
+            "run-queued-1".to_owned(),
+            "   ".to_owned(),
+            None,
+            Vec::new(),
+        ))
+        .expect_err("blank queued text must be refused before dispatch");
+        assert!(matches!(blank, FfiError::InvalidInput { .. }));
+        // Changing the files of a run the thread doesn't hold as queued is refused, not sent.
+        let gone = futures::executor::block_on(core.edit_queued_message(
+            "thread-1".to_owned(),
+            "run-not-queued".to_owned(),
+            "Edited".to_owned(),
+            Some(Vec::new()),
+            Vec::new(),
+        ))
+        .expect_err("a run that left the queue can't drop files");
+        assert!(matches!(gone, FfiError::InvalidInput { .. }));
+        // Step 15 expects `launchThread` next, so a refused edit that still dispatched fails there.
 
         // 15. launch_thread: uses project's default model, applies projection, subscribes & emits.
         let launched_id = futures::executor::block_on(

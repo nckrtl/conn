@@ -678,6 +678,15 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
     func attachmentUrl(id: String, name: String, mime: String, mcpApp: Bool) async throws  -> String
     
     /**
+     * Removes a queued message from the queue (`queued-run.cancel`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func cancelQueuedMessage(threadId: String, runId: String) async throws 
+    
+    /**
      * Unsubscribes from `thread_id` while retaining its cached timeline for fast re-open.
      */
     func closeThread(threadId: String) 
@@ -707,6 +716,17 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
      * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
      */
     func dismissUserInput(threadId: String, requestId: String) async throws 
+    
+    /**
+     * Saves an edited queued message (`queued-run.edit`). `kept_attachment_ids` lists the
+     * message's files still wanted (`None` keeps them all); `files` are new ones to upload.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::InvalidInput`] for blank text, a file that cannot be uploaded, or a run
+     * that left the queue while its files changed; otherwise the mapped transport/RPC error.
+     */
+    func editQueuedMessage(threadId: String, runId: String, text: String, keptAttachmentIds: [String]?, files: [FfiComposerFile]) async throws 
     
     /**
      * Ensures the server's General / scratch project (`projects.ensureScratch`, `"No project"`)
@@ -859,6 +879,16 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
      * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
      */
     func sendMessage(threadId: String, text: String, mode: FfiSendMode) async throws 
+    
+    /**
+     * `Send now` on a queued message: steers the active run when there is one, else starts the
+     * queued run (desktop `promote_queued_message`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func sendQueuedNow(threadId: String, runId: String) async throws 
     
     /**
      * Returns the normalized HTTP base URL this connection targets.
@@ -1026,6 +1056,29 @@ open func attachmentUrl(id: String, name: String, mime: String, mcpApp: Bool)asy
 }
     
     /**
+     * Removes a queued message from the queue (`queued-run.cancel`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func cancelQueuedMessage(threadId: String, runId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_cancel_queued_message(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(runId)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
      * Unsubscribes from `thread_id` while retaining its cached timeline for fast re-open.
      */
 open func closeThread(threadId: String)  {try! rustCall() {
@@ -1094,6 +1147,31 @@ open func dismissUserInput(threadId: String, requestId: String)async throws   {
             rustFutureFunc: {
                 uniffi_conn_ffi_fn_method_conncore_dismiss_user_input(
                         self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(requestId)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Saves an edited queued message (`queued-run.edit`). `kept_attachment_ids` lists the
+     * message's files still wanted (`None` keeps them all); `files` are new ones to upload.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::InvalidInput`] for blank text, a file that cannot be uploaded, or a run
+     * that left the queue while its files changed; otherwise the mapped transport/RPC error.
+     */
+open func editQueuedMessage(threadId: String, runId: String, text: String, keptAttachmentIds: [String]?, files: [FfiComposerFile])async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_edit_queued_message(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(runId),FfiConverterString.lower(text),FfiConverterOptionSequenceString.lower(keptAttachmentIds),FfiConverterSequenceTypeFfiComposerFile.lower(files)
                 )
             },
             pollFunc: ffi_conn_ffi_rust_future_poll_void,
@@ -1484,6 +1562,30 @@ open func sendMessage(threadId: String, text: String, mode: FfiSendMode)async th
             rustFutureFunc: {
                 uniffi_conn_ffi_fn_method_conncore_send_message(
                         self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(text),FfiConverterTypeFfiSendMode_lower(mode)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * `Send now` on a queued message: steers the active run when there is one, else starts the
+     * queued run (desktop `promote_queued_message`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func sendQueuedNow(threadId: String, runId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_send_queued_now(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(runId)
                 )
             },
             pollFunc: ffi_conn_ffi_rust_future_poll_void,
@@ -17305,6 +17407,30 @@ fileprivate struct FfiConverterOptionTypeFfiTaskLabelTone: FfiConverterRustBuffe
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterSequenceString.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterSequenceString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionSequenceTypeFfiUserInputSubmission: FfiConverterRustBuffer {
     typealias SwiftType = [FfiUserInputSubmission]?
 
@@ -18948,6 +19074,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_conncore_attachment_url() != 3853) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_conncore_cancel_queued_message() != 20281) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_conncore_close_thread() != 13465) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18961,6 +19090,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_dismiss_user_input() != 10644) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_edit_queued_message() != 22144) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_ensure_scratch_project() != 24904) {
@@ -19015,6 +19147,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_send_message() != 39835) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_send_queued_now() != 53620) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_server_url() != 43789) {

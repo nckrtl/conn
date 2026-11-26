@@ -18,6 +18,10 @@ final class ComposerDraft {
     var sending = false
     var importing = false
     var error: String?
+    /// A queued message open for editing; Send saves it instead of sending a new message.
+    var queuedEdit: QueuedEdit?
+    /// Bumped to put the caret in the field (opening a queued message for editing).
+    var focusRequest = 0
     var locked: Bool { sending || importing }
     var hasContent: Bool { !files.isEmpty || !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
@@ -37,6 +41,7 @@ final class ComposerDraft {
 
     func discard() {
         discarded = true
+        queuedEdit = nil
         text = ""
         files = []
         projectOverride = nil

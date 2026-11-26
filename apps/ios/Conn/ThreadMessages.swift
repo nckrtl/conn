@@ -83,25 +83,37 @@ struct MessageFooter: View {
 
 /// A tap on a message shows its copy button and time below it; another tap hides them.
 /// Simultaneous, so links, code-card buttons and the feed's keyboard dismissal still get the tap.
-struct MessageReveal<Content: View>: View {
+/// A queued message adds its own actions to the one long-press menu and keeps its time in view
+/// (desktop's queued row), with an accessory after it.
+struct MessageReveal<Content: View, Actions: View, Accessory: View>: View {
     let text: String
     let timestamp: String?
     /// User bubbles: footer on the right, time then copy.
     var trailing = false
     var enabled = true
-    @ViewBuilder let content: Content
+    /// The time stays in view; a tap shows or hides only the copy button.
+    var pinnedFooter = false
+    private let hasActions: Bool
+    private let actions: Actions
+    private let accessory: Accessory
+    private let content: Content
     @State private var revealed = false
     @State private var selecting = false
 
-    /// "Today, 8:45", "Yesterday, 21:10" or "26 Nov, 08:45": the long-press menu's header.
-    static func sentLabel(_ timestamp: String?) -> String {
-        guard let date = threadDate(timestamp) else { return "" }
-        let time = date.formatted(date: .omitted, time: .shortened)
-        let calendar = Calendar.current
-        if calendar.isDateInToday(date) { return "Today, " + time }
-        if calendar.isDateInYesterday(date) { return "Yesterday, " + time }
-        return date.formatted(.dateTime.day().month(.abbreviated)) + ", " + time
+    init(text: String, timestamp: String?, trailing: Bool = false, enabled: Bool = true, pinnedFooter: Bool = false,
+         @ViewBuilder actions: () -> Actions, @ViewBuilder accessory: () -> Accessory,
+         @ViewBuilder content: () -> Content) {
+        self.text = text
+        self.timestamp = timestamp
+        self.trailing = trailing
+        self.enabled = enabled
+        self.pinnedFooter = pinnedFooter
+        hasActions = Actions.self != EmptyView.self
+        self.actions = actions()
+        self.accessory = accessory()
+        self.content = content()
     }
+
     @ScaledMetric(relativeTo: .body) private var messageSize: CGFloat = ThreadText.size
     private var previewInset: CGFloat { trailing ? 0 : 14 }
 
@@ -111,16 +123,19 @@ struct MessageReveal<Content: View>: View {
                 // Agent text has no bubble: pad the preview so its rounded corners clear the glyphs.
                 .padding(previewInset)
                 .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 20, style: .continuous))
-                // A long press shows when it was sent, Copy and Select text (like ChatGPT).
+                // A long press shows when it was sent, Copy and Select text (like ChatGPT); a
+                // queued message puts its own actions first, under the same header.
                 .contextMenu {
-                    Section(MessageReveal<Content>.sentLabel(timestamp)) {
-                        Button("Copy", systemImage: "doc.on.doc") {
-                            UIPasteboard.general.string = text
-                        }
-                        Button("Select text", systemImage: "selection.pin.in.out") {
-                            selecting = true
+                    Group {
+                        if hasActions {
+                            Section(messageSentLabel(timestamp)) { actions }
+                            Section { copyItems }
+                        } else {
+                            Section(messageSentLabel(timestamp)) { copyItems }
                         }
                     }
+                    .onAppear { MessageMenu.isOpen = true }
+                    .onDisappear { MessageMenu.isOpen = false }
                 }
                 .padding(-previewInset)
                 .sheet(isPresented: $selecting) { SelectTextSheet(text: text) }
@@ -133,17 +148,54 @@ struct MessageReveal<Content: View>: View {
                 .accessibilityAction(named: revealed ? "Hide details" : "Show time and copy") {
                     withAnimation { revealed.toggle() }
                 }
-            if revealed {
-                MessageFooter(text: text, timestamp: timestamp, trailingCopy: true, showsCopy: true, copyAfter: trailing)
-                    .environment(\.layoutDirection, .leftToRight)
-                    // Under a user bubble, the time ends where the bottom-right corner starts to
-                    // curve (its 20 pt radius, set in a little for the glyphs' own inset).
-                    .padding(.trailing, trailing ? 14 : 0)
-                    .frame(maxWidth: .infinity, alignment: trailing ? .trailing : .leading)
-                    .transition(.opacity.combined(with: .move(edge: .top)))
+            if revealed || pinnedFooter {
+                HStack(spacing: 4) {
+                    MessageFooter(text: text, timestamp: timestamp, trailingCopy: true, showsCopy: revealed, copyAfter: trailing)
+                    accessory
+                }
+                .environment(\.layoutDirection, .leftToRight)
+                // Under a user bubble, the time ends where the bottom-right corner starts to
+                // curve (its 20 pt radius, set in a little for the glyphs' own inset).
+                .padding(.trailing, trailing ? 14 : 0)
+                .frame(maxWidth: .infinity, alignment: trailing ? .trailing : .leading)
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
     }
+
+    @ViewBuilder private var copyItems: some View {
+        Button("Copy", systemImage: "doc.on.doc") {
+            UIPasteboard.general.string = text
+        }
+        Button("Select text", systemImage: "selection.pin.in.out") {
+            selecting = true
+        }
+    }
+}
+
+extension MessageReveal where Actions == EmptyView, Accessory == EmptyView {
+    init(text: String, timestamp: String?, trailing: Bool = false, enabled: Bool = true,
+         @ViewBuilder content: () -> Content) {
+        self.init(text: text, timestamp: timestamp, trailing: trailing, enabled: enabled,
+                  actions: { EmptyView() }, accessory: { EmptyView() }, content: content)
+    }
+}
+
+/// Whether a message's long-press menu is open. The menu holds the feed still while the keyboard
+/// goes down, so the feed must not pin itself or move the jump circle until it closes.
+@MainActor
+enum MessageMenu {
+    static var isOpen = false
+}
+
+/// "Today, 8:45", "Yesterday, 21:10" or "26 Nov, 08:45": the long-press menu's header.
+func messageSentLabel(_ timestamp: String?) -> String {
+    guard let date = threadDate(timestamp) else { return "" }
+    let time = date.formatted(date: .omitted, time: .shortened)
+    let calendar = Calendar.current
+    if calendar.isDateInToday(date) { return "Today, " + time }
+    if calendar.isDateInYesterday(date) { return "Yesterday, " + time }
+    return date.formatted(.dateTime.day().month(.abbreviated)) + ", " + time
 }
 
 

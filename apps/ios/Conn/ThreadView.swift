@@ -244,7 +244,7 @@ struct ThreadView: View {
                 .safeAreaBar(edge: .bottom, spacing: 0) {
                     composerArea(proxy)
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { old, new in
-                            if old != new && stickToBottom && !userScrolling && readingWindow == nil {
+                            if old != new && stickToBottom && !userScrolling && readingWindow == nil && !MessageMenu.isOpen {
                                 proxy.scrollTo("timeline-bottom", anchor: .bottom)
                             }
                         }
@@ -473,6 +473,13 @@ struct ThreadView: View {
                         .padding(.top, snapshot.workGroups.contains(where: \.hasActive) ? foldGap : 0)
                         // The gap under the divider is the fold's own paragraph gap, as above it.
                     }
+                    // Desktop: queued messages sit at the very bottom, after the live row.
+                    let queued = snapshot.entries.compactMap(QueuedMessage.init)
+                    if !queued.isEmpty {
+                        QueuedMessagesSection(threadId: threadId, messages: queued, store: store,
+                                              editBlocked: pendingQuestion != nil || !pendingApprovals.isEmpty)
+                            .id("queued-messages")
+                    }
                 } else {
                     HStack(spacing: Kit.Space.m) {
                         KitStatusIcon(.working, size: 16, label: "Loading")
@@ -549,6 +556,9 @@ struct ThreadView: View {
             let toEnd = g.contentSize.height - (g.contentOffset.y + g.contentInsets.top + g.containerSize.height)
             return toEnd <= 24 ? 0 : toEnd <= 100 ? 1 : 2
         }) { _, band in
+            // A message menu holds the scroll view still: the jump circle coming and going would
+            // change the bottom inset and flip the band again, without end.
+            guard !MessageMenu.isOpen else { return }
             // Explicit, so the jump circle's entrance and exit play: a change made in a scroll
             // geometry callback got no animation from the row's value-based modifier.
             withAnimation(.smooth(duration: 0.35)) { endBand = band }
@@ -817,7 +827,7 @@ struct ThreadView: View {
         let waiting = Set(pendingApprovals.map(\.entryId))
         for entry in snapshot.entries {
             let id = entry.entryId
-            if waiting.contains(id) { continue }
+            if waiting.contains(id) || QueuedMessage(entry) != nil { continue }
             if let group = groupByFirstId[id] {
                 let groupedEntries = group.entryIds.compactMap { entriesById[$0] }
                 if !groupedEntries.isEmpty {

@@ -37,6 +37,8 @@ struct ConnTheme: Sendable, Equatable {
     var codeBackground: Color { Color(ffi: tokens.codeBackground) }
     var codeForeground: Color { Color(ffi: tokens.codeForeground) }
     var messageSurface: Color { Color(ffi: tokens.messageSurface) }
+    /// Desktop's `shell_raised`: the queued message bubble's fill.
+    var shellRaised: Color { Color(ffi: tokens.shellRaised) }
     var messageForeground: Color { Color(ffi: tokens.messageForeground) }
     var diffAdded: Color { Color(ffi: tokens.diffAdded) }
     var diffRemoved: Color { Color(ffi: tokens.diffRemoved) }

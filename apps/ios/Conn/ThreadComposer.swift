@@ -75,6 +75,10 @@ struct ThreadComposerArea<Floating: View>: View {
 
     private var composerCanSend: Bool {
         guard store.status == .connected, !readingHistory else { return false }
+        // `conn-server` refuses a queued message without text.
+        if composer.queuedEdit != nil {
+            return !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !composer.locked
+        }
         guard let question = pendingQuestion, let panel = questionPanelModel else {
             return hasDraft && !composer.locked
         }
@@ -140,15 +144,17 @@ struct ThreadComposerArea<Floating: View>: View {
           .padding(.bottom, overlayHasCards ? 7 : 0)
 
             ConnComposerPill(
-                placeholder: questionPanelModel?.composerPlaceholder
-                    ?? (isWorking ? "Queue a follow-up…" : "Ask anything"),
+                placeholder: composer.queuedEdit != nil ? "Edit queued message"
+                    : questionPanelModel?.composerPlaceholder ?? (isWorking ? "Queue a follow-up…" : "Ask anything"),
                 draft: composer,
                 limits: store.composerLimits,
                 allowsAttachments: questionPanelModel == nil,
-                isBusy: isWorking && !hasDraft && questionPanelModel == nil,
+                isBusy: isWorking && !hasDraft && questionPanelModel == nil && composer.queuedEdit == nil,
                 canSend: composerCanSend,
                 onSend: {
-                    if let question = pendingQuestion, let panel = questionPanelModel {
+                    if composer.queuedEdit != nil {
+                        Task { await store.saveQueuedEdit(threadId: threadId) }
+                    } else if let question = pendingQuestion, let panel = questionPanelModel {
                         if hasDraft {
                             answerQuestion(with: draft, question: question, panel: panel)
                         } else {
@@ -165,7 +171,7 @@ struct ThreadComposerArea<Floating: View>: View {
                 },
                 trailing: {
                     HStack(spacing: 0) {
-                        if isWorking && hasDraft && questionPanelModel == nil {
+                        if isWorking && hasDraft && questionPanelModel == nil && composer.queuedEdit == nil {
                             Button {
                                 Task {
                                     await store.stopThread(threadId: threadId)

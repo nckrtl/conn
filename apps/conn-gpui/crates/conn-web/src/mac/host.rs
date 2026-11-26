@@ -137,11 +137,11 @@ fn log_sigchld(before: Option<libc::sighandler_t>, after: Option<libc::sighandle
         Some(libc::SIG_IGN) => "ignored",
         Some(_) => "handler",
     };
-    let verdict = match (name(before), after == before) {
-        ("handler", true) => "handler kept",
-        ("handler", false) => "handler LOST: child process exits will be missed",
-        (_, true) => "no handler yet, unchanged",
-        (_, false) => "changed",
+    let verdict = match (name(before), name(after)) {
+        ("handler", "handler") if after == before => "handler kept",
+        (_, "handler") => "handler present (installed while CEF started)",
+        ("handler", _) => "handler LOST: child process exits will be missed",
+        _ => "no handler yet: Tokio installs it with its first child",
     };
     let line = format!(
         "SIGCHLD across cef_initialize: before={} after={} ({verdict})",

@@ -91,11 +91,35 @@ struct MessageReveal<Content: View>: View {
     var enabled = true
     @ViewBuilder let content: Content
     @State private var revealed = false
+    @State private var selecting = false
+
+    /// "Today, 8:45", "Yesterday, 21:10" or "26 Nov, 08:45": the long-press menu's header.
+    static func sentLabel(_ timestamp: String?) -> String {
+        guard let date = threadDate(timestamp) else { return "" }
+        let time = date.formatted(date: .omitted, time: .shortened)
+        let calendar = Calendar.current
+        if calendar.isDateInToday(date) { return "Today, " + time }
+        if calendar.isDateInYesterday(date) { return "Yesterday, " + time }
+        return date.formatted(.dateTime.day().month(.abbreviated)) + ", " + time
+    }
     @ScaledMetric(relativeTo: .body) private var messageSize: CGFloat = ThreadText.size
 
     var body: some View {
         VStack(alignment: trailing ? .trailing : .leading, spacing: (messageSize * 0.85 - 1) / 2) {
             content
+                .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 20, style: .continuous))
+                // A long press shows when it was sent, Copy and Select text (like ChatGPT).
+                .contextMenu {
+                    Section(MessageReveal<Content>.sentLabel(timestamp)) {
+                        Button("Copy", systemImage: "doc.on.doc") {
+                            UIPasteboard.general.string = text
+                        }
+                        Button("Select text", systemImage: "selection.pin.in.out") {
+                            selecting = true
+                        }
+                    }
+                }
+                .sheet(isPresented: $selecting) { SelectTextSheet(text: text) }
                 .contentShape(Rectangle())
                 .simultaneousGesture(TapGesture().onEnded {
                     guard enabled else { return }
@@ -108,9 +132,9 @@ struct MessageReveal<Content: View>: View {
             if revealed {
                 MessageFooter(text: text, timestamp: timestamp, trailingCopy: true, showsCopy: true, copyAfter: trailing)
                     .environment(\.layoutDirection, .leftToRight)
-                    // Under a user bubble, the time ends where the 10 pt bottom-right corner
-                    // starts to curve.
-                    .padding(.trailing, trailing ? 10 : 0)
+                    // Under a user bubble, the time ends where the bottom-right corner starts to
+                    // curve (its 20 pt radius, set in a little for the glyphs' own inset).
+                    .padding(.trailing, trailing ? 14 : 0)
                     .frame(maxWidth: .infinity, alignment: trailing ? .trailing : .leading)
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
@@ -192,7 +216,7 @@ struct ThreadMessage: View {
                 .padding(3)
                 // Lab: the corner toward the time is nearly square.
                 .background(theme.messageSurface, in: UnevenRoundedRectangle(
-                    topLeadingRadius: 20, bottomLeadingRadius: 20, bottomTrailingRadius: 10, topTrailingRadius: 20,
+                    topLeadingRadius: 20, bottomLeadingRadius: 20, bottomTrailingRadius: 20, topTrailingRadius: 20,
                     style: .continuous))
             }
             .containerRelativeFrame(.horizontal, alignment: .trailing) { width, _ in (width - 32) * 0.9 }
@@ -290,5 +314,43 @@ extension FfiThreadSnapshot {
             guard case let .user(id, body, _, true, _, _, _) = entry, let task = tasks[id] else { return false }
             return !seen.insert(ResultKey(task: task, body: body.trimmingCharacters(in: .whitespacesAndNewlines))).inserted
         }
+    }
+}
+
+/// The whole message in a read-only text view, to select any part of it (the menu's Select text).
+struct SelectTextSheet: View {
+    let text: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            SelectableTextView(text: text)
+                .padding(.horizontal, 12)
+                .navigationTitle("Select text")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) { Button(role: .close) { dismiss() } }
+                }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+private struct SelectableTextView: UIViewRepresentable {
+    let text: String
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.backgroundColor = .clear
+        view.font = .systemFont(ofSize: 16)
+        view.textColor = .label
+        view.textContainerInset = UIEdgeInsets(top: 12, left: 0, bottom: 24, right: 0)
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context: Context) {
+        if view.text != text { view.text = text }
     }
 }

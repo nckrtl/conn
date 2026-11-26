@@ -33,7 +33,7 @@ final class AttachmentThumbnails {
 
 struct ThreadAttachments: View {
     static let radius: CGFloat = 17
-    static let tailRadius: CGFloat = 7
+    static let tailRadius: CGFloat = 17
     let files: [FfiAttachment]
     let store: CoreStore
     let thread: String
@@ -66,7 +66,7 @@ struct ThreadAttachments: View {
                     ))
             }
         }
-        // Concentric with the user bubble (20, tail 10) 3 inside it.
+        // Concentric with the user bubble (20 on every corner) 3 inside it.
         .clipShape(UnevenRoundedRectangle(
             topLeadingRadius: Self.radius, bottomLeadingRadius: Self.radius,
             bottomTrailingRadius: Self.tailRadius, topTrailingRadius: Self.radius, style: .continuous

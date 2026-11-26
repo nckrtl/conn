@@ -63,7 +63,7 @@ struct MarkdownView: View, Equatable {
                 .foregroundStyle(textColor)
                 .lineHeight(bodyLineHeight)
                 .frame(maxWidth: fillsWidth ? .infinity : nil, alignment: .leading)
-                .textSelection(.enabled)
+                .modifier(MessageTextSelection(on: messageStyle == nil))
         } else {
             markdown
         }
@@ -88,7 +88,7 @@ struct MarkdownView: View, Equatable {
                 .font(headingFont(for: level))
                 .lineHeight(messageStyle != nil ? bodyLineHeight : recordStyle ? .exact(points: 24) : nil)
                 .foregroundStyle(messageStyle != nil && level == 6 ? theme.mutedForeground : textColor)
-                .textSelection(.enabled)
+                .modifier(MessageTextSelection(on: messageStyle == nil))
                 // Lab: a heading after another block has a 20/16 margin in place of the block gap.
                 .padding(.top, messageStyle != nil ? (first ? 0 : max(0, 20 * feedScale - blockSpacing)) : recordStyle ? 0 : level <= 2 ? Kit.Space.xs : 0)
 
@@ -97,7 +97,7 @@ struct MarkdownView: View, Equatable {
                 .font(bodyFont)
                 .lineHeight(bodyLineHeight)
                 .foregroundStyle(textColor)
-                .textSelection(.enabled)
+                .modifier(MessageTextSelection(on: messageStyle == nil))
 
         case let .codeBlock(language, code):
             // A code block gets 16 above and about 16 below in the feed, more than a paragraph's gap.
@@ -109,7 +109,7 @@ struct MarkdownView: View, Equatable {
             // Lab `.m-md blockquote`: a 2 pt rule in the text colour at 35%, 12.8 gap, same text colour.
             HStack(alignment: .top, spacing: 12.8) {
                 Rectangle().fill(textColor.opacity(0.35)).frame(width: 2)
-                inlineMarkdownText(text).font(bodyFont).foregroundStyle(textColor).textSelection(.enabled)
+                inlineMarkdownText(text).font(bodyFont).foregroundStyle(textColor).modifier(MessageTextSelection(on: messageStyle == nil))
                     .lineHeight(bodyLineHeight)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -138,7 +138,7 @@ struct MarkdownView: View, Equatable {
             .lineHeight(messageStyle != nil ? bodyLineHeight : .exact(points: 20))
             .font(bodyFont)
             .foregroundStyle(textColor)
-            .textSelection(.enabled)
+            .modifier(MessageTextSelection(on: messageStyle == nil))
 
         case let .template(template, raw):
             if let onTemplate {
@@ -156,7 +156,7 @@ struct MarkdownView: View, Equatable {
                     .accessibilityLabel("Start a draft with " + template.name)
                 }
             } else {
-                Text(raw).textSelection(.enabled)
+                Text(raw).modifier(MessageTextSelection(on: messageStyle == nil))
             }
 
         case let .list(items):
@@ -195,7 +195,7 @@ struct MarkdownView: View, Equatable {
                         inlineMarkdownText(items[i].text)
                             .font(bodyFont)
                             .foregroundStyle(textColor)
-                            .textSelection(.enabled)
+                            .modifier(MessageTextSelection(on: messageStyle == nil))
                     }
                     .lineHeight(bodyLineHeight)
                 }
@@ -614,5 +614,15 @@ struct ArtifactTemplate {
         guard let artifact = kinds[kind] else { return nil }
         self.name = display
         prompt = "Use $\(skill) to create a new \(artifact) about…"
+    }
+}
+
+/// Messages skip the system's own long-press text selection: their long press opens the message
+/// menu (MessageReveal), whose Select text shows the whole message to select from. Records and
+/// other Markdown keep it.
+struct MessageTextSelection: ViewModifier {
+    let on: Bool
+    func body(content: Content) -> some View {
+        if on { content.textSelection(.enabled) } else { content.textSelection(.disabled) }
     }
 }

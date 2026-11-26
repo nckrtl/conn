@@ -239,6 +239,14 @@ impl ConnApp {
         self.connection.is_some() && crate::orbit_sync::orbit_sync_enabled_by_env()
     }
 
+    /// The id a linked environment's own server reports for itself, once its config has loaded.
+    pub(super) fn linked_server_environment_id(&self, environment_id: &str) -> Option<&str> {
+        self.linked
+            .configs
+            .get(environment_id)
+            .and_then(|config| config.environment_id())
+    }
+
     /// The environment a thread of the merged list lives on; `None` is the primary one.
     pub(crate) fn linked_environment_of_thread(&self, thread_id: &str) -> Option<&str> {
         let origins = self.linked.origins();

@@ -976,6 +976,22 @@ struct ThreadView: View {
                 items.append(.entry(entry))
             }
         }
+        // A message sent while the agent works lands after the running group, which split
+        // "Working for" from the live row drawn at the end. Keep the running group last, under
+        // the messages sent during it, so the fold and its live row stay together.
+        if let index = items.lastIndex(where: { if case let .workGroup(group, _) = $0 { group.hasActive } else { false } }),
+           index < items.count - 1,
+           items[(index + 1)...].allSatisfy({ item in
+               if case let .entry(entry) = item {
+                   switch entry {
+                   case .user, .queuedUser: return true
+                   default: return false
+                   }
+               }
+               return false
+           }) {
+            items.append(items.remove(at: index))
+        }
         return items
     }
 

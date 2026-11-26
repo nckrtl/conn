@@ -83,6 +83,7 @@ struct ThreadMessage: View {
     let threadId: String
     let onOpenThread: (String, String?) -> Void
     @Environment(\.connTheme) private var theme
+    @ScaledMetric(relativeTo: .body) private var messageSize: CGFloat = ThreadText.size
 
     private var metadata: (sender: String?, thread: String?, environment: String?, reviews: [FfiReviewExcerpt]) {
         guard case let .message(sender, thread, env, reviews) = detail else { return (nil, nil, nil, []) }
@@ -118,7 +119,9 @@ struct ThreadMessage: View {
                 }
             }
         } else {
-            VStack(alignment: .trailing, spacing: 2) {
+            // The copy and time row sits as far under the bubble as an agent message's row sits
+            // under its rule (TimelineEntryRow `.assistant`).
+            VStack(alignment: .trailing, spacing: messageSize * 0.85 - 1) {
                 VStack(alignment: .leading, spacing: 3) {
                     if !displayText.isEmpty {
                         ViewThatFits(in: .horizontal) {

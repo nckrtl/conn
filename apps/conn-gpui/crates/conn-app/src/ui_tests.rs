@@ -4393,6 +4393,218 @@ fn a_background_database_query_waits_for_its_thread_and_connections(cx: &mut Tes
     );
 }
 
+/// A thread without a project (General) has no Files, MCP or API: the `+` menu and the tab strip
+/// leave them out, Database stays, and a request to open one opens Tasks instead.
+#[gpui_kit::test]
+fn a_thread_without_a_project_offers_no_files_mcp_or_api_and_opens_tasks_instead(
+    cx: &mut TestAppContext,
+) {
+    use conn_state::{PanelSurface, RightPanelTab};
+    let tasks = PanelSurface::Kind(RightPanelTab::Tasks);
+    let (window, app) = mount_two_thread_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_scratch_project_for_test(Some("proj-other"));
+            app.learn_primary_environment_for_test("env-a", cx);
+            app.select_thread("thread-selected", cx);
+        })
+    });
+    render_frames(cx, window);
+    let project_gated = [RightPanelTab::Files, RightPanelTab::Mcp, RightPanelTab::Api];
+    cx.update(|cx| {
+        let (offered, _) = app.read(cx).offered_and_visible_tabs_for_test();
+        for tab in project_gated {
+            assert!(offered.contains(&tab), "a project thread offers {tab:?}");
+        }
+    });
+
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-other", cx)));
+    render_frames(cx, window);
+    cx.update(|cx| {
+        let (offered, _) = app.read(cx).offered_and_visible_tabs_for_test();
+        for tab in project_gated {
+            assert!(!offered.contains(&tab), "General does not offer {tab:?}");
+        }
+        assert!(offered.contains(&RightPanelTab::Database));
+        assert!(offered.contains(&RightPanelTab::Tasks));
+    });
+    // Every way in: the menu and its keys, the palette and agent requests (select), the
+    // panel's own events (select) and a file.
+    for open in 0..4 {
+        cx.update(|cx| {
+            app.update(cx, |app, cx| match open {
+                0 => app.add_right_panel_tab(RightPanelTab::Files, cx),
+                1 => app.select_right_panel_tab(RightPanelTab::Mcp, cx),
+                2 => app.select_right_panel_tab(RightPanelTab::Api, cx),
+                _ => app.select_right_panel_surface(PanelSurface::File("a.rs".into()), cx),
+            })
+        });
+        render_frames(cx, window);
+        cx.update(|cx| {
+            let app = app.read(cx);
+            assert_eq!(app.right_panel_tabs().active(), Some(&tasks), "way {open}");
+            assert_eq!(app.layout().right_panel_tab, RightPanelTab::Tasks);
+            assert!(app.layout().right_panel_open);
+            let (_, visible) = app.offered_and_visible_tabs_for_test();
+            assert_eq!(visible, std::slice::from_ref(&tasks));
+        });
+    }
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.add_right_panel_tab(RightPanelTab::Database, cx)
+        })
+    });
+    cx.update(|cx| {
+        let app = app.read(cx);
+        assert_eq!(
+            app.right_panel_tabs().active(),
+            Some(&PanelSurface::Kind(RightPanelTab::Database))
+        );
+    });
+}
+
+/// Tabs a thread's project made available stay open when the thread has none, hidden, and the
+/// panel shows Tasks, so they are back if the thread gets a project again.
+#[gpui_kit::test]
+fn project_tabs_hide_without_a_project_and_come_back_with_one(cx: &mut TestAppContext) {
+    use conn_state::{PanelSurface, RightPanelTab};
+    let files = PanelSurface::Kind(RightPanelTab::Files);
+    let (window, app) = mount_two_thread_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.learn_primary_environment_for_test("env-a", cx);
+            app.select_thread("thread-selected", cx);
+            app.add_right_panel_tab(RightPanelTab::Files, cx);
+            app.add_right_panel_tab(RightPanelTab::Database, cx);
+            app.select_right_panel_tab(RightPanelTab::Files, cx);
+        })
+    });
+    render_frames(cx, window);
+    cx.update(|cx| {
+        app.update(cx, |app, _| {
+            app.set_scratch_project_for_test(Some("proj-parity"))
+        })
+    });
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
+    render_frames(cx, window);
+    cx.update(|cx| {
+        let app = app.read(cx);
+        let (_, visible) = app.offered_and_visible_tabs_for_test();
+        assert!(!visible.contains(&files));
+        assert!(app.right_panel_tabs().tabs().contains(&files));
+        assert_eq!(
+            app.right_panel_tabs().active(),
+            Some(&PanelSurface::Kind(RightPanelTab::Tasks))
+        );
+    });
+    cx.update(|cx| app.update(cx, |app, _| app.set_scratch_project_for_test(None)));
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
+    cx.update(|cx| {
+        let (_, visible) = app.read(cx).offered_and_visible_tabs_for_test();
+        assert!(visible.contains(&files));
+    });
+}
+
+/// A text system and renderer for the `#[ignore]`d screenshot tests. They build their own:
+/// libtest runs a test off the main thread, and `current_platform(true)` needs the main thread.
+#[cfg(target_os = "macos")]
+pub(crate) fn headless_shot_context() -> gpui_kit::HeadlessAppContext {
+    gpui_kit::HeadlessAppContext::with_platform(
+        std::sync::Arc::new(gpui_apple::AppleTextSystem::new()),
+        std::sync::Arc::new(crate::superhero::AppAssets),
+        gpui_kit::platform::current_headless_renderer,
+    )
+}
+
+/// Renders the right panel's header and `+` menu offscreen for a thread with a project and one
+/// without, in Dark Ocean and Light. It opens no window on screen and takes no focus.
+///
+/// `CONN_FILES_SHOTS_DIR=<dir> cargo test -p conn-app render_no_project_panel_screenshots -- --ignored`
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "writes PNGs; set CONN_FILES_SHOTS_DIR"]
+fn render_no_project_panel_screenshots() {
+    use conn_state::RightPanelTab;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, Bounds, Point, WindowBounds, WindowOptions, px, size};
+    let Some(dir) = std::env::var_os("CONN_FILES_SHOTS_DIR") else {
+        return;
+    };
+    let dir = std::path::Path::new(&dir);
+    std::fs::create_dir_all(dir).expect("an output folder");
+    let mut ctx = headless_shot_context();
+    for (theme_id, theme_label) in [("dark-ocean", "dark"), ("t3-code-light", "light")] {
+        for (thread, scratch, label) in [
+            ("thread-selected", None, "project"),
+            ("thread-other", Some("proj-other"), "no-project"),
+        ] {
+            let theme = conn_theme::theme_by_id(theme_id).expect("a built-in theme");
+            let tokens = conn_theme::Tokens::derive(&theme);
+            let (window, app) = ctx.update(|cx| {
+                gpui_kit::init(cx);
+                crate::fonts::register(cx);
+                crate::theme::apply_kit_theme(&tokens, cx);
+                crate::app::register_keybindings(cx);
+                gpui_kit::open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                            Point::default(),
+                            size(px(1100.0), px(420.0)),
+                        ))),
+                        focus: false,
+                        show: false,
+                        ..Default::default()
+                    },
+                    cx,
+                    |window, cx| {
+                        let tokens = tokens.clone();
+                        cx.new(|cx| ConnApp::new(theme.id, tokens, None, window, cx))
+                    },
+                )
+                .expect("a window")
+            });
+            ctx.update(|cx| {
+                app.update(cx, |app, cx| {
+                    let mut shell = two_project_shell();
+                    shell.threads.push(make_thread_shell(ThreadSeedSpec {
+                        id: "thread-other",
+                        project_id: "proj-other",
+                        title: "General question",
+                        status: "completed",
+                        activity_run_status: None,
+                        pinned_at: None,
+                        settled_at: None,
+                        pending_kind: None,
+                    }));
+                    shell.synchronized = true;
+                    app.set_shell(shell, cx);
+                    app.set_scratch_project_for_test(scratch);
+                    app.learn_primary_environment_for_test("env-a", cx);
+                    app.select_thread(thread, cx);
+                    // A project thread has Files open next to Database and Tasks.
+                    for tab in [
+                        RightPanelTab::Files,
+                        RightPanelTab::Database,
+                        RightPanelTab::Tasks,
+                    ] {
+                        app.add_right_panel_tab(tab, cx);
+                    }
+                    app.open_right_panel_add_menu_for_test(cx);
+                });
+            });
+            for _ in 0..4 {
+                ctx.update_window(window, |_, w, c| w.render_frame(c))
+                    .expect("a frame");
+                ctx.run_until_parked();
+            }
+            let image = ctx.capture_screenshot(window).expect("a screenshot");
+            image
+                .save(dir.join(format!("menu-{label}-{theme_label}.png")))
+                .expect("a saved PNG");
+        }
+    }
+}
+
 /// Each thread keeps its own right panel: tabs, open state, maximize, terminal drawer and
 /// width. They survive switching threads, and a restart through the saved file.
 #[gpui_kit::test]

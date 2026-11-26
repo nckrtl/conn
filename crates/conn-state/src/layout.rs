@@ -57,6 +57,22 @@ impl PanelSurface {
         }
     }
 
+    /// Whether a thread without a project may show it (see [`RightPanelTab::needs_project`]).
+    #[must_use]
+    pub fn needs_project(&self) -> bool {
+        self.kind().needs_project()
+    }
+
+    /// The surface a thread without a project shows in place of this one: itself, or Tasks.
+    #[must_use]
+    pub fn without_project(self) -> Self {
+        if self.needs_project() {
+            Self::Kind(RightPanelTab::Tasks)
+        } else {
+            self
+        }
+    }
+
     /// The file path of a file surface.
     #[must_use]
     pub fn file_path(&self) -> Option<&str> {
@@ -88,6 +104,23 @@ impl RightPanelTab {
         Self::LinkedItems,
         Self::Device,
     ];
+
+    /// Whether the surface belongs to a project, so a thread without one never offers it
+    /// (`needsProject` in the lab's `Panel.tsx`): Files (and the files it opens), MCP and API.
+    #[must_use]
+    pub const fn needs_project(self) -> bool {
+        matches!(self, Self::Files | Self::File | Self::Mcp | Self::Api)
+    }
+
+    /// The kind that shows in place of this one on a thread without a project: Tasks.
+    #[must_use]
+    pub const fn without_project(self) -> Self {
+        if self.needs_project() {
+            Self::Tasks
+        } else {
+            self
+        }
+    }
 
     /// The surface's single-key shortcut in the add-surface menu.
     #[must_use]

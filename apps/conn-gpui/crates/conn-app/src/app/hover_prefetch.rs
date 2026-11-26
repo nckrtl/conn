@@ -32,6 +32,9 @@ const SPECULATIVE_TTL: Duration = Duration::from_secs(30);
 /// One speculative subscription. `C` is the connection it runs on.
 pub(super) struct Speculative<C> {
     thread_id: String,
+    /// The environment the thread lives on (its offline-cache environment), so the same thread id
+    /// on another environment is not this entry's.
+    environment: Option<String>,
     /// The entry created the thread's reducer, so dropping it drops the reducer too.
     owns_cache: bool,
     connection: C,
@@ -60,6 +63,20 @@ impl<C> SpeculativeThreads<C> {
             .is_some_and(|entry| entry.thread_id == thread_id)
     }
 
+    /// Whether the live entry is `thread_id` on `environment`. Without an environment (a stream
+    /// of no known environment) the thread id alone decides.
+    fn holds_on(&self, environment: Option<&str>, thread_id: &str) -> bool {
+        self.live.as_ref().is_some_and(|entry| {
+            entry.thread_id == thread_id
+                && environment.is_none_or(|environment| {
+                    entry
+                        .environment
+                        .as_deref()
+                        .is_none_or(|own| own == environment)
+                })
+        })
+    }
+
     /// A new hover on the live entry keeps it. Returns whether it was the live one.
     fn touch(&mut self, thread_id: &str, now: Instant) -> bool {
         match self.live.as_mut() {
@@ -75,12 +92,14 @@ impl<C> SpeculativeThreads<C> {
     fn begin(
         &mut self,
         thread_id: &str,
+        environment: Option<&str>,
         owns_cache: bool,
         connection: C,
         now: Instant,
     ) -> Option<Speculative<C>> {
         self.live.replace(Speculative {
             thread_id: thread_id.to_owned(),
+            environment: environment.map(str::to_owned),
             owns_cache,
             connection,
             touched_at: now,
@@ -124,11 +143,23 @@ impl ConnApp {
     /// Whether another owner keeps `thread_id`'s stream: the open or selected thread, a launch
     /// that subscribed it directly, a child approval, or the offline cache.
     fn thread_stream_claimed(&self, thread_id: &str) -> bool {
-        self.subscribed_thread_id.as_deref() == Some(thread_id)
-            || self.layout.selected_thread_id.as_deref() == Some(thread_id)
-            || self.launched_threads.contains(thread_id)
-            || self.child_approvals.holds(thread_id)
-            || self.offline.watching(self.cache_env(thread_id), thread_id)
+        self.thread_stream_claimed_on(self.cache_env(thread_id), thread_id)
+    }
+
+    /// Whether another owner keeps the stream of `thread_id` on `env`. The open or selected
+    /// thread, a launch and a child approval name a thread id, so they own the stream only of the
+    /// environment that thread lives on; the offline cache watches a thread of its own
+    /// environment. `None` is a stream of no known environment.
+    fn thread_stream_claimed_on(&self, env: Option<&str>, thread_id: &str) -> bool {
+        let lives_here = env.is_none_or(|env| self.cache_env(thread_id) == Some(env));
+        (lives_here
+            && (self.subscribed_thread_id.as_deref() == Some(thread_id)
+                || self.layout.selected_thread_id.as_deref() == Some(thread_id)
+                || self.launched_threads.contains(thread_id)
+                || self.child_approvals.holds(thread_id)))
+            || self
+                .offline
+                .watching(env.or_else(|| self.cache_env(thread_id)), thread_id)
     }
 
     /// Whether anything wants `thread_id`'s stream now. An ended stream of any other thread was
@@ -138,12 +169,19 @@ impl ConnApp {
     }
 
     /// Whether an item of `thread_id`'s stream on `env` has nobody to apply to: no reducer holds
-    /// the thread and nobody wants its stream. The stream was dropped with its reducer, so the
-    /// item is late and must not bring the reducer back.
+    /// the thread on that environment and nobody wants its stream. The stream was dropped with
+    /// its reducer, so the item is late and must not bring the reducer back.
+    ///
+    /// The same thread id can live on two environments, so every part compares the stream's own
+    /// environment along with the thread id: another environment's reducer, prefetch or open
+    /// thread neither keeps this item nor drops it.
     pub(super) fn thread_item_is_orphaned(&self, env: Option<&str>, thread_id: &str) -> bool {
-        !self.threads.contains_key(thread_id)
-            && !env.is_some_and(|env| self.offline.shadows(env, thread_id))
-            && !self.thread_stream_wanted(thread_id)
+        let reducer_here = self.threads.contains_key(thread_id)
+            && env.is_none_or(|env| self.cache_env(thread_id) == Some(env));
+        let shadowed = env.is_some_and(|env| self.offline.shadows(env, thread_id));
+        let wanted = self.thread_stream_claimed_on(env, thread_id)
+            || self.speculative.holds_on(env, thread_id);
+        !reducer_here && !shadowed && !wanted
     }
 
     /// Records that a draft launch subscribed `thread_id` itself, so a hover prefetch never takes
@@ -178,16 +216,20 @@ impl ConnApp {
             let Some(connection) = self.connection_for_thread(thread_id) else {
                 return;
             };
+            let environment = self.cache_env(thread_id).map(str::to_owned);
             let owns_cache = !self.threads.contains_key(thread_id);
             self.threads
                 .entry(thread_id.to_owned())
                 .or_insert_with(|| ThreadState::new(thread_id.to_owned()));
             self.ended_threads.remove(thread_id);
             connection.subscribe_thread(thread_id);
-            if let Some(previous) = self
-                .speculative
-                .begin(thread_id, owns_cache, connection, now)
-            {
+            if let Some(previous) = self.speculative.begin(
+                thread_id,
+                environment.as_deref(),
+                owns_cache,
+                connection,
+                now,
+            ) {
                 self.drop_speculative(previous);
             }
         }
@@ -221,15 +263,20 @@ impl ConnApp {
 
     /// Ends the speculative subscription, unless another owner holds it.
     fn drop_speculative(&mut self, entry: Speculative<Connection>) {
-        if self.thread_stream_claimed(&entry.thread_id) {
+        // The entry's own environment decides, not the thread id alone: the same thread id on
+        // another environment is not this stream's.
+        let environment = entry.environment.as_deref();
+        if self.thread_stream_claimed_on(environment, &entry.thread_id) {
             return;
         }
         if entry.owns_cache {
             entry.connection.forget_thread(&entry.thread_id);
-            self.threads.remove(&entry.thread_id);
-            self.ended_threads.remove(&entry.thread_id);
-            if let Some(env) = self.cache_env(&entry.thread_id).map(str::to_owned) {
-                self.offline.forget_stream(&env, &entry.thread_id);
+            if environment.is_none_or(|env| self.cache_env(&entry.thread_id) == Some(env)) {
+                self.threads.remove(&entry.thread_id);
+                self.ended_threads.remove(&entry.thread_id);
+            }
+            if let Some(env) = environment {
+                self.offline.forget_stream(env, &entry.thread_id);
             }
         } else {
             entry.connection.unsubscribe_thread(&entry.thread_id);
@@ -264,6 +311,30 @@ impl ConnApp {
             .iter()
             .map(|entry| entry.thread_id.clone())
             .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn thread_item_is_orphaned_for_test(
+        &self,
+        env: Option<&str>,
+        thread_id: &str,
+    ) -> bool {
+        self.thread_item_is_orphaned(env, thread_id)
+    }
+
+    /// Test helper: the environment `thread_id`'s items are cached under.
+    #[cfg(test)]
+    pub(crate) fn cache_env_for_test(&self, thread_id: &str) -> Option<String> {
+        self.cache_env(thread_id).map(str::to_owned)
+    }
+
+    /// Test helper: the offline cache watches `thread_id` on `env`, as it does for every thread it
+    /// keeps.
+    #[cfg(test)]
+    pub(crate) fn watch_cache_stream_for_test(&mut self, env: &str, thread_id: &str) {
+        if let Some(connection) = self.connection.clone() {
+            self.offline.watch_for_test(env, thread_id, connection);
+        }
     }
 
     #[cfg(test)]
@@ -332,20 +403,34 @@ mod tests {
     fn rapid_hover_keeps_one_entry_and_pushes_out_the_previous() {
         let now = Instant::now();
         let mut set = SpeculativeThreads::<()>::default();
-        assert!(set.begin("a", true, (), now).is_none());
-        let pushed = set.begin("b", true, (), now);
+        assert!(set.begin("a", None, true, (), now).is_none());
+        let pushed = set.begin("b", None, true, (), now);
         assert_eq!(pushed.map(|e| e.thread_id), Some("a".to_owned()));
         for i in 0..20 {
-            set.begin(&format!("row-{i}"), true, (), now);
+            set.begin(&format!("row-{i}"), None, true, (), now);
             assert_eq!(live(&set), Some(format!("row-{i}").as_str()));
         }
+    }
+
+    #[test]
+    fn an_entry_belongs_to_its_environment_not_to_the_thread_id_alone() {
+        let now = Instant::now();
+        let mut set = SpeculativeThreads::<()>::default();
+        set.begin("a", Some("env-1"), true, (), now);
+        assert!(set.holds_on(Some("env-1"), "a"));
+        assert!(
+            !set.holds_on(Some("env-2"), "a"),
+            "same id, other environment"
+        );
+        assert!(!set.holds_on(Some("env-1"), "b"));
+        assert!(set.holds_on(None, "a"), "no environment: the id decides");
     }
 
     #[test]
     fn hovering_the_live_entry_again_refreshes_it() {
         let now = Instant::now();
         let mut set = SpeculativeThreads::<()>::default();
-        set.begin("a", true, (), now);
+        set.begin("a", None, true, (), now);
         let later = now + Duration::from_secs(20);
         assert!(set.touch("a", later));
         assert!(!set.touch("zzz", later));
@@ -360,11 +445,11 @@ mod tests {
     fn an_entry_whose_row_is_still_hovered_outlives_the_ttl() {
         let now = Instant::now();
         let mut set = SpeculativeThreads::<()>::default();
-        set.begin("a", true, (), now);
+        set.begin("a", None, true, (), now);
         let late = now + SPECULATIVE_TTL * 2;
         assert!(set.expire(late, Some("b")).is_some(), "another row: gone");
 
-        set.begin("a", true, (), now);
+        set.begin("a", None, true, (), now);
         assert!(set.expire(late, Some("a")).is_none(), "hovered: kept");
         assert_eq!(live(&set), Some("a"));
         // The pointer stays for another full TTL, then leaves.
@@ -376,7 +461,7 @@ mod tests {
     fn a_click_takes_the_entry_without_tearing_down_its_stream() {
         let now = Instant::now();
         let mut set = SpeculativeThreads::<()>::default();
-        set.begin("a", true, (), now);
+        set.begin("a", None, true, (), now);
         set.promote("other");
         assert!(set.holds("a"));
         set.promote("a");
@@ -389,7 +474,7 @@ mod tests {
         let now = Instant::now();
         let mut set = SpeculativeThreads::<()>::default();
         assert_eq!(set.arm_timer(now), None, "nothing to wait for");
-        set.begin("a", true, (), now);
+        set.begin("a", None, true, (), now);
         assert_eq!(set.arm_timer(now), Some(SPECULATIVE_TTL));
         assert_eq!(set.arm_timer(now), None, "one timer at a time");
 

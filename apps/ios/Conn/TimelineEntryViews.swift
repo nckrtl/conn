@@ -362,8 +362,8 @@ struct TimelineEntryRow: View {
             // no spinner, so a waiting approval never repaints.
             ApprovalWorkRow(title: title, detail: detail)
 
-        case let .userInputRequest(_, _, _, _, _, pending, answers, _, _):
-            QuestionRow(pending: pending, answers: answers)
+        case let .userInputRequest(_, _, _, _, _, pending, answers, _, createdAt):
+            QuestionRow(pending: pending, answers: answers, createdAt: createdAt)
 
         case let .secretRequest(id, label, reason, url, placeholder, _, status, pending, _):
             SecretRequestCard(
@@ -529,40 +529,38 @@ private struct ApprovalWorkRow: View {
     }
 }
 
-/// A question's feed row, like Conn mobile's "Input requested" work row: it expands to the
-/// answers (`QuestionAnswerHistory`). The open question has no row; the panel above the
-/// composer asks it.
+/// A question's feed row, drawn like an expanded "Worked for" log row: the question icon, muted
+/// "Input requested", a chevron that opens the answers; then a soft rule and the copy and time
+/// row, as under an agent message. The open question has no row; the panel above the composer
+/// asks it.
 private struct QuestionRow: View {
     let pending: Bool
     let answers: [FfiUserInputAnswer]
+    let createdAt: String?
     @Environment(\.connTheme) private var theme
+    @Environment(\.colorScheme) private var appearance
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
+
+    private var answersText: String {
+        answers.map { answer in
+            [answer.question, answer.answer.isEmpty ? nil : "→ " + answer.answer]
+                .compactMap { $0?.isEmpty == false ? $0 : nil }
+                .joined(separator: "\n")
+        }
+        .joined(separator: "\n\n")
+    }
 
     var body: some View {
-        KitCollapsibleCard(
-            "Input requested",
-            status: pending ? .working : .ok,
-            statusLabel: "question",
-            trailingText: nil,
-            expandable: !answers.isEmpty
-        ) {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(answers, id: \.questionId) { answer in
-                    VStack(alignment: .leading, spacing: 4) {
-                        if !answer.question.isEmpty {
-                            Text(answer.question)
-                                .font(.system(size: 14))
-                                .foregroundStyle(theme.mutedForeground)
-                        }
-                        if !answer.answer.isEmpty {
-                            Text(answer.answer)
-                                .font(.system(size: 14))
-                                .foregroundStyle(theme.mutedForeground)
-                                .padding(.leading, 12)
-                        }
-                    }
-                }
+        VStack(alignment: .leading, spacing: size * 0.85 - 1) {
+            VStack(alignment: .leading, spacing: 0) {
+                WorkLogRow(title: "Input requested", status: pending ? .running : .completed, duration: nil,
+                           detail: answers.isEmpty ? nil : answersText, monospaced: false, size: size,
+                           glyph: "work-question")
+                Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
             }
-            .textSelection(.enabled)
+            if !pending {
+                MessageFooter(text: answersText, timestamp: createdAt)
+            }
         }
     }
 }

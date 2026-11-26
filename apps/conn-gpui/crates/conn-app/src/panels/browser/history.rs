@@ -303,12 +303,6 @@ const SECRET_PATH_KEYS: &[&str] = &[
     "confirm",
 ];
 
-/// Path segments after which a 32 to 64 character hex segment is a commit id, not a secret.
-const GIT_PATH_KEYS: &[&str] = &["commit", "commits", "tree", "blob", "raw", "compare"];
-
-/// The shortest run that counts as a high-entropy token.
-const MIN_TOKEN_SEGMENT_LEN: usize = 32;
-
 fn is_base64url(text: &str) -> bool {
     text.bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
@@ -333,29 +327,6 @@ fn is_jwt_shaped(segment: &str) -> bool {
         .all(|part| part.len() >= 16)
 }
 
-/// A long, random-looking segment: all hex, or base64url with mixed character classes and few
-/// separators. A long slug (`how-to-build-a-rust-web-app-in-2024-step-by-step`) has many `-`
-/// between words, so it is not one.
-fn is_high_entropy(segment: &str, after_git_key: bool) -> bool {
-    if segment.len() < MIN_TOKEN_SEGMENT_LEN {
-        return false;
-    }
-    if segment.bytes().all(|b| b.is_ascii_hexdigit()) {
-        // A full commit id (SHA-1 or SHA-256) in a repository URL is a page address.
-        return !(after_git_key && matches!(segment.len(), 40 | 64));
-    }
-    if !is_base64url(segment) {
-        return false;
-    }
-    let separators = segment.bytes().filter(|b| matches!(b, b'-' | b'_')).count();
-    let classes = [
-        segment.bytes().any(|b| b.is_ascii_lowercase()),
-        segment.bytes().any(|b| b.is_ascii_uppercase()),
-        segment.bytes().any(|b| b.is_ascii_digit()),
-    ];
-    separators * 8 <= segment.len() && classes.into_iter().filter(|&c| c).count() >= 2
-}
-
 /// A plain route word such as `callback`, `login` or `google`. It follows a path key without being
 /// a credential, so `/auth/callback` stays.
 fn is_plain_route_word(segment: &str) -> bool {
@@ -372,9 +343,10 @@ fn normalize_path_key(segment: &str) -> String {
         .collect()
 }
 
-/// The path with its secret segments replaced by [`REDACTED_SEGMENT`]: JWT-shaped segments,
-/// long high-entropy segments, and the segment right after a [`SECRET_PATH_KEYS`] key (unless it
-/// is a plain route word). Slugs, numeric ids and short hashes such as `a1b2c3d` stay.
+/// The path with its secret segments replaced by [`REDACTED_SEGMENT`]: JWT-shaped segments and
+/// the segment right after a [`SECRET_PATH_KEYS`] key (unless it is a plain route word). Long ids
+/// stay: UUIDs, commit hashes, Google Docs and Notion document ids are page addresses, and
+/// redacting them would merge distinct pages into one entry that no longer opens.
 fn redact_secret_path(path: &str) -> String {
     let mut previous = String::new();
     let segments: Vec<String> = path
@@ -382,11 +354,8 @@ fn redact_secret_path(path: &str) -> String {
         .map(|segment| {
             let key = normalize_path_key(segment);
             let after_secret_key = SECRET_PATH_KEYS.contains(&previous.as_str());
-            let after_git_key = GIT_PATH_KEYS.contains(&previous.as_str());
             let secret = !segment.is_empty()
-                && (is_jwt_shaped(segment)
-                    || is_high_entropy(segment, after_git_key)
-                    || (after_secret_key && !is_plain_route_word(segment)));
+                && (is_jwt_shaped(segment) || (after_secret_key && !is_plain_route_word(segment)));
             previous = key;
             if secret {
                 REDACTED_SEGMENT.to_owned()
@@ -954,10 +923,11 @@ mod tests {
         let hex = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
         let b64 = "q83vK2lO0pXz9RtYw1uHn7BcDe4FgJa5MsVx6Zi_8T-A";
         let cases = [
-            // JWT-shaped, long hex and long base64url segments.
+            // JWT-shaped segments.
             (format!("https://app.test/s/{jwt}/view"), "https://app.test/s/:redacted/view"),
-            (format!("https://app.test/files/{hex}"), "https://app.test/files/:redacted"),
-            (format!("https://app.test/d/{b64}?a=1"), "https://app.test/d/:redacted?a=1"),
+            // Long secrets after a secret path key.
+            (format!("https://app.test/reset/{hex}"), "https://app.test/reset/:redacted"),
+            (format!("https://app.test/token/{b64}?a=1"), "https://app.test/token/:redacted?a=1"),
             ("https://app.test/s/aaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccc".to_owned(), "https://app.test/s/:redacted"),
             // The segment after a known path key, in any case and spelling.
             ("https://app.test/token/abc123".to_owned(), "https://app.test/token/:redacted"),
@@ -967,7 +937,7 @@ mod tests {
             ("https://app.test/invite/Zm9vYmFy/accept".to_owned(), "https://app.test/invite/:redacted/accept"),
             ("https://app.test/magic/a1B2c3".to_owned(), "https://app.test/magic/:redacted"),
             ("https://app.test/auth/x7Yq2".to_owned(), "https://app.test/auth/:redacted"),
-            ("https://app.test/email/verify/7/da39a3ee5e6b4b0d3255bfef95601890afd80709".to_owned(), "https://app.test/email/verify/:redacted/:redacted"),
+            ("https://app.test/email/verify/7/da39a3ee5e6b4b0d3255bfef95601890afd80709".to_owned(), "https://app.test/email/verify/:redacted/da39a3ee5e6b4b0d3255bfef95601890afd80709"),
         ];
         for (raw, expected) in cases {
             assert_eq!(
@@ -982,9 +952,9 @@ mod tests {
                 "{expected}"
             );
         }
-        for secret in [jwt, hex, b64] {
-            let url =
-                normalize_history_url(&format!("https://app.test/a/{secret}")).unwrap_or_default();
+        for (key, secret) in [("s", jwt), ("reset", hex), ("token", b64)] {
+            let url = normalize_history_url(&format!("https://app.test/{key}/{secret}"))
+                .unwrap_or_default();
             assert!(!url.contains(secret), "{url}");
         }
     }
@@ -1011,12 +981,22 @@ mod tests {
             "https://app.test/keyword/codec".to_owned(),
             "https://app.test/a//b/".to_owned(),
         ];
-        // A full commit id stays under a repository's commit and tree paths.
+        // Long resource ids are page addresses, not secrets: commit ids anywhere, canonical
+        // UUIDs, Google Docs and Notion document ids, and long base64url ids.
         for sha in [sha40, sha64] {
-            for key in ["commit", "tree", "blob"] {
+            for key in ["commit", "tree", "blob", "dl", "files"] {
                 kept.push(format!("https://github.test/o/r/{key}/{sha}"));
             }
         }
+        kept.extend([
+            "https://app.test/projects/3f2a9c1e-7b4d-4e8a-9c21-5d6f0a1b2c3d".to_owned(),
+            "https://app.test/projects/3F2A9C1E-7B4D-4E8A-9C21-5D6F0A1B2C3D/settings".to_owned(),
+            "https://docs.google.com/document/d/1aBcD3fGhIjK4lMnOpQr5StUvWxYz6AbCdEfGhIjKlMn/edit"
+                .to_owned(),
+            "https://www.notion.so/acme/Roadmap-8f6a2b1c9d0e4f7a8b3c5d2e1f0a9b8c".to_owned(),
+            "https://www.notion.so/8f6a2b1c9d0e4f7a8b3c5d2e1f0a9b8c".to_owned(),
+            "https://app.test/d/q83vK2lO0pXz9RtYw1uHn7BcDe4FgJa5MsVx6Zi_8T-A".to_owned(),
+        ]);
         for raw in &kept {
             assert_eq!(
                 normalize_history_url(raw).as_deref(),
@@ -1024,11 +1004,6 @@ mod tests {
                 "{raw}"
             );
         }
-        // Outside such a path, the same 40 hex characters are a credential.
-        assert_eq!(
-            normalize_history_url(&format!("https://app.test/dl/{sha40}")).as_deref(),
-            Some("https://app.test/dl/:redacted")
-        );
     }
 
     #[test]

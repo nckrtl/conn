@@ -122,6 +122,395 @@ fn sessions(
     cx.read(|cx| panel.read(cx).sessions_for_test())
 }
 
+// ------------------------------------------------ a connection that drops and comes back
+
+/// What a test tells the scripted terminal server to do.
+#[derive(Clone, Debug)]
+enum Control {
+    /// Close every open socket. The server keeps listening, so the client can reconnect.
+    Drop,
+    /// The shell prints `data`; every attached socket hears it.
+    Output(String),
+    /// The shell exits.
+    Exit,
+}
+
+/// A loopback server that plays a terminal: it answers `terminal.attach` with a snapshot of the
+/// shell's history, then streams what `Control::Output` prints. It reports each `terminal.*`
+/// request with the number of the socket that sent it.
+struct ScriptedServer {
+    connection: Connection,
+    control: tokio::sync::broadcast::Sender<Control>,
+    heard: std::sync::mpsc::Receiver<(usize, String, Value)>,
+    seen: Vec<(usize, String, Value)>,
+    _events: tokio::sync::mpsc::Receiver<ClientEvent>,
+}
+
+impl ScriptedServer {
+    fn start() -> Self {
+        let (control, _) = tokio::sync::broadcast::channel::<Control>(16);
+        let (heard_tx, heard) = std::sync::mpsc::channel();
+        let history = std::sync::Arc::new(std::sync::Mutex::new("agent$ ".to_owned()));
+        let sockets = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let addr = RT.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind a loopback listener");
+            let addr = listener.local_addr().expect("listener address");
+            let control = control.clone();
+            tokio::spawn(async move {
+                while let Ok((tcp, _)) = listener.accept().await {
+                    let socket = sockets.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    tokio::spawn(scripted_socket(
+                        tcp,
+                        socket,
+                        control.subscribe(),
+                        heard_tx.clone(),
+                        history.clone(),
+                    ));
+                }
+            });
+            addr
+        });
+        let config = ServerConfig {
+            http_base_url: url::Url::parse(&format!("http://{addr}")).expect("loopback URL"),
+            credential: Credential::Bearer("test-token".to_owned()),
+        };
+        let (connection, mut events) = Connection::start(config, RT.handle());
+        RT.block_on(async {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while tokio::time::Instant::now() < deadline {
+                if let Ok(Some(ClientEvent::Status(ConnectionStatus::Connected))) =
+                    tokio::time::timeout(Duration::from_secs(1), events.recv()).await
+                {
+                    return;
+                }
+            }
+            panic!("the scripted server never connected");
+        });
+        Self {
+            connection,
+            control,
+            heard,
+            seen: Vec::new(),
+            _events: events,
+        }
+    }
+
+    fn tell(&self, control: Control) {
+        self.control
+            .send(control)
+            .expect("a socket listens for the control message");
+    }
+
+    /// Every `terminal.*` request heard so far, as (socket number, tag, payload).
+    fn requests(&mut self) -> &[(usize, String, Value)] {
+        while let Ok(request) = self.heard.try_recv() {
+            self.seen.push(request);
+        }
+        &self.seen
+    }
+
+    fn count(&mut self, tag: &str) -> usize {
+        self.requests().iter().filter(|(_, t, _)| t == tag).count()
+    }
+
+    /// The highest socket number that sent a request, plus one: how many sockets spoke.
+    fn sockets_heard(&mut self) -> usize {
+        self.requests()
+            .iter()
+            .map(|(socket, _, _)| socket + 1)
+            .max()
+            .unwrap_or(0)
+    }
+}
+
+fn terminal_event(kind: &str, extra: Value) -> Value {
+    let mut event = serde_json::json!({
+        "type": kind, "threadId": "thread-a", "terminalId": "term-1"
+    });
+    if let (Some(event), Some(extra)) = (event.as_object_mut(), extra.as_object()) {
+        event.extend(extra.clone());
+    }
+    event
+}
+
+async fn scripted_socket(
+    tcp: tokio::net::TcpStream,
+    socket: usize,
+    mut control: tokio::sync::broadcast::Receiver<Control>,
+    heard: std::sync::mpsc::Sender<(usize, String, Value)>,
+    history: std::sync::Arc<std::sync::Mutex<String>>,
+) {
+    use conn_wire::{Exit, FromClient, FromServer, encode_server_frame};
+    use futures::SinkExt as _;
+
+    let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+        return;
+    };
+    let mut attach_id = None;
+    loop {
+        let chunk = |request_id, event| {
+            Message::Text(
+                encode_server_frame(&FromServer::Chunk {
+                    request_id,
+                    values: vec![event],
+                })
+                .into(),
+            )
+        };
+        tokio::select! {
+            message = ws.next() => {
+                let Some(Ok(Message::Text(text))) = message else { return };
+                for frame in conn_wire::decode_client_message(&text).unwrap_or_default() {
+                    let FromClient::Request(req) = frame else { continue };
+                    if !req.tag.starts_with("terminal.") {
+                        continue;
+                    }
+                    let _ = heard.send((socket, req.tag.clone(), req.payload.clone()));
+                    if req.tag == "terminal.attach" {
+                        attach_id = Some(req.id.clone());
+                        let snapshot = serde_json::json!({
+                            "type": "snapshot",
+                            "snapshot": {
+                                "threadId": "thread-a", "terminalId": "term-1",
+                                "cwd": "/srv/a", "worktreePath": null, "status": "running",
+                                "pid": 1, "history": history.lock().expect("history").clone(),
+                                "exitCode": null, "exitSignal": null, "label": "zsh",
+                                "updatedAt": "2026-11-26T10:00:00.000Z"
+                            }
+                        });
+                        let _ = ws.send(chunk(req.id, snapshot)).await;
+                    } else {
+                        let reply = FromServer::Exit {
+                            request_id: req.id,
+                            exit: Exit::success(Value::Null),
+                        };
+                        let _ = ws.send(Message::Text(encode_server_frame(&reply).into())).await;
+                    }
+                }
+            }
+            told = control.recv() => match told {
+                Ok(Control::Drop) => {
+                    let _ = ws.close(None).await;
+                    return;
+                }
+                Ok(Control::Output(data)) => {
+                    history.lock().expect("history").push_str(&data);
+                    if let Some(id) = attach_id.clone() {
+                        let event = terminal_event("output", serde_json::json!({ "data": data }));
+                        let _ = ws.send(chunk(id, event)).await;
+                    }
+                }
+                Ok(Control::Exit) => {
+                    if let Some(id) = attach_id.clone() {
+                        let event = terminal_event(
+                            "exited",
+                            serde_json::json!({ "exitCode": 0, "exitSignal": null }),
+                        );
+                        let _ = ws.send(chunk(id, event)).await;
+                    }
+                }
+                Err(_) => return,
+            },
+        }
+    }
+}
+
+/// Runs the app (and its clock, which times the reattach delay) until `done` holds.
+fn wait_until(
+    cx: &mut TestAppContext,
+    what: &str,
+    mut done: impl FnMut(&mut TestAppContext) -> bool,
+) {
+    for _ in 0..400 {
+        cx.run_until_parked();
+        if done(cx) {
+            return;
+        }
+        cx.executor().advance_clock(Duration::from_millis(300));
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    panic!("timed out waiting for {what}");
+}
+
+fn first_row(cx: &mut TestAppContext, panel: &Entity<TerminalPanel>) -> String {
+    cx.read(|cx| panel.read(cx).first_row_for_test())
+}
+
+fn reconnecting(cx: &mut TestAppContext, panel: &Entity<TerminalPanel>) -> bool {
+    cx.read(|cx| panel.read(cx).reconnecting_for_test())
+}
+
+fn type_into(cx: &mut TestAppContext, panel: &Entity<TerminalPanel>, text: &str) {
+    cx.update(|cx| panel.update(cx, |panel, cx| panel.type_for_test(text, cx)));
+}
+
+#[gpui_kit::test]
+fn a_dropped_connection_reattaches_the_same_terminal_and_never_restarts_it(
+    cx: &mut TestAppContext,
+) {
+    cx.executor().allow_parking();
+    let mut server = ScriptedServer::start();
+    let panel = new_panel(cx);
+    show(
+        cx,
+        &panel,
+        target(Some("agent"), "thread-a", "/srv/a", true),
+        Some(server.connection.clone()),
+    );
+    wait_until(cx, "the first snapshot", |cx| {
+        first_row(cx, &panel) == "agent$"
+    });
+
+    // Typing reaches the shell while the connection is up.
+    type_into(cx, &panel, "ls");
+    wait_until(cx, "the first write", |_| {
+        server.count("terminal.write") == 1
+    });
+    server.tell(Control::Output("ls".to_owned()));
+    wait_until(cx, "the echo", |cx| first_row(cx, &panel) == "agent$ ls");
+
+    // The WebSocket drops (sleep, a network blip, a server restart) and comes back by itself.
+    server.tell(Control::Drop);
+    wait_until(cx, "the panel to notice the drop", |cx| {
+        reconnecting(cx, &panel)
+    });
+    assert_eq!(
+        first_row(cx, &panel),
+        "agent$ ls",
+        "the screen stays while it reconnects"
+    );
+
+    // Typing while disconnected is blocked, not queued: it never reaches the shell later.
+    type_into(cx, &panel, "rm -rf nothing\r");
+
+    wait_until(cx, "the second attach", |_| {
+        server.count("terminal.attach") == 2
+    });
+    wait_until(cx, "the panel to be back", |cx| !reconnecting(cx, &panel));
+    assert_eq!(
+        server.sockets_heard(),
+        2,
+        "the second attach came on the new socket"
+    );
+    let attaches: Vec<Value> = server
+        .requests()
+        .iter()
+        .filter(|(_, tag, _)| tag == "terminal.attach")
+        .map(|(_, _, payload)| payload.clone())
+        .collect();
+    assert_eq!(attaches[0]["threadId"], attaches[1]["threadId"]);
+    assert_eq!(attaches[1]["threadId"], "thread-a");
+    assert_eq!(attaches[0]["terminalId"], "term-1");
+    assert_eq!(
+        attaches[1]["terminalId"], "term-1",
+        "the same terminal id, so the server's shell and history stay"
+    );
+
+    // The server's replay replaces the screen: the scrollback is neither lost nor doubled.
+    wait_until(cx, "the replay", |cx| first_row(cx, &panel) == "agent$ ls");
+
+    // Output after the reconnect arrives, and typing works again.
+    server.tell(Control::Output("x".to_owned()));
+    wait_until(cx, "output after the reconnect", |cx| {
+        first_row(cx, &panel) == "agent$ lsx"
+    });
+    type_into(cx, &panel, "q");
+    wait_until(cx, "a write after the reconnect", |_| {
+        server.count("terminal.write") == 2
+    });
+
+    assert_eq!(
+        server.count("terminal.close"),
+        0,
+        "reconnecting never closes the shell"
+    );
+    let writes: Vec<String> = server
+        .requests()
+        .iter()
+        .filter(|(_, tag, _)| tag == "terminal.write")
+        .map(|(_, _, payload)| payload["data"].as_str().unwrap_or_default().to_owned())
+        .collect();
+    assert_eq!(
+        writes,
+        ["ls", "q"],
+        "input typed while disconnected was dropped, not replayed"
+    );
+    assert!(
+        !cx.read(|cx| panel.read(cx).exited_for_test()),
+        "the terminal did not end"
+    );
+}
+
+#[gpui_kit::test]
+fn a_shell_that_exits_is_not_attached_again(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let mut server = ScriptedServer::start();
+    let panel = new_panel(cx);
+    show(
+        cx,
+        &panel,
+        target(Some("agent"), "thread-a", "/srv/a", true),
+        Some(server.connection.clone()),
+    );
+    wait_until(cx, "the first snapshot", |cx| {
+        first_row(cx, &panel) == "agent$"
+    });
+
+    server.tell(Control::Exit);
+    wait_until(cx, "the exit", |cx| {
+        cx.read(|cx| panel.read(cx).exited_for_test())
+    });
+    for _ in 0..40 {
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(300));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        server.count("terminal.attach"),
+        1,
+        "an ended shell is not attached again"
+    );
+    assert!(!reconnecting(cx, &panel));
+}
+
+#[gpui_kit::test]
+fn a_local_shell_ignores_a_dropped_connection(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let mut server = ScriptedServer::start();
+    let panel = new_panel(cx);
+    let folder = std::env::temp_dir().to_string_lossy().into_owned();
+    show(
+        cx,
+        &panel,
+        target(None, "thread-local", &folder, false),
+        Some(server.connection.clone()),
+    );
+
+    // Drop the primary connection and let it come back: a local PTY does not care.
+    server.tell(Control::Drop);
+    let before = cx.read(|cx| sessions_len(&panel, cx));
+    for _ in 0..40 {
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_millis(300));
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(before, 1);
+    let kinds: Vec<&str> = sessions(cx, &panel).iter().map(|(_, kind)| *kind).collect();
+    assert_eq!(kinds, ["local"]);
+    assert!(!reconnecting(cx, &panel));
+    assert!(!cx.read(|cx| panel.read(cx).exited_for_test()));
+    assert!(
+        server.requests().is_empty(),
+        "a local shell sends no terminal request, before or after the drop"
+    );
+}
+
+fn sessions_len(panel: &Entity<TerminalPanel>, cx: &gpui_kit::App) -> usize {
+    panel.read(cx).sessions_for_test().len()
+}
+
 #[gpui_kit::test]
 fn a_linked_thread_opens_its_terminal_through_its_own_connection(cx: &mut TestAppContext) {
     cx.executor().allow_parking();

@@ -13,8 +13,9 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
@@ -43,7 +44,7 @@ use gpui_kit::{
     ShapedLine, StrikethroughStyle, Style, Styled, Task, TextAlign, TextRun, UTF16Selection,
     UnderlineStyle, Window, div, fill, font, outline, point, px, relative, size,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use super::color::{Rgb8, rgb8_to_hsla, to_hsla};
 use super::header::superhero_icon;
@@ -118,8 +119,14 @@ enum TermNote {
     Wakeup,
     Exited,
     Copy(String),
-    /// A remote terminal broke: the server refused it, or the connection to it ended.
+    /// A remote terminal broke: the server refused it. The shell is gone for good.
     Failed(String),
+    /// The connection to a remote terminal dropped. The reader attaches again by itself.
+    Reconnecting,
+    /// A remote terminal attached again and repainted its screen.
+    Reconnected,
+    /// A `terminal.write` did not reach the server, so some typed input may be missing.
+    InputLost,
 }
 
 struct SharedState {
@@ -164,6 +171,10 @@ struct TerminalSession {
     failed: Option<String>,
     /// Set when the shell runs on the thread's server.
     remote: Option<RemoteLink>,
+    /// A remote terminal lost its connection and attaches again. Typing waits until it has.
+    reconnecting: bool,
+    /// A write may not have reached a remote shell; shown until the next keystroke.
+    input_lost: bool,
     _events_task: Task<()>,
 }
 
@@ -174,11 +185,47 @@ enum RemoteOp {
     Clear,
 }
 
+/// What the reader and the writer of one remote terminal share with the panel.
+struct RemoteState {
+    /// The grid size (`cols << 16 | rows`), so an attach after a reconnect uses the size now.
+    size: AtomicU32,
+    /// The server has this session attached: requests may go out. False while it reattaches.
+    online: watch::Sender<bool>,
+}
+
+impl RemoteState {
+    fn new(size: GridSize) -> Self {
+        let (online, _) = watch::channel(false);
+        let state = Self {
+            size: AtomicU32::new(0),
+            online,
+        };
+        state.set_size(size);
+        state
+    }
+
+    fn set_size(&self, size: GridSize) {
+        self.size.store(
+            (u32::from(size.cols) << 16) | u32::from(size.rows),
+            Ordering::Release,
+        );
+    }
+
+    fn cols_rows(&self) -> (u16, u16) {
+        let packed = self.size.load(Ordering::Acquire);
+        (
+            u16::try_from(packed >> 16).unwrap_or(u16::MAX),
+            u16::try_from(packed & 0xFFFF).unwrap_or(u16::MAX),
+        )
+    }
+}
+
 /// The connection to a terminal on the thread's own server (`terminal.attach` stream plus
 /// `terminal.write`, `.resize` and `.clear` calls). Dropping it ends the stream.
 struct RemoteLink {
     connection: Connection,
     ops: mpsc::UnboundedSender<RemoteOp>,
+    state: Arc<RemoteState>,
     _reader: Task<()>,
     _writer: Task<()>,
 }
@@ -219,6 +266,8 @@ impl TerminalSession {
             exited: false,
             failed: None,
             remote: None,
+            reconnecting: false,
+            input_lost: false,
             _events_task: events_task,
         }
     }
@@ -389,6 +438,37 @@ impl TerminalPanel {
         self.waiting_for_connection()
     }
 
+    /// Test helper: the shown terminal lost its connection and attaches again.
+    #[cfg(test)]
+    pub(crate) fn reconnecting_for_test(&self) -> bool {
+        self.session().is_some_and(|session| session.reconnecting)
+    }
+
+    /// Test helper: the shown terminal ended (the shell exited or failed).
+    #[cfg(test)]
+    pub(crate) fn exited_for_test(&self) -> bool {
+        self.session().is_some_and(|session| session.exited)
+    }
+
+    /// Test helper: the first screen row of the shown terminal, without trailing blanks.
+    #[cfg(test)]
+    pub(crate) fn first_row_for_test(&self) -> String {
+        self.session().map_or_else(String::new, |session| {
+            let term = session.term.lock();
+            (0..80)
+                .map(|col| term.grid()[GridLine(0)][Column(col)].c)
+                .collect::<String>()
+                .trim_end()
+                .to_owned()
+        })
+    }
+
+    /// Test helper: types `text` into the shown terminal, as the keyboard does.
+    #[cfg(test)]
+    pub(crate) fn type_for_test(&mut self, text: &str, cx: &mut Context<'_, Self>) {
+        self.send_text(text, cx);
+    }
+
     /// The machine the shown terminal runs on, for the header (`Terminal · agent`).
     pub(crate) fn machine_label(&self) -> Option<&str> {
         self.target.label.as_deref()
@@ -532,7 +612,7 @@ impl TerminalPanel {
             session.size.rows,
         );
         let (ops_tx, ops_rx) = mpsc::unbounded_channel();
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let state = Arc::new(RemoteState::new(session.size));
         let reader = remote_reader(
             cx,
             connection.clone(),
@@ -540,7 +620,7 @@ impl TerminalPanel {
             fresh,
             session.term.clone(),
             session.shared.clone(),
-            ready_tx,
+            state.clone(),
         );
         let writer = remote_writer(
             cx,
@@ -548,11 +628,12 @@ impl TerminalPanel {
             thread_id,
             session.shared.notes.clone(),
             ops_rx,
-            ready_rx,
+            state.online.subscribe(),
         );
         session.remote = Some(RemoteLink {
             connection,
             ops: ops_tx,
+            state,
             _reader: reader,
             _writer: writer,
         });
@@ -569,10 +650,21 @@ impl TerminalPanel {
             }
             TermNote::Exited => {
                 session.exited = true;
+                session.reconnecting = false;
             }
             TermNote::Failed(why) => {
                 session.exited = true;
+                session.reconnecting = false;
                 session.failed = Some(why);
+            }
+            TermNote::Reconnecting => {
+                session.reconnecting = true;
+            }
+            TermNote::Reconnected => {
+                session.reconnecting = false;
+            }
+            TermNote::InputLost => {
+                session.input_lost = true;
             }
             TermNote::Copy(text) => {
                 cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -583,16 +675,20 @@ impl TerminalPanel {
         }
     }
 
-    fn write_bytes(&self, bytes: Vec<u8>) {
+    /// Sends keystrokes to the shell of the thread on screen. A remote terminal that is
+    /// reconnecting takes no input: the keys are dropped, and the panel says so (nothing is
+    /// buffered, so nothing runs by surprise after the shell is back).
+    fn write_bytes(&mut self, bytes: Vec<u8>) {
         if bytes.is_empty() {
             return;
         }
-        let Some(session) = self.session() else {
+        let Some(session) = self.session_mut() else {
             return;
         };
-        if session.exited {
+        if session.exited || session.reconnecting {
             return;
         }
+        session.input_lost = false;
         if let Some(link) = &session.remote {
             for chunk in write_chunks(&bytes) {
                 let _ = link.ops.send(RemoteOp::Write(chunk));
@@ -611,6 +707,9 @@ impl TerminalPanel {
         }
         session.size = next;
         session.term.lock().resize(next);
+        if let Some(link) = &session.remote {
+            link.state.set_size(next);
+        }
         if !session.exited {
             if let Some(link) = &session.remote {
                 let _ = link.ops.send(RemoteOp::Resize {
@@ -953,7 +1052,21 @@ impl Render for TerminalPanel {
         } else {
             self.session().and_then(|s| {
                 if !s.exited {
-                    return None;
+                    // Quiet notes for a shell that is still there. Reconnecting never restarts it.
+                    return if s.reconnecting {
+                        Some(match &machine {
+                            Some(name) => format!(
+                                "Reconnecting to {name}… Typing is paused until the terminal is back."
+                            ),
+                            None => "Reconnecting… Typing is paused until the terminal is back."
+                                .to_owned(),
+                        })
+                    } else if s.input_lost {
+                        Some("Reconnected. The last keys you typed may not have reached the shell."
+                            .to_owned())
+                    } else {
+                        None
+                    };
                 }
                 Some(match &s.failed {
                     Some(why) if remote => format!("Terminal unavailable: {why}"),
@@ -1232,7 +1345,8 @@ fn apply_remote_event(
     }
 }
 
-/// Reads the thread's terminal from its server into `term` until the session is dropped.
+/// Reads the thread's terminal from its server into `term` until the session is dropped or the
+/// shell ends. When the connection drops it attaches to the same terminal again (see below).
 fn remote_reader(
     cx: &Context<'_, TerminalPanel>,
     connection: Connection,
@@ -1240,8 +1354,9 @@ fn remote_reader(
     fresh: bool,
     term: Arc<FairMutex<Term<Listener>>>,
     shared: Arc<SharedState>,
-    ready: tokio::sync::oneshot::Sender<()>,
+    state: Arc<RemoteState>,
 ) -> Task<()> {
+    let executor = cx.background_executor().clone();
     cx.background_executor().spawn(async move {
         if fresh {
             // A restart ends the old shell first, so the attach below starts a new one.
@@ -1256,61 +1371,101 @@ fn remote_reader(
                 )
                 .await;
         }
-        let Ok(payload) = serde_json::to_value(&input) else {
-            return;
-        };
-        let (_stream, mut events) = connection.stream_json("terminal.attach", payload);
-        let mut ready = Some(ready);
         let mut processor = AnsiProcessor::new();
         let wake = Listener(shared.clone());
-        while let Some(raw) = events.recv().await {
-            let Ok(event) = serde_json::from_value::<TerminalAttachStreamEvent>(raw) else {
-                continue;
+        let mut lost = false;
+        let mut failures = 0u32;
+        loop {
+            // Every attach joins the same terminal id; the server keeps the shell running and
+            // answers with a snapshot that repaints the screen. The size is the one now.
+            let mut input = input.clone();
+            let (cols, rows) = state.cols_rows();
+            input.cols = Some(i64::from(cols));
+            input.rows = Some(i64::from(rows));
+            let Ok(payload) = serde_json::to_value(&input) else {
+                return;
             };
-            let outcome = apply_remote_event(&term, &mut processor, event);
-            if outcome.ready
-                && let Some(ready) = ready.take()
-            {
-                let _ = ready.send(());
-            }
-            if outcome.redraw {
-                wake.send_event(TermEvent::Wakeup);
-            }
-            match outcome.end {
-                Some(RemoteEnd::Exited) => {
-                    let _ = shared.notes.send(TermNote::Exited);
+            let (_stream, mut events) = connection.stream_json("terminal.attach", payload);
+            let started = Instant::now();
+            let mut ended = false;
+            while let Some(raw) = events.recv().await {
+                let Ok(event) = serde_json::from_value::<TerminalAttachStreamEvent>(raw) else {
+                    continue;
+                };
+                let outcome = apply_remote_event(&term, &mut processor, event);
+                if outcome.ready {
+                    state.online.send_replace(true);
+                    if lost {
+                        lost = false;
+                        let _ = shared.notes.send(TermNote::Reconnected);
+                    }
                 }
-                Some(RemoteEnd::Failed(why)) => {
-                    let _ = shared.notes.send(TermNote::Failed(why));
+                if outcome.redraw {
+                    wake.send_event(TermEvent::Wakeup);
                 }
-                None => {}
+                match outcome.end {
+                    Some(RemoteEnd::Exited) => {
+                        let _ = shared.notes.send(TermNote::Exited);
+                        ended = true;
+                    }
+                    Some(RemoteEnd::Failed(why)) => {
+                        let _ = shared.notes.send(TermNote::Failed(why));
+                        ended = true;
+                    }
+                    None => {}
+                }
+                if ended {
+                    break;
+                }
             }
+            if ended {
+                return;
+            }
+            // The stream ended without the shell ending: `conn-client` drops its streams when
+            // the WebSocket drops, and does not resume the ones started by `stream_json`. The
+            // shell is still there, so attach again. A stream started while the socket is
+            // down waits for the reconnect. Never restart or close the terminal here.
+            state.online.send_replace(false);
+            lost = true;
+            let _ = shared.notes.send(TermNote::Reconnecting);
+            if started.elapsed() >= REATTACH_STABLE {
+                failures = 0;
+            }
+            executor.timer(reattach_delay(failures)).await;
+            failures = failures.saturating_add(1);
         }
-        let _ = shared.notes.send(TermNote::Failed(
-            "the connection to this terminal ended".to_owned(),
-        ));
     })
 }
 
-/// Sends the session's input, resizes and clears to the server in order, once it has the
-/// terminal.
+/// How long an attach must live before the next one starts with the shortest delay again.
+const REATTACH_STABLE: Duration = Duration::from_secs(10);
+
+/// How long to wait before attaching again after `failures` quick failures in a row.
+fn reattach_delay(failures: u32) -> Duration {
+    const BASE_MS: u64 = 250;
+    const MAX_MS: u64 = 5_000;
+    Duration::from_millis((BASE_MS << failures.min(5)).min(MAX_MS))
+}
+
+/// Sends the session's input, resizes and clears to the server in order, while it has the
+/// terminal attached. During a reconnect the requests wait and go out after the next attach.
 fn remote_writer(
     cx: &Context<'_, TerminalPanel>,
     connection: Connection,
     thread_id: String,
     notes: mpsc::UnboundedSender<TermNote>,
     mut ops: mpsc::UnboundedReceiver<RemoteOp>,
-    ready: tokio::sync::oneshot::Receiver<()>,
+    mut online: watch::Receiver<bool>,
 ) -> Task<()> {
     cx.background_executor().spawn(async move {
-        if ready.await.is_err() {
-            return;
-        }
         let session = serde_json::json!({
             "threadId": thread_id,
             "terminalId": DEFAULT_TERMINAL_ID,
         });
         while let Some(op) = ops.recv().await {
+            if online.wait_for(|up| *up).await.is_err() {
+                return;
+            }
             let mut payload = session.clone();
             let (tag, input) = match op {
                 RemoteOp::Write(data) => ("terminal.write", Some(data)),
@@ -1324,10 +1479,11 @@ fn remote_writer(
             if let Some(data) = input {
                 payload["data"] = data.into();
             }
-            if let Err(err) = connection.call_json(tag, payload).await
-                && tag == "terminal.write"
-            {
-                let _ = notes.send(TermNote::Failed(err.to_string()));
+            // A failed write is not a dead terminal: the connection may have dropped under it.
+            // The attach stream tells whether the shell ended. Keep the screen and say that
+            // the last keys may be missing.
+            if connection.call_json(tag, payload).await.is_err() && tag == "terminal.write" {
+                let _ = notes.send(TermNote::InputLost);
             }
         }
     })
@@ -1940,6 +2096,26 @@ mod remote_tests {
         // A later snapshot (a re-attach) replaces the screen instead of adding to it.
         apply_remote_event(&term, &mut processor, event(snapshot("fresh", "running")));
         assert_eq!(first_row(&term), "fresh");
+    }
+
+    #[test]
+    fn the_reattach_delay_grows_and_stops_at_five_seconds() {
+        let delays: Vec<u64> = (0..8)
+            .map(|failures| u64::try_from(reattach_delay(failures).as_millis()).unwrap_or(0))
+            .collect();
+        assert_eq!(delays, [250, 500, 1000, 2000, 4000, 5000, 5000, 5000]);
+    }
+
+    #[test]
+    fn the_size_survives_the_round_trip_for_a_reattach() {
+        let state = RemoteState::new(GridSize::default());
+        let next = GridSize {
+            cols: 132,
+            rows: 43,
+            ..GridSize::default()
+        };
+        state.set_size(next);
+        assert_eq!(state.cols_rows(), (132, 43));
     }
 
     #[test]

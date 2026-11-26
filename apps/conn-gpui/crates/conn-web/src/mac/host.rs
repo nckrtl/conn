@@ -116,6 +116,42 @@ fn timed<T>(label: &str, step: impl FnOnce() -> T) -> T {
     out
 }
 
+/// The current SIGCHLD action: `SIG_DFL`, `SIG_IGN` or a handler address. `None` if unreadable.
+fn sigchld_action() -> Option<libc::sighandler_t> {
+    // SAFETY: `sigaction` with a null new action only reads the current one into `old`, a
+    // plain C struct for which all-zero bytes are valid.
+    unsafe {
+        let mut old: libc::sigaction = std::mem::zeroed();
+        (libc::sigaction(libc::SIGCHLD, std::ptr::null(), &raw mut old) == 0)
+            .then_some(old.sa_sigaction)
+    }
+}
+
+/// Logs once at start-up whether SIGCHLD's handler survived `cef_initialize`. Tokio installs the
+/// handler when the app starts its first child process, so "none before" means no child had
+/// started yet: Tokio installs it later, after CEF, and it then stays.
+fn log_sigchld(before: Option<libc::sighandler_t>, after: Option<libc::sighandler_t>) {
+    let name = |action: Option<libc::sighandler_t>| match action {
+        None => "unknown",
+        Some(libc::SIG_DFL) => "default",
+        Some(libc::SIG_IGN) => "ignored",
+        Some(_) => "handler",
+    };
+    let verdict = match (name(before), after == before) {
+        ("handler", true) => "handler kept",
+        ("handler", false) => "handler LOST: child process exits will be missed",
+        (_, true) => "no handler yet, unchanged",
+        (_, false) => "changed",
+    };
+    let line = format!(
+        "SIGCHLD across cef_initialize: before={} after={} ({verdict})",
+        name(before),
+        name(after)
+    );
+    eprintln!("[conn-web] {line}");
+    super::view::trace(&line);
+}
+
 /// Starts CEF on the main thread (at most once per process).
 ///
 /// Call [`prepare`] and [`preload_framework`] on a background thread first: this then spends its
@@ -181,6 +217,23 @@ pub(crate) fn start(options: StartOptions) -> Result<(), WebError> {
         remote_debugging_port: options.remote_debugging_port.map_or(0, i32::from),
         log_file: path_to_cef_string(&log_file),
         log_severity: LogSeverity::WARNING,
+        // Keep this process's signal handlers. Without this, Chromium's `SetupSignalHandlers`
+        // (content_main.cc) clears the signal mask and resets SIGHUP, SIGINT, SIGQUIT, SIGILL,
+        // SIGABRT, SIGFPE, SIGSEGV, SIGALRM, SIGTERM, SIGCHLD, SIGBUS and SIGTRAP to SIG_DFL in
+        // this, the browser, process. Losing SIGCHLD breaks Tokio: it learns of a child's exit
+        // only from that signal, so every `Child::wait()`/`kill()` after CEF starts hangs, and a
+        // Vault relay or `bw` call that started before CEF hangs forever.
+        //
+        // The trade-off is small in this host:
+        // - Only that reset is skipped (CEF patch content_main_654986). Helper processes still
+        //   run it, because they start through `execute_process`, not `cef_initialize`.
+        // - Crash reports on macOS use Mach exception ports (Crashpad), not POSIX handlers. CEF's
+        //   release build has no in-process stack dumping (official builds disable it).
+        // - SIGTERM, SIGINT and SIGHUP keep the dispositions the app inherited (normally
+        //   SIG_DFL, so they still end the app). Chrome's graceful-shutdown handlers for them
+        //   are installed later by the browser main parts and do not depend on this flag.
+        // - SIGPIPE stays ignored: Rust's runtime ignores it before `main`.
+        disable_signal_handlers: 1,
         ..Default::default()
     };
 
@@ -189,15 +242,17 @@ pub(crate) fn start(options: StartOptions) -> Result<(), WebError> {
         *pending.borrow_mut() = Some(Box::new(move || {
             let mut app = app;
             INITIALIZE_CALLED.store(true, Ordering::Release);
-            if timed("cef_initialize (main thread blocked)", || {
+            let sigchld_before = sigchld_action();
+            let initialized = timed("cef_initialize (main thread blocked)", || {
                 initialize(
                     Some(args.as_main_args()),
                     Some(&settings),
                     Some(&mut app),
                     std::ptr::null_mut(),
                 )
-            }) != 1
-            {
+            });
+            log_sigchld(sigchld_before, sigchld_action());
+            if initialized != 1 {
                 let code = get_exit_code();
                 let why = format!("cef_initialize failed with exit code {code}");
                 tracing::error!(exit_code = code, "CEF failed to initialize");

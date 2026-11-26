@@ -177,7 +177,7 @@ async function run(a, b) {
     listed.ok
       ? listed.ok.threads
           .filter((t) => t.threadId === launched.ok?.threadId)
-          .map((t) => ({ title: t.title, chip: t.link.startsWith("[From the link](conn://thread/") }))
+          .map((t) => ({ title: t.title, chip: /^\[From the link\]\((?:conn:\/\/thread|t3-thread:\/\/v2)\//.test(t.link) }))
       : listed,
   );
   record("agent conn_environment_link: both url and environmentId", await ask({ url: b.origin, environmentId: b.id }));

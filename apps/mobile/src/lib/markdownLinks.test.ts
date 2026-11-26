@@ -79,6 +79,19 @@ describe("resolveMarkdownLinkPresentation", () => {
     });
   });
 
+  it("keeps thread links of both schemes as links, and drops other conn links", () => {
+    for (const href of [
+      "conn://thread/env-1/thr-9",
+      "t3-thread://v2/env-1/thr-9",
+      "t3-thread://v1/thr-9",
+    ]) {
+      expect(resolveMarkdownLinkPresentation(href), href).toEqual({ kind: "link", href });
+    }
+    for (const href of ["conn://thread/thr-9", "conn://app/welcome"]) {
+      expect(resolveMarkdownLinkPresentation(href), href).toEqual({ kind: "link", href: null });
+    }
+  });
+
   it("does not style app routes as file links", () => {
     expect(resolveMarkdownLinkPresentation("/chat/settings")).toEqual({
       kind: "link",

@@ -51,6 +51,16 @@ describe("resolveTimelineMinimapPreview", () => {
     expect(preview?.assistantText).toBe("Started a thread and Fix CI.");
   });
 
+  it("previews a conn://thread autolink as prose, not its URL", () => {
+    const preview = resolveTimelineMinimapPreview({
+      id: "turn-1",
+      rowIndex: 0,
+      userText: null,
+      assistantText: "Started <conn://thread/env-1/thread-1> and [Fix CI](conn://thread/env-1/t2).",
+    });
+    expect(preview?.assistantText).toBe("Started a thread and Fix CI.");
+  });
+
   it("previews a quote, a context chip and a file link in the user's message as their text", () => {
     const quote = serializeAssistantCitation({
       version: 1,

@@ -4,6 +4,7 @@ import { mFallback } from "gt-i18n";
 import type { MFunctionType } from "gt-i18n/types";
 
 import {
+  hasThreadLinks,
   formatHostedThreadLink,
   formatThreadLink,
   guessThreadLinkRef,
@@ -84,6 +85,75 @@ describe("thread links", () => {
     expect(parseThreadLinkHref("t3-thread://v2/env-1")).toBeNull();
     expect(parseThreadLinkHref("t3-thread://v2/env-1/")).toBeNull();
     expect(parseThreadLinkHref("t3-thread://v2//chat-1")).toBeNull();
+  });
+
+  it("reads conn://thread/<environment>/<thread>, with the ids as written", () => {
+    expect(parseThreadLinkHref("conn://thread/env-1/thr-9")).toEqual(ref("env-1", "thr-9"));
+    expect(parseThreadLinkHref("conn://thread/env-1/a%2Fb%41")).toEqual(ref("env-1", "a%2Fb%41"));
+    expect(parseThreadLinkHref("conn://thread/env-1/thread:a%3A1")).toEqual(
+      ref("env-1", "thread:a%3A1"),
+    );
+  });
+
+  it("reads a conn link as conn_desktop's parse_thread_link does", () => {
+    const expected = ref("env-1", "thr-9");
+    expect(parseThreadLinkHref("  conn://thread/env-1/thr-9/  ")).toEqual(expected);
+    expect(parseThreadLinkHref("conn://thread/env-1/thr-9?x=1#top")).toEqual(expected);
+    expect(parseThreadLinkHref("CONN://thread/env-1/thr-9")).toEqual(expected);
+    expect(parseThreadLinkHref("conn-dev://thread/env-1/thr-9")).toEqual(expected);
+  });
+
+  it("reads the conn and t3-thread schemes to the same link", () => {
+    expect(parseThreadLinkHref("conn://thread/env-1/thr-9")).toEqual(
+      parseThreadLinkHref("t3-thread://v2/env-1/thr-9"),
+    );
+    expect(parseThreadLinkHref("t3-thread://v1/thr-9")).toEqual(v1("thr-9"));
+  });
+
+  it("rejects what is not a whole conn thread link", () => {
+    for (const href of [
+      "conn://thread/thr-9",
+      "conn://thread//thr-9",
+      "conn://thread/env-1/",
+      "conn://thread/env-1/a/b",
+      "conn://thread/",
+      "conn://workspace/env-1/thr-9",
+      "conn://app/welcome",
+      "see conn://thread/env-1/thr-9",
+      "conn://thread/env-1/thr-9)",
+      "conn://thread/env-1/thr 9",
+      "https://example.com/thread/env-1/thr-9",
+    ]) {
+      expect(parseThreadLinkHref(href), href).toBeNull();
+    }
+  });
+
+  it("finds conn links outside code, in each form the server writes", () => {
+    expect(hasThreadLinks("See [A](conn://thread/there/t1).")).toBe(true);
+    expect(hasThreadLinks("See [A](https://example.com).")).toBe(false);
+    expect(
+      threadLinkRefs(
+        [
+          "[A](conn://thread/there/t1) <conn://thread/there/t2> [B](<conn://thread/there/t3>)",
+          "`[no](conn://thread/there/t4)` [other](https://example.com/conn://thread/there/t5)",
+          "[old](t3-thread://v2/there/t6) [bad](conn://thread/there)",
+        ].join("\n"),
+        local,
+      ),
+    ).toEqual([ref("there", "t1"), ref("there", "t2"), ref("there", "t3"), ref("there", "t6")]);
+  });
+
+  it("relabels a conn link by its thread's title, and makes one without a thread plain text", () => {
+    const title = titlesIn({ there: { t1: "Fresh title" } });
+    expect(
+      relabelThreadLinks(
+        "[Old](conn://thread/there/t1) and <conn://thread/there/t1>",
+        local,
+        title,
+      ),
+    ).toBe("[Fresh title](t3-thread://v2/there/t1) and [Fresh title](t3-thread://v2/there/t1)");
+    // A conn link names its environment, so a thread that cannot be found is plain text, as for t3-thread v2.
+    expect(relabelThreadLinks("[Old](conn://thread/there/t2)", local, () => undefined)).toBe("Old");
   });
 
   it("resolves a percent-encoded id when the id as written names no thread", () => {

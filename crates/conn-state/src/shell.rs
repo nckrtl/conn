@@ -905,10 +905,11 @@ impl ShellState {
             .iter()
             .chain(&self.archived_threads)
             .chain(&self.older.threads)
+            // Runs on every sidebar render over thousands of threads: cheapest test first.
             .filter(|t| {
-                in_scope(&sidebar_project_key(t))
+                is_older_settled(t, cut.before_ms)
+                    && in_scope(&sidebar_project_key(t))
                     && !self.foreign_of.contains_key(&t.id)
-                    && is_older_settled(t, cut.before_ms)
             })
             .count();
         usize::try_from(counted - i64::try_from(held).unwrap_or(i64::MAX)).unwrap_or(0)

@@ -2637,7 +2637,7 @@ pub(super) fn outline_button_surface(
 /// `<model> · <effort>` for a subagent card, for example `Opus 5.5 · medium`. The model name is the
 /// composer's trigger label; the effort is the composer's effort label, lowercased. A model the
 /// catalog does not list shows its slug and the raw reasoning option.
-fn subagent_model_text(
+pub(crate) fn subagent_model_text(
     catalog: &conn_state::providers::ModelCatalog,
     model: &conn_state::SubagentModel,
 ) -> Option<String> {

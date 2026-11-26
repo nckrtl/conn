@@ -498,6 +498,27 @@ pub struct SubagentModel {
 }
 
 impl SubagentModel {
+    /// The model of a thread that runs on `instance_id` with `selection` (a thread shell's
+    /// `modelSelection`), for rows that have no subagent record.
+    #[must_use]
+    pub fn from_selection(instance_id: &str, selection: &conn_contract::ModelSelection) -> Self {
+        let options = selection
+            .options
+            .as_ref()
+            .and_then(Option::as_ref)
+            .map(model_option_strings)
+            .unwrap_or_default();
+        Self {
+            model: selection
+                .model
+                .as_str()
+                .map(str::to_owned)
+                .and_then(|m| non_empty(Some(m))),
+            instance_id: non_empty(Some(instance_id.to_owned())),
+            options,
+        }
+    }
+
     fn from_subagent(subagent: &conn_contract::OrchestrationV2Subagent) -> Self {
         let selection = subagent.model_selection.as_ref();
         let model = non_empty(subagent.model.clone()).or_else(|| {

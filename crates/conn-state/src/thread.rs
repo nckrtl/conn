@@ -50,7 +50,7 @@ pub use conn_contract::{
     OrchestrationV2TurnItemStatus as TurnItemStatus,
 };
 
-use crate::agent_wakeups::ScheduleCall;
+use crate::agent_wakeups::{ScheduleCall, ScheduleLedger};
 use crate::review_comment::{ReviewComment, review_comments_for_message};
 use crate::timeline::{
     TurnCheckpointFile, UserInputAnswer, UserInputOption, UserInputQuestion,
@@ -597,9 +597,10 @@ pub struct ThreadState {
     pub subagent_models: HashMap<String, SubagentModel>,
     /// The subagent id behind each `subagent` timeline entry, by entry id.
     pub subagent_of_entry: HashMap<String, String>,
-    /// The agent's scheduling tool calls (`ScheduleWakeup`, `CronCreate`, `CronDelete`), by item
-    /// id. A timeline row drops the call's input; [`Self::agent_wakeups`] needs it.
-    pub(crate) schedule_calls: HashMap<String, ScheduleCall>,
+    /// What [`Self::agent_wakeups`] keeps of the agent's scheduling tool calls (`ScheduleWakeup`,
+    /// `CronCreate`, `CronDelete`). A timeline row drops the call's input, so the calls are read
+    /// as they arrive, and the ledger drops the ones that no longer matter.
+    pub(crate) schedule_calls: ScheduleLedger,
     /// Changes whenever [`Self::apply`], [`Self::apply_projection`], or
     /// [`Self::prepend_history_page`] runs, and is unique across all thread states,
     /// so views can skip re-syncing a timeline that did not change.
@@ -1033,7 +1034,7 @@ impl ThreadState {
             if let ProjectionTurnItem::DynamicTool(tool) = &item
                 && let Some(call) = ScheduleCall::from_item(tool)
             {
-                self.schedule_calls.insert(tool.id.clone(), call);
+                self.schedule_calls.observe(&tool.id, Some(call));
             }
             if let ProjectionTurnItem::Subagent(sub) = &item {
                 self.subagent_of_entry
@@ -1084,7 +1085,15 @@ impl ThreadState {
         self.history_cursor = cursor;
         self.has_more_history = false;
         self.loading_earlier = false;
+        // The caller may still set `has_more_history`: keep the deletes an older page needs.
+        self.schedule_calls.prune(&self.run_timings, true);
         self.reconcile_queued_runs(true);
+    }
+
+    /// Drops the scheduling calls that no longer matter (see [`ScheduleLedger`]).
+    fn prune_schedule_calls(&mut self) {
+        self.schedule_calls
+            .prune(&self.run_timings, self.has_more_history);
     }
 
     /// Replaces this thread's timeline from an [`conn_contract::OrchestrationV2ThreadDetailSnapshot`],
@@ -1100,6 +1109,7 @@ impl ThreadState {
         );
         self.has_more_history = snapshot.has_more_history.unwrap_or(false);
         self.loading_earlier = false;
+        self.prune_schedule_calls();
     }
 
     /// Prepends one older history page returned by `GET /api/orchestration/threads/:id/history`
@@ -1122,6 +1132,7 @@ impl ThreadState {
 
         let mut prepended = Vec::with_capacity(rows.len());
         let mut prepended_index: HashMap<String, usize> = HashMap::with_capacity(rows.len());
+        let mut older_calls: Vec<(String, ScheduleCall)> = Vec::new();
 
         for row in rows {
             let item = row.item;
@@ -1155,8 +1166,8 @@ impl ThreadState {
             if let Some((id, detail)) = feed_detail {
                 self.feed_details.entry(id).or_insert(detail);
             }
-            if let Some((id, call)) = schedule_call {
-                self.schedule_calls.entry(id).or_insert(call);
+            if let Some(call) = schedule_call {
+                older_calls.push(call);
             }
             if let Some((id, request_id, details)) = approval_pair {
                 self.approval_details.entry(id.clone()).or_insert(details);
@@ -1177,6 +1188,7 @@ impl ThreadState {
             }
         }
 
+        self.schedule_calls.observe_older(older_calls);
         let prepended_count = prepended.len();
         if prepended_count > 0 {
             self.history_prefix_len += prepended_count;
@@ -1187,6 +1199,7 @@ impl ThreadState {
         self.history_cursor = page.next_cursor;
         self.has_more_history = page.has_more_history;
         self.loading_earlier = false;
+        self.prune_schedule_calls();
         self.revision = next_revision();
         prepended_count
     }
@@ -1245,6 +1258,7 @@ impl ThreadState {
                 );
                 self.has_more_history = snapshot.has_more_history.unwrap_or(false);
                 self.loading_earlier = false;
+                self.prune_schedule_calls();
                 true
             }
             ThreadStreamItem::Event(event_item) => {
@@ -1469,6 +1483,7 @@ impl ThreadState {
             DomainEvent::RunCreated(ev) => {
                 self.record_run(&ev.payload);
                 self.record_run_timing(&ev.payload);
+                self.prune_schedule_calls();
                 let next_working = self.runs.values().any(is_tracked_run_working);
                 let working_changed = self.working != next_working;
                 self.working = next_working;
@@ -1478,6 +1493,7 @@ impl ThreadState {
             DomainEvent::RunUpdated(ev) => {
                 self.record_run(&ev.payload);
                 self.record_run_timing(&ev.payload);
+                self.prune_schedule_calls();
                 let next_working = self.runs.values().any(is_tracked_run_working);
                 let working_changed = self.working != next_working;
                 self.working = next_working;
@@ -1525,15 +1541,13 @@ impl ThreadState {
                     self.subagent_of_entry
                         .insert(i.id.clone(), i.subagent_id.clone());
                 }
-                if let TurnItem::DynamicTool(tool) = &ev.payload {
-                    match ScheduleCall::from_item(tool) {
-                        Some(call) => {
-                            self.schedule_calls.insert(tool.id.clone(), call);
-                        }
-                        None => {
-                            self.schedule_calls.remove(&tool.id);
-                        }
-                    }
+                if let TurnItem::DynamicTool(tool) = &ev.payload
+                    && let Some(call) = ScheduleCall::from_item(tool)
+                {
+                    self.schedule_calls.observe(&tool.id, Some(call));
+                    self.prune_schedule_calls();
+                } else if matches!(&ev.payload, TurnItem::DynamicTool(_)) {
+                    self.schedule_calls.forget(&item_id);
                 }
                 let timing = extract_turn_item_timing(&ev.payload);
                 self.entry_timings.insert(item_id.clone(), timing);
@@ -1567,6 +1581,7 @@ impl ThreadState {
                     changed |= upsert_entry(&mut self.entries, entry);
                     changed
                 } else {
+                    self.schedule_calls.forget(&item_id);
                     remove_entry(&mut self.entries, &item_id) || compaction_changed
                 }
             }

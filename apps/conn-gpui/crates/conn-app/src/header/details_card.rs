@@ -1378,7 +1378,7 @@ pub(crate) fn bound_tasks<'a>(
 /// Conn's `relativeLabel` for a time `diff_secs` from now: `in 5m`, `in 3h`, `2h ago`.
 fn relative_label(diff_secs: i64) -> String {
     if diff_secs <= 0 {
-        let elapsed = -diff_secs;
+        let elapsed = diff_secs.saturating_neg();
         return match elapsed {
             0..60 => "just now".to_owned(),
             60..3_600 => format!("{}m ago", elapsed / 60),
@@ -1386,7 +1386,7 @@ fn relative_label(diff_secs: i64) -> String {
             _ => format!("{}d ago", elapsed / 86_400),
         };
     }
-    let minutes = (diff_secs + 59) / 60;
+    let minutes = diff_secs.saturating_add(59) / 60;
     if minutes < 2 {
         return "in under a minute".to_owned();
     }
@@ -1663,6 +1663,9 @@ pub(crate) fn thread_wakeups(props: &DetailsCardProps<'_>, now_secs: i64) -> Vec
         now_ms: now_secs.saturating_mul(1_000),
         pending,
         provider: &props.thread.provider_instance_id,
+        driver: props
+            .catalog
+            .driver_for_instance(&props.thread.provider_instance_id),
     })
 }
 
@@ -1684,7 +1687,7 @@ fn wakeup_when(wakeup: &AgentWakeup, now_secs: i64) -> String {
             .clone()
             .unwrap_or_else(|| "time unknown".to_owned());
     };
-    let diff = due_ms.div_euclid(1_000) - now_secs;
+    let diff = due_ms.div_euclid(1_000).saturating_sub(now_secs);
     let mut when = if diff <= 0 {
         "due now".to_owned()
     } else {

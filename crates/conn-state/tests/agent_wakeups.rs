@@ -116,6 +116,7 @@ fn wakeups(
         now_ms: t0_plus(now_secs),
         pending,
         provider,
+        driver: None,
     })
 }
 
@@ -548,4 +549,209 @@ fn a_snapshot_and_a_history_page_carry_the_calls_too() {
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].title, "From history");
     }
+}
+
+/// A reported time or a delay that overflows the due-time math must not panic: a debug build
+/// would crash the app on that thread. The row falls back to the estimate, or has no time.
+#[test]
+fn an_overflowing_reported_time_or_delay_never_panics() {
+    let roster = roster_with_wakeup();
+    let huge = [
+        json!(1e300),
+        json!(u64::MAX),
+        json!(i64::MAX),
+        json!(9.3e18),
+        json!(f64::MAX),
+        json!("1e300"),
+    ];
+    for value in huge {
+        // `scheduledFor` is no time: the delay gives the estimate.
+        let state = timeline(vec![wake(
+            1,
+            0,
+            "run-1",
+            json!({"delaySeconds": 270, "reason": "r", "prompt": "p"}),
+            json!({ "scheduledFor": value }),
+        )]);
+        for now in [0, i64::MAX / 2_000, i64::MIN / 2_000] {
+            let rows = wakeups(&state, now, &roster, "claudeAgent");
+            assert!(rows.len() <= 1, "{rows:?}");
+        }
+        let rows = wakeups(&state, 60, &roster, "claudeAgent");
+        if value.is_number() {
+            assert_eq!(rows.len(), 1, "{value}: {rows:?}");
+            assert_eq!(rows[0].due_ms, Some(t0_plus(270)), "{value}");
+            assert!(rows[0].estimated, "{value}");
+        }
+
+        // No delay either: a row with no time, never a wrong one.
+        let state = timeline(vec![wake(
+            1,
+            0,
+            "run-1",
+            json!({"reason": "r", "prompt": "p"}),
+            json!({ "scheduledFor": value }),
+        )]);
+        let rows = wakeups(&state, 60, &roster, "claudeAgent");
+        for row in rows {
+            assert_eq!(row.due_ms, None, "{value}");
+        }
+    }
+
+    // A huge delay is clamped to an hour, as a huge string is.
+    for delay in [
+        json!(1e300),
+        json!(u64::MAX),
+        json!(i64::MAX),
+        json!("99999999999999999999999"),
+    ] {
+        let state = timeline(vec![wake(
+            1,
+            0,
+            "run-1",
+            json!({ "delaySeconds": delay, "reason": "r", "prompt": "p" }),
+            json!("ok"),
+        )]);
+        let rows = wakeups(&state, 60, &roster, "claudeAgent");
+        assert_eq!(rows.len(), 1, "{delay}: {rows:?}");
+        assert_eq!(rows[0].due_ms, Some(t0_plus(3_600)), "{delay}");
+    }
+    // A delay that is not a finite number has no time.
+    let state = timeline(vec![wake(
+        1,
+        0,
+        "run-1",
+        json!({"delaySeconds": "1e400", "reason": "r", "prompt": "p"}),
+        json!("ok"),
+    )]);
+    let rows = wakeups(&state, 60, &roster, "claudeAgent");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].due_ms, None);
+}
+
+#[test]
+fn a_sleep_that_overflows_or_is_no_time_makes_no_timer() {
+    let command_id = "turn-item:provider:claudeAgent:native-item:toolu_sleep";
+    let state = timeline(vec![item_event(
+        1,
+        json!({
+            "id": command_id, "type": "command_execution", "status": "running",
+            "input": "sleep", "output": "", "startedAt": T0, "updatedAt": T0
+        }),
+    )]);
+    for command in [
+        "sleep 1e300",
+        "sleep inf",
+        "sleep infinity",
+        "sleep -5",
+        "sleep 18446744073709551615",
+        "sleep 99999999999999999999999999",
+        "sleep 99999999999999d",
+        "sleep nan",
+    ] {
+        let tasks = pending(json!([{
+            "taskId": "t", "kind": "command", "awaited": true,
+            "command": command, "itemId": command_id
+        }]));
+        let rows = wakeups(&state, 60, &tasks, "claudeAgent");
+        assert!(rows.is_empty(), "{command}: {rows:?}");
+    }
+    // A sleep of a year still is a timer, with a time that does not overflow.
+    let tasks = pending(json!([{
+        "taskId": "t", "kind": "command", "awaited": true,
+        "command": "sleep 365d", "itemId": command_id
+    }]));
+    let rows = wakeups(&state, 60, &tasks, "claudeAgent");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].due_ms, Some(t0_plus(365 * 86_400)));
+}
+
+/// The rows come from what the thread kept as the calls arrived, not from a scan of the timeline:
+/// with the timeline rows gone, the same rows show, and a new call updates them.
+#[test]
+fn the_rows_are_worked_out_as_calls_arrive_not_from_the_timeline() {
+    let roster = roster_with_wakeup();
+    let mut state = timeline(vec![
+        wake(
+            1,
+            0,
+            "run-1",
+            json!({"delaySeconds": 270, "reason": "first", "prompt": "p"}),
+            json!("ok"),
+        ),
+        cron(
+            2,
+            1,
+            "run-1",
+            json!({"cron": "*/5 * * * *", "prompt": "poll"}),
+            json!({"id": "job-1", "humanSchedule": "Every 5 minutes"}),
+        ),
+    ]);
+    let first = wakeups(&state, 10, &roster, "claudeAgent");
+    assert_eq!(first.len(), 2, "{first:?}");
+    // Rendering again reads the same result, and the timeline is not read at all.
+    state.entries.clear();
+    assert_eq!(wakeups(&state, 10, &roster, "claudeAgent"), first);
+
+    state.apply(wake(
+        3,
+        20,
+        "run-1",
+        json!({"delaySeconds": 600, "reason": "second", "prompt": "p"}),
+        json!("ok"),
+    ));
+    let next = wakeups(&state, 30, &roster, "claudeAgent");
+    let titles: Vec<&str> = next.iter().map(|row| row.title.as_str()).collect();
+    assert_eq!(titles, ["second", "poll"], "{next:?}");
+}
+
+#[test]
+fn a_long_loop_keeps_one_call() {
+    let roster = roster_with_wakeup();
+    let mut state = ThreadState::new(THREAD);
+    for step in 0..300 {
+        state.apply(wake(
+            step + 1,
+            step,
+            "run-1",
+            json!({"delaySeconds": 270, "reason": format!("step {step}"), "prompt": "/loop"}),
+            json!("ok"),
+        ));
+    }
+    let rows = wakeups(&state, 300, &roster, "claudeAgent");
+    assert_eq!(rows.len(), 1, "{rows:?}");
+    assert_eq!(rows[0].title, "step 299");
+}
+
+#[test]
+fn only_a_claude_driver_makes_the_roster_the_authority() {
+    // A Claude instance with a custom id: the driver says it is Claude, so an empty roster
+    // means the wakeup was cancelled.
+    let state = timeline(vec![wake(
+        1,
+        0,
+        "run-1",
+        json!({"delaySeconds": 270, "reason": "r", "prompt": "p"}),
+        json!("ok"),
+    )]);
+    let ctx = |provider: &'static str, driver: Option<&'static str>| WakeupContext {
+        now_ms: t0_plus(60),
+        pending: &[],
+        provider,
+        driver,
+    };
+    assert!(
+        state
+            .agent_wakeups(&ctx("work_account", Some("claudeAgent")))
+            .is_empty()
+    );
+    // A non-Claude instance whose id mentions Claude keeps its wakeup.
+    assert_eq!(
+        state
+            .agent_wakeups(&ctx("claude_proxy", Some("codex")))
+            .len(),
+        1
+    );
+    // With no driver known, the id decides, as before.
+    assert!(state.agent_wakeups(&ctx("claudeAgent", None)).is_empty());
 }

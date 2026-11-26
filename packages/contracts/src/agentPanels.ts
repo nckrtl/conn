@@ -9,14 +9,7 @@ import { PreviewTabId } from "./preview.ts";
 // panel. Each panel kind may carry its own arguments (the browser a URL, the database
 // panel a query), so panel-specific actions grow from here.
 
-const AGENT_PANEL_KINDS = [
-  "browser",
-  "database",
-  "mcp",
-  "diff",
-  "files",
-  "terminal",
-] as const;
+const AGENT_PANEL_KINDS = ["browser", "database", "mcp", "diff", "files", "terminal"] as const;
 export const AgentPanelKind = Schema.Literals(AGENT_PANEL_KINDS);
 export type AgentPanelKind = typeof AgentPanelKind.Type;
 

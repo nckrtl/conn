@@ -240,11 +240,22 @@ final class QueuedMessagesUITests: XCTestCase {
         field.tap()
         field.typeText("Draft")
         let message = app.staticTexts.containing(NSPredicate(format: "label BEGINSWITH 'Step 3'")).firstMatch
+        // Pinned to the end above the keyboard, the message sits just off screen: a short drag down
+        // in the feed (away from the keyboard) brings it into view. Off-screen cells aren't in the tree.
+        if !message.exists {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2))
+                .press(forDuration: 0.05, thenDragTo: app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.4)),
+                       withVelocity: .slow, thenHoldForDuration: 0.3)
+        }
         XCTAssertTrue(message.waitForExistence(timeout: 5), "user message")
+        XCTAssertTrue(app.keyboards.firstMatch.exists, "the keyboard is still up")
         message.press(forDuration: 1.2)
         XCTAssertTrue(app.buttons["Copy"].waitForExistence(timeout: 5), "plain message menu")
         app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.12)).tap()
         XCTAssertTrue(app.buttons["Copy"].waitForNonExistence(timeout: 3))
+        // Back to the end, where the queue sits above the composer.
+        let jump = app.buttons["thread.scrollToEnd"]
+        if jump.exists { jump.tap(); Thread.sleep(forTimeInterval: 0.8) }
         openMenu("run:qbusy:q0")
         shot("menu-keyboard-up")
     }

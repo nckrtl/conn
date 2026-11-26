@@ -53,7 +53,9 @@ struct QueuedMessagesSection: View {
     @Bindable var store: CoreStore
     /// A question or approval holds the composer, so Edit waits (mobile `editBlocked`).
     let editBlocked: Bool
-    @State private var expanded = false
+    @Environment(\.feedExpansion) private var expansion
+    @State private var localExpanded = false
+    private var expanded: Bool { expansion?.isOpen("queued:" + threadId) ?? localExpanded }
 
     /// Desktop `QUEUE_VISIBLE_ROWS`: a longer queue shows the first two and the toggle.
     static let visibleRows = 3
@@ -91,7 +93,9 @@ struct QueuedMessagesSection: View {
             if collapsible {
                 // No animation: growing rows under the feed's end pin made the pin and the jump
                 // circle's inset chase each other mid-animation.
-                QueuedToggle(total: rows.count, expanded: expanded) { expanded.toggle() }
+                QueuedToggle(total: rows.count, expanded: expanded) {
+                    if let expansion { expansion.toggle("queued:" + threadId) } else { localExpanded.toggle() }
+                }
             }
         }
         .frame(maxWidth: .infinity, alignment: .trailing)

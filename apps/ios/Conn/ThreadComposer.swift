@@ -2,10 +2,9 @@ import DesignKit
 import SwiftUI
 import UIKit
 
-/// The thread's bottom bar: the floating control, the approval and question cards, and the
-/// composer. It is the only part of the thread screen that reads the draft, so typing re-runs this
-/// body and not the feed's.
-struct ThreadComposerArea<Floating: View>: View {
+/// The thread's bottom bar: the approval and question cards, and the composer. It is the only part
+/// of the thread screen that reads the draft, so typing re-runs this body and not the feed's.
+struct ThreadComposerArea: View {
     @Bindable var store: CoreStore
     let threadId: String
     let pendingApprovals: [FfiPendingApproval]
@@ -19,7 +18,6 @@ struct ThreadComposerArea<Floating: View>: View {
     let modelLabel: String?
     let onModelChip: () -> Void
     let onSendReply: () -> Void
-    @ViewBuilder let floating: () -> Floating
 
     @Environment(\.connTheme) private var theme
     /// The approval whose answer is on its way; its buttons stay off until the server answers.
@@ -90,11 +88,8 @@ struct ThreadComposerArea<Floating: View>: View {
     }
 
     var body: some View {
-        // Merge spacing 8: below the 12pt gap kept between the floating control and the composer, so
-        // the jump circle never blends into the prompt box's glass, also as the box grows.
         GlassEffectContainer(spacing: 8) {
           VStack(alignment: .leading, spacing: 0) {
-            floating()
           VStack(alignment: .leading, spacing: 10.5) {
             if let historyNotice {
                 Text(historyNotice).font(.kitDetail)

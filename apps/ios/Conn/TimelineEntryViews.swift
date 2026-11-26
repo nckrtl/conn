@@ -26,9 +26,13 @@ struct WorkGroupCard: View, Equatable {
     var clockOffsetMs: Int64 = 0
     @Environment(\.connTheme) private var theme
     @Environment(\.colorScheme) private var appearance
-    @State private var expanded = false
+    @Environment(\.feedExpansion) private var expansion
+    @State private var localExpanded = false
 
     @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
+
+    /// Kept by the feed, so the log stays open when its row scrolls away and back.
+    private var expanded: Bool { expansion?.isOpen("wg:" + group.id) ?? localExpanded }
 
     private var title: String {
         if let ms = group.durationMs, ms > 0 {
@@ -56,7 +60,7 @@ struct WorkGroupCard: View, Equatable {
             } else {
                 Button {
                     withAnimation(Kit.Motion.fast) {
-                        expanded.toggle()
+                        if let expansion { expansion.toggle("wg:" + group.id) } else { localExpanded.toggle() }
                     }
                 } label: {
                     // No fixed line box, so the chevron centres on the text's own glyphs.
@@ -98,14 +102,14 @@ struct WorkGroupCard: View, Equatable {
                             let line = text.split(whereSeparator: \.isNewline).first.map {
                                 $0.trimmingCharacters(in: .whitespaces)
                             }
-                            WorkLogRow(title: line.flatMap { $0.isEmpty ? nil : $0 } ?? (streaming ? "Thinking…" : "Thought"),
+                            WorkLogRow(key: entry.entryId, title: line.flatMap { $0.isEmpty ? nil : $0 } ?? (streaming ? "Thinking…" : "Thought"),
                                        status: streaming ? .running : .completed, duration: nil,
                                        detail: text.isEmpty ? nil : text, monospaced: false, size: size,
                                        glyph: "work-thinking")
                         case let .tool(_, kind, title, detail, status, _, _, durationMs):
                             // Conn's own MCP tools get desktop's label (`conn_tools`).
                             let conn = title.isEmpty ? nil : connToolLabel(title: title)
-                            WorkLogRow(title: conn?.displayName ?? (title.isEmpty ? kind : title), status: status,
+                            WorkLogRow(key: entry.entryId, title: conn?.displayName ?? (title.isEmpty ? kind : title), status: status,
                                        duration: workDurationLabel(durationMs),
                                        detail: detail?.isEmpty == false ? detail : nil, monospaced: true, size: size,
                                        glyph: WorkLogIcon.glyph(kind: kind, title: title, conn: conn?.icon))
@@ -562,7 +566,7 @@ private struct QuestionRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: size * 0.85 - 1) {
             VStack(alignment: .leading, spacing: 0) {
-                WorkLogRow(title: "Input requested", status: pending ? .running : .completed, duration: nil,
+                WorkLogRow(key: "question:\(createdAt ?? ""):\(answersText.hashValue)", title: "Input requested", status: pending ? .running : .completed, duration: nil,
                            detail: answers.isEmpty ? nil : answersText, monospaced: false, size: size,
                            glyph: "work-question")
                 Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
@@ -728,6 +732,8 @@ func durationText(_ ms: UInt64) -> String {
 /// One step of an expanded "Worked for" log (lab `.m-work-log li`): status glyph, title, duration and a
 /// chevron when there is detail to show; a tap reveals the detail under the row.
 private struct WorkLogRow: View {
+    /// The step's entry id, for the feed's expansion state.
+    let key: String
     let title: String
     let status: FfiItemStatus
     let duration: String?
@@ -737,13 +743,17 @@ private struct WorkLogRow: View {
     /// Desktop's icon for the step kind; shown unless the step runs or failed.
     var glyph: String? = nil
     @Environment(\.connTheme) private var theme
-    @State private var open = false
+    @Environment(\.feedExpansion) private var expansion
+    @State private var localOpen = false
+    private var open: Bool { expansion?.isOpen("log:" + key) ?? localOpen }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Button {
                 guard detail != nil else { return }
-                withAnimation(Kit.Motion.fast) { open.toggle() }
+                withAnimation(Kit.Motion.fast) {
+                    if let expansion { expansion.toggle("log:" + key) } else { localOpen.toggle() }
+                }
             } label: {
                 HStack(spacing: 10) {
                     Group {

@@ -81,7 +81,6 @@ private struct AttachmentTile: View {
     /// The message's only image: full width at its own aspect ratio, at most `singleImageMaxHeight` tall.
     var single = false
     @Environment(\.connTheme) private var theme
-    @State private var tileWidth: CGFloat = 0
     @State private var loaded: UIImage?
     @State private var preview: URL?
     @State private var directory: URL?
@@ -108,11 +107,10 @@ private struct AttachmentTile: View {
 
     private static let singleImageMaxHeight: CGFloat = 320
 
-    /// 4:3 in a grid. A single image keeps its own ratio, but never taller than the cap at this width.
+    /// 4:3 in a grid. A single image keeps its own ratio; the tile caps its height.
     private var imageRatio: CGFloat {
         guard single, let image = thumbnail, image.size.height > 0 else { return 4 / 3 }
-        let natural = image.size.width / image.size.height
-        return tileWidth > 0 ? max(natural, tileWidth / Self.singleImageMaxHeight) : natural
+        return image.size.width / image.size.height
     }
 
     var body: some View {
@@ -122,13 +120,20 @@ private struct AttachmentTile: View {
                     .onDisappear { player.pause() }
             } else if file.isImage {
                 Button { Task { await openFile() } } label: {
-                    Color.clear.aspectRatio(imageRatio, contentMode: .fit)
-                        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { tileWidth = $0 }
+                    // The ratio sets the height from the width, the frame stops a tall image at
+                    // the cap, and the image fills (and is cropped to) that tile.
+                    Color.clear
+                        .aspectRatio(imageRatio, contentMode: .fit)
+                        .frame(maxWidth: .infinity, maxHeight: single ? Self.singleImageMaxHeight : nil)
                         .overlay {
                         if let image = thumbnail {
-                            Image(uiImage: image).resizable().scaledToFill()
+                            Image(uiImage: image).resizable().scaledToFill().allowsHitTesting(false)
                         } else { fileLabel }
-                    }.clipped()
+                    }
+                    .clipped()
+                    // `clipped` only clips drawing: the filled image's overflow still took taps
+                    // meant for the message text. Only the tile itself opens the image.
+                    .contentShape(Rectangle())
                 }
             } else {
                 Button {

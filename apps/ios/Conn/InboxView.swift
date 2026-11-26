@@ -41,7 +41,7 @@ struct InboxView: View {
         }
     }
 
-    private struct ScopedRow: Identifiable {
+    struct ScopedRow: Identifiable {
         let thread: FfiThreadSummary
         let owner: CoreStore
         let project: FfiProject?
@@ -49,54 +49,15 @@ struct InboxView: View {
     }
 
     private func inboxList() -> some View {
-        let owners = store.inboxOwners.filter { environmentFilter == nil || $0.scope == environmentFilter }
-        let projectChoices = owners.reduce(into: [String: String]()) { choices, owner in
-            guard let snapshot = owner.shell else { return }
-            for project in snapshot.projects { choices[project.id] = project.title }
-            let hidden = Set(snapshot.hiddenThreadIds)
-            for thread in snapshot.threads where !hidden.contains(thread.id) {
-                if let slug = thread.orbitProjectSlug { choices[thread.sidebarProjectKey] = slug }
-            }
-        }
-        let rows = inboxRows(owners: owners)
+        let owners = Self.owners(store, environmentFilter: environmentFilter)
+        let projectChoices = Self.projectChoices(owners)
+        let rows = Self.rows(owners: owners, projectFilter: selectedProjectFilter, query: searchQuery)
         let active = rows.filter { !$0.thread.settled }
         let settled = rows.filter { $0.thread.settled }
         let paged = owners.filter { ($0.shell?.olderSettledCount ?? 0) > 0 }
         let missing = paged.reduce(0) { $0 + Int($1.shell?.olderSettledCount ?? 0) }
+        // The title, count and filter live in the navigation bar (`WorkspaceRootView.rootHeader`).
         return List {
-            ZStack(alignment: .trailing) {
-                VStack(spacing: 0) {
-                    Text("Threads").font(.system(size: 18, weight: .medium)).frame(height: 20)
-                    Text("\(rows.count) \(rows.count == 1 ? "thread" : "threads")")
-                        .font(.system(size: 12)).frame(height: 16)
-                        .foregroundStyle(theme.mutedForeground)
-                        .accessibilityIdentifier("inbox.threadCount")
-                }.frame(maxWidth: .infinity)
-                Menu {
-                    Picker("Environments", selection: $environmentFilter) {
-                        Text("All environments").tag(nil as String?)
-                        Text(store.serverURL.flatMap { URL(string: $0)?.host } ?? "Local").tag(Optional(""))
-                        ForEach(store.linked.keys.sorted(), id: \.self) { scope in
-                            Text(store.linked[scope]?.displayName ?? scope).tag(Optional(scope))
-                                .accessibilityIdentifier("inbox.environment." + (store.linked[scope]?.fleetID ?? store.linked[scope]?.environmentId ?? scope))
-                        }
-                    }
-                    .pickerStyle(.inline)
-                    Picker("Projects", selection: $selectedProjectFilter) {
-                        Text("All projects").tag(nil as String?)
-                        ForEach(projectChoices.keys.sorted { (projectChoices[$0] ?? $0, $0) < (projectChoices[$1] ?? $1, $1) }, id: \.self) { key in
-                            Text(projectChoices[key] ?? key).tag(Optional(key))
-                        }
-                    }
-                    .pickerStyle(.inline)
-                } label: {
-                    WorkspaceFilterIcon()
-                }.accessibilityLabel("Filter threads")
-            }.padding(.horizontal, 16).frame(height: 56).padding(.bottom, 10)
-            .listRowInsets(EdgeInsets())
-            .listRowSeparator(.hidden)
-            .listRowBackground(theme.background)
-
             if active.isEmpty && settled.isEmpty && missing == 0 {
                 if store.discoveredPrimary == store.environmentId && owners.allSatisfy({ $0.shell?.synchronized == true }) && store.discoveryError == nil { emptyState }
             } else {
@@ -148,7 +109,7 @@ struct InboxView: View {
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .background(theme.background)
-        // `HomeScreen` scroll edges: a soft top blur under the status bar, none at the bottom.
+        // The list runs under the navigation bar, softly blurred there; no edge at the bottom.
         .scrollEdgeEffectStyle(.soft, for: .top)
         .scrollEdgeEffectHidden(true, for: .bottom)
     }
@@ -275,7 +236,23 @@ struct InboxView: View {
         .listRowBackground(theme.background)
     }
 
-    private func inboxRows(owners: [CoreStore]) -> [ScopedRow] {
+    static func owners(_ store: CoreStore, environmentFilter: String?) -> [CoreStore] {
+        store.inboxOwners.filter { environmentFilter == nil || $0.scope == environmentFilter }
+    }
+
+    /// The project filter's choices: each project's title, keyed by its sidebar key.
+    static func projectChoices(_ owners: [CoreStore]) -> [String: String] {
+        owners.reduce(into: [String: String]()) { choices, owner in
+            guard let snapshot = owner.shell else { return }
+            for project in snapshot.projects { choices[project.id] = project.title }
+            let hidden = Set(snapshot.hiddenThreadIds)
+            for thread in snapshot.threads where !hidden.contains(thread.id) {
+                if let slug = thread.orbitProjectSlug { choices[thread.sidebarProjectKey] = slug }
+            }
+        }
+    }
+
+    static func rows(owners: [CoreStore], projectFilter: String?, query searchQuery: String) -> [ScopedRow] {
         let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         var seen = Set<String>()
         var rows: [ScopedRow] = []
@@ -285,7 +262,7 @@ struct InboxView: View {
             let projects = Dictionary(uniqueKeysWithValues: snapshot.projects.map { ($0.id, $0) })
             for thread in snapshot.threads where seen.insert(thread.id).inserted {
                 if query.isEmpty && hidden.contains(thread.id) { continue }
-                guard selectedProjectFilter == nil || thread.sidebarProjectKey == selectedProjectFilter else { continue }
+                guard projectFilter == nil || thread.sidebarProjectKey == projectFilter else { continue }
                 let project = projects[thread.projectId]
                 if !query.isEmpty && ![thread.title, thread.branch, thread.orbitProjectSlug ?? project?.title]
                     .compactMap({ $0 }).contains(where: { $0.lowercased().contains(query) }) { continue }
@@ -300,6 +277,37 @@ struct InboxView: View {
             if lhs.orderTimeMs != rhs.orderTimeMs { return lhs.orderTimeMs > rhs.orderTimeMs }
             return lhs.id.utf8.lexicographicallyPrecedes(rhs.id.utf8)
         }
+    }
+}
+
+/// The thread list's filter: environments and projects, behind the header's 44pt glass button.
+struct InboxFilterMenu: View {
+    @Bindable var store: CoreStore
+    @Binding var environmentFilter: String?
+    @Binding var selectedProjectFilter: String?
+
+    var body: some View {
+        let projectChoices = InboxView.projectChoices(InboxView.owners(store, environmentFilter: environmentFilter))
+        Menu {
+            Picker("Environments", selection: $environmentFilter) {
+                Text("All environments").tag(nil as String?)
+                Text(store.serverURL.flatMap { URL(string: $0)?.host } ?? "Local").tag(Optional(""))
+                ForEach(store.linked.keys.sorted(), id: \.self) { scope in
+                    Text(store.linked[scope]?.displayName ?? scope).tag(Optional(scope))
+                        .accessibilityIdentifier("inbox.environment." + (store.linked[scope]?.fleetID ?? store.linked[scope]?.environmentId ?? scope))
+                }
+            }
+            .pickerStyle(.inline)
+            Picker("Projects", selection: $selectedProjectFilter) {
+                Text("All projects").tag(nil as String?)
+                ForEach(projectChoices.keys.sorted { (projectChoices[$0] ?? $0, $0) < (projectChoices[$1] ?? $1, $1) }, id: \.self) { key in
+                    Text(projectChoices[key] ?? key).tag(Optional(key))
+                }
+            }
+            .pickerStyle(.inline)
+        } label: {
+            WorkspaceFilterIcon()
+        }.accessibilityLabel("Filter threads")
     }
 }
 

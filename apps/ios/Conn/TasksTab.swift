@@ -160,30 +160,19 @@ struct TasksTabView: View {
     let searchQuery: String
     @Environment(\.connTheme) private var theme
 
-    /// `TasksTopBar` height.
-    private let barHeight: CGFloat = 56
-
     var body: some View {
         let view = model.view(query: searchQuery)
-        ZStack(alignment: .top) {
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    content(view)
-                }
-                .padding(.top, barHeight + 8)
+        // The title, status line and lane filter live in the navigation bar (`WorkspaceRootView`).
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                content(view)
             }
-            .refreshable { await model.refresh() }
-            .background(theme.background)
-            .scrollEdgeEffectStyle(.soft, for: .top)
-            .scrollEdgeEffectHidden(true, for: .bottom)
-
-            TasksTopBar(
-                subtitle: model.isLoaded ? view.subtitle : nil,
-                lanes: view.lanes,
-                onSelectLane: { model.lane = $0 }
-            )
-            .frame(height: barHeight)
+            .padding(.top, 8)
         }
+        .refreshable { await model.refresh() }
+        .background(theme.background)
+        .scrollEdgeEffectStyle(.soft, for: .top)
+        .scrollEdgeEffectHidden(true, for: .bottom)
     }
 
     @ViewBuilder
@@ -228,44 +217,6 @@ struct TasksTabView: View {
                 }
             }
         }
-    }
-}
-
-/// Conn turns large titles off: the title stays centred in the bar, a status line under it.
-private struct TasksTopBar: View {
-    let subtitle: String?
-    let lanes: [FfiPhoneTaskLane]
-    let onSelectLane: (FfiTaskLane) -> Void
-    @Environment(\.connTheme) private var theme
-
-    var body: some View {
-        HStack(spacing: 0) {
-            Color.clear.frame(width: 44)
-            VStack(spacing: 0) {
-                Text("Tasks")
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundStyle(theme.foreground)
-                    .frame(height: 20)
-                if let subtitle {
-                    Text(subtitle)
-                        .font(.system(size: 12))
-                        .foregroundStyle(theme.mutedForeground)
-                        .accessibilityIdentifier("tasks.subtitle")
-                }
-            }
-            .lineLimit(1)
-            .frame(maxWidth: .infinity)
-            .allowsHitTesting(false)
-
-            Menu {
-                TaskLaneMenuItems(lanes: lanes, onSelect: onSelectLane)
-            } label: {
-                WorkspaceFilterIcon()
-            }
-            .accessibilityLabel("Filter tasks")
-            .accessibilityIdentifier("tasks.laneMenu")
-        }
-        .padding(.horizontal, 16)
     }
 }
 

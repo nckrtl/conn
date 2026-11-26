@@ -74,6 +74,54 @@ struct WorkspaceRootView: View {
         }
     }
 
+    /// The root screens keep the system navigation bar, as a thread does, so a push or pop never
+    /// hides or shows it: its glass and soft edge stay put and only these items cross-fade.
+    @ToolbarContentBuilder
+    private var rootHeader: some ToolbarContent {
+        ToolbarItem(placement: .principal) {
+            let header = rootTitle
+            NavigationHeaderTitle(title: header.title, subtitle: header.subtitle, subtitleID: header.subtitleID)
+        }
+        ToolbarItem(placement: .topBarTrailing) { rootFilter }
+            .sharedBackgroundVisibility(.hidden)
+    }
+
+    /// What the lists show: the search query only while searching.
+    private var listQuery: String { isSearching ? searchQuery : "" }
+
+    private var rootTitle: (title: String, subtitle: String?, subtitleID: String) {
+        switch selectedTab {
+        case .threads:
+            let owners = InboxView.owners(store, environmentFilter: environmentFilter)
+            let count = InboxView.rows(owners: owners, projectFilter: selectedProjectFilter, query: listQuery).count
+            return ("Threads", "\(count) \(count == 1 ? "thread" : "threads")", "inbox.threadCount")
+        case .tasks:
+            return ("Tasks", tasks.isLoaded ? tasks.view(query: listQuery).subtitle : nil, "tasks.subtitle")
+        case .pullRequests:
+            let selected = pullRequests.selected(query: listQuery)
+            let running = selected.filter { $0.status == "Checks running" }.count
+            return ("Pull Requests", "\(selected.count) open · \(running) in progress", "pr.subtitle")
+        }
+    }
+
+    @ViewBuilder
+    private var rootFilter: some View {
+        switch selectedTab {
+        case .threads:
+            InboxFilterMenu(store: store, environmentFilter: $environmentFilter, selectedProjectFilter: $selectedProjectFilter)
+        case .tasks:
+            Menu {
+                TaskLaneMenuItems(lanes: tasks.view(query: listQuery).lanes) { tasks.lane = $0 }
+            } label: {
+                WorkspaceFilterIcon()
+            }
+            .accessibilityLabel("Filter tasks")
+            .accessibilityIdentifier("tasks.laneMenu")
+        case .pullRequests:
+            PullRequestFilterMenu(model: pullRequests, searchQuery: listQuery)
+        }
+    }
+
     /// Mobile's switcher: 48pt tall with 4pt above and below, 64pt per item, 22pt icons; the selected
     /// item sits in a capsule of the text colour at 12% with its icon in the accent foreground.
     private var workspaceSwitcher: some View {
@@ -124,7 +172,8 @@ struct WorkspaceRootView: View {
                 Tab(value: WorkspaceSelection.search) { section(selectedTab, query: searchQuery) } label: { EmptyView() }
             }
             .tabViewStyle(.tabBarOnly)
-            .toolbar(.hidden, for: .navigationBar)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { rootHeader }
             .toolbar { if !isSearching { workspaceToolbar } }
             .toolbar(isSearching ? .hidden : .visible, for: .bottomBar)
             .navigationDestination(for: WorkspaceRoute.self) { route in
@@ -316,6 +365,30 @@ struct WorkspaceRootView: View {
             navigationPath = [route]
         }
         pushNextLink = false
+    }
+}
+
+/// A navigation bar title as the lab's `.m-header-title`: 17/22 semibold, and a 12/16 muted
+/// subtitle under it, centred.
+struct NavigationHeaderTitle: View {
+    let title: String
+    let subtitle: String?
+    var subtitleID = ""
+    @Environment(\.connTheme) private var theme
+
+    var body: some View {
+        VStack(spacing: 0) {
+            Text(title).font(.system(size: 17, weight: .semibold)).lineHeight(.exact(points: 22))
+                .accessibilityAddTraits(.isHeader)
+            if let subtitle {
+                Text(subtitle).font(.system(size: 12)).lineHeight(.exact(points: 16))
+                    .foregroundStyle(theme.mutedForeground)
+                    .accessibilityIdentifier(subtitleID)
+            }
+        }
+        .lineLimit(1)
+        .truncationMode(.tail)
+        .foregroundStyle(theme.foreground)
     }
 }
 

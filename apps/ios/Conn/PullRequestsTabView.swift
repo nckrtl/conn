@@ -50,29 +50,11 @@ struct PullRequestsTabView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        let candidates = model.rows.filter { row in
-            searchQuery.isEmpty || [row.title, row.repository, row.projectTitle, "#\(row.number)", row.headBranch, row.author?.login ?? "", row.labels?.map(\.name).joined(separator: " ") ?? ""]
-                .joined(separator: " ").localizedCaseInsensitiveContains(searchQuery)
-        }
-        let selected = candidates.filter { model.filter == "All" || $0.status == model.filter }
+        let candidates = model.candidates(query: searchQuery)
+        let selected = model.selected(query: searchQuery)
+        // The title, counts and status filter live in the navigation bar (`WorkspaceRootView`).
         ScrollView {
             LazyVStack(spacing: 0) {
-                ZStack(alignment: .trailing) {
-                    VStack(spacing: 0) {
-                        Text("Pull Requests").font(.system(size: 18, weight: .medium)).frame(height: 20)
-                        Text("\(selected.count) open · \(selected.filter { $0.status == "Checks running" }.count) in progress")
-                            .font(.system(size: 12)).foregroundStyle(theme.mutedForeground).frame(height: 16)
-                    }.foregroundStyle(theme.foreground).lineLimit(1).frame(maxWidth: .infinity)
-                    Menu {
-                        Picker("Status", selection: $model.filter) {
-                            ForEach(["All", "Checks running", "Checks passed", "Checks failed", "Draft"], id: \.self) { option in
-                                let label = option == "Checks running" ? "In progress" : option
-                                Text("\(label) · \(candidates.filter { option == "All" || $0.status == option }.count)").tag(option)
-                            }
-                        }.pickerStyle(.inline)
-                    } label: { WorkspaceFilterIcon() }
-                    .accessibilityLabel("Filter pull requests")
-                }.frame(height: 56).padding(.horizontal, 16).padding(.bottom, 4)
                 if model.loading { ProgressView() }
                 if let notice = model.notice { Text(notice).foregroundStyle(theme.mutedForeground).padding() }
                 if !model.loading && model.notice == nil && selected.isEmpty {
@@ -149,6 +131,17 @@ final class WorkspacePullRequests {
     var loading = true
     var filter = "All"
 
+    func candidates(query: String) -> [PullRequestRow] {
+        rows.filter { row in
+            query.isEmpty || [row.title, row.repository, row.projectTitle, "#\(row.number)", row.headBranch, row.author?.login ?? "", row.labels?.map(\.name).joined(separator: " ") ?? ""]
+                .joined(separator: " ").localizedCaseInsensitiveContains(query)
+        }
+    }
+
+    func selected(query: String) -> [PullRequestRow] {
+        candidates(query: query).filter { filter == "All" || $0.status == filter }
+    }
+
     func load(store: CoreStore) async {
         let generation = UUID()
         request = generation
@@ -192,6 +185,25 @@ final class WorkspacePullRequests {
         } catch {
             if request == generation && !Task.isCancelled { notice = error.localizedDescription }
         }
+    }
+}
+
+/// The list's status filter, behind the header's 44pt glass button.
+struct PullRequestFilterMenu: View {
+    @Bindable var model: WorkspacePullRequests
+    let searchQuery: String
+
+    var body: some View {
+        let candidates = model.candidates(query: searchQuery)
+        Menu {
+            Picker("Status", selection: $model.filter) {
+                ForEach(["All", "Checks running", "Checks passed", "Checks failed", "Draft"], id: \.self) { option in
+                    let label = option == "Checks running" ? "In progress" : option
+                    Text("\(label) · \(candidates.filter { option == "All" || $0.status == option }.count)").tag(option)
+                }
+            }.pickerStyle(.inline)
+        } label: { WorkspaceFilterIcon() }
+        .accessibilityLabel("Filter pull requests")
     }
 }
 

@@ -42,7 +42,6 @@ struct WorkGroupCard: View {
             if group.hasActive {
                 // Mobile's `RunFoldWorking` and desktop's working row: plain text, no chevron.
                 WorkingFoldLabel(since: startedAt, size: size)
-                    .padding(.bottom, FoldRow.leading(size))
             } else {
                 Button {
                     withAnimation(Kit.Motion.fast) {
@@ -61,13 +60,9 @@ struct WorkGroupCard: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                // Collapsed, the label stands in for a paragraph above its message. Expanded, the
-                // opening rule sits as far under the label as the first row's text sits under the
-                // rule: the 44 pt row centres its line, which leaves the plain gap.
-                .padding(.bottom, expanded ? 0 : FoldRow.leading(size))
             }
 
-            if expanded && !group.hasActive {
+            Group {
                 // Lab `.m-work-log`: plain 44 pt rows split by subtle dividers, no cards.
                 let steps = entries.filter {
                     if case .thinking = $0 { return true }
@@ -75,8 +70,11 @@ struct WorkGroupCard: View {
                     return false
                 }
                 VStack(alignment: .leading, spacing: 0) {
-                    // Rules open and close the expanded log, and split its rows.
+                    // The rule under "Worked for" is always there, the plain gap below the label
+                    // (as far as the first row's text sits under it). Expanded, it opens the log;
+                    // rules split the rows and close the log.
                     Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
+                    if expanded && !group.hasActive {
                     ForEach(Array(steps.enumerated()), id: \.element.entryId) { index, entry in
                         if index > 0 {
                             Rectangle()
@@ -105,8 +103,9 @@ struct WorkGroupCard: View {
                         }
                     }
                     Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
+                    }
                 }
-                // The closing rule to the message reads as a paragraph gap, as above the log.
+                // The last rule to the message reads as a paragraph gap.
                 .padding(.bottom, FoldRow.leading(size))
             }
         }
@@ -132,9 +131,12 @@ struct WorkingFold: View {
 
     var body: some View {
         let gap = size * 0.85
-        // No rule under "Working for": the live row follows a paragraph gap below.
-        WorkingFoldLabel(since: since, size: size)
-            .padding(.bottom, gap + FoldRow.leading(size))
+        // The same rule as under "Worked for", then the live row a paragraph gap below it.
+        VStack(alignment: .leading, spacing: gap) {
+            WorkingFoldLabel(since: since, size: size)
+            Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
+        }
+        .padding(.bottom, gap + FoldRow.leading(size))
     }
 }
 
@@ -291,6 +293,7 @@ struct TimelineEntryRow: View {
     let onTemplate: (String) -> Void
     @Environment(\.connTheme) private var theme
     @ScaledMetric(relativeTo: .body) private var messageSize: CGFloat = ThreadText.size
+    @Environment(\.colorScheme) private var appearance
 
     var body: some View {
         switch detail {
@@ -324,6 +327,8 @@ struct TimelineEntryRow: View {
                         if status == .failed { Label("Response interrupted", systemImage: "exclamationmark.circle").font(.caption) }
                         MessageFooter(text: markdown, timestamp: timestamp)
                     }
+                    // A rule closes the agent's message, the same soft rule as the work log's.
+                    Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
                 }
             }
 

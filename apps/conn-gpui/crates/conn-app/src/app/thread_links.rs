@@ -9,6 +9,17 @@ use gpui_kit::Context;
 use super::ConnApp;
 use crate::chat::thread_links::{ThreadDirectory, ThreadLink, fingerprint, format_thread_link};
 
+/// What a thread link's environment id names on this machine.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum LinkEnvironment {
+    /// The primary server.
+    Primary,
+    /// A linked environment or Orbit target, by its Orbit target id.
+    Target(String),
+    /// Nothing here goes by that id.
+    Unknown,
+}
+
 impl ConnApp {
     /// The ids the primary server goes by in a thread link: the environment id its config names
     /// (the one the Conn Server writes into its own links), and the id the app knows it by.
@@ -78,6 +89,26 @@ impl ConnApp {
         format_thread_link(&environment, thread_id)
     }
 
+    /// What the environment id of a thread link names on this machine. A link carries the id its
+    /// server reports for itself (`ServerConfigState::environment_id`), while Orbit targets are
+    /// looked up by their target id, so either one matches: a linked environment by its Orbit
+    /// target id or by the id its server reports, and the primary server by any id it goes by.
+    pub(super) fn link_environment(&self, id: &str) -> LinkEnvironment {
+        let targets = self.linked_target_ids();
+        if targets.iter().any(|target| target == id)
+            || self.orbit.fleet.find_by_server_id(id).is_some()
+        {
+            return LinkEnvironment::Target(id.to_owned());
+        }
+        if self.primary_link_environments().iter().any(|own| own == id) {
+            return LinkEnvironment::Primary;
+        }
+        targets
+            .into_iter()
+            .find(|target| self.linked_server_environment_id(target) == Some(id))
+            .map_or(LinkEnvironment::Unknown, LinkEnvironment::Target)
+    }
+
     /// Opens the thread a link names, as a click on its chip does. A thread of the merged shell
     /// opens where it lives; one of another Orbit server connects to that server first (the
     /// thread opens once it is up). `false` when nothing matches.
@@ -86,6 +117,16 @@ impl ConnApp {
         link: &ThreadLink,
         cx: &mut Context<'_, Self>,
     ) -> bool {
+        // Name the environment by its Orbit target id, whichever id the link carries.
+        let link = &ThreadLink {
+            environment_id: link.environment_id.as_ref().map(|id| {
+                match self.link_environment(id) {
+                    LinkEnvironment::Target(target) => target,
+                    LinkEnvironment::Primary | LinkEnvironment::Unknown => id.clone(),
+                }
+            }),
+            thread_id: link.thread_id.clone(),
+        };
         if let Some(found) = self.thread_link_directory().resolve(link) {
             // The merged shell holds linked environments' threads too: selecting is enough.
             self.pending_open_thread = None;

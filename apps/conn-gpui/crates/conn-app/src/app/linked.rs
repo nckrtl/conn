@@ -552,6 +552,14 @@ impl ConnApp {
             .map(str::to_owned)
     }
 
+    /// The base URL of the server that owns the current thread or draft.
+    pub(super) fn context_server_url(&self, environment: Option<&str>) -> Option<&str> {
+        match environment {
+            Some(id) => self.linked.urls.get(id).map(String::as_str),
+            None => self.server_url.as_deref(),
+        }
+    }
+
     /// Points the chat and the right panel at the connection of what is open, when that moved to
     /// another environment since the last call.
     pub(super) fn sync_chat_environment(&mut self, cx: &mut Context<'_, Self>) {
@@ -562,10 +570,9 @@ impl ConnApp {
         let Some(connection) = self.context_connection() else {
             return;
         };
-        let url = match &environment {
-            Some(id) => self.linked.urls.get(id).cloned(),
-            None => self.server_url.clone(),
-        };
+        let url = self
+            .context_server_url(environment.as_deref())
+            .map(str::to_owned);
         self.linked.chat_env = environment;
         self.push_server_config(cx);
         self.chat.update(cx, |chat, cx| {

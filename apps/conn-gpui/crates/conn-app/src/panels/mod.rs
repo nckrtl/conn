@@ -48,7 +48,7 @@ use gpui_kit::{
 };
 
 use self::api::ApiPanel;
-use self::browser::{BrowserPanel, BrowserTabEvent};
+use self::browser::{BrowserPanel, BrowserTabEvent, Navigation};
 use self::color::to_hsla;
 use self::database::DatabasePanel;
 #[cfg(test)]
@@ -132,8 +132,9 @@ pub struct RightPanel {
     browsers: Vec<(BrowserTabId, Entity<BrowserPanel>)>,
     /// The browser tab that shows while `tab` is Browser.
     active_browser: Option<BrowserTabId>,
-    /// Addresses asked for before a tab's browser exists; it loads them when made.
-    pending_browser_urls: Vec<(BrowserTabId, String)>,
+    /// Addresses asked for before a tab's browser exists; it loads them when made, as the
+    /// navigation says (a restored address is not a visit).
+    pending_browser_urls: Vec<(BrowserTabId, String, Navigation)>,
     /// Live browsers by when they last showed, oldest first.
     browsers_by_use: Vec<BrowserTabId>,
     /// Titles of tabs whose browser was closed to stay under [`MAX_PARKED_BROWSERS`].
@@ -143,6 +144,10 @@ pub struct RightPanel {
     /// What a new browser tab starts with.
     connection: Option<Connection>,
     environment_id: Option<String>,
+    /// The browser history's project key, and the host its environment runs on. Every browser tab
+    /// reads and feeds the history under them.
+    history_project: Option<String>,
+    history_hostname: Option<String>,
     annotations: Option<(Vec<AnnotationRecord>, bool, bool)>,
     api: Entity<ApiPanel>,
     database: Entity<DatabasePanel>,
@@ -313,6 +318,8 @@ impl RightPanel {
             preview_handles: None,
             connection,
             environment_id: None,
+            history_project: None,
+            history_hostname: None,
             annotations: None,
             api,
             database,
@@ -336,11 +343,30 @@ impl RightPanel {
     /// Loads `url` in browser tab `id` (starting the CEF runtime on first use). A tab whose
     /// browser is not made yet loads it when it is.
     pub fn navigate_browser(&mut self, id: BrowserTabId, url: String, cx: &mut Context<'_, Self>) {
+        self.load_browser(id, url, Navigation::User, cx);
+    }
+
+    /// Loads the saved address of browser tab `id` at startup. Nothing is recorded in the history:
+    /// the address is where the page ended up, not something the user opened.
+    pub fn restore_browser(&mut self, id: BrowserTabId, url: String, cx: &mut Context<'_, Self>) {
+        self.load_browser(id, url, Navigation::Restore, cx);
+    }
+
+    fn load_browser(
+        &mut self,
+        id: BrowserTabId,
+        url: String,
+        source: Navigation,
+        cx: &mut Context<'_, Self>,
+    ) {
         match self.browser(id) {
-            Some(browser) => browser.update(cx, |b, cx| b.navigate(url, cx)),
+            Some(browser) => browser.update(cx, |b, cx| match source {
+                Navigation::User => b.navigate(url, cx),
+                Navigation::Restore => b.restore(url, cx),
+            }),
             None => {
-                self.pending_browser_urls.retain(|(tab, _)| *tab != id);
-                self.pending_browser_urls.push((id, url));
+                self.pending_browser_urls.retain(|(tab, ..)| *tab != id);
+                self.pending_browser_urls.push((id, url, source));
             }
         }
     }
@@ -380,10 +406,10 @@ impl RightPanel {
             None => self
                 .pending_browser_urls
                 .iter()
-                .find(|(tab, _)| *tab == id)
+                .find(|(tab, ..)| *tab == id)
                 .map_or_else(
                     || conn_state::browser_tab_title("", ""),
-                    |(_, url)| conn_state::browser_tab_title("", url),
+                    |(_, url, _)| conn_state::browser_tab_title("", url),
                 ),
         }
     }
@@ -434,6 +460,7 @@ impl RightPanel {
         .detach();
         let (project, root) = (self.project_id.clone(), self.workspace_root.clone());
         let environment = self.environment_id.clone();
+        let history = (self.history_project.clone(), self.history_hostname.clone());
         let annotations = self.annotations.clone();
         let host_handle = self
             .preview_handles
@@ -442,8 +469,8 @@ impl RightPanel {
         let pending = self
             .pending_browser_urls
             .iter()
-            .position(|(tab, _)| *tab == id)
-            .map(|index| self.pending_browser_urls.remove(index).1);
+            .position(|(tab, ..)| *tab == id)
+            .map(|index| self.pending_browser_urls.remove(index));
         browser.update(cx, |b, cx| {
             if let Some(handle) = host_handle {
                 b.set_host_handle(handle);
@@ -453,11 +480,15 @@ impl RightPanel {
             if let Some(environment) = environment {
                 b.set_environment(environment, cx);
             }
+            // Before the pending address: opening it records the visit under the project.
+            b.set_history_context(history.0, history.1, cx);
             if let Some((records, watching, ready)) = annotations {
                 b.sync_annotations(records, watching, ready, cx);
             }
-            if let Some(url) = pending {
-                b.navigate(url, cx);
+            match pending {
+                Some((_, url, Navigation::User)) => b.navigate(url, cx),
+                Some((_, url, Navigation::Restore)) => b.restore(url, cx),
+                None => {}
             }
         });
         self.parked_titles.retain(|(tab, _)| *tab != id);
@@ -497,8 +528,10 @@ impl RightPanel {
             let (url, title) = (page.page_url(), page.tab_title());
             // Dropping the last handle releases its frame and closes its Chromium view.
             drop(browser);
-            self.pending_browser_urls.retain(|(tab, _)| *tab != id);
-            self.pending_browser_urls.push((id, url));
+            self.pending_browser_urls.retain(|(tab, ..)| *tab != id);
+            // `url` is where the page ended up, so it comes back as a restore, never a visit.
+            self.pending_browser_urls
+                .push((id, url, Navigation::Restore));
             self.parked_titles.push((id, title));
         }
     }
@@ -518,7 +551,7 @@ impl RightPanel {
             return;
         };
         self.browsers.retain(|(id, _)| *id != closed);
-        self.pending_browser_urls.retain(|(id, _)| *id != closed);
+        self.pending_browser_urls.retain(|(id, ..)| *id != closed);
         self.browsers_by_use.retain(|id| *id != closed);
         self.parked_titles.retain(|(id, _)| *id != closed);
         if self.active_browser == Some(closed) {
@@ -590,8 +623,8 @@ impl RightPanel {
             None => self
                 .pending_browser_urls
                 .iter()
-                .find(|(tab, _)| *tab == id)
-                .map(|(_, url)| url.clone())
+                .find(|(tab, ..)| *tab == id)
+                .map(|(_, url, _)| url.clone())
                 .unwrap_or_default(),
         };
         (url, self.browser_tab_title(id, cx))
@@ -720,8 +753,8 @@ impl RightPanel {
             None => self
                 .pending_browser_urls
                 .iter()
-                .find(|(tab, _)| *tab == id)
-                .map(|(_, url)| url.clone())?,
+                .find(|(tab, ..)| *tab == id)
+                .map(|(_, url, _)| url.clone())?,
         };
         (!url.is_empty()).then_some(url)
     }
@@ -863,6 +896,31 @@ impl RightPanel {
             browser.update(cx, |b, cx| b.set_environment(environment_id.clone(), cx));
         }
         self.environment_id = Some(environment_id);
+    }
+
+    /// Names the project the browser history is kept under (the sidebar's project grouping: git
+    /// clones share one key) and the host the environment runs on. Every browser tab, now and
+    /// later, reads and feeds the history under them.
+    pub fn set_browser_history_context(
+        &mut self,
+        project: Option<String>,
+        hostname: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.history_project == project && self.history_hostname == hostname {
+            return;
+        }
+        self.history_project = project;
+        self.history_hostname = hostname;
+        for (_, browser) in &self.browsers {
+            browser.update(cx, |b, cx| {
+                b.set_history_context(
+                    self.history_project.clone(),
+                    self.history_hostname.clone(),
+                    cx,
+                );
+            });
+        }
     }
 
     /// Updates the active project, workspace root, and thread context.

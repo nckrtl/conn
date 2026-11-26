@@ -7548,7 +7548,11 @@ impl Render for ConnApp {
                         return;
                     }
                     // Escape drops a selection in the thread's text, and only then: with none, it
-                    // goes on to whatever else wants it.
+                    // goes on to whatever else wants it. An open message or link menu has it
+                    // first, and closes without touching the selection.
+                    if event.keystroke.key == "escape" && app.chat.read(cx).has_open_menu() {
+                        return;
+                    }
                     if crate::chat::selection::clear_on_escape(event, window, cx) {
                         cx.stop_propagation();
                     }

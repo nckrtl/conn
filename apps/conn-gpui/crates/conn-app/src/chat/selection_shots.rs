@@ -154,3 +154,90 @@ fn render_selection_screenshots() {
             .expect("a saved PNG");
     }
 }
+
+/// Selects words in the user's message, right-clicks inside the selection, and renders the open
+/// message menu offscreen to PNG, in a dark and a light theme.
+///
+/// `CONN_SELECTION_MENU_SHOTS_DIR=<dir> cargo test -p conn-app render_selection_menu_screenshots
+/// -- --ignored`
+#[test]
+#[ignore = "writes PNGs; set CONN_SELECTION_MENU_SHOTS_DIR"]
+fn render_selection_menu_screenshots() {
+    let Some(dir) = std::env::var_os("CONN_SELECTION_MENU_SHOTS_DIR") else {
+        return;
+    };
+    let dir = Path::new(&dir);
+    std::fs::create_dir_all(dir).expect("an output folder");
+    let mut ctx = gpui_kit::HeadlessAppContext::with_platform(
+        std::sync::Arc::new(gpui_apple::AppleTextSystem::new()),
+        std::sync::Arc::new(crate::superhero::AppAssets),
+        gpui_kit::platform::current_headless_renderer,
+    );
+    ctx.update(|cx| {
+        gpui_kit::init(cx);
+        crate::fonts::register(cx);
+        register_keybindings(cx);
+    });
+    for (theme_id, name) in [("dark-ocean", "dark"), ("t3-code-light", "light")] {
+        let theme = conn_theme::theme_by_id(theme_id).expect("a built-in theme");
+        let tokens = Tokens::derive(&theme);
+        let (window, app) = ctx.update(|cx| {
+            crate::theme::apply_kit_theme(&tokens, cx);
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        Point::default(),
+                        size(px(WIDTH_PX), px(HEIGHT_PX)),
+                    ))),
+                    focus: false,
+                    show: false,
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| {
+                    let tokens = tokens.clone();
+                    cx.new(|cx| ConnApp::new(theme.id, tokens, None, window, cx))
+                },
+            )
+            .expect("a window")
+        });
+        ctx.update(|cx| {
+            app.update(cx, |app, cx| {
+                app.set_shell(crate::ui_tests::kitchen_sink_shell(), cx);
+                app.set_thread_for_test("thread-selected".to_owned(), thread(), cx);
+            });
+        });
+        let frames = |ctx: &mut gpui_kit::HeadlessAppContext| {
+            for _ in 0..4 {
+                ctx.update_window(window, |_, w, c| w.render_frame(c))
+                    .expect("a frame");
+                ctx.run_until_parked();
+            }
+        };
+        frames(&mut ctx);
+        let at = ctx
+            .update_window(window, |_, window, cx| {
+                let user = last_bounds_of(window, "Can you make the selection highlight lighter?");
+                let y = user.origin.y + user.size.height * 0.5;
+                let from = point(user.origin.x + user.size.width * 0.28, y);
+                let to = point(user.origin.x + user.size.width * 0.72, y);
+                window.pointer_down(from, MouseButton::Left, cx);
+                window.pointer_move(to, Some(MouseButton::Left), cx);
+                window.pointer_up(to, MouseButton::Left, cx);
+                window.render_frame(cx);
+                point(user.origin.x + user.size.width * 0.5, y)
+            })
+            .expect("a selection");
+        frames(&mut ctx);
+        ctx.update_window(window, |_, window, cx| {
+            window.pointer_down(at, MouseButton::Right, cx);
+            window.pointer_up(at, MouseButton::Right, cx);
+        })
+        .expect("a right click");
+        frames(&mut ctx);
+        let image = ctx.capture_screenshot(window).expect("a screenshot");
+        image
+            .save(dir.join(format!("selection-menu-{name}.png")))
+            .expect("a saved PNG");
+    }
+}

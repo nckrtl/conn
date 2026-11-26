@@ -935,6 +935,7 @@ fn render_code_block(
             false,
             styled_code.into_any_element(),
         )
+        .in_scope(scope)
         .into_any_element(),
         None => styled_code.into_any_element(),
     };
@@ -1258,6 +1259,7 @@ fn render_inline_spans(
         (
             SharedString::from(format!("sel-{span_id}")),
             scope.next_order(),
+            scope.clone(),
         )
     });
     let probe = FlowProbe::default();
@@ -1341,9 +1343,9 @@ fn render_inline_spans(
         )
     };
     match selectable {
-        Some((id, order)) => {
-            SelectableFlow::new(id, order, probe, press, tight, inner).into_any_element()
-        }
+        Some((id, order, scope)) => SelectableFlow::new(id, order, probe, press, tight, inner)
+            .in_scope(&scope)
+            .into_any_element(),
         None => inner,
     }
 }

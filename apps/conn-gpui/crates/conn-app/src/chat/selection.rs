@@ -27,21 +27,55 @@ use gpui_kit::base::{
     TextSelectionEvent, TextSelectionHandle, TextSelectionRegistration, TextSelectionRun,
 };
 use gpui_kit::{
-    AnyElement, App, BorderStyle, Bounds, Corners, Edges, Element, ElementId, GlobalElementId,
-    HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId, PaintQuad, Pixels, Point,
-    SharedString, StyledText, Subscription, TextLayout, Window, transparent_black,
+    AnyElement, App, BorderStyle, Bounds, Corners, DispatchPhase, Edges, Element, ElementId,
+    GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IntoElement, LayoutId,
+    MouseButton, MouseDownEvent, PaintQuad, Pixels, Point, SharedString, StyledText, Subscription,
+    TextLayout, Window, transparent_black,
 };
 
 /// Bits of a document order that number the flows inside one row.
 const ORDER_SHIFT: u32 = 24;
 const ORDER_MASK: u64 = (1 << ORDER_SHIFT) - 1;
 
+/// What a right-click on a message's text asks the chat to open.
+pub(crate) struct MessageMenuRequest {
+    /// Where the pointer is, in window coordinates.
+    pub(crate) position: Point<Pixels>,
+    /// The message as its Copy action copies it.
+    pub(crate) message_text: String,
+    /// What Cmd+C copies now, when the message holds part of the selection.
+    pub(crate) selection_text: Option<String>,
+}
+
+/// Opens the message menu for a [`MessageMenuRequest`].
+pub(crate) type MessageMenuHook = Rc<dyn Fn(MessageMenuRequest, &mut Window, &mut App)>;
+
+/// A message's right-click menu: how to open it, and the text its `Copy message` row copies.
+#[derive(Clone)]
+struct MessageMenu {
+    message_text: Rc<str>,
+    open: MessageMenuHook,
+}
+
 /// Hands out document orders for the text of one timeline row, so that its flows sort in reading
 /// order and after every flow of the rows above it.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct SelectionScope {
     base: u64,
     next: Rc<Cell<u64>>,
+    menu: Option<MessageMenu>,
+    /// Set by a flow that paints part of the selection, in the frame it paints. A right-click on
+    /// another flow of the same row reads it, so the selection survives a click inside its message.
+    holds_selection: Rc<Cell<bool>>,
+}
+
+impl std::fmt::Debug for SelectionScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelectionScope")
+            .field("base", &self.base)
+            .field("has_menu", &self.menu.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl SelectionScope {
@@ -51,7 +85,23 @@ impl SelectionScope {
         Self {
             base: (row as u64 + 1) << ORDER_SHIFT,
             next: Rc::new(Cell::new(0)),
+            menu: None,
+            holds_selection: Rc::new(Cell::new(false)),
         }
+    }
+
+    /// Gives the row's text a right-click menu. `message_text` is what `Copy message` copies.
+    #[must_use]
+    pub(crate) fn with_message_menu(
+        mut self,
+        message_text: impl Into<Rc<str>>,
+        open: MessageMenuHook,
+    ) -> Self {
+        self.menu = Some(MessageMenu {
+            message_text: message_text.into(),
+            open,
+        });
+        self
     }
 
     /// The order of the next flow in the row.
@@ -106,6 +156,7 @@ pub(super) fn selectable_message_text(
         true,
         styled.into_any_element(),
     )
+    .in_scope(scope)
     .into_any_element()
 }
 
@@ -266,6 +317,8 @@ pub(super) struct SelectableFlow {
     press: PressSlot,
     tight: bool,
     child: AnyElement,
+    menu: Option<MessageMenu>,
+    holds_selection: Option<Rc<Cell<bool>>>,
 }
 
 impl SelectableFlow {
@@ -284,8 +337,51 @@ impl SelectableFlow {
             press,
             tight,
             child,
+            menu: None,
+            holds_selection: None,
         }
     }
+
+    /// Takes the row's right-click menu, and tells the row when this flow holds the selection.
+    #[must_use]
+    pub(super) fn in_scope(mut self, scope: &SelectionScope) -> Self {
+        self.menu = scope.menu.clone();
+        self.holds_selection = Some(scope.holds_selection.clone());
+        self
+    }
+}
+
+/// The right-click handler of a flow's message (see [`MessageMenuRequest`]).
+///
+/// A right-click never changes the selection by itself (`gpui-base` acts on the left button
+/// only), so a click inside the selection keeps it. A click on a message that holds no part of the
+/// selection clears it first, and the menu then offers the message. A click on another paragraph
+/// of the message that holds the selection keeps it. The word under the pointer is not selected
+/// first, as macOS does: the window's selection has no way to be set from outside.
+fn on_message_right_click(
+    menu: &MessageMenu,
+    holds_selection: bool,
+    event: &MouseDownEvent,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let selected = gpui_kit::base::TextSelection::has_selection(window, cx);
+    let selection_text = (selected && holds_selection)
+        .then(|| gpui_kit::base::TextSelection::selected_text(window, cx))
+        .filter(|text| !text.is_empty());
+    if selected && selection_text.is_none() {
+        gpui_kit::base::TextSelection::clear(window, cx);
+    }
+    cx.stop_propagation();
+    (menu.open)(
+        MessageMenuRequest {
+            position: event.position,
+            message_text: menu.message_text.to_string(),
+            selection_text,
+        },
+        window,
+        cx,
+    );
 }
 
 impl IntoElement for SelectableFlow {
@@ -298,7 +394,7 @@ impl IntoElement for SelectableFlow {
 
 impl Element for SelectableFlow {
     type RequestLayoutState = FlowState;
-    type PrepaintState = ();
+    type PrepaintState = Hitbox;
 
     fn id(&self) -> Option<ElementId> {
         Some(self.id.clone())
@@ -343,11 +439,12 @@ impl Element for SelectableFlow {
         // Same order as `gpui-base`'s `SelectableText`: the child's own hitboxes (links) come
         // first, and this normal hitbox does not hide them.
         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-        let registration = TextSelectionRegistration::new(hitbox, bounds)
+        let registration = TextSelectionRegistration::new(hitbox.clone(), bounds)
             .with_document_order(self.order)
             .with_text_bounds(vec![bounds])
             .with_rendered_element(&state.handle, window, cx);
         state.handle.register(registration, window, cx);
+        hitbox
     }
 
     fn paint(
@@ -356,10 +453,21 @@ impl Element for SelectableFlow {
         _inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         state: &mut Self::RequestLayoutState,
-        _prepaint: &mut Self::PrepaintState,
+        hitbox: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
+        if let (Some(menu), Some(holds)) = (self.menu.clone(), self.holds_selection.clone()) {
+            let hitbox = hitbox.clone();
+            window.on_mouse_event(move |event: &MouseDownEvent, phase, window, cx| {
+                if phase == DispatchPhase::Bubble
+                    && event.button == MouseButton::Right
+                    && hitbox.is_hovered(window)
+                {
+                    on_message_right_click(&menu, holds.get(), event, window, cx);
+                }
+            });
+        }
         if let Some(info) = self.probe.get() {
             let run = TextSelectionRun::new(info.text.clone(), info.layout.clone(), bounds);
             let projection = state.handle.update_runs(&[run], cx);
@@ -371,6 +479,9 @@ impl Element for SelectableFlow {
                 copy.info = Some(info.clone());
             }
             if let Some(range) = range {
+                if let Some(holds) = &self.holds_selection {
+                    holds.set(true);
+                }
                 let color = selection_color(cx);
                 paint_selection(&info.layout, range, color, window);
             }

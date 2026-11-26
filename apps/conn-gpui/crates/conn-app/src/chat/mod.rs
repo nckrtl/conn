@@ -32,6 +32,8 @@ mod question_logic;
 mod question_panel;
 mod request_stack;
 pub(crate) mod selection;
+#[cfg(test)]
+mod selection_menu_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod selection_shots;
 mod spinner;
@@ -1281,6 +1283,14 @@ impl ChatView {
         }
     }
 
+    /// Opens the message menu in this view when a message's text is right-clicked.
+    fn message_menu_hook(cx: &mut Context<'_, Self>) -> selection::MessageMenuHook {
+        let view = cx.entity().downgrade();
+        Rc::new(move |request, window, cx| {
+            let _ = view.update(cx, |view, cx| view.open_message_menu(request, window, cx));
+        })
+    }
+
     fn remeasure_for_id(&self, target_id: &str) {
         if let Some(idx) = self.cache.find_item_index_for_id(target_id) {
             self.list_state.remeasure_items(idx..idx + 1);
@@ -1965,7 +1975,14 @@ impl ChatView {
                     // Lazily parse & cache Markdown only when this row enters the viewport.
                     let blocks = row.markdown_blocks();
                     let mut options = self.markdown_options(cx);
-                    options.selection = Some(selection::SelectionScope::for_row(*row_idx));
+                    let mut scope = selection::SelectionScope::for_row(*row_idx);
+                    if !text.trim().is_empty() {
+                        scope = scope.with_message_menu(
+                            artifact_template::message_copy_text(text),
+                            Self::message_menu_hook(cx),
+                        );
+                    }
+                    options.selection = Some(scope);
                     let group = SharedString::from(format!("assistant-row-{id}"));
                     let body: AnyElement = if text.is_empty() && !*streaming {
                         // Conn: `text || (streaming ? "" : "(empty response)")`.
@@ -1991,7 +2008,7 @@ impl ChatView {
                         ));
                     }
                     // Conn `AssistantTimelineRow`: `px-1 py-0.5`, row spacing `pb-2` before work or `pb-4`.
-                    div()
+                    let row = div()
                         .id(SharedString::from(format!("chat-assistant-{id}")))
                         .a11y(
                             gpui_kit::Role::Article,
@@ -2002,8 +2019,10 @@ impl ChatView {
                         .w_full()
                         .min_w_0()
                         .pb(px(if *followed_by_work { 8.0 } else { 16.0 }))
-                        .child(inner)
-                        .into_any_element()
+                        .child(inner);
+                    #[cfg(test)]
+                    let row = gpui_kit::TestSupportExt::test_support(row);
+                    row.into_any_element()
                 } else {
                     div().into_any_element()
                 }
@@ -2478,7 +2497,11 @@ impl ChatView {
         } else {
             text.chars().take(120).collect()
         };
-        let selection = selection::SelectionScope::for_row(row_idx);
+        let mut selection = selection::SelectionScope::for_row(row_idx);
+        if !copy_text.trim().is_empty() {
+            selection =
+                selection.with_message_menu(copy_text.as_str(), Self::message_menu_hook(cx));
+        }
         // No top highlight: a sent message is one flat surface.
         let bubble = div()
             .id(SharedString::from(format!("chat-user-{id}")))

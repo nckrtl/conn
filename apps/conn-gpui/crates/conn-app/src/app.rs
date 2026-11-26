@@ -884,7 +884,12 @@ impl ConnApp {
         // The write in flight finishes, and the latest layout follows if it differs.
         cx.on_app_quit(|app, cx| {
             app.preview_host.close_all();
-            app.thread_panels_on_quit(cx)
+            let panels = app.thread_panels_on_quit(cx);
+            let offline = app.offline_on_quit();
+            async move {
+                panels.await;
+                offline.await;
+            }
         })
         .detach();
         app.sync_chat(cx);
@@ -1617,6 +1622,7 @@ impl ConnApp {
                         }
                         let mut status_changed = false;
                         let mut shell_changed = false;
+                        let shows = batch.iter().any(|event| app.event_shows(event));
                         for event in batch {
                             if matches!(
                                 event,
@@ -1635,8 +1641,10 @@ impl ConnApp {
                         if status_changed {
                             app.refresh_settings_orbit_info(cx);
                         }
-                        app.sync_chat(cx);
-                        cx.notify();
+                        if shows {
+                            app.sync_chat(cx);
+                            cx.notify();
+                        }
                         true
                     })
                     .unwrap_or(false);
@@ -1646,6 +1654,24 @@ impl ConnApp {
             }
         })
         .detach();
+    }
+
+    /// Whether `event` can change what the window shows. Items of the offline cache's background
+    /// thread streams cannot, and there are hundreds of those streams.
+    fn event_shows(&self, event: &ClientEvent) -> bool {
+        match event {
+            ClientEvent::Thread { thread_id, .. } => self.thread_on_screen(thread_id),
+            _ => true,
+        }
+    }
+
+    /// Whether `thread_id`'s timeline feeds the window: it is open, launching, or a child whose
+    /// approval its parent shows.
+    fn thread_on_screen(&self, thread_id: &str) -> bool {
+        self.layout.selected_thread_id.as_deref() == Some(thread_id)
+            || self.subscribed_thread_id.as_deref() == Some(thread_id)
+            || self.launched_threads.contains(thread_id)
+            || self.child_approvals.holds(thread_id)
     }
 
     fn apply_event(

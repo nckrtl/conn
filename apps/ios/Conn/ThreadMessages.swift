@@ -58,9 +58,9 @@ struct MessageFooter: View {
     var showsCopy = false
     /// The copy button after the time (user bubbles, right-aligned) or before it (agent messages).
     var copyAfter = true
-    // Message times sit two points below the thread text: 13 pt on Polar (thread text 15).
+    // Message times sit a point below the thread text: 13 pt on Polar (thread text 14).
     @ScaledMetric(relativeTo: .body) private var fullSize: CGFloat = ThreadText.size
-    private var size: CGFloat { trailingCopy ? fullSize * (ThreadText.size - 2) / ThreadText.size : fullSize }
+    private var size: CGFloat { trailingCopy ? fullSize * (ThreadText.size - 1) / ThreadText.size : fullSize }
     @Environment(\.connTheme) private var theme
     var body: some View {
         HStack(spacing: 4) {

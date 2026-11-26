@@ -377,9 +377,9 @@ struct ProviderIcon: View {
 /// 24pt line is rebuilt from the font's own height: half the extra goes above and below each
 /// line as padding, and the rest sits between lines as `lineSpacing`.
 enum ComposerInputMetrics {
-    // Lab `.m-composer-input`: 15/22.
-    static let fontSize: CGFloat = 15
-    static let lineBox: CGFloat = 22
+    // Lab `.m-composer-input`: 14/21.
+    static let fontSize: CGFloat = 14
+    static let lineBox: CGFloat = 21
 
     static var naturalLineHeight: CGFloat { UIFont.systemFont(ofSize: fontSize).lineHeight }
     static var lineSpacing: CGFloat { lineSpacing(natural: naturalLineHeight) }

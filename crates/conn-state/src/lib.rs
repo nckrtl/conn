@@ -11,6 +11,7 @@
 //!   into [`TimelineEntry`] view models so views never touch raw contract events.
 //! - [`LayoutState`]: sidebar, right panel, and tab layout.
 
+mod agent_wakeups;
 mod annotations;
 pub mod conn_tools;
 pub mod custom_model_editor;
@@ -60,6 +61,7 @@ pub use conn_contract::{
     ScheduledTaskWebhookSignatureEncoding,
 };
 
+pub use crate::agent_wakeups::{AgentWakeup, CLAUDE_WAKEUP_TASK_ID, WakeupContext, WakeupKind};
 pub use crate::annotations::{
     AnnotationPinPoint, AnnotationQueueCounts, AnnotationQueueState, DetectedDomElement,
     DetectedPoint, DetectedRect, annotation_state, build_annotation_prompt,

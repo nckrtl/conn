@@ -10,6 +10,16 @@ The desktop reference is `apps/lab-gpui` at `b4f0ac5512b823431dea8cca12eb84ace65
 
 The VM also opened an Orbit task from thread details, expanded its subtask brief and deliverables, opened and returned from a workspace file, and sent GET and HEAD requests. HEAD displayed the 204 status and empty response. The pull request inbox filtered a live GitHub list through the selected Conn server, opened a three-file breakdown, then loaded the PR detail and code patch.
 
+## Agents drive the Browser panel, 25 November 2026
+
+- **Desktop tab relay (T3 `hostDesktopTab`).** Every browser tab of every thread opens a record on its thread's server (`preview.open`), registers (`preview.desktopRegister`), serves agent requests (`preview.desktopRequests` / `desktopRespond`) and reports navigation (`preview.reportStatus`). Relay logic: `crates/conn-client/src/preview/host.rs`; page work (`status`, `snapshot`, `click`, `type`, `hover`, `select`, `drag`, `press`, `scroll`, `waitFor`, `upload`, `evaluate`, `navigate`, `dialog`, `resize`, `setColorScheme`, `credentialFill`, `credentialLock`) over CEF's in-process CDP: `crates/conn-preview-driver`; app wiring: `conn-app/src/preview_host.rs`. `cdpEndpoint`, `open` and recordings answer with T3's "Not supported on desktop tabs" error.
+- **Deliberate divergence from T3: the desktop is the agent's default browser.** With a desktop connected, a preview call with no `tabId` goes to the thread's desktop tab (the agent's current one, else the newest registered); `preview_open` shows that tab (navigating it when given an address); with no tab yet the server asks the desktop to open its Browser panel (`panel_open`, no window focus) and waits for the tab to register. The server's own browser serves only a thread without a desktop, or a call that names a server tab. See `apps/conn-server/crates/conn-preview/src/relay.rs`. Needs a `conn-server` release: the running server must include this change.
+- Verified by `crates/conn-preview-driver/tests/desktop_relay_e2e.rs` against a disposable server (`CONN_RELAY_E2E_BIN`, built from the `desktop_relay_e2e` example in `apps/conn-server`).
+
+## Thread message text selection, 25 November 2026
+
+Assistant Markdown and user bubble text are selectable: drag across paragraphs, headings, list items, inline code and code blocks (and across messages), double-click a word, triple-click a paragraph, `Cmd+C` copies plain text, `Esc` or a click elsewhere clears it. `chat/selection.rs` registers each message's text with `gpui-base`'s window selection (`TextSelectionLayer` under `Root`) and paints the highlight with the theme's own focus colour (`theme::selection_highlight`). A flow notifies its view when its part of the selection changes, so a drag inside one paragraph redraws at once rather than at the next caret blink; `ui_tests::selection_perf` (ignored) times a drag on a 300-message thread with the real text system. Links still open on a plain click; a drag that starts on one selects. Headless tests in `chat::selection` cover the drag, copy, word and paragraph picks, the link click and drag, clearing, scrolling and both appearances. Open: copy is plain text only, and work-log rows, queued bubbles and the right-panel Markdown are not selectable (`docs/parity/timeline.md`).
+
 ## Milestones (from `GOAL.md`)
 
 | Phase | Area | State | Proof |

@@ -208,6 +208,8 @@ async fn run(state: PathBuf, input: Value) -> Result<Value, Error> {
         return Err("at most 256 fixture cases".into());
     }
     let mut tabs = Vec::<String>::new();
+    // How many desktop requests had been logged when each case finished.
+    let mut request_ends = Vec::<usize>::new();
     for case in cases {
         let mode = usize::from(
             case.get("supervised")
@@ -256,11 +258,15 @@ async fn run(state: PathBuf, input: Value) -> Result<Value, Error> {
                 .insert("storedHtml".into(), Value::String(html));
         }
         replies.push(reply);
+        // The desktop logs a request before it answers, so a finished call has logged them all.
+        if let Some((desktop, _)) = &desktop {
+            request_ends.push(desktop.seen.lock().map(|s| s.len()).unwrap_or_default());
+        }
     }
     let output = match &desktop {
         Some((desktop, thread)) => {
             let seen = desktop.seen.lock().map(|s| s.clone()).unwrap_or_default();
-            json!({"replies":replies,"requests":seen,"thread":thread,"tab":desktop.tab})
+            json!({"replies":replies,"requests":seen,"requestEnds":request_ends,"thread":thread,"tab":desktop.tab})
         }
         None => json!(replies),
     };

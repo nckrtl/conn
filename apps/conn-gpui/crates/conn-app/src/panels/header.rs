@@ -6,7 +6,7 @@
 use std::rc::Rc;
 
 use conn_state::{PanelSurface, RightPanelTab};
-use conn_theme::Tokens;
+use conn_theme::{Appearance, Tokens};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::h_flex;
 use gpui_kit::prelude::*;
@@ -17,7 +17,7 @@ use gpui_kit::{
 
 use super::color::to_hsla;
 use crate::a11y::ConnA11yExt as _;
-use crate::panels::chrome::ConnTooltipExt as _;
+use crate::panels::chrome::{ConnTooltipExt as _, FloatingSurfaceExt as _};
 
 /// Header height (`--shell-header-height`, 44px).
 pub(crate) const HEADER_HEIGHT_PX: f32 = 44.0;
@@ -114,25 +114,22 @@ pub(crate) fn surface_ax_slug(surface: &PanelSurface, label: &str) -> String {
     }
 }
 
-/// The tab icon of an open surface: a file's `@pierre/trees` type icon, else the surface icon.
+/// The tab icon of an open surface: a file's Pierre type icon, else the surface icon.
 #[must_use]
-pub(crate) fn surface_icon_path(surface: &PanelSurface) -> &'static str {
+pub(crate) fn surface_icon_path(surface: &PanelSurface, appearance: Appearance) -> &'static str {
     match surface {
         PanelSurface::Kind(tab) => panel_tab_icon_path(*tab),
-        PanelSurface::File(path) => crate::file_icons::file_icon(path).asset,
+        PanelSurface::File(path) => crate::file_icons::file_icon(path, appearance).asset,
         PanelSurface::Browser(_) => panel_tab_icon_path(RightPanelTab::Browser),
     }
 }
 
-/// Optional themed tint for an open surface's tab icon (`@pierre/trees` file-type colors).
-#[must_use]
-fn surface_icon_color(surface: &PanelSurface, tokens: &Tokens, fallback: Hsla) -> Hsla {
-    match surface {
-        PanelSurface::Kind(_) | PanelSurface::Browser(_) => fallback,
-        PanelSurface::File(path) => crate::file_icons::file_icon(path)
-            .color
-            .map(|c| to_hsla(c.for_appearance(tokens.appearance)))
-            .unwrap_or(fallback),
+/// The tab icon element: a Pierre icon in its own colours, else a glyph tinted with `color`.
+fn surface_icon(asset: &'static str, color: Hsla) -> gpui_kit::AnyElement {
+    if crate::file_icons::is_file_icon_asset(asset) {
+        crate::file_icons::icon_img(asset, HEADER_ICON_PX).into_any_element()
+    } else {
+        superhero_icon(asset, HEADER_ICON_PX, color).into_any_element()
     }
 }
 
@@ -178,9 +175,14 @@ impl PanelMenuItem {
 /// The surface list in Conn's order (`RightPanelTab::MENU_ORDER`), the single source for the `+`
 /// menu and the launcher.
 #[must_use]
-pub(crate) fn panel_menu_items(available_tabs: &[RightPanelTab]) -> Vec<PanelMenuItem> {
+pub(crate) fn panel_menu_items(
+    available_tabs: &[RightPanelTab],
+    has_project: bool,
+) -> Vec<PanelMenuItem> {
     RightPanelTab::MENU_ORDER
         .into_iter()
+        // A thread without a project leaves Files, MCP and API out of the list.
+        .filter(|tab| has_project || !tab.needs_project())
         .map(|tab| PanelMenuItem {
             tab,
             label: panel_tab_label(tab),
@@ -207,6 +209,9 @@ pub(crate) struct PanelHeaderProps<'a> {
     pub(crate) add_menu_open: bool,
     /// Surfaces the add menu offers as enabled; the rest show dimmed, as in Conn.
     pub(crate) available_tabs: &'a [RightPanelTab],
+    /// The thread has a project. Without one the add menu and launcher leave out the surfaces
+    /// that need one (Files, MCP, API) instead of dimming them.
+    pub(crate) has_project: bool,
     pub(crate) tokens: &'a Tokens,
 }
 
@@ -255,8 +260,7 @@ pub(crate) fn render_panel_header(
             _ => surface_label(tab),
         };
         let ax_slug = surface_ax_slug(tab, &label);
-        let icon_path = surface_icon_path(tab);
-        let icon_color = surface_icon_color(tab, props.tokens, text_color);
+        let icon_path = surface_icon_path(tab, props.tokens.appearance);
         let group = SharedString::from(format!("right-panel-tab-group-{idx}"));
         let on_select = callbacks.on_select_tab.clone();
         let on_close_middle = callbacks.on_close_tab.clone();
@@ -295,7 +299,7 @@ pub(crate) fn render_panel_header(
                     .items_center()
                     .justify_center()
                     .group_hover(group.clone(), |s| s.invisible())
-                    .child(superhero_icon(icon_path, HEADER_ICON_PX, icon_color)),
+                    .child(surface_icon(icon_path, text_color)),
             )
             .child(
                 div()
@@ -385,6 +389,7 @@ pub(crate) fn render_panel_header(
         add_anchor = add_anchor.child(render_add_panel_menu(
             props.tokens,
             props.available_tabs,
+            props.has_project,
             callbacks.on_add_tab,
         ));
     }
@@ -549,9 +554,10 @@ pub(crate) fn dropdown_glass_shadow(tokens: &Tokens) -> gpui_kit::BoxShadow {
     }
 }
 
-fn render_add_panel_menu(
+pub(crate) fn render_add_panel_menu(
     tokens: &Tokens,
     available_tabs: &[RightPanelTab],
+    has_project: bool,
     on_add_tab: Rc<dyn Fn(RightPanelTab, &mut Window, &mut App)>,
 ) -> impl IntoElement {
     // GPUI cannot blur what lies behind a popup, so use `dropdown-glass`'s own fallback for
@@ -577,9 +583,9 @@ fn render_add_panel_menu(
         .border_1()
         .border_color(glass_border)
         .shadow(vec![shadow])
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        .floating_surface();
 
-    for item in panel_menu_items(available_tabs) {
+    for item in panel_menu_items(available_tabs, has_project) {
         let PanelMenuItem {
             tab,
             label,
@@ -656,6 +662,7 @@ fn render_add_panel_menu(
 pub(crate) fn render_panel_launcher(
     tokens: &Tokens,
     available_tabs: &[RightPanelTab],
+    has_project: bool,
     on_add_tab: Rc<dyn Fn(RightPanelTab, &mut Window, &mut App)>,
 ) -> impl IntoElement {
     let fg = to_hsla(tokens.foreground);
@@ -664,7 +671,7 @@ pub(crate) fn render_panel_launcher(
     let hover_bg = to_hsla(tokens.shell_highlight);
 
     let mut rows = div().flex().flex_col().gap(px(2.0));
-    for item in panel_menu_items(available_tabs) {
+    for item in panel_menu_items(available_tabs, has_project) {
         let on_add = on_add_tab.clone();
         let tab = item.tab;
         let mut row = h_flex()
@@ -769,7 +776,7 @@ mod tests {
 
     #[test]
     fn menu_and_launcher_share_one_item_list() {
-        let items = panel_menu_items(&[RightPanelTab::Browser, RightPanelTab::Tasks]);
+        let items = panel_menu_items(&[RightPanelTab::Browser, RightPanelTab::Tasks], true);
         let order: Vec<RightPanelTab> = items.iter().map(|item| item.tab).collect();
         assert_eq!(order, RightPanelTab::MENU_ORDER.to_vec());
         let available: Vec<&str> = items
@@ -780,6 +787,25 @@ mod tests {
         assert_eq!(available, ["Browser", "Tasks"]);
         assert_eq!(items[8].slug(), "pull-request");
         assert_eq!(items[0].icon, panel_tab_icon_path(RightPanelTab::Browser));
+    }
+
+    #[test]
+    fn menu_leaves_out_files_mcp_and_api_without_a_project() {
+        let all = RightPanelTab::MENU_ORDER;
+        let labels = |has_project| -> Vec<&'static str> {
+            panel_menu_items(&all, has_project)
+                .iter()
+                .map(|item| item.label)
+                .collect()
+        };
+        let with = labels(true);
+        let without = labels(false);
+        for label in ["Files", "MCP", "API"] {
+            assert!(with.contains(&label), "{label}");
+            assert!(!without.contains(&label), "{label}");
+        }
+        assert!(without.contains(&"Database"));
+        assert_eq!(without.len(), with.len() - 3);
     }
 
     #[test]

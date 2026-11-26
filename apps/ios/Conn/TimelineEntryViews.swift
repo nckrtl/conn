@@ -388,24 +388,27 @@ struct TimelineEntryRow: View, Equatable {
 
         case let .proposedPlan(_, _, title, markdown, display, _, _, streaming, _, _):
             ProposedPlanCard(title: title, markdown: markdown, display: display, streaming: streaming)
-        case let .subagent(_, child, title, role, status, label, _, summary, remoteLabel, _, started, ended):
+        case let .subagent(_, child, title, role, status, label, _, summary, remoteLabel, created, started, ended):
             let metadata = subagentMetadata
-            ThreadCard {
-                // Lab `SubagentCard`: `<model> · <effort>`, the run time at the right. As on desktop,
-                // the header opens the child thread.
-                ThreadCardHeaderLink(open: (metadata.thread ?? child).map { destination in
-                    { onOpenThread(destination, metadata.environment) }
-                }, label: "Open " + title) {
-                    // GPUI's fixed info and success colours (lab `--thread-info`, `--thread-success`).
-                    ProviderIcon(driver: metadata.provider, size: 14).cardStatusDot(
-                        status == .completed ? Color(rgbHex: 0x00BC7D) : status == .failed ? theme.destructive : Color(rgbHex: 0x2B7FFF))
+            // A tap shows the copy button and time below the card, like a message (MessageReveal).
+            MessageReveal(text: summary ?? "", timestamp: created) {
+                ThreadCard {
+                    // Lab `SubagentCard`: `<model> · <effort>`, the run time at the right. As on desktop,
+                    // the header opens the child thread.
+                    ThreadCardHeaderLink(open: (metadata.thread ?? child).map { destination in
+                        { onOpenThread(destination, metadata.environment) }
+                    }, label: "Open " + title) {
+                        // GPUI's fixed info and success colours (lab `--thread-info`, `--thread-success`).
+                        ProviderIcon(driver: metadata.provider, size: 14).cardStatusDot(
+                            status == .completed ? Color(rgbHex: 0x00BC7D) : status == .failed ? theme.destructive : Color(rgbHex: 0x2B7FFF))
                     let elapsed = threadElapsed(started, ended)
                     Text([metadata.model ?? role, metadata.effort, elapsed == nil ? label : nil, remoteLabel]
                         .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).lineLimit(2)
                     Spacer(minLength: 0)
                     if let elapsed { Text(elapsed).monospacedDigit().fixedSize() }
-                }
-            } content: { AgentSummary(title: title, text: summary ?? "") }
+                    }
+                } content: { AgentSummary(title: title, text: summary ?? "") }
+            }
         case let .turnCheckpoint(_, _, ordinal, fileCount, additions, deletions, files):
             TurnCheckpointCard(fileCount: Int(fileCount), additions: additions, deletions: deletions, files: files,
                                ordinal: ordinal, threadId: threadId, store: store)

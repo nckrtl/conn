@@ -25,6 +25,7 @@ lsp-types = "0.97"
 conn-cache = { path = "../../../../crates/conn-cache" }
 conn-client.workspace = true
 conn-desktop.workspace = true
+conn-preview-driver.workspace = true
 conn-contract.workspace = true
 conn-state.workspace = true
 conn-theme = { workspace = true, features = ["highlight"] }
@@ -74,6 +75,11 @@ conn-state = { workspace = true, features = ["testkit"] }
 conn-wire.workspace = true
 gpui-kit = { workspace = true, features = ["test-support"] }
 tokio-tungstenite.workspace = true
+
+# The `#[ignore]`d screenshot tests build their own text system: libtest runs a test off the main
+# thread, and `current_platform(true)` needs the main thread on macOS.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+gpui-pre-apple = "0.3.11"
 
 [features]
 default = ["zed-files"]

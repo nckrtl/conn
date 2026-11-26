@@ -207,7 +207,8 @@ impl LaravelToolbar {
         }
         self.orbit.environment = Some(environment_id.clone());
         self.orbit.own_instance = None;
-        if environment_id.is_empty() {
+        // GPUI tests have no backing Orbit Instance and must not wake the test scheduler from Tokio.
+        if cfg!(test) || environment_id.is_empty() {
             return;
         }
         let task = crate::live::RT.spawn(async move {

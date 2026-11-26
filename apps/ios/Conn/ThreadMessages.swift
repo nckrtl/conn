@@ -142,6 +142,7 @@ struct MessageReveal<Content: View>: View {
     }
 }
 
+
 struct ThreadMessage: View {
     let text: String
     let date: String?
@@ -173,22 +174,24 @@ struct ThreadMessage: View {
 
     var body: some View {
         if agent {
-            ThreadCard {
-                ThreadCardHeaderLink(open: metadata.thread.map { id in
-                    { onOpenThread(id, metadata.environment) }
-                }, label: "Open sender thread") {
-                    ThreadGlyph(name: "agent", size: 15)
-                    Text("Agent")
-                    Spacer()
-                }
-            } content: {
-                VStack(alignment: .leading, spacing: 3) {
-                    AgentSummary(title: metadata.sender ?? "Message", text: text)
-                    if !files.isEmpty { ThreadAttachments(files: files, store: store, thread: threadId) }
+            // A tap shows the copy button and time below the card, like a message (MessageReveal).
+            MessageReveal(text: text, timestamp: date) {
+                ThreadCard {
+                    ThreadCardHeaderLink(open: metadata.thread.map { id in
+                        { onOpenThread(id, metadata.environment) }
+                    }, label: "Open sender thread") {
+                        ThreadGlyph(name: "agent", size: 15)
+                        Text("Agent")
+                        Spacer()
+                    }
+                } content: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        AgentSummary(title: metadata.sender ?? "Message", text: text)
+                        if !files.isEmpty { ThreadAttachments(files: files, store: store, thread: threadId) }
+                    }
                 }
             }
         } else {
-            // The copy and time row sits close under the bubble: half the agent footer's gap.
             // A tap on the bubble shows its time and copy button below it.
             MessageReveal(text: text, timestamp: date, trailing: true) {
                 VStack(alignment: .leading, spacing: 3) {

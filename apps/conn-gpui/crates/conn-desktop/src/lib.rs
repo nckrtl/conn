@@ -15,3 +15,4 @@ pub mod operator;
 pub mod orbit;
 pub mod server_store;
 pub mod vault;
+pub mod vaultwarden;

@@ -385,6 +385,64 @@ fn presentation(tool: &str) -> ConnToolPresentation {
     }
 }
 
+/// The tool of `mcp_<server>_<tool>` when `<server>` is a Conn server and `<tool>` looks like a
+/// Conn tool. The longest matching server wins, so `mcp_conn_direct_x` is read as `conn-direct`.
+fn single_underscore_tool(label: &str) -> Option<&str> {
+    if !has_prefix(label, "mcp_") {
+        return None;
+    }
+    let rest = &label[4..];
+    SERVERS
+        .iter()
+        .filter_map(|server| {
+            let tool = rest.get(server.len() + 1..)?;
+            let head = rest.get(..server.len())?;
+            (head.eq_ignore_ascii_case(server)
+                && rest.as_bytes().get(server.len()) == Some(&b'_')
+                && looks_like_conn_tool(tool))
+            .then_some((server.len(), tool))
+        })
+        .max_by_key(|(length, _)| *length)
+        .map(|(_, tool)| tool)
+}
+
+/// Resolves a shell-command row to Conn's label and icon when the command is only a Conn tool
+/// name, which some providers report as a `command` item (`mcp_conn_conn_thread_read`). `None` for
+/// every real shell command.
+///
+/// The provider's row title may wrap the name (`Run mcp_conn_conn_thread_read`, ``Run `x` ``). The
+/// name must be a single word, and it must be unmistakable: an `mcp_` or `mcp__` spelling, a
+/// `<conn server>.<tool>` or `<conn server>:<tool>` pair, or a tool the table lists. A bare name
+/// that only looks like a Conn tool (`device_info`), a path (`conn/conn_thread_read`) or a command
+/// with arguments (`conn_thread_read --help`) stays a shell command.
+#[must_use]
+pub fn conn_tool_command_presentation(command: &str) -> Option<ConnToolPresentation> {
+    let mut word = command.trim();
+    for verb in ["running", "execute", "exec", "ran", "run"] {
+        if has_prefix(word, verb) && word[verb.len()..].starts_with(char::is_whitespace) {
+            word = word[verb.len()..].trim_start();
+            break;
+        }
+    }
+    let word = word
+        .strip_prefix('`')
+        .and_then(|rest| rest.strip_suffix('`'))
+        .unwrap_or(word)
+        .trim();
+    if word.is_empty() || word.contains(char::is_whitespace) || word.contains('/') {
+        return None;
+    }
+    let unmistakable = has_prefix(word, "mcp_")
+        || lookup(word).is_some()
+        || word
+            .split_once(['.', ':'])
+            .is_some_and(|(server, _)| is_conn_server(server));
+    if !unmistakable {
+        return None;
+    }
+    conn_tool_presentation(word)
+}
+
 /// Resolves a tool row title to Conn's label and icon, in any spelling providers use. `None` when
 /// the title is not a Conn tool, so other tools keep their own title and icon.
 ///
@@ -402,6 +460,13 @@ pub fn conn_tool_presentation(title: &str) -> Option<ConnToolPresentation> {
     if has_prefix(label, "mcp__") {
         let (server, tool) = label[5..].split_once("__")?;
         return (is_conn_server(server) && !tool.is_empty()).then(|| presentation(tool));
+    }
+
+    // `mcp_conn_conn_thread_read`: some providers join server and tool with a single underscore,
+    // and turn the `-` of `t3-code` into `_`. `mcp_call` and `mcp_connect` are Conn tools too, so
+    // a miss here falls through to the bare-name check below.
+    if let Some(tool) = single_underscore_tool(label) {
+        return Some(presentation(tool));
     }
 
     for separator in [".", ":", "/", "·"] {
@@ -802,8 +867,120 @@ mod tests {
 
     #[test]
     fn non_ascii_titles_do_not_panic() {
-        for title in ["mcp_é_x", "é", "conn-é_x", "mcp__é__é", "日本語"] {
+        for title in [
+            "mcp_é_x",
+            "é",
+            "conn-é_x",
+            "mcp__é__é",
+            "日本語",
+            "Run é",
+            "Run `é`",
+            "mcp_conn_é",
+            "mcp_é",
+        ] {
             let _ = conn_tool_presentation(title);
+            let _ = conn_tool_command_presentation(title);
+        }
+    }
+
+    #[test]
+    fn single_underscore_spelling_resolves() {
+        assert_eq!(
+            resolved("mcp_conn_conn_thread_read"),
+            ("Read a Conn thread".to_owned(), ConnMark)
+        );
+        for (title, display, icon) in [
+            (
+                "MCP_CONN_conn_thread_send",
+                "Send to a Conn thread",
+                ConnMark,
+            ),
+            (
+                "mcp_conn_pull_request_create",
+                "Open a pull request",
+                PullRequest,
+            ),
+            ("mcp_t3_code_t3_thread_list", "List Conn threads", ConnMark),
+            (
+                "mcp_conn_direct_preview_open",
+                "Open a page in the preview browser",
+                Browser,
+            ),
+            ("mcp_conn_conn_brand_new_tool", "Brand new tool", ConnMark),
+            (
+                "mcp_conn_conn_thread_read completed",
+                "Read a Conn thread",
+                ConnMark,
+            ),
+        ] {
+            assert_eq!(resolved(title), (display.to_owned(), icon), "{title:?}");
+        }
+        // The table's own `mcp_*` tools still resolve as bare names.
+        assert_eq!(resolved("mcp_call").0, "Call an MCP tool");
+        assert_eq!(resolved("mcp_connect").0, "Connect an MCP server");
+    }
+
+    #[test]
+    fn single_underscore_spelling_of_other_servers_is_not_a_conn_tool() {
+        for title in [
+            "mcp_github_create_issue",
+            "mcp_other_conn_thread_read",
+            "mcp_conn_lookup",
+            "mcp_conn_",
+            "mcp_conn",
+            "mcp_",
+            "mcp_connection_pool",
+        ] {
+            assert_eq!(conn_tool_presentation(title), None, "{title:?}");
+        }
+    }
+
+    #[test]
+    fn a_command_that_is_only_a_conn_tool_name_resolves() {
+        for command in [
+            "mcp_conn_conn_thread_read",
+            "mcp__conn__conn_thread_read",
+            "conn.conn_thread_read",
+            "conn:conn_thread_read",
+            "conn_thread_read",
+            "t3_thread_read",
+            "Run mcp_conn_conn_thread_read",
+            "Run `mcp_conn_conn_thread_read`",
+            "running mcp_conn_conn_thread_read",
+            "  Ran   mcp_conn_conn_thread_read  ",
+            "`mcp_conn_conn_thread_read`",
+        ] {
+            let found = conn_tool_command_presentation(command)
+                .unwrap_or_else(|| panic!("{command:?} should be a Conn tool"));
+            assert_eq!(found.display_name, "Read a Conn thread", "{command:?}");
+            assert_eq!(found.icon, ConnMark, "{command:?}");
+        }
+    }
+
+    #[test]
+    fn real_shell_commands_are_not_conn_tools() {
+        for command in [
+            "ls -la",
+            "conn_thread_read --help",
+            "mcp_conn_conn_thread_read | jq .",
+            "Run cargo test",
+            "Run conn_thread_read --id 1",
+            "./conn_thread_read",
+            "conn/conn_thread_read",
+            "/usr/local/bin/conn_thread_read",
+            "device_info",
+            "preview_server",
+            "conn_cli",
+            "conn-cli",
+            "conn.local",
+            "conn: connecting to host",
+            "mcp_github_create_issue",
+            "Run",
+            "Run ``",
+            "echo conn_thread_read",
+            "",
+        ] {
+            assert_eq!(conn_tool_command_presentation(command), None, "{command:?}");
         }
     }
 

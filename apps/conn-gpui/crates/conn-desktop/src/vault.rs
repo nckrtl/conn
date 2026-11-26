@@ -23,6 +23,8 @@ pub const VAULT_BINARY: &str = "/Applications/Vault.app/Contents/MacOS/Vault";
 
 /// Touch ID or master-password unlock can take a while before Vault replies.
 const TIMEOUT: Duration = Duration::from_secs(120);
+/// Upper bound for a login status check, which never prompts the user.
+const STATUS_DEADLINE: Duration = Duration::from_secs(15);
 /// Maximum accepted reply frame length (64 KiB, matching Conn's `MAX_FRAME`).
 const MAX_FRAME: usize = 64 * 1024;
 
@@ -143,6 +145,33 @@ pub struct VaultLoginItem {
     pub title: String,
     pub username: Option<String>,
     pub source: String,
+    /// The site icon Vault stores for this login, as PNG bytes (already base64-decoded and
+    /// checked). `None` when Vault sent none, or sent one that failed the checks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon_png: Option<Vec<u8>>,
+}
+
+/// Longest accepted `icon` text. Vault sends at most 8,000 characters (a 6,000-byte PNG).
+const MAX_ICON_BASE64: usize = 12_000;
+/// Largest accepted decoded icon.
+const MAX_ICON_BYTES: usize = 9_000;
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+
+/// Decodes the optional `icon` of a Vault login suggestion: standard base64 of a PNG, within the
+/// size limits. Anything else gives `None`, and the login is still listed.
+#[must_use]
+pub fn decode_login_icon(icon: &str) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    if icon.is_empty() || icon.len() > MAX_ICON_BASE64 {
+        return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(icon)
+        .ok()?;
+    (bytes.len() > PNG_SIGNATURE.len()
+        && bytes.len() <= MAX_ICON_BYTES
+        && bytes.starts_with(&PNG_SIGNATURE))
+    .then_some(bytes)
 }
 
 /// Result of querying Vault login status or suggestions for a page URL.
@@ -241,6 +270,9 @@ struct WireSuggestion {
     name: String,
     #[serde(default)]
     username: String,
+    /// Optional base64 PNG of the site's icon (Vault build 139 and later).
+    #[serde(default)]
+    icon: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -254,7 +286,6 @@ struct WireCredential {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct BridgeReply {
-    id: Option<String>,
     status: Option<String>,
     message: Option<String>,
     databases: Option<Vec<WireDatabase>>,
@@ -264,6 +295,149 @@ struct BridgeReply {
     #[serde(rename = "itemID")]
     item_id: Option<String>,
     credential: Option<WireCredential>,
+}
+
+/// Only the `id` of a reply frame, to find ours before reading the rest.
+#[derive(Deserialize)]
+struct ReplyId {
+    id: Option<String>,
+}
+
+/// Which WebAuthn ceremony Vault runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasskeyMode {
+    /// `navigator.credentials.create`.
+    Create,
+    /// `navigator.credentials.get`.
+    Get,
+}
+
+impl PasskeyMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Create => "passkey-create",
+            Self::Get => "passkey-get",
+        }
+    }
+}
+
+/// The `DOMException` a failed ceremony rejects with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PasskeyError {
+    NotAllowed,
+    InvalidState,
+    Security,
+    NotSupported,
+    Abort,
+}
+
+impl PasskeyError {
+    /// The `DOMException` name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::NotAllowed => "NotAllowedError",
+            Self::InvalidState => "InvalidStateError",
+            Self::Security => "SecurityError",
+            Self::NotSupported => "NotSupportedError",
+            Self::Abort => "AbortError",
+        }
+    }
+
+    /// Maps a name Vault sent. A name Conn does not know is a refusal, as in the Chrome
+    /// extension and Conn's Electron bridge.
+    #[must_use]
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "InvalidStateError" => Self::InvalidState,
+            "SecurityError" => Self::Security,
+            "NotSupportedError" => Self::NotSupported,
+            "AbortError" => Self::Abort,
+            _ => Self::NotAllowed,
+        }
+    }
+}
+
+/// Largest `url` Vault accepts in a passkey request.
+pub const PASSKEY_URL_MAX_BYTES: usize = 8192;
+/// Largest `options` string Vault accepts in a passkey request.
+pub const PASSKEY_OPTIONS_MAX_BYTES: usize = 12_000;
+
+/// Where the browser's page area sits on screen, so Vault opens its passkey panel at the area's
+/// top-right corner instead of the top centre of the screen.
+///
+/// The rect is in AppKit's global screen coordinates, in points: the origin is the bottom-left
+/// corner of the primary display, `y` grows upward, and `(x, y)` is the rect's bottom-left
+/// corner. Retina scale does not apply: these are points, never pixels. Placement only: Vault
+/// ignores it for every security decision, and drops a rect it cannot use.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct PasskeyAnchor {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+impl PasskeyAnchor {
+    /// No display comes near this. Vault refuses anything larger.
+    pub const LIMIT: f64 = 100_000.0;
+
+    /// The anchor, when every number is finite and sane and the size is positive.
+    #[must_use]
+    pub fn new(x: f64, y: f64, width: f64, height: f64) -> Option<Self> {
+        let sane = [x, y, width, height]
+            .iter()
+            .all(|value| value.is_finite() && value.abs() <= Self::LIMIT);
+        (sane && width > 0.0 && height > 0.0).then_some(Self {
+            x,
+            y,
+            width,
+            height,
+        })
+    }
+}
+
+/// A passkey request carries exactly these fields: Vault refuses any other. `anchor` is optional
+/// and left out when Conn cannot say where its browser is.
+#[derive(Serialize)]
+struct PasskeyBridgeRequest<'a> {
+    version: u8,
+    id: &'a str,
+    kind: &'static str,
+    mode: &'static str,
+    url: &'a str,
+    options: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    anchor: Option<PasskeyAnchor>,
+}
+
+#[derive(Deserialize)]
+struct PasskeyReply {
+    status: Option<String>,
+    passkey: Option<String>,
+    error: Option<String>,
+}
+
+/// Reads Vault's passkey reply: the credential JSON string on `ok`, else the error to reject with.
+fn parse_passkey_reply(payload: &[u8]) -> Result<String, PasskeyError> {
+    let reply: PasskeyReply =
+        serde_json::from_slice(payload).map_err(|_| PasskeyError::NotAllowed)?;
+    match reply.status.as_deref() {
+        Some("ok") => {
+            let passkey = reply.passkey.ok_or(PasskeyError::NotAllowed)?;
+            // The page shim parses it: refuse anything that is not a JSON object.
+            match serde_json::from_str::<serde_json::Value>(&passkey) {
+                Ok(serde_json::Value::Object(_)) => Ok(passkey),
+                _ => Err(PasskeyError::NotAllowed),
+            }
+        }
+        Some("error") => Err(reply
+            .error
+            .as_deref()
+            .map_or(PasskeyError::NotAllowed, PasskeyError::from_name)),
+        _ => Err(PasskeyError::NotAllowed),
+    }
 }
 
 fn parse_wire_database(wire: WireDatabase) -> Option<(VaultDatabase, Option<String>)> {
@@ -431,11 +605,26 @@ impl VaultClient {
     }
 
     /// Queries whether Vault is currently unlocked without prompting.
+    ///
+    /// A status check never waits for Touch ID or a master password, so the whole exchange
+    /// (spawning the relay, the reply, and stopping the relay) is capped at [`STATUS_DEADLINE`]
+    /// instead of the 120 second unlock allowance. A relay that never answers then ends in an
+    /// error the caller can show and retry, rather than an endless "checking" state.
     pub async fn login_status(&self) -> VaultLoginsResponse {
-        match self
-            .send_request("login", "status", None, None, None, false)
-            .await
+        let deadline = self.timeout.min(STATUS_DEADLINE);
+        let reply = match tokio::time::timeout(
+            deadline,
+            self.send_request("login", "status", None, None, None, false),
+        )
+        .await
         {
+            Ok(reply) => reply,
+            Err(_) => Err(VaultError::new(
+                VaultErrorKind::Error,
+                "Vault did not answer in time.",
+            )),
+        };
+        match reply {
             Ok(reply) => match reply.status.as_deref() {
                 Some("unlocked") => VaultLoginsResponse {
                     status: VaultLoginsStatus::Ok,
@@ -493,6 +682,7 @@ impl VaultClient {
                                 Some(s.username)
                             },
                             source: "vault".to_owned(),
+                            icon_png: s.icon.as_deref().and_then(decode_login_icon),
                         })
                         .collect();
                     VaultLoginsResponse {
@@ -570,6 +760,55 @@ impl VaultClient {
         }
     }
 
+    /// Runs one passkey ceremony in Vault, which is the authenticator.
+    ///
+    /// `url` is the page's exact HTTPS top-frame address and `options` the `{publicKey: …}` string
+    /// in the Chrome extension's wire format. Both come from Conn, never from the page. Vault
+    /// waits for a person (Touch ID), so the call waits as long as the client timeout allows.
+    /// Closing the pipe with no reply (an older Vault) rejects with `NotAllowedError`, and so does
+    /// every other failure to reach Vault.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`PasskeyError`] the page's promise rejects with.
+    ///
+    /// `anchor` is where the browser's page area is on screen; Vault places its panel there.
+    /// Pass `None` when it is unknown: Vault then opens the panel where it always did.
+    pub async fn passkey(
+        &self,
+        mode: PasskeyMode,
+        url: &str,
+        options: &str,
+        anchor: Option<PasskeyAnchor>,
+    ) -> Result<String, PasskeyError> {
+        if https_origin(url).is_none() || url.len() > PASSKEY_URL_MAX_BYTES {
+            return Err(PasskeyError::Security);
+        }
+        if options.is_empty() || options.len() > PASSKEY_OPTIONS_MAX_BYTES {
+            return Err(PasskeyError::NotSupported);
+        }
+        if !self.binary.exists() {
+            return Err(PasskeyError::NotAllowed);
+        }
+        let request_id = next_request_id();
+        let body = serde_json::to_vec(&PasskeyBridgeRequest {
+            version: 1,
+            id: &request_id,
+            kind: "passkey",
+            mode: mode.as_str(),
+            url,
+            options,
+            // Re-checked here, so a caller that built the struct by hand cannot send a bad rect.
+            anchor: anchor.and_then(|a| PasskeyAnchor::new(a.x, a.y, a.width, a.height)),
+        })
+        .map_err(|_| PasskeyError::NotSupported)?;
+        let payload = self
+            .exchange(&request_id, &body)
+            .await
+            .map_err(|_| PasskeyError::NotAllowed)?;
+        parse_passkey_reply(&payload)
+    }
+
     async fn send_request(
         &self,
         kind: &str,
@@ -598,9 +837,18 @@ impl VaultClient {
         };
         let body = serde_json::to_vec(&payload)
             .map_err(|err| VaultError::new(VaultErrorKind::Error, err.to_string()))?;
+        let payload = self.exchange(&request_id, &body).await?;
+        serde_json::from_slice(&payload)
+            .map_err(|_| VaultError::new(VaultErrorKind::Error, "Vault sent an invalid reply."))
+    }
+
+    /// Sends one framed request to a fresh `--conn-bridge` process and returns the raw payload of
+    /// the reply whose `id` is `request_id`. Closing the pipe without a reply (an older Vault, or a
+    /// refused caller) is an error. The child dies with the call, which Vault reads as the caller
+    /// going away, so dropping the future cancels a pending ceremony.
+    async fn exchange(&self, request_id: &str, body: &[u8]) -> Result<Vec<u8>, VaultError> {
         let body_len = u32::try_from(body.len())
             .map_err(|_| VaultError::new(VaultErrorKind::Error, "Vault request is too large."))?;
-
         let mut child = Command::new(&self.binary)
             .arg("--conn-bridge")
             .stdin(Stdio::piped())
@@ -622,7 +870,7 @@ impl VaultClient {
         // Keep stdin open until the reply arrives: the relay treats EOF as caller disconnect.
         let mut frame = Vec::with_capacity(4 + body.len());
         frame.extend_from_slice(&body_len.to_le_bytes());
-        frame.extend_from_slice(&body);
+        frame.extend_from_slice(body);
         if stdin.write_all(&frame).await.is_err() || stdin.flush().await.is_err() {
             let _ = child.kill().await;
             return Err(VaultError::new(
@@ -658,11 +906,11 @@ impl VaultClient {
                         "Vault sent an invalid reply.",
                     ));
                 }
-                let reply: BridgeReply = serde_json::from_slice(&payload_buf).map_err(|_| {
+                let reply: ReplyId = serde_json::from_slice(&payload_buf).map_err(|_| {
                     VaultError::new(VaultErrorKind::Error, "Vault sent an invalid reply.")
                 })?;
-                if reply.id.as_deref() == Some(request_id.as_str()) {
-                    return Ok(reply);
+                if reply.id.as_deref() == Some(request_id) {
+                    return Ok(payload_buf);
                 }
             }
         };
@@ -734,6 +982,93 @@ mod tests {
         std::fs::write(&path, full)?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
         Ok((dir, path))
+    }
+
+    /// A relay that answers a login `status` request with `locked`, then keeps stdin and stdout
+    /// open like the real `Vault --conn-bridge` does until its parent hangs up.
+    const LOCKED_STATUS_RELAY: &str = r#"
+import json, struct, sys, time
+
+raw_len = sys.stdin.buffer.read(4)
+size = struct.unpack("<I", raw_len)[0]
+req = json.loads(sys.stdin.buffer.read(size).decode("utf-8"))
+assert req["kind"] == "login" and req["mode"] == "status", req
+assert req["allowUnlock"] is False, req
+for key in ("url", "itemID", "field"):
+    assert key not in req, req
+
+body = json.dumps({"id": req["id"], "status": "locked"}).encode("utf-8")
+sys.stdout.buffer.write(struct.pack("<I", len(body)) + body)
+sys.stdout.buffer.flush()
+time.sleep(60)
+"#;
+
+    #[tokio::test]
+    async fn login_status_returns_locked_promptly_while_the_relay_stays_open()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, bin) = write_fake_vault(LOCKED_STATUS_RELAY)?;
+        let client = VaultClient::with_binary(&bin).with_timeout(Duration::from_secs(20));
+
+        let started = std::time::Instant::now();
+        let response = client.login_status().await;
+        assert_eq!(response.status, VaultLoginsStatus::Locked);
+        assert!(response.items.is_empty());
+        assert_eq!(response.error, None);
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "login_status waited for the relay to exit: {:?}",
+            started.elapsed()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn login_status_gives_up_when_the_relay_never_answers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let script = r#"
+import sys, time
+
+sys.stdin.buffer.read(4)
+time.sleep(60)
+"#;
+        let (_dir, bin) = write_fake_vault(script)?;
+        let client = VaultClient::with_binary(&bin).with_timeout(Duration::from_millis(400));
+
+        let started = std::time::Instant::now();
+        let response = client.login_status().await;
+        assert_eq!(response.status, VaultLoginsStatus::Error);
+        assert!(response.error.is_some());
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "login_status ignored its deadline: {:?}",
+            started.elapsed()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn login_status_skips_frames_for_other_requests() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let script = r#"
+import json, struct, sys
+
+raw_len = sys.stdin.buffer.read(4)
+size = struct.unpack("<I", raw_len)[0]
+req = json.loads(sys.stdin.buffer.read(size).decode("utf-8"))
+
+def send(reply):
+    body = json.dumps(reply).encode("utf-8")
+    sys.stdout.buffer.write(struct.pack("<I", len(body)) + body)
+    sys.stdout.buffer.flush()
+
+send({"id": "00000000-0000-4000-8000-000000000000", "status": "locked"})
+send({"id": req["id"], "status": "unlocked"})
+"#;
+        let (_dir, bin) = write_fake_vault(script)?;
+        let client = VaultClient::with_binary(&bin).with_timeout(Duration::from_secs(20));
+        let response = client.login_status().await;
+        assert_eq!(response.status, VaultLoginsStatus::Ok);
+        Ok(())
     }
 
     #[tokio::test]
@@ -861,5 +1196,441 @@ sys.stdout.buffer.flush()
             .await;
         assert_eq!(mismatch, VaultLoginFillLookup::OriginMismatch);
         Ok(())
+    }
+
+    /// A 1 × 1 PNG, base64.
+    const TINY_PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==";
+
+    #[test]
+    fn a_login_icon_is_a_small_base64_png_or_nothing() {
+        use base64::Engine as _;
+        let png = decode_login_icon(TINY_PNG).expect("a valid icon");
+        assert!(png.starts_with(&PNG_SIGNATURE));
+
+        assert_eq!(decode_login_icon(""), None, "empty");
+        assert_eq!(decode_login_icon("not base64 !!"), None, "invalid base64");
+        let text = base64::engine::general_purpose::STANDARD.encode(b"GIF89a plus more bytes");
+        assert_eq!(decode_login_icon(&text), None, "not a PNG");
+        let signature_only = base64::engine::general_purpose::STANDARD.encode(PNG_SIGNATURE);
+        assert_eq!(decode_login_icon(&signature_only), None, "no image data");
+        let mut huge = PNG_SIGNATURE.to_vec();
+        huge.resize(MAX_ICON_BYTES + 1, 0);
+        let huge = base64::engine::general_purpose::STANDARD.encode(huge);
+        assert!(huge.len() > MAX_ICON_BASE64);
+        assert_eq!(decode_login_icon(&huge), None, "oversized");
+        let mut largest = PNG_SIGNATURE.to_vec();
+        largest.resize(MAX_ICON_BYTES, 0);
+        let largest = base64::engine::general_purpose::STANDARD.encode(largest);
+        assert!(largest.len() <= MAX_ICON_BASE64);
+        assert!(decode_login_icon(&largest).is_some(), "the largest allowed");
+    }
+
+    #[tokio::test]
+    async fn logins_carry_an_icon_only_when_vault_sent_a_valid_one()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let script = format!(
+            r#"
+import json, struct, sys
+
+size = struct.unpack("<I", sys.stdin.buffer.read(4))[0]
+req = json.loads(sys.stdin.buffer.read(size).decode("utf-8"))
+reply = {{
+    "id": req["id"],
+    "status": "suggestions",
+    "suggestions": [
+        {{"id": "AAA", "name": "With icon", "username": "a@example.com", "icon": "{TINY_PNG}"}},
+        {{"id": "BBB", "name": "No icon", "username": "b@example.com"}},
+        {{"id": "CCC", "name": "Bad icon", "username": "c@example.com", "icon": "!!not-base64!!"}},
+        {{"id": "DDD", "name": "Wrong type", "username": "d@example.com", "icon": "R0lGODlhAQABAAAAACw="}},
+    ],
+}}
+body = json.dumps(reply).encode("utf-8")
+sys.stdout.buffer.write(struct.pack("<I", len(body)) + body)
+sys.stdout.buffer.flush()
+"#
+        );
+        let (_dir, bin) = write_fake_vault(&script)?;
+        let client = VaultClient::with_binary(&bin);
+        let logins = client.list_logins("https://example.com/login", false).await;
+        assert_eq!(logins.status, VaultLoginsStatus::Ok);
+        let icons: Vec<(&str, bool)> = logins
+            .items
+            .iter()
+            .map(|item| (item.title.as_str(), item.icon_png.is_some()))
+            .collect();
+        assert_eq!(
+            icons,
+            vec![
+                ("With icon", true),
+                ("No icon", false),
+                ("Bad icon", false),
+                ("Wrong type", false),
+            ],
+            "a bad icon never drops the login"
+        );
+        assert!(
+            logins.items[0]
+                .icon_png
+                .as_deref()
+                .is_some_and(|png| png.starts_with(&PNG_SIGNATURE))
+        );
+        Ok(())
+    }
+
+    const PASSKEY_OPTIONS: &str =
+        r#"{"publicKey":{"challenge":"AAAAAAAAAAAAAAAAAAAAAA","rpId":"example.com"}}"#;
+
+    /// A fake Vault that checks the request is exactly the contract's shape, then answers with
+    /// `reply_body` (Python source of an expression over `req`).
+    fn passkey_script(reply_body: &str) -> String {
+        format!(
+            r#"
+import json, struct, sys
+
+req = json.loads(sys.stdin.buffer.read(struct.unpack("<I", sys.stdin.buffer.read(4))[0]))
+keys = sorted(req.keys())
+base = ["id", "kind", "mode", "options", "url", "version"]
+anchor = req.get("anchor")
+ok_anchor = anchor is None or (
+    sorted(anchor.keys()) == ["height", "width", "x", "y"]
+    and all(isinstance(v, (int, float)) for v in anchor.values())
+)
+ok_shape = (
+    ok_anchor
+    and keys in (base, sorted(base + ["anchor"]))
+    and req["version"] == 1
+    and req["kind"] == "passkey"
+    and req["mode"] in ("passkey-create", "passkey-get")
+    and isinstance(req["options"], str)
+)
+if not ok_shape:
+    reply = {{"id": req["id"], "status": "error", "error": "NotSupportedError"}}
+else:
+    reply = {reply_body}
+body = json.dumps(reply).encode("utf-8")
+sys.stdout.buffer.write(struct.pack("<I", len(body)) + body)
+sys.stdout.buffer.flush()
+"#
+        )
+    }
+
+    #[test]
+    fn passkey_modes_and_errors_use_the_contract_names() {
+        assert_eq!(PasskeyMode::Create.as_str(), "passkey-create");
+        assert_eq!(PasskeyMode::Get.as_str(), "passkey-get");
+        for error in [
+            PasskeyError::NotAllowed,
+            PasskeyError::InvalidState,
+            PasskeyError::Security,
+            PasskeyError::NotSupported,
+            PasskeyError::Abort,
+        ] {
+            assert_eq!(PasskeyError::from_name(error.name()), error);
+        }
+        assert_eq!(PasskeyError::from_name("Locked"), PasskeyError::NotAllowed);
+        assert_eq!(PasskeyError::from_name(""), PasskeyError::NotAllowed);
+    }
+
+    #[test]
+    fn parses_passkey_replies() {
+        let ok =
+            br#"{"id":"1","status":"ok","passkey":"{\"id\":\"abc\",\"type\":\"public-key\"}"}"#;
+        assert_eq!(
+            parse_passkey_reply(ok).as_deref(),
+            Ok(r#"{"id":"abc","type":"public-key"}"#)
+        );
+        let named = |name: &str| {
+            parse_passkey_reply(
+                format!(r#"{{"id":"1","status":"error","error":"{name}","message":"x"}}"#)
+                    .as_bytes(),
+            )
+        };
+        assert_eq!(named("InvalidStateError"), Err(PasskeyError::InvalidState));
+        assert_eq!(named("SecurityError"), Err(PasskeyError::Security));
+        assert_eq!(named("NotSupportedError"), Err(PasskeyError::NotSupported));
+        assert_eq!(named("AbortError"), Err(PasskeyError::Abort));
+        assert_eq!(named("NotAllowedError"), Err(PasskeyError::NotAllowed));
+        assert_eq!(named("Surprise"), Err(PasskeyError::NotAllowed));
+        // An error with no name, a missing credential, a credential that is not an object, an
+        // unknown status and a frame that is not JSON all refuse.
+        for bad in [
+            &br#"{"id":"1","status":"error"}"#[..],
+            br#"{"id":"1","status":"ok"}"#,
+            br#"{"id":"1","status":"ok","passkey":"[1]"}"#,
+            br#"{"id":"1","status":"ok","passkey":"not json"}"#,
+            br#"{"id":"1","status":"locked"}"#,
+            b"nonsense",
+        ] {
+            assert_eq!(parse_passkey_reply(bad), Err(PasskeyError::NotAllowed));
+        }
+    }
+
+    #[tokio::test]
+    async fn passkey_request_has_exactly_the_contract_fields()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let script = passkey_script(
+            r#"{"id": req["id"], "status": "ok", "passkey": json.dumps({"mode": req["mode"], "url": req["url"], "options": req["options"]})}"#,
+        );
+        let (_dir, bin) = write_fake_vault(&script)?;
+        let client = VaultClient::with_binary(&bin);
+        let url = "https://example.com/login?next=%2F";
+        for mode in [PasskeyMode::Get, PasskeyMode::Create] {
+            let credential = client
+                .passkey(mode, url, PASSKEY_OPTIONS, None)
+                .await
+                .map_err(|err| err.name())?;
+            let value: serde_json::Value = serde_json::from_str(&credential)?;
+            assert_eq!(value["mode"], mode.as_str());
+            assert_eq!(value["url"], url);
+            assert_eq!(value["options"], PASSKEY_OPTIONS);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn anchor_needs_finite_sane_numbers_and_a_positive_size() {
+        assert_eq!(
+            PasskeyAnchor::new(100.0, 200.5, 900.0, 700.0),
+            Some(PasskeyAnchor {
+                x: 100.0,
+                y: 200.5,
+                width: 900.0,
+                height: 700.0
+            })
+        );
+        // A second display sits at negative coordinates.
+        assert!(PasskeyAnchor::new(-1920.0, -300.0, 1920.0, 1080.0).is_some());
+        for bad in [
+            PasskeyAnchor::new(f64::NAN, 0.0, 10.0, 10.0),
+            PasskeyAnchor::new(0.0, f64::INFINITY, 10.0, 10.0),
+            PasskeyAnchor::new(0.0, 0.0, f64::NEG_INFINITY, 10.0),
+            PasskeyAnchor::new(0.0, 0.0, 0.0, 10.0),
+            PasskeyAnchor::new(0.0, 0.0, 10.0, -1.0),
+            PasskeyAnchor::new(1.0e12, 0.0, 10.0, 10.0),
+            PasskeyAnchor::new(0.0, -1.0e12, 10.0, 10.0),
+        ] {
+            assert_eq!(bad, None);
+        }
+    }
+
+    #[test]
+    fn request_serialises_the_anchor_only_when_there_is_one() -> Result<(), serde_json::Error> {
+        let build = |anchor| {
+            serde_json::to_value(PasskeyBridgeRequest {
+                version: 1,
+                id: "11111111-1111-1111-1111-111111111111",
+                kind: "passkey",
+                mode: PasskeyMode::Get.as_str(),
+                url: "https://example.com/login",
+                options: PASSKEY_OPTIONS,
+                anchor,
+            })
+        };
+        let plain = build(None)?;
+        assert!(plain.get("anchor").is_none(), "{plain}");
+        let anchored = build(PasskeyAnchor::new(100.0, 200.0, 900.5, 700.0))?;
+        assert_eq!(
+            anchored["anchor"],
+            serde_json::json!({"x": 100.0, "y": 200.0, "width": 900.5, "height": 700.0})
+        );
+        // Everything else is the contract's shape, with or without it.
+        let mut keys: Vec<_> = anchored
+            .as_object()
+            .map(|map| map.keys().cloned().collect())
+            .unwrap_or_default();
+        keys.sort();
+        assert_eq!(
+            keys,
+            ["anchor", "id", "kind", "mode", "options", "url", "version"]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn passkey_request_carries_the_anchor_to_vault() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let script = passkey_script(
+            r#"{"id": req["id"], "status": "ok", "passkey": json.dumps({"anchor": req.get("anchor")})}"#,
+        );
+        let (_dir, bin) = write_fake_vault(&script)?;
+        let client = VaultClient::with_binary(&bin);
+        let anchor = PasskeyAnchor::new(-1920.0, 40.5, 1500.0, 900.0);
+        let credential = client
+            .passkey(
+                PasskeyMode::Get,
+                "https://example.com/",
+                PASSKEY_OPTIONS,
+                anchor,
+            )
+            .await
+            .map_err(|err| err.name())?;
+        let value: serde_json::Value = serde_json::from_str(&credential)?;
+        assert_eq!(
+            value["anchor"],
+            serde_json::json!({"x": -1920.0, "y": 40.5, "width": 1500.0, "height": 900.0})
+        );
+        // A hand-built bad rect never leaves Conn.
+        let bad = PasskeyAnchor {
+            x: f64::NAN,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+        };
+        let credential = client
+            .passkey(
+                PasskeyMode::Get,
+                "https://example.com/",
+                PASSKEY_OPTIONS,
+                Some(bad),
+            )
+            .await
+            .map_err(|err| err.name())?;
+        let value: serde_json::Value = serde_json::from_str(&credential)?;
+        assert!(value["anchor"].is_null(), "{value}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn passkey_skips_replies_for_other_requests() -> Result<(), Box<dyn std::error::Error>> {
+        let script = passkey_script(r#"{"id": req["id"], "status": "ok", "passkey": "{}"}"#)
+            .replace(
+                "body = json.dumps(reply)",
+                r#"stray = json.dumps({"id": "other", "status": "error", "error": "SecurityError"}).encode("utf-8")
+sys.stdout.buffer.write(struct.pack("<I", len(stray)) + stray)
+body = json.dumps(reply)"#,
+            );
+        let (_dir, bin) = write_fake_vault(&script)?;
+        let client = VaultClient::with_binary(&bin);
+        let credential = client
+            .passkey(
+                PasskeyMode::Get,
+                "https://example.com/",
+                PASSKEY_OPTIONS,
+                None,
+            )
+            .await;
+        assert_eq!(credential.as_deref(), Ok("{}"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn passkey_error_names_reach_the_caller() -> Result<(), Box<dyn std::error::Error>> {
+        for (name, expected) in [
+            ("InvalidStateError", PasskeyError::InvalidState),
+            ("SecurityError", PasskeyError::Security),
+            ("NotSupportedError", PasskeyError::NotSupported),
+            ("NotAllowedError", PasskeyError::NotAllowed),
+        ] {
+            let script = passkey_script(&format!(
+                r#"{{"id": req["id"], "status": "error", "error": "{name}", "message": "no"}}"#
+            ));
+            let (_dir, bin) = write_fake_vault(&script)?;
+            let outcome = VaultClient::with_binary(&bin)
+                .passkey(
+                    PasskeyMode::Create,
+                    "https://example.com/",
+                    PASSKEY_OPTIONS,
+                    None,
+                )
+                .await;
+            assert_eq!(outcome, Err(expected), "{name}");
+        }
+        Ok(())
+    }
+
+    /// An older Vault closes the pipe without a reply.
+    #[tokio::test]
+    async fn passkey_closed_pipe_is_not_allowed() -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, bin) = write_fake_vault(
+            "import sys
+sys.stdin.buffer.read(4)
+sys.exit(0)
+",
+        )?;
+        let outcome = VaultClient::with_binary(&bin)
+            .passkey(
+                PasskeyMode::Get,
+                "https://example.com/",
+                PASSKEY_OPTIONS,
+                None,
+            )
+            .await;
+        assert_eq!(outcome, Err(PasskeyError::NotAllowed));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn passkey_timeout_is_not_allowed() -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, bin) = write_fake_vault(
+            "import time
+time.sleep(30)
+",
+        )?;
+        let started = std::time::Instant::now();
+        let outcome = VaultClient::with_binary(&bin)
+            .with_timeout(Duration::from_millis(300))
+            .passkey(
+                PasskeyMode::Get,
+                "https://example.com/",
+                PASSKEY_OPTIONS,
+                None,
+            )
+            .await;
+        assert_eq!(outcome, Err(PasskeyError::NotAllowed));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        Ok(())
+    }
+
+    /// The default wait covers a person using Touch ID, far beyond the 15 s status cap.
+    #[test]
+    fn passkey_waits_for_a_person() {
+        assert!(VaultClient::new().timeout >= Duration::from_secs(120));
+    }
+
+    #[tokio::test]
+    async fn passkey_refuses_before_starting_vault() {
+        // A binary that does not exist proves the checks ran first for these.
+        let client = VaultClient::with_binary("/nonexistent/Vault");
+        for url in [
+            "http://example.com/",
+            "https://user:pw@example.com/",
+            "about:blank",
+            "not a url",
+        ] {
+            assert_eq!(
+                client
+                    .passkey(PasskeyMode::Get, url, PASSKEY_OPTIONS, None)
+                    .await,
+                Err(PasskeyError::Security),
+                "{url}"
+            );
+        }
+        let long_url = format!("https://example.com/{}", "a".repeat(PASSKEY_URL_MAX_BYTES));
+        assert_eq!(
+            client
+                .passkey(PasskeyMode::Get, &long_url, PASSKEY_OPTIONS, None)
+                .await,
+            Err(PasskeyError::Security)
+        );
+        for options in ["", &"x".repeat(PASSKEY_OPTIONS_MAX_BYTES + 1)] {
+            assert_eq!(
+                client
+                    .passkey(PasskeyMode::Get, "https://example.com/", options, None)
+                    .await,
+                Err(PasskeyError::NotSupported)
+            );
+        }
+        assert_eq!(
+            client
+                .passkey(
+                    PasskeyMode::Get,
+                    "https://example.com/",
+                    PASSKEY_OPTIONS,
+                    None
+                )
+                .await,
+            Err(PasskeyError::NotAllowed),
+            "no Vault installed"
+        );
     }
 }

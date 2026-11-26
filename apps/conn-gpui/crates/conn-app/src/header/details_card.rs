@@ -28,7 +28,7 @@ use gpui_kit::{
 use crate::a11y::ConnA11yExt as _;
 use crate::app::ConnApp;
 use crate::icons;
-use crate::panels::chrome::ConnTooltipExt as _;
+use crate::panels::chrome::{ConnTooltipExt as _, FloatingSurfaceExt as _};
 use crate::panels::header::dropdown_glass_shadow;
 use crate::sidebar::thread_list::{
     current_unix_secs, format_working_duration, middle_truncate, parse_iso8601_unix_secs,
@@ -540,7 +540,7 @@ pub(crate) fn render_thread_details_card(
         .border_1()
         .border_color(hsla(tokens.foreground.with_alpha(0.08)))
         .shadow(vec![dropdown_glass_shadow(tokens)])
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+        .floating_surface()
         .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
         .child(body);
 

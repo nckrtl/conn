@@ -879,7 +879,10 @@ impl RowCache {
                 VirtualItem::Notice { row_idx } => {
                     if matches!(
                         rows[*row_idx].entry,
-                        TimelineEntry::Notice { is_error: true, .. }
+                        TimelineEntry::Notice {
+                            level: conn_state::NoticeLevel::Error,
+                            ..
+                        }
                     ) && let Some(last) = toc.last_mut()
                     {
                         last.has_error = true;

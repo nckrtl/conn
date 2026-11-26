@@ -337,6 +337,8 @@ pub(crate) struct Store {
     starts: StartLedger,
     /// Set when attention events are on (`attention.rs`); raised after a commit that wrote one.
     pub(crate) attention: Option<std::sync::Arc<tokio::sync::Notify>>,
+    /// Set when thread pushes are on (`thread_push.rs`); raised after a commit that wrote a row.
+    pub(crate) thread_push: Option<std::sync::Arc<tokio::sync::Notify>>,
     /// Raised after a commit that wrote outbox rows (`outbox.rs`): the effect worker wakes.
     pub(crate) effects_wake: std::sync::Arc<tokio::sync::Notify>,
     /// The latest committed sequence, sent by the commit itself (T3's `EventSink` publishes
@@ -463,6 +465,8 @@ impl Store {
         conn.execute_batch(crate::outline::CREATE_INDEX)
             .map_err(err)?;
         conn.execute_batch(crate::attention::SCHEMA).map_err(err)?;
+        conn.execute_batch(crate::thread_push::SCHEMA)
+            .map_err(err)?;
         conn.execute_batch(crate::outbox::SCHEMA).map_err(err)?;
         migrate(&conn)?;
         let high = stored_high(&conn)?;
@@ -484,6 +488,7 @@ impl Store {
             providers: conn_provider::ProviderSet::default(),
             starts: StartLedger::default(),
             attention: None,
+            thread_push: None,
             effects_wake: std::sync::Arc::default(),
             published: std::sync::Arc::new(tokio::sync::watch::Sender::new(high)),
             limit_recovery_wake: Default::default(),
@@ -658,6 +663,8 @@ impl Store {
             reserved: None,
             attention: self.attention.clone(),
             attention_written: false,
+            thread_push: self.thread_push.clone(),
+            thread_push_written: false,
             effects_wake: self.effects_wake.clone(),
             effects_written: false,
             published: self.published.clone(),
@@ -1993,6 +2000,9 @@ pub(crate) struct Tx<'a> {
     /// See [`Store::attention`].
     attention: Option<std::sync::Arc<tokio::sync::Notify>>,
     attention_written: bool,
+    /// See [`Store::thread_push`].
+    thread_push: Option<std::sync::Arc<tokio::sync::Notify>>,
+    thread_push_written: bool,
     effects_wake: std::sync::Arc<tokio::sync::Notify>,
     effects_written: bool,
     published: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
@@ -2970,18 +2980,29 @@ impl Tx<'_> {
                 }
                 limited_thread_changed |=
                     row["status"] == "failed" && row["lastErrorClass"] == "usage_limit";
-                if self.attention.is_some() {
-                    let before = previous
+                if self.attention.is_some() || self.thread_push.is_some() {
+                    let before: Option<Value> = previous
                         .as_deref()
                         .and_then(|p| serde_json::from_str(p).ok());
-                    self.attention_written |= crate::attention::record(
-                        &self.tx,
-                        &thread_id,
-                        before.as_ref(),
-                        &row,
-                        self.now_ms,
-                        &self.now,
-                    )?;
+                    if self.attention.is_some() {
+                        self.attention_written |= crate::attention::record(
+                            &self.tx,
+                            &thread_id,
+                            before.as_ref(),
+                            &row,
+                            self.now_ms,
+                            &self.now,
+                        )?;
+                    }
+                    if self.thread_push.is_some() {
+                        self.thread_push_written |= crate::thread_push::record(
+                            &self.tx,
+                            &thread_id,
+                            before.as_ref(),
+                            &row,
+                            self.now_ms,
+                        )?;
+                    }
                 }
                 self.tx
                     .execute(
@@ -3060,6 +3081,11 @@ impl Tx<'_> {
             && let Some(attention) = &self.attention
         {
             attention.notify_one();
+        }
+        if self.thread_push_written
+            && let Some(thread_push) = &self.thread_push
+        {
+            thread_push.notify_one();
         }
         if self.effects_written {
             self.effects_wake.notify_one();

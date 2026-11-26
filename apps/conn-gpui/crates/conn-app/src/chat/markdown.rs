@@ -28,6 +28,7 @@ use super::color::{SyntaxRole, hsla, hsla_alpha, prose_foreground};
 use super::icons;
 use super::inline_code::{self, Built, ChipPlan, InlineCodeText};
 use super::link_preview::{LinkHoverEvent, Rect, is_previewable, link_anchor};
+use super::selection::{FlowInfo, FlowProbe, PressSlot, SelectableFlow, SelectionScope};
 use crate::a11y::ConnA11yExt as _;
 
 /// Body text size matching Conn's `text-sm` (`14px`) with relaxed (`1.625`) leading.
@@ -43,6 +44,10 @@ const CODE_WRAP_GLYPH_PX: f32 = 16.0;
 const CODE_FONT_PX: f32 = 13.0;
 const CODE_LINE_HEIGHT_PX: f32 = 13.0 * 1.625;
 const MONO_FONT_FAMILY: &str = crate::theme::MONO_FONT;
+
+mod files;
+#[cfg(all(test, target_os = "macos"))]
+mod shots;
 
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
 
@@ -97,9 +102,21 @@ pub(crate) struct ProseStyle {
     pub(crate) size: Option<(f32, f32)>,
 }
 
+/// Where the Markdown is drawn. The chat and the Files preview share the parser, the code card,
+/// the inline text and the highlighter; the Files preview sets its own sizes and spacing
+/// (`files.rs`, from the lab's `.lf-markdown`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MarkdownSurface {
+    #[default]
+    Chat,
+    Files,
+}
+
 /// Per-context rendering options for [`render_blocks`] and [`render_markdown`].
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct MarkdownOptions<'a> {
+    /// The place that shows the Markdown.
+    pub(crate) surface: MarkdownSurface,
     /// Overrides the colour (and size) of prose, headings and inline code.
     pub(crate) prose: Option<ProseStyle>,
     /// Heading typography style.
@@ -127,6 +144,10 @@ pub(crate) struct MarkdownOptions<'a> {
     /// Optional callback invoked when an artifact template card's "Use template" button is
     /// clicked. Without it the card has no button.
     pub(crate) on_use_artifact_template: Option<UseArtifactTemplateCallback>,
+    /// Makes the prose and code of the message selectable (drag, double and triple click, Cmd+C).
+    /// The scope orders the message among the others in the window. Without it the text is not
+    /// selectable, as in the panels that show Markdown.
+    pub(crate) selection: Option<SelectionScope>,
 }
 
 /// Tells the chat where the pointer is relative to the preview-able links of a paragraph.
@@ -145,15 +166,38 @@ pub(crate) type LinkMenuCallback =
     Rc<dyn Fn(LinkMenuTarget, gpui_kit::Point<gpui_kit::Pixels>, &mut Window, &mut App)>;
 
 impl MarkdownOptions<'_> {
+    /// The options of the Files panel's Markdown preview.
+    pub(crate) fn files_preview() -> Self {
+        Self {
+            surface: MarkdownSurface::Files,
+            ..Self::default()
+        }
+    }
+
+    fn is_files(&self) -> bool {
+        self.surface == MarkdownSurface::Files
+    }
+
     fn prose_color(&self, tokens: &Tokens) -> Hsla {
-        self.prose
-            .map_or_else(|| prose_foreground(tokens), |prose| prose.color)
+        self.prose.map_or_else(
+            || {
+                if self.is_files() {
+                    hsla(tokens.foreground)
+                } else {
+                    prose_foreground(tokens)
+                }
+            },
+            |prose| prose.color,
+        )
     }
 
     fn body_size(&self) -> (f32, f32) {
-        self.prose
-            .and_then(|prose| prose.size)
-            .unwrap_or((BODY_FONT_PX, BODY_LINE_HEIGHT_PX))
+        let body = if self.is_files() {
+            files::BODY_SIZE_PX
+        } else {
+            (BODY_FONT_PX, BODY_LINE_HEIGHT_PX)
+        };
+        self.prose.and_then(|prose| prose.size).unwrap_or(body)
     }
 }
 
@@ -173,6 +217,7 @@ impl fmt::Debug for MarkdownOptions<'_> {
             .field("has_on_open_file", &self.on_open_file.is_some())
             .field("has_on_link_menu", &self.on_link_menu.is_some())
             .field("has_on_link_hover", &self.on_link_hover.is_some())
+            .field("selectable", &self.selection.is_some())
             .field(
                 "has_on_use_artifact_template",
                 &self.on_use_artifact_template.is_some(),
@@ -451,6 +496,12 @@ pub(super) fn highlight_code_spans(language: &str, code: &str) -> Vec<SyntaxSpan
     let Some(syntax) = find_syntax(language) else {
         return Vec::new();
     };
+    // PHP's syntax reads plain text until an opening tag, as a `.php` file does, so a snippet
+    // without one is parsed after a tag that is dropped from the result.
+    let php_prefix = (syntax.name == "PHP" && !code.contains("<?")).then_some("<?php\n");
+    let skip = php_prefix.map_or(0, str::len);
+    let prefixed = php_prefix.map(|prefix| format!("{prefix}{code}"));
+    let code = prefixed.as_deref().unwrap_or(code);
     let mut parser = ParseState::new(syntax);
     let mut scopes = ScopeStack::new();
     let mut spans: Vec<SyntaxSpan> = Vec::new();
@@ -480,6 +531,12 @@ pub(super) fn highlight_code_spans(language: &str, code: &str) -> Vec<SyntaxSpan
             }
         }
         offset += line.len();
+    }
+    if skip > 0 {
+        spans.retain(|span| span.range.end > skip);
+        for span in &mut spans {
+            span.range = span.range.start.saturating_sub(skip)..span.range.end - skip;
+        }
     }
     spans
 }
@@ -518,13 +575,21 @@ fn find_syntax(language: &str) -> Option<&'static SyntaxReference> {
 }
 
 fn scope_role(stack: &ScopeStack) -> SyntaxRole {
+    let mut variable = false;
     for scope in stack.scopes.iter().rev() {
-        let role = classify_scope(*scope);
-        if role != SyntaxRole::Plain {
-            return role;
+        match classify_scope(*scope) {
+            SyntaxRole::Plain => {}
+            // A variable yields to the role around it (one in a string stays a string), so the
+            // chat, which draws variables as plain code, looks as it did before the role.
+            SyntaxRole::Variable => variable = true,
+            role => return role,
         }
     }
-    SyntaxRole::Plain
+    if variable {
+        SyntaxRole::Variable
+    } else {
+        SyntaxRole::Plain
+    }
 }
 
 fn classify_scope(scope: Scope) -> SyntaxRole {
@@ -549,6 +614,11 @@ fn classify_scope(scope: Scope) -> SyntaxRole {
         SyntaxRole::Number
     } else if name.starts_with("constant.language") || name.starts_with("constant.character") {
         SyntaxRole::Constant
+    } else if name.starts_with("variable.other")
+        || name.starts_with("variable.language")
+        || (name.starts_with("variable.parameter") && !name.contains(".option"))
+    {
+        SyntaxRole::Variable
     } else {
         SyntaxRole::Plain
     }
@@ -573,6 +643,9 @@ pub(super) fn render_blocks(
     tokens: &Tokens,
     options: &MarkdownOptions<'_>,
 ) -> AnyElement {
+    if options.is_files() {
+        return files::render_blocks(entry_id, blocks, tokens, options);
+    }
     let mut container = div()
         .flex()
         .flex_col()
@@ -581,7 +654,14 @@ pub(super) fn render_blocks(
         .min_w_0();
     for (idx, block) in blocks.iter().enumerate() {
         let block_id = format!("{entry_id}-b{idx}");
-        container = container.child(render_block(&block_id, block, idx == 0, tokens, options));
+        container = container.child(render_block(
+            &block_id,
+            block,
+            idx == 0,
+            false,
+            tokens,
+            options,
+        ));
     }
     container.into_any_element()
 }
@@ -623,13 +703,21 @@ fn ax_preview(text: &str) -> String {
     out
 }
 
+/// `tight` is set for the blocks of a list item: copying them puts the next block on the next
+/// line, not after a blank one.
 fn render_block(
     block_id: &str,
     block: &MarkdownBlock,
     is_first: bool,
+    tight: bool,
     tokens: &Tokens,
     options: &MarkdownOptions<'_>,
 ) -> AnyElement {
+    if options.is_files()
+        && let Some(element) = files::render_block(block_id, block, tokens, options)
+    {
+        return element;
+    }
     match block {
         MarkdownBlock::Paragraph(spans) => {
             let (font_px, line_px) = options.body_size();
@@ -645,12 +733,13 @@ fn render_block(
                 .text_size(px(font_px))
                 .line_height(px(line_px))
                 .text_color(options.prose_color(tokens))
-                .child(render_inline_spans(block_id, spans, tokens, options))
+                .child(render_inline_spans(block_id, spans, tokens, options, tight))
                 .into_any_element()
         }
 
         MarkdownBlock::Heading { level, spans } => {
             let (font_px, line_px, weight, text_color) = match options.heading_style {
+                _ if options.is_files() => files::heading_type(*level, tokens),
                 HeadingStyle::Scale => {
                     let (font, line, color) = match level {
                         1 => (20.0, 26.0, hsla(tokens.foreground)),
@@ -684,7 +773,14 @@ fn render_block(
                 .line_height(px(line_px))
                 .font_weight(weight)
                 .text_color(options.prose.map_or(text_color, |prose| prose.color))
-                .child(render_inline_spans(block_id, spans, tokens, options));
+                .child(render_inline_spans_weighted(
+                    block_id,
+                    spans,
+                    tokens,
+                    options,
+                    tight,
+                    options.is_files().then_some(weight),
+                ));
             if !is_first {
                 // `.chat-markdown h1..h6 { margin: 1.25rem 0 0.5rem }` (20px top total with 10.4px gap).
                 el = el.pt(px(9.6));
@@ -733,7 +829,14 @@ fn render_block(
                 let mut body = div().flex().flex_col().gap(px(4.0)).flex_1().min_w_0();
                 for (b_idx, inner) in item.blocks.iter().enumerate() {
                     let inner_id = format!("{block_id}-i{idx}-{b_idx}");
-                    body = body.child(render_block(&inner_id, inner, b_idx == 0, tokens, options));
+                    body = body.child(render_block(
+                        &inner_id,
+                        inner,
+                        b_idx == 0,
+                        true,
+                        tokens,
+                        options,
+                    ));
                 }
 
                 let row = if let Some(checked) = item.checked {
@@ -830,7 +933,8 @@ fn render_block(
                 .text_color(options.prose_color(tokens));
             for (idx, b) in inner.iter().enumerate() {
                 let inner_id = format!("{block_id}-q{idx}");
-                inner_col = inner_col.child(render_block(&inner_id, b, idx == 0, tokens, options));
+                inner_col =
+                    inner_col.child(render_block(&inner_id, b, idx == 0, false, tokens, options));
             }
             inner_col.into_any_element()
         }
@@ -882,21 +986,42 @@ fn render_code_block(
     let wrap_key = block_id.to_owned();
     let on_wrap = options.on_toggle_wrap_code.clone();
 
+    let files = options.is_files();
     let runs: Vec<(Range<usize>, HighlightStyle)> = highlights
         .iter()
         .filter(|span| span.range.end <= code.len())
         .map(|span| {
-            (
-                span.range.clone(),
+            let style = if files {
+                files::syntax_style(span.role, tokens)
+            } else {
                 HighlightStyle {
                     color: Some(span.role.color(tokens)),
                     ..Default::default()
-                },
-            )
+                }
+            };
+            (span.range.clone(), style)
         })
         .collect();
 
-    let styled_code = StyledText::new(SharedString::from(code.to_owned())).with_highlights(runs);
+    let code_text = SharedString::from(code.to_owned());
+    let styled_code = StyledText::new(code_text.clone()).with_highlights(runs);
+    let code_body = match &options.selection {
+        Some(scope) => SelectableFlow::new(
+            SharedString::from(format!("sel-{block_id}-code")),
+            scope.next_order(),
+            FlowProbe::with(FlowInfo {
+                text: code_text,
+                layout: styled_code.layout().clone(),
+                chips: Vec::new(),
+            }),
+            PressSlot::default(),
+            false,
+            styled_code.into_any_element(),
+        )
+        .in_scope(scope)
+        .into_any_element(),
+        None => styled_code.into_any_element(),
+    };
 
     // Lab `.m-code`: the 24px icon buttons of the card header, 14px glyphs; the wrap toggle's
     // glyph is drawn larger (16px) in the lab and stays so.
@@ -939,7 +1064,7 @@ fn render_code_block(
 
     let lang_icon = language
         .and_then(language_sample_filename)
-        .map(crate::file_icons::file_icon);
+        .map(|name| crate::file_icons::file_icon(name, tokens.appearance));
     let mut lang_header = div()
         .flex()
         .flex_row()
@@ -947,16 +1072,16 @@ fn render_code_block(
         .gap(px(CARD_ICON_GAP_PX))
         .min_w_0();
     if let Some(icon) = lang_icon {
-        let icon_color = icon
-            .color
-            .map(|c| hsla(c.for_appearance(tokens.appearance)))
-            .unwrap_or(muted);
-        lang_header = lang_header.child(icons::icon(icon.asset, CARD_ICON_PX, icon_color));
+        lang_header = lang_header.child(crate::file_icons::icon_img(icon.asset, CARD_ICON_PX));
     }
     // The language is named in full, in the card's sans text, not in code type.
     lang_header = lang_header.child(
         div()
-            .text_size(px(CARD_TEXT_PX))
+            .text_size(px(if files {
+                files::CODE_LABEL_PX
+            } else {
+                CARD_TEXT_PX
+            }))
             .line_height(px(CARD_META_LINE_PX))
             .text_color(muted)
             .child(lang_label),
@@ -1015,7 +1140,12 @@ fn render_code_block(
                 .min_w_0()
                 .overflow_hidden()
                 .rounded(px(CARD_BODY_RADIUS_PX))
-                .bg(hsla(tokens.code_background))
+                // Lab `.lf-markdown .m-code-body`: the panel's own background, ink text.
+                .bg(if files {
+                    files::code_body_background(tokens)
+                } else {
+                    hsla(tokens.code_background)
+                })
                 .child(
                     div()
                         .id(SharedString::from(format!("code-scroll-{block_id}")))
@@ -1026,9 +1156,13 @@ fn render_code_block(
                         .font_family(MONO_FONT_FAMILY)
                         .text_size(px(CODE_FONT_PX))
                         .line_height(px(CODE_LINE_HEIGHT_PX))
-                        .text_color(hsla(tokens.code_foreground))
+                        .text_color(if files {
+                            hsla(tokens.foreground)
+                        } else {
+                            hsla(tokens.code_foreground)
+                        })
                         .when(!is_wrapped, |el| el.overflow_x_scroll().whitespace_nowrap())
-                        .child(styled_code),
+                        .child(code_body),
                 ),
         )
         .into_any_element()
@@ -1137,6 +1271,7 @@ fn render_table(
                         cell,
                         tokens,
                         options,
+                        true,
                     )),
             );
         }
@@ -1175,6 +1310,7 @@ fn render_table(
                         cell,
                         tokens,
                         options,
+                        true,
                     )),
             );
         }
@@ -1193,13 +1329,32 @@ enum ClickTarget {
 /// Renders inline spans as a single continuously flowing `StyledText` (or `InteractiveText` when
 /// clickable URLs or workspace file paths are present). Paragraphs with inline code draw each
 /// code span as Conn's chip (see `inline_code`).
+///
+/// With a selection scope the paragraph takes part in the window's text selection. `tight` is
+/// for text in a list item or a table cell: the copy that follows it starts on the next line.
 fn render_inline_spans(
     span_id: &str,
     spans: &[InlineSpan],
     tokens: &Tokens,
     options: &MarkdownOptions<'_>,
+    tight: bool,
+) -> AnyElement {
+    render_inline_spans_weighted(span_id, spans, tokens, options, tight, None)
+}
+
+/// [`render_inline_spans`] with a weight for the text that is not strong: a heading's. The text
+/// runs carry their own font, so a weight set on the block around them does not reach the text.
+fn render_inline_spans_weighted(
+    span_id: &str,
+    spans: &[InlineSpan],
+    tokens: &Tokens,
+    options: &MarkdownOptions<'_>,
+    tight: bool,
+    base_weight: Option<FontWeight>,
 ) -> AnyElement {
     let prose = options.prose.map(|prose| prose.color);
+    let files = options.is_files();
+    let look = InlineLook { files, base_weight };
     let workspace_root = options.workspace_root.map(str::to_owned);
     let on_open_file = options.on_open_file.clone();
     let callbacks = LinkCallbacks {
@@ -1207,28 +1362,59 @@ fn render_inline_spans(
         on_link_menu: options.on_link_menu.clone(),
         on_link_hover: options.on_link_hover.clone(),
     };
-    if spans.iter().any(|span| span.style.code) {
+    let selectable = options.selection.as_ref().map(|scope| {
+        (
+            SharedString::from(format!("sel-{span_id}")),
+            scope.next_order(),
+            scope.clone(),
+        )
+    });
+    let probe = FlowProbe::default();
+    let press = PressSlot::default();
+    let inner = if spans.iter().any(|span| span.style.code) {
         let spans = spans.to_vec();
         let owned_tokens = tokens.clone();
-        let span_id = span_id.to_owned();
-        let background = hsla(tokens.foreground.with_alpha(0.10));
-        return InlineCodeText::new(background, move |window| {
-            let (styled, ranges, targets, chips) = build_styled_text_with_targets(
+        let owned_id = span_id.to_owned();
+        let background = if files {
+            files::raised(tokens)
+        } else {
+            hsla(tokens.foreground.with_alpha(0.10))
+        };
+        let build_probe = probe.clone();
+        let build_press = press.clone();
+        InlineCodeText::new(background, move |window| {
+            let StyledFlow {
+                styled,
+                text,
+                ranges,
+                targets,
+                chips,
+            } = build_styled_text_with_targets(
                 &spans,
                 &owned_tokens,
                 prose,
                 workspace_root.as_deref(),
                 on_open_file.is_some(),
                 Some(window),
+                look,
             );
             let layout = styled.layout().clone();
+            build_probe.set(FlowInfo {
+                text,
+                layout: layout.clone(),
+                chips: chips
+                    .iter()
+                    .map(|chip| (chip.range.clone(), chip.shaped.text.to_string()))
+                    .collect(),
+            });
             let inner = interactive_inline_text(
-                &span_id,
+                &owned_id,
                 styled,
                 ranges,
                 targets,
                 callbacks.clone(),
                 layout.clone(),
+                build_press,
             );
             Built {
                 inner,
@@ -1236,18 +1422,45 @@ fn render_inline_spans(
                 chips,
             }
         })
-        .into_any_element();
+        .into_any_element()
+    } else {
+        let StyledFlow {
+            styled,
+            text,
+            ranges,
+            targets,
+            ..
+        } = build_styled_text_with_targets(
+            spans,
+            tokens,
+            prose,
+            options.workspace_root,
+            on_open_file.is_some(),
+            None,
+            look,
+        );
+        let layout = styled.layout().clone();
+        probe.set(FlowInfo {
+            text,
+            layout: layout.clone(),
+            chips: Vec::new(),
+        });
+        interactive_inline_text(
+            span_id,
+            styled,
+            ranges,
+            targets,
+            callbacks,
+            layout,
+            press.clone(),
+        )
+    };
+    match selectable {
+        Some((id, order, scope)) => SelectableFlow::new(id, order, probe, press, tight, inner)
+            .in_scope(&scope)
+            .into_any_element(),
+        None => inner,
     }
-    let (styled, ranges, targets, _) = build_styled_text_with_targets(
-        spans,
-        tokens,
-        prose,
-        options.workspace_root,
-        on_open_file.is_some(),
-        None,
-    );
-    let layout = styled.layout().clone();
-    interactive_inline_text(span_id, styled, ranges, targets, callbacks, layout)
 }
 
 /// What a paragraph tells the chat about its links.
@@ -1268,6 +1481,7 @@ fn interactive_inline_text(
     targets: Vec<ClickTarget>,
     callbacks: LinkCallbacks,
     layout: gpui_kit::TextLayout,
+    press: PressSlot,
 ) -> AnyElement {
     if ranges.is_empty() {
         return styled.into_any_element();
@@ -1283,8 +1497,17 @@ fn interactive_inline_text(
     } else {
         Vec::new()
     });
+    // `InteractiveText` calls a link clicked when the press and the release land inside the same
+    // link, which a drag that selects part of a long link also does. `press` remembers where the
+    // button went down, in state that outlives the frame, so a release far from its press is a
+    // selection and not a click.
+    let click_press = press.clone();
+    let down_press = press.clone();
     let text = InteractiveText::new(SharedString::from(format!("inline-{span_id}")), styled)
         .on_click(ranges, move |ix, window, cx| {
+            if click_press.take_drag() {
+                return;
+            }
             let Some(target) = targets.get(ix) else {
                 return;
             };
@@ -1311,6 +1534,9 @@ fn interactive_inline_text(
     let mut wrapper = div()
         .id(SharedString::from(format!("inline-links-{span_id}")))
         .capture_any_mouse_down(move |event, window, cx| {
+            if event.button == gpui_kit::MouseButton::Left {
+                down_press.press(event.position);
+            }
             let Ok(index) = press_layout.index_for_position(event.position) else {
                 return;
             };
@@ -1328,6 +1554,12 @@ fn interactive_inline_text(
                 if let Some(on_link_menu) = &on_link_menu {
                     on_link_menu(target.clone(), event.position, window, cx);
                 }
+            }
+        })
+        // Capture phase again, so the release is judged before `InteractiveText` reads it.
+        .capture_any_mouse_up(move |event, _window, _cx| {
+            if event.button == gpui_kit::MouseButton::Left {
+                press.release(event.position);
             }
         });
     if let Some(on_hover) = on_link_hover
@@ -1449,9 +1681,18 @@ fn link_at(links: &[(Range<usize>, LinkMenuTarget)], index: usize) -> Option<&Li
         .map(|(_, target)| target)
 }
 
+/// How inline text is set: the Files preview's type, and a weight for text that is not strong.
+#[derive(Clone, Copy, Default)]
+struct InlineLook {
+    files: bool,
+    base_weight: Option<FontWeight>,
+}
+
 /// Builds the paragraph text and runs. With a `chip_window`, an inline code span becomes a run
 /// of invisible no-break spaces as wide as its chip, and a [`ChipPlan`] says where to paint the
-/// code; without one, the code stays in the text as a mono run on a flat background.
+/// code; without one, the code stays in the text as a mono run on a flat background. `files` sets
+/// the Files preview's inline type: medium-weight strong text, struck text in the muted colour,
+/// and links in the text colour with a 40% underline.
 fn build_styled_text_with_targets(
     spans: &[InlineSpan],
     tokens: &Tokens,
@@ -1459,15 +1700,17 @@ fn build_styled_text_with_targets(
     workspace_root: Option<&str>,
     file_links_enabled: bool,
     chip_window: Option<&Window>,
-) -> (
-    StyledText,
-    Vec<Range<usize>>,
-    Vec<ClickTarget>,
-    Vec<ChipPlan>,
-) {
+    look: InlineLook,
+) -> StyledFlow {
     // Runs, not highlights: inline code switches font family (the mono font), which a highlight
     // cannot. Every run therefore carries its own font and color.
-    let prose = prose_override.unwrap_or_else(|| super::color::prose_foreground(tokens));
+    let prose = prose_override.unwrap_or_else(|| {
+        if look.files {
+            hsla(tokens.foreground)
+        } else {
+            super::color::prose_foreground(tokens)
+        }
+    });
     let mut text = String::new();
     let mut runs: Vec<gpui_kit::TextRun> = Vec::new();
     let mut ranges: Vec<Range<usize>> = Vec::new();
@@ -1477,10 +1720,13 @@ fn build_styled_text_with_targets(
         family: ".SystemUIFont".into(),
         features: gpui_kit::FontFeatures::default(),
         fallbacks: None,
-        weight: if bold {
+        weight: if bold && look.files {
+            // Lab `.m-md strong { font-weight: 500 }`.
+            FontWeight::MEDIUM
+        } else if bold {
             FontWeight::BOLD
         } else {
-            FontWeight::NORMAL
+            look.base_weight.unwrap_or(FontWeight::NORMAL)
         },
         style: if italic {
             FontStyle::Italic
@@ -1595,6 +1841,19 @@ fn build_styled_text_with_targets(
                 Some(hsla(tokens.foreground.with_alpha(0.10))),
                 None,
             )
+        } else if span.link.is_some() && look.files {
+            // Lab `.m-md a`: the text colour with a 40% underline.
+            let ink = hsla(tokens.foreground);
+            (
+                sans(span.style.bold, span.style.italic),
+                ink,
+                None,
+                Some(UnderlineStyle {
+                    thickness: px(1.0),
+                    color: Some(Hsla { a: 0.4, ..ink }),
+                    wavy: false,
+                }),
+            )
         } else if span.link.is_some() {
             (
                 sans(span.style.bold, span.style.italic),
@@ -1605,6 +1864,23 @@ fn build_styled_text_with_targets(
                     color: Some(hsla(tokens.info_foreground)),
                     wavy: false,
                 }),
+            )
+        } else if look.files && span.style.strikethrough {
+            // Lab `.m-md del { color: var(--muted) }`.
+            (
+                sans(span.style.bold, span.style.italic),
+                hsla(tokens.muted_foreground),
+                None,
+                None,
+            )
+        } else if look.files && span.style.bold && prose_override.is_some() {
+            // Lab `blockquote strong { color: var(--ink) }`: strong text keeps the text colour
+            // inside a muted quote.
+            (
+                sans(true, span.style.italic),
+                hsla(tokens.foreground),
+                None,
+                None,
             )
         } else {
             (sans(span.style.bold, span.style.italic), prose, None, None)
@@ -1625,12 +1901,25 @@ fn build_styled_text_with_targets(
             strikethrough,
         });
     }
-    (
-        StyledText::new(SharedString::from(text)).with_runs(runs),
+    let text = SharedString::from(text);
+    StyledFlow {
+        styled: StyledText::new(text.clone()).with_runs(runs),
+        text,
         ranges,
         targets,
         chips,
-    )
+    }
+}
+
+/// A paragraph's styled text and what it needs around it.
+struct StyledFlow {
+    styled: StyledText,
+    /// The text exactly as `styled` lays it out.
+    text: SharedString,
+    /// Byte ranges of the links and the targets they open.
+    ranges: Vec<Range<usize>>,
+    targets: Vec<ClickTarget>,
+    chips: Vec<ChipPlan>,
 }
 
 /// Resolves a `file://` URL or inline-code token (e.g. `src/main.rs:42`, `Cargo.toml`, or
@@ -2081,8 +2370,15 @@ mod tests {
                 let Some(MarkdownBlock::Paragraph(spans)) = blocks.first() else {
                     panic!("expected a paragraph");
                 };
-                let (styled, _, _, chips) =
-                    build_styled_text_with_targets(spans, &tokens, None, None, false, Some(window));
+                let StyledFlow { styled, chips, .. } = build_styled_text_with_targets(
+                    spans,
+                    &tokens,
+                    None,
+                    None,
+                    false,
+                    Some(window),
+                    InlineLook::default(),
+                );
                 let body_px = window.text_style().font_size.to_pixels(window.rem_size());
                 assert_eq!(chips.len(), 2);
                 for chip in &chips {

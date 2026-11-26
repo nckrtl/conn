@@ -9,6 +9,7 @@
 //! [`WebError::Unsupported`].
 
 mod archive;
+mod cdp;
 #[cfg(any(target_os = "macos", test))]
 mod context_menu;
 mod download;
@@ -19,6 +20,9 @@ mod menu;
 mod popup;
 mod trace;
 
+pub use cdp::{
+    CdpEventListener, CdpHandle, CdpReply, DialogChangeListener, FileChooserInfo, JsDialogInfo,
+};
 pub use load_error::{LoadError, net_error_name};
 pub use popup::NewTabRequest;
 pub use trace::{LOG_PATH as TRACE_LOG_PATH, trace};
@@ -27,6 +31,7 @@ pub use menu::{
     Answer as MenuAnswer, ContextMenuEvent, ContextMenuReply, ContextMenuRequest, MenuEntry,
 };
 
+use std::fmt;
 use std::path::PathBuf;
 use thiserror::Error;
 
@@ -412,6 +417,116 @@ pub struct ToolbarResponse {
     pub summary: Option<String>,
 }
 
+/// A cloneable, thread-safe handle on one view's automation channel: its in-process DevTools
+/// Protocol connection, and the JavaScript dialogs and file pickers held for an agent.
+///
+/// Every method is safe to call from any thread; answers reach CEF on its UI thread.
+#[derive(Clone)]
+pub struct PageControl {
+    #[cfg(target_os = "macos")]
+    inner: mac::view::MacPageControl,
+}
+
+impl fmt::Debug for PageControl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PageControl").finish_non_exhaustive()
+    }
+}
+
+impl PageControl {
+    /// The view's CDP channel.
+    #[must_use]
+    pub fn cdp(&self) -> CdpHandle {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.cdp()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            unreachable!("a PageControl exists only on macOS")
+        }
+    }
+
+    /// Controls whether JavaScript dialogs (`alert`, `confirm`, `prompt`, `beforeunload`) are
+    /// held for an agent instead of shown.
+    pub fn set_intercept_dialogs(&self, intercept: bool) {
+        #[cfg(target_os = "macos")]
+        self.inner.set_intercept_dialogs(intercept);
+        #[cfg(not(target_os = "macos"))]
+        let _ = intercept;
+    }
+
+    /// The held JavaScript dialog, if any.
+    #[must_use]
+    pub fn pending_js_dialog(&self) -> Option<JsDialogInfo> {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.pending_js_dialog()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
+    }
+
+    /// Answers the held JavaScript dialog. Returns `true` if one was pending.
+    pub fn handle_js_dialog(&self, accept: bool, prompt_text: Option<&str>) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.handle_js_dialog(accept, prompt_text)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (accept, prompt_text);
+            false
+        }
+    }
+
+    /// Controls whether file pickers (`<input type="file">`) are held for an agent.
+    pub fn set_intercept_file_dialogs(&self, intercept: bool) {
+        #[cfg(target_os = "macos")]
+        self.inner.set_intercept_file_dialogs(intercept);
+        #[cfg(not(target_os = "macos"))]
+        let _ = intercept;
+    }
+
+    /// The held file picker, if any.
+    #[must_use]
+    pub fn pending_file_chooser(&self) -> Option<FileChooserInfo> {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.pending_file_chooser()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
+    }
+
+    /// Answers the held file picker (`paths` empty cancels it). Returns `true` if one was
+    /// pending.
+    pub fn resolve_file_chooser(&self, paths: &[String]) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.resolve_file_chooser(paths)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = paths;
+            false
+        }
+    }
+
+    /// Calls `callback` when a JavaScript dialog or file picker opens or closes. Replaces the
+    /// previous callback.
+    pub fn on_dialog_change(&self, callback: impl Fn() + Send + Sync + 'static) {
+        #[cfg(target_os = "macos")]
+        self.inner.on_dialog_change(callback);
+        #[cfg(not(target_os = "macos"))]
+        let _ = callback;
+    }
+}
+
 /// Handle to an offscreen-rendered embedded Chromium view.
 #[derive(Debug)]
 pub struct BrowserView {
@@ -616,6 +731,20 @@ impl BrowserView {
         let _ = callback;
     }
 
+    /// Registers a callback invoked when the main frame starts a new document, with its URL. A
+    /// script it returns runs in that document's main world at once, in the same callback, so it
+    /// is ahead of the page's own scripts as far as the browser process can make it. Runs on a
+    /// CEF thread.
+    pub fn on_document_start(
+        &self,
+        callback: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    ) {
+        #[cfg(target_os = "macos")]
+        self.inner.on_document_start(callback);
+        #[cfg(not(target_os = "macos"))]
+        let _ = callback;
+    }
+
     /// Registers a callback for each document and fetch/XHR response (any thread), with the
     /// Laravel Toolbar headers it carries. Pages with a Content-Security-Policy get no inline
     /// toolbar data, so the host reads the headers instead.
@@ -697,6 +826,16 @@ impl BrowserView {
         {
             false
         }
+    }
+
+    /// Registers a callback for the page's own icon: the page's address, then the icon as PNG bytes
+    /// (at most 64 KiB). It runs after each navigation that declares an icon, and never for a page
+    /// without one. The browser fetched and decoded the icon, so the bytes are a plain PNG.
+    pub fn on_favicon(&self, callback: impl Fn(&str, Vec<u8>) + Send + Sync + 'static) {
+        #[cfg(target_os = "macos")]
+        self.inner.on_favicon(callback);
+        #[cfg(not(target_os = "macos"))]
+        let _ = callback;
     }
 
     /// Registers a callback invoked for the detector bridge's console messages. Returning `true`
@@ -822,6 +961,59 @@ impl BrowserView {
         self.inner.execute_edit_command(command);
         #[cfg(not(target_os = "macos"))]
         let _ = command;
+    }
+
+    /// Returns a cloneable, thread-safe handle to this view's in-process CDP channel.
+    #[must_use]
+    pub fn cdp(&self) -> Option<CdpHandle> {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.cdp()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
+    }
+
+    /// Returns the current logical viewport `(width, height)` in CSS points.
+    #[must_use]
+    pub fn size(&self) -> (i32, i32) {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.size()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            (0, 0)
+        }
+    }
+
+    /// Returns the current device scale factor.
+    #[must_use]
+    pub fn scale(&self) -> f32 {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.scale()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            1.0
+        }
+    }
+
+    /// A cloneable, thread-safe handle on this view's automation channel, or `None` once the
+    /// view is closed (or off macOS).
+    #[must_use]
+    pub fn control(&self) -> Option<PageControl> {
+        #[cfg(target_os = "macos")]
+        {
+            self.inner.control().map(|inner| PageControl { inner })
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            None
+        }
     }
 
     /// Closes the offscreen browser.

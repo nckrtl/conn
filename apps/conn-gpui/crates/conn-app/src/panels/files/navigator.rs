@@ -98,8 +98,8 @@ impl FilesPanel {
                         .max_w(gpui_kit::relative(0.45))
                         .border_l_1()
                         .border_color(divider)
-                        .child(self.render_tree_toolbar(cx))
-                        .child(self.render_tree_column(cx))
+                        .child(self.render_tree_toolbar(true, cx))
+                        .child(self.render_tree_column(true, cx))
                         .child(handle),
                 )
                 .on_drag_move::<ResizeNavigator>(cx.listener(

@@ -4,6 +4,12 @@
 //! device scale factor and forwards mouse, wheel, keyboard, and focus events
 //! explicitly from GPUI.
 
+#![expect(
+    clippy::too_many_arguments,
+    reason = "cef-rs `wrap_client!` generates a constructor with one argument per handler"
+)]
+
+use crate::cdp::{CdpCore, CdpHandle, DialogChangeListener, FileChooserInfo, JsDialogInfo};
 use crate::context_menu::{self, ContextCommand, Entry, LinkTarget, MenuParams};
 use crate::load_error::{self, LoadError};
 use crate::menu::{
@@ -14,7 +20,7 @@ use crate::{
     WebError, WebRuntimeState,
 };
 use cef::*;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::ffi::{CString, c_char};
 use std::fmt;
 use std::os::raw::c_int;
@@ -26,11 +32,70 @@ const MAX_FRAME_RATE_FPS: i32 = 60;
 type FrameCallback = Arc<dyn Fn() + Send + Sync>;
 type LoadEndCallback = Arc<dyn Fn(&str, i32) + Send + Sync>;
 type LoadStartCallback = Arc<dyn Fn(&str) + Send + Sync>;
+type DocumentStartCallback = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
 type ConsoleMessageCallback = Arc<dyn Fn(&str) -> bool + Send + Sync>;
+/// The page's address and its icon as PNG bytes.
+type FaviconCallback = Arc<dyn Fn(&str, Vec<u8>) + Send + Sync>;
 type ContextMenuCallback = Arc<dyn Fn(ContextMenuEvent) + Send + Sync>;
 type OpenTabCallback = Arc<dyn Fn(crate::NewTabRequest) + Send + Sync>;
 /// The host's new-tab handler, shared by the popup and request handlers.
 pub(crate) type OpenTabSlot = Arc<Mutex<Option<OpenTabCallback>>>;
+
+/// Ref-counted CEF `Browser` handle marshaled onto `ThreadId::UI` for CDP dispatch.
+#[derive(Clone)]
+struct SendBrowser(Browser);
+
+// SAFETY: CEF's `cef_browser_t` uses atomic reference counting (`AddRef`/`Release`), and every
+// method call on `self.0` is guarded to execute exclusively on `ThreadId::UI` via `post_task`.
+unsafe impl Send for SendBrowser {}
+// SAFETY: `SendBrowser` is only cloned (atomic refcount bump) or invoked on `ThreadId::UI`.
+unsafe impl Sync for SendBrowser {}
+
+/// CEF `JsdialogCallback` wrapper answered exclusively on `ThreadId::UI`.
+struct SendJsDialogCallback(JsdialogCallback);
+
+// SAFETY: CEF callbacks use atomic refcounting and `cont` is always invoked on `ThreadId::UI`.
+unsafe impl Send for SendJsDialogCallback {}
+
+/// CEF `FileDialogCallback` wrapper answered exclusively on `ThreadId::UI`.
+struct SendFileDialogCallback(FileDialogCallback);
+
+// SAFETY: CEF callbacks use atomic refcounting and `cont`/`cancel` are invoked on `ThreadId::UI`.
+unsafe impl Send for SendFileDialogCallback {}
+
+struct PendingJsDialog {
+    info: JsDialogInfo,
+    callback: SendJsDialogCallback,
+}
+
+struct PendingFileChooser {
+    info: FileChooserInfo,
+    callback: SendFileDialogCallback,
+}
+
+wrap_task! {
+    struct UiClosureTask {
+        func: Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>,
+    }
+
+    impl Task {
+        fn execute(&self) {
+            let func = self.func.lock().ok().and_then(|mut slot| slot.take());
+            if let Some(func) = func {
+                func();
+            }
+        }
+    }
+}
+
+fn run_on_ui_thread(func: impl FnOnce() + Send + 'static) {
+    if currently_on(ThreadId::UI) == 1 {
+        func();
+    } else {
+        let mut task = UiClosureTask::new(Arc::new(Mutex::new(Some(Box::new(func)))));
+        let _ = post_task(ThreadId::UI, Some(&mut task));
+    }
+}
 
 struct FrameBuffer {
     generation: u64,
@@ -53,9 +118,12 @@ struct Shared {
     on_frame: Mutex<Option<FrameCallback>>,
     on_load_end: Mutex<Option<LoadEndCallback>>,
     on_load_start: Mutex<Option<LoadStartCallback>>,
+    /// Makes the script that runs in each new main-frame document at once (`on_document_start`).
+    on_document_start: Mutex<Option<DocumentStartCallback>>,
     /// The Laravel Toolbar's response headers (`toolbar_hooks`); shared with the request handler.
     toolbar_response: super::toolbar_hooks::ToolbarResponseSlot,
     on_console_message: Mutex<Option<ConsoleMessageCallback>>,
+    on_favicon: Mutex<Option<FaviconCallback>>,
     on_context_menu: Mutex<Option<ContextMenuCallback>>,
     on_open_tab: OpenTabSlot,
     /// When the last `load_url` was called, and how many paints came since (trace only).
@@ -63,9 +131,26 @@ struct Shared {
     paints_since_load: AtomicU32,
     /// Why the last main-frame load failed, until the next load starts.
     load_error: Mutex<Option<LoadError>>,
+    /// Whether JS dialogs (`alert`/`confirm`/`prompt`/`beforeunload`) are intercepted for agents.
+    intercept_dialogs: AtomicBool,
+    pending_js_dialog: Mutex<Option<PendingJsDialog>>,
+    /// Whether file choosers (`<input type="file">`) are intercepted for agent uploads.
+    intercept_file_dialogs: AtomicBool,
+    pending_file_chooser: Mutex<Option<PendingFileChooser>>,
+    on_dialog_change: Mutex<Option<DialogChangeListener>>,
 }
 
 impl Shared {
+    fn notify_dialog_change(&self) {
+        let cb = self
+            .on_dialog_change
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone());
+        if let Some(callback) = cb {
+            callback();
+        }
+    }
     /// Notes the start of a load, for the timings `CONN_WEB_TRACE=1` prints.
     fn mark_load_began(&self) {
         if let Ok(mut began) = self.load_began.lock() {
@@ -102,6 +187,102 @@ pub(crate) struct MacBrowserView {
     hidden: Cell<bool>,
     closed: Cell<bool>,
     shared: Arc<Shared>,
+    cdp_core: Arc<Mutex<CdpCore>>,
+    cdp_handle: CdpHandle,
+    cdp_registration: RefCell<Option<Registration>>,
+}
+
+/// A cloneable, thread-safe handle on one page's automation channel. Dialog and file-picker
+/// answers hop to CEF's UI thread themselves.
+#[derive(Clone)]
+pub(crate) struct MacPageControl {
+    shared: Arc<Shared>,
+    cdp: CdpHandle,
+}
+
+impl MacPageControl {
+    pub(crate) fn cdp(&self) -> CdpHandle {
+        self.cdp.clone()
+    }
+
+    pub(crate) fn set_intercept_dialogs(&self, intercept: bool) {
+        self.shared
+            .intercept_dialogs
+            .store(intercept, Ordering::Release);
+    }
+
+    pub(crate) fn pending_js_dialog(&self) -> Option<JsDialogInfo> {
+        self.shared
+            .pending_js_dialog
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|d| d.info.clone()))
+    }
+
+    pub(crate) fn handle_js_dialog(&self, accept: bool, prompt_text: Option<&str>) -> bool {
+        let pending = self
+            .shared
+            .pending_js_dialog
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        let Some(pending) = pending else {
+            return false;
+        };
+        let text = prompt_text.map(str::to_owned);
+        run_on_ui_thread(move || {
+            let input = text.as_deref().map(CefString::from);
+            pending.callback.0.cont(i32::from(accept), input.as_ref());
+        });
+        self.shared.notify_dialog_change();
+        true
+    }
+
+    pub(crate) fn set_intercept_file_dialogs(&self, intercept: bool) {
+        self.shared
+            .intercept_file_dialogs
+            .store(intercept, Ordering::Release);
+    }
+
+    pub(crate) fn pending_file_chooser(&self) -> Option<FileChooserInfo> {
+        self.shared
+            .pending_file_chooser
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|c| c.info.clone()))
+    }
+
+    pub(crate) fn resolve_file_chooser(&self, paths: &[String]) -> bool {
+        let pending = self
+            .shared
+            .pending_file_chooser
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take());
+        let Some(pending) = pending else {
+            return false;
+        };
+        let owned_paths = paths.to_vec();
+        run_on_ui_thread(move || {
+            if owned_paths.is_empty() {
+                pending.callback.0.cancel();
+            } else {
+                let mut list = CefStringList::new();
+                for path in &owned_paths {
+                    list.append(path);
+                }
+                pending.callback.0.cont(Some(&mut list));
+            }
+        });
+        self.shared.notify_dialog_change();
+        true
+    }
+
+    pub(crate) fn on_dialog_change(&self, callback: impl Fn() + Send + Sync + 'static) {
+        if let Ok(mut slot) = self.shared.on_dialog_change.lock() {
+            *slot = Some(Arc::new(callback));
+        }
+    }
 }
 
 impl fmt::Debug for MacBrowserView {
@@ -151,13 +332,20 @@ impl MacBrowserView {
             on_frame: Mutex::new(None),
             on_load_end: Mutex::new(None),
             on_load_start: Mutex::new(None),
+            on_document_start: Mutex::new(None),
             toolbar_response: Arc::new(Mutex::new(None)),
             on_console_message: Mutex::new(None),
+            on_favicon: Mutex::new(None),
             on_context_menu: Mutex::new(None),
             on_open_tab: Arc::new(Mutex::new(None)),
             load_began: Mutex::new(None),
             paints_since_load: AtomicU32::new(0),
             load_error: Mutex::new(None),
+            intercept_dialogs: AtomicBool::new(false),
+            pending_js_dialog: Mutex::new(None),
+            intercept_file_dialogs: AtomicBool::new(false),
+            pending_file_chooser: Mutex::new(None),
+            on_dialog_change: Mutex::new(None),
         });
 
         let window_info = WindowInfo {
@@ -183,6 +371,8 @@ impl MacBrowserView {
                 shared.toolbar_response.clone(),
                 shared.on_open_tab.clone(),
             ),
+            ViewJsDialogHandler::new(shared.clone()),
+            ViewDialogHandler::new(shared.clone()),
         );
 
         let mut context = request_context_get_global_context();
@@ -202,6 +392,23 @@ impl MacBrowserView {
         host.notify_screen_info_changed();
         host.was_resized();
 
+        let cdp_core = Arc::new(Mutex::new(CdpCore::default()));
+        let mut observer = ViewDevToolsObserver::new(cdp_core.clone());
+        let cdp_registration = host.add_dev_tools_message_observer(Some(&mut observer));
+        let send_browser = SendBrowser(browser.clone());
+        let cdp_handle = CdpHandle::new(
+            cdp_core.clone(),
+            Arc::new(move |bytes| {
+                let browser = send_browser.clone();
+                run_on_ui_thread(move || {
+                    if let Some(host) = browser.0.host() {
+                        let _ = host.send_dev_tools_message(Some(bytes.as_slice()));
+                    }
+                });
+                Ok(())
+            }),
+        );
+
         Ok(Self {
             browser,
             size: Cell::new((width, height)),
@@ -209,6 +416,9 @@ impl MacBrowserView {
             hidden: Cell::new(false),
             closed: Cell::new(false),
             shared,
+            cdp_core,
+            cdp_handle,
+            cdp_registration: RefCell::new(cdp_registration),
         })
     }
 
@@ -362,6 +572,15 @@ impl MacBrowserView {
         }
     }
 
+    pub(crate) fn on_document_start(
+        &self,
+        callback: impl Fn(&str) -> Option<String> + Send + Sync + 'static,
+    ) {
+        if let Ok(mut slot) = self.shared.on_document_start.lock() {
+            *slot = Some(Arc::new(callback));
+        }
+    }
+
     pub(crate) fn on_toolbar_response(
         &self,
         callback: impl Fn(crate::ToolbarResponse) + Send + Sync + 'static,
@@ -398,6 +617,12 @@ impl MacBrowserView {
         callback: impl Fn(&str) -> bool + Send + Sync + 'static,
     ) {
         if let Ok(mut slot) = self.shared.on_console_message.lock() {
+            *slot = Some(Arc::new(callback));
+        }
+    }
+
+    pub(crate) fn on_favicon(&self, callback: impl Fn(&str, Vec<u8>) + Send + Sync + 'static) {
+        if let Ok(mut slot) = self.shared.on_favicon.lock() {
             *slot = Some(Arc::new(callback));
         }
     }
@@ -576,9 +801,51 @@ impl MacBrowserView {
         }
     }
 
+    pub(crate) fn cdp(&self) -> Option<CdpHandle> {
+        (!self.closed.get()).then(|| self.cdp_handle.clone())
+    }
+
+    pub(crate) fn size(&self) -> (i32, i32) {
+        self.size.get()
+    }
+
+    pub(crate) fn scale(&self) -> f32 {
+        self.scale.get()
+    }
+
+    /// A thread-safe handle on this page's automation channel: CDP, dialogs and file pickers.
+    pub(crate) fn control(&self) -> Option<MacPageControl> {
+        (!self.closed.get()).then(|| MacPageControl {
+            shared: self.shared.clone(),
+            cdp: self.cdp_handle.clone(),
+        })
+    }
+
     pub(crate) fn close_inner(&self) {
         if self.closed.replace(true) {
             return;
+        }
+        if let Ok(mut core) = self.cdp_core.lock() {
+            core.fail_all("Browser view closed.");
+        }
+        let _ = self.cdp_registration.borrow_mut().take();
+        if let Some(pending) = self
+            .shared
+            .pending_js_dialog
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+        {
+            run_on_ui_thread(move || pending.callback.0.cont(0, None));
+        }
+        if let Some(pending) = self
+            .shared
+            .pending_file_chooser
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+        {
+            run_on_ui_thread(move || pending.callback.0.cancel());
         }
         if let Ok(mut slot) = self.shared.on_frame.lock() {
             slot.take();
@@ -589,7 +856,13 @@ impl MacBrowserView {
         if let Ok(mut slot) = self.shared.on_console_message.lock() {
             slot.take();
         }
+        if let Ok(mut slot) = self.shared.on_favicon.lock() {
+            slot.take();
+        }
         if let Ok(mut slot) = self.shared.on_open_tab.lock() {
+            slot.take();
+        }
+        if let Ok(mut slot) = self.shared.on_dialog_change.lock() {
             slot.take();
         }
         if let Some(host) = self.browser.host() {
@@ -777,6 +1050,8 @@ wrap_client! {
         menu: ContextMenuHandler,
         downloads: DownloadHandler,
         requests: RequestHandler,
+        jsdialog: JsdialogHandler,
+        dialogs: DialogHandler,
     }
 
     impl Client {
@@ -800,6 +1075,206 @@ wrap_client! {
         }
         fn display_handler(&self) -> Option<DisplayHandler> {
             Some(self.display.clone())
+        }
+        fn jsdialog_handler(&self) -> Option<JsdialogHandler> {
+            Some(self.jsdialog.clone())
+        }
+        fn dialog_handler(&self) -> Option<DialogHandler> {
+            Some(self.dialogs.clone())
+        }
+    }
+}
+
+wrap_dev_tools_message_observer! {
+    struct ViewDevToolsObserver {
+        cdp: Arc<Mutex<CdpCore>>,
+    }
+
+    impl DevToolsMessageObserver {
+        fn on_dev_tools_message(
+            &self,
+            _browser: Option<&mut Browser>,
+            message: Option<&[u8]>,
+        ) -> c_int {
+            if let Some(bytes) = message
+                && let Ok(mut core) = self.cdp.lock()
+            {
+                core.on_message(bytes);
+            }
+            1
+        }
+
+        fn on_dev_tools_agent_detached(&self, _browser: Option<&mut Browser>) {
+            if let Ok(mut core) = self.cdp.lock() {
+                core.fail_all("DevTools agent detached.");
+            }
+        }
+    }
+}
+
+wrap_jsdialog_handler! {
+    struct ViewJsDialogHandler {
+        shared: Arc<Shared>,
+    }
+
+    impl JsdialogHandler {
+        fn on_jsdialog(
+            &self,
+            _browser: Option<&mut Browser>,
+            _origin_url: Option<&CefString>,
+            dialog_type: JsdialogType,
+            message_text: Option<&CefString>,
+            default_prompt_text: Option<&CefString>,
+            callback: Option<&mut JsdialogCallback>,
+            _suppress_message: Option<&mut c_int>,
+        ) -> c_int {
+            if !self.shared.intercept_dialogs.load(Ordering::Acquire) {
+                return 0;
+            }
+            let Some(callback) = callback else {
+                return 0;
+            };
+            let kind = if dialog_type == JsdialogType::CONFIRM {
+                "confirm"
+            } else if dialog_type == JsdialogType::PROMPT {
+                "prompt"
+            } else {
+                "alert"
+            };
+            let info = JsDialogInfo {
+                dialog_type: kind.to_owned(),
+                message: message_text.map(ToString::to_string).unwrap_or_default(),
+                default_value: default_prompt_text
+                    .map(ToString::to_string)
+                    .unwrap_or_default(),
+            };
+            if let Ok(mut slot) = self.shared.pending_js_dialog.lock() {
+                *slot = Some(PendingJsDialog {
+                    info,
+                    callback: SendJsDialogCallback(callback.clone()),
+                });
+            }
+            self.shared.notify_dialog_change();
+            self.shared.notify_frame();
+            1
+        }
+
+        fn on_before_unload_dialog(
+            &self,
+            _browser: Option<&mut Browser>,
+            message_text: Option<&CefString>,
+            _is_reload: c_int,
+            callback: Option<&mut JsdialogCallback>,
+        ) -> c_int {
+            if !self.shared.intercept_dialogs.load(Ordering::Acquire) {
+                return 0;
+            }
+            let Some(callback) = callback else {
+                return 0;
+            };
+            let info = JsDialogInfo {
+                dialog_type: "beforeunload".to_owned(),
+                message: message_text.map(ToString::to_string).unwrap_or_default(),
+                default_value: String::new(),
+            };
+            if let Ok(mut slot) = self.shared.pending_js_dialog.lock() {
+                *slot = Some(PendingJsDialog {
+                    info,
+                    callback: SendJsDialogCallback(callback.clone()),
+                });
+            }
+            self.shared.notify_dialog_change();
+            self.shared.notify_frame();
+            1
+        }
+
+        fn on_reset_dialog_state(&self, _browser: Option<&mut Browser>) {
+            let cleared = self
+                .shared
+                .pending_js_dialog
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take())
+                .is_some();
+            if cleared {
+                self.shared.notify_dialog_change();
+            }
+        }
+
+        fn on_dialog_closed(&self, _browser: Option<&mut Browser>) {
+            let cleared = self
+                .shared
+                .pending_js_dialog
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take())
+                .is_some();
+            if cleared {
+                self.shared.notify_dialog_change();
+            }
+        }
+    }
+}
+
+fn read_cef_string_list(list: &mut CefStringList) -> Vec<String> {
+    let raw: *mut cef::sys::_cef_string_list_t = list.into();
+    // SAFETY: `raw` comes from a live borrowed `CefStringList` during `on_file_dialog`;
+    // `cef_string_list_size` and `cef_string_list_value` only read entries without freeing `raw`.
+    unsafe {
+        if raw.is_null() {
+            return Vec::new();
+        }
+        let count = cef::sys::cef_string_list_size(raw);
+        let mut out = Vec::with_capacity(count);
+        for i in 0..count {
+            let mut value = std::mem::zeroed();
+            if cef::sys::cef_string_list_value(raw, i, &mut value) > 0 {
+                out.push(CefString::from(std::ptr::from_ref(&value)).to_string());
+            }
+        }
+        out
+    }
+}
+
+wrap_dialog_handler! {
+    struct ViewDialogHandler {
+        shared: Arc<Shared>,
+    }
+
+    impl DialogHandler {
+        fn on_file_dialog(
+            &self,
+            _browser: Option<&mut Browser>,
+            mode: FileDialogMode,
+            _title: Option<&CefString>,
+            _default_file_path: Option<&CefString>,
+            accept_filters: Option<&mut CefStringList>,
+            _accept_extensions: Option<&mut CefStringList>,
+            _accept_descriptions: Option<&mut CefStringList>,
+            callback: Option<&mut FileDialogCallback>,
+        ) -> c_int {
+            if !self.shared.intercept_file_dialogs.load(Ordering::Acquire) {
+                return 0;
+            }
+            let Some(callback) = callback else {
+                return 0;
+            };
+            let accept = accept_filters
+                .map(read_cef_string_list)
+                .unwrap_or_default()
+                .join(",");
+            let info = FileChooserInfo {
+                multiple: mode == FileDialogMode::OPEN_MULTIPLE,
+                accept,
+            };
+            if let Ok(mut slot) = self.shared.pending_file_chooser.lock() {
+                *slot = Some(PendingFileChooser {
+                    info,
+                    callback: SendFileDialogCallback(callback.clone()),
+                });
+            }
+            self.shared.notify_dialog_change();
+            1
         }
     }
 }
@@ -875,6 +1350,52 @@ wrap_download_image_callback! {
             let mut bytes = vec![0_u8; png.size()];
             if png.data(Some(&mut bytes), 0) == bytes.len() && !bytes.is_empty() {
                 copy_png(&bytes);
+            }
+        }
+    }
+}
+
+/// The largest favicon, as PNG bytes, the browser hands to the host.
+const MAX_FAVICON_PNG_BYTES: usize = 64 * 1024;
+
+wrap_download_image_callback! {
+    struct FaviconDownload {
+        shared: Arc<Shared>,
+    }
+
+    impl DownloadImageCallback {
+        // The browser fetched and decoded the page's declared icon; it comes back as PNG, whatever
+        // the source format was. A failed fetch gives no image and nothing is reported.
+        fn on_download_image_finished(
+            &self,
+            _image_url: Option<&CefString>,
+            _http_status_code: c_int,
+            image: Option<&mut Image>,
+        ) {
+            let Some(png) = image.and_then(|image| image.as_png(2.0, 1, None, None)) else {
+                return;
+            };
+            let mut bytes = vec![0_u8; png.size()];
+            if bytes.is_empty()
+                || bytes.len() > MAX_FAVICON_PNG_BYTES
+                || png.data(Some(&mut bytes), 0) != bytes.len()
+            {
+                return;
+            }
+            let page = self
+                .shared
+                .url
+                .lock()
+                .map(|url| url.clone())
+                .unwrap_or_default();
+            let callback = self
+                .shared
+                .on_favicon
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone());
+            if let Some(callback) = callback {
+                callback(&page, bytes);
             }
         }
     }
@@ -1327,6 +1848,22 @@ wrap_load_handler! {
             };
             let url = CefString::from(&frame.url()).to_string();
             trace(&format!("on_load_start {url} {}", self.shared.since_load()));
+            // Run in the frame's own callback, the earliest the browser process can, so a script
+            // reaches the new document ahead of the page's.
+            let document_script = self
+                .shared
+                .on_document_start
+                .lock()
+                .ok()
+                .and_then(|slot| slot.clone())
+                .and_then(|make| make(&url));
+            if let Some(script) = document_script {
+                frame.execute_java_script(
+                    Some(&CefString::from(script.as_str())),
+                    Some(&CefString::from("conn://document-start")),
+                    0,
+                );
+            }
             if let Ok(mut error) = self.shared.load_error.lock() {
                 *error = None;
             }
@@ -1415,6 +1952,36 @@ wrap_display_handler! {
                 *current = title.map(|t| t.to_string()).unwrap_or_default();
             }
             self.shared.notify_frame();
+        }
+
+        // The page declares its icons; the browser fetches the first one over HTTPS (or reads a
+        // `data:` image) and reports it as PNG. Nothing about the page leaves the browser process
+        // but its own icon.
+        fn on_favicon_urlchange(
+            &self,
+            browser: Option<&mut Browser>,
+            icon_urls: Option<&mut CefStringList>,
+        ) {
+            let Some(host) = browser.and_then(|browser| browser.host()) else {
+                return;
+            };
+            let urls: Vec<String> = icon_urls
+                .map(|urls| urls.clone().into_iter().collect())
+                .unwrap_or_default();
+            let Some(url) = urls
+                .into_iter()
+                .find(|url| url.starts_with("https://") || url.starts_with("data:image/"))
+            else {
+                return;
+            };
+            let mut callback = FaviconDownload::new(self.shared.clone());
+            host.download_image(
+                Some(&CefString::from(url.as_str())),
+                1,
+                64,
+                0,
+                Some(&mut callback),
+            );
         }
 
         fn on_address_change(

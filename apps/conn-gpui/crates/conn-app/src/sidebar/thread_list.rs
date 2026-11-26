@@ -45,7 +45,7 @@ use gpui_kit::{
 use crate::a11y::ConnA11yExt as _;
 use crate::app::{ConnApp, PressMode};
 use crate::icons;
-use crate::panels::chrome::ConnTooltipExt as _;
+use crate::panels::chrome::{ConnTooltipExt as _, FloatingSurfaceExt as _};
 use crate::shell::{CardJoin, MACOS_TRAFFIC_LIGHTS_INSET_PX, WORKSPACE_RAIL_WIDTH_PX, inset_card};
 use crate::sidebar::drafts::{DraftSidebar, render_draft_block, render_draft_undo_notice};
 use crate::sidebar::hover_card::render_thread_hover_card;
@@ -865,7 +865,7 @@ fn render_project_filter_menu(
         .flex()
         .flex_col()
         .gap(px(2.0))
-        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        .floating_surface();
 
     let all_active = active_workspace.is_none();
     menu = menu.child(

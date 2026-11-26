@@ -162,6 +162,13 @@ impl Preview {
         self.0.events.subscribe()
     }
     pub fn list(&self, thread: &str) -> Value {
+        self.list_for(thread, None)
+    }
+
+    /// A thread's tabs as `session` sees them: each desktop tab a desktop hosts names its
+    /// `host` (the device), and `hostedHere` says whether `session` is that desktop (T3's
+    /// `PreviewManager.list`). A tab no desktop hosts has neither.
+    pub fn list_for(&self, thread: &str, session: Option<&str>) -> Value {
         let state = lock(&self.0.state);
         let mut sessions = state
             .tabs
@@ -171,6 +178,19 @@ impl Preview {
             .chain(desktop::sessions(&state, thread))
             .cloned()
             .collect::<Vec<_>>();
+        for snapshot in &mut sessions {
+            let tab = snapshot
+                .get("tabId")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if snapshot.get("runtime").and_then(Value::as_str) == Some("server") {
+                continue;
+            }
+            if let Some((device, host_session)) = self.0.relay.host_of(thread, tab) {
+                snapshot["host"] = json!(device);
+                snapshot["hostedHere"] = json!(session == Some(host_session.as_str()));
+            }
+        }
         // T3 lists a thread's tabs by `updatedAt`, server and desktop tabs together.
         sessions.sort_by(|a, b| {
             let at = |v: &Value| {

@@ -101,6 +101,9 @@ pub struct EngineConfig {
     /// Write attention events for iOS push to the outbox (`attention.rs`). Off by default:
     /// with it off, nothing is written. The server's sender drains them.
     pub attention: bool,
+    /// Write the threads the Orbit Gateway should hear of to the outbox (`thread_push.rs`). Off
+    /// by default: with it off, nothing is written. The server's sender drains them.
+    pub thread_push: bool,
     /// Effects wait in the outbox until [`SqliteEngine::start_effects`]: a server whose host
     /// services start after the engine sets it, so an effect a restart replays finds them
     /// ready (T3 starts its worker once its layers are built).
@@ -181,6 +184,7 @@ impl EngineConfig {
             zone: jiff::tz::TimeZone::system(),
             recover_runs: true,
             attention: false,
+            thread_push: false,
             hold_effects: false,
             restart_policy: crate::RestartPolicy::default(),
             #[cfg(test)]
@@ -300,6 +304,8 @@ pub(crate) struct Inner {
     store: Arc<Mutex<Store>>,
     /// Raised after a commit wrote an attention event; `None` when they are off.
     attention: Option<Arc<tokio::sync::Notify>>,
+    /// Raised after a commit wrote a thread push row; `None` when they are off.
+    thread_push: Option<Arc<tokio::sync::Notify>>,
     /// The latest committed sequence. Stream tasks wake on it and read from the store. Each
     /// commit sends it (`Tx::commit`).
     pub(crate) notify: Arc<watch::Sender<u64>>,
@@ -451,6 +457,10 @@ impl SqliteEngine {
             .attention
             .then(|| Arc::new(tokio::sync::Notify::new()));
         store.attention = attention.clone();
+        let thread_push = config
+            .thread_push
+            .then(|| Arc::new(tokio::sync::Notify::new()));
+        store.thread_push = thread_push.clone();
         // T3's `reconcileAfterProcessLoss`: what the previous process left unsettled is
         // cancelled when it was process-bound and runs again when it is replay-safe. An inert
         // copy cancels everything.
@@ -530,6 +540,7 @@ impl SqliteEngine {
             inner: Arc::new(Inner {
                 store: Arc::new(Mutex::new(store)),
                 attention,
+                thread_push,
                 notify,
                 providers,
                 live: Mutex::new(HashMap::new()),
@@ -818,6 +829,54 @@ impl SqliteEngine {
     pub async fn attention_drop_older(&self, before_ms: u64) -> Result<usize, String> {
         self.inner
             .db(move |store| crate::attention::drop_older(store.raw(), before_ms))
+            .await
+    }
+
+    /// Raised after each commit that wrote a thread push row; `None` when they are off
+    /// ([`EngineConfig::thread_push`]).
+    pub fn thread_push_signal(&self) -> Option<Arc<tokio::sync::Notify>> {
+        self.inner.thread_push.clone()
+    }
+
+    /// Up to `limit` threads due for the Gateway at `now_ms`, oldest due first.
+    pub async fn thread_push_due(
+        &self,
+        now_ms: u64,
+        limit: usize,
+    ) -> Result<Vec<crate::ThreadPushRow>, String> {
+        self.inner
+            .db(move |store| crate::thread_push::due(store.raw(), now_ms, limit))
+            .await
+    }
+
+    /// When the next thread push is due, if one waits.
+    pub async fn thread_push_next_due(&self) -> Result<Option<u64>, String> {
+        self.inner
+            .db(|store| crate::thread_push::next_due(store.raw()))
+            .await
+    }
+
+    /// Removes a thread the Gateway took with `title`; a newer title keeps its row.
+    pub async fn thread_push_delivered(&self, thread_id: &str, title: &str) -> Result<(), String> {
+        let (thread_id, title) = (thread_id.to_owned(), title.to_owned());
+        self.inner
+            .db(move |store| crate::thread_push::delivered(store.raw(), &thread_id, &title))
+            .await
+    }
+
+    /// Holds a thread until `at_ms`, after `attempts` failed sends of `title`.
+    pub async fn thread_push_retry(
+        &self,
+        thread_id: &str,
+        title: &str,
+        attempts: u32,
+        at_ms: u64,
+    ) -> Result<(), String> {
+        let (thread_id, title) = (thread_id.to_owned(), title.to_owned());
+        self.inner
+            .db(move |store| {
+                crate::thread_push::retry(store.raw(), &thread_id, &title, attempts, at_ms)
+            })
             .await
     }
 

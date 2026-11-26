@@ -1712,6 +1712,7 @@ dependencies = [
  "conn-client",
  "conn-contract",
  "conn-desktop",
+ "conn-preview-driver",
  "conn-state",
  "conn-theme",
  "conn-web",
@@ -1724,6 +1725,7 @@ dependencies = [
  "futures",
  "gpui-kit",
  "gpui-pre",
+ "gpui-pre-apple",
  "image",
  "language",
  "libc",
@@ -1801,6 +1803,7 @@ dependencies = [
  "futures",
  "nix 0.31.3",
  "reqwest",
+ "security-framework",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1809,6 +1812,8 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "url",
+ "uuid",
+ "zeroize",
 ]
 
 [[package]]
@@ -1824,6 +1829,22 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-tungstenite",
+ "url",
+]
+
+[[package]]
+name = "conn-preview-driver"
+version = "0.1.0"
+dependencies = [
+ "conn-client",
+ "conn-contract",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
  "url",
 ]
 

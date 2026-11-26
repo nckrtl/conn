@@ -1490,20 +1490,11 @@ impl FilesPanel {
             } else {
                 fg
             };
-            let (icon, icon_size, icon_color) = if is_dir {
-                let chevron = if row.expanded {
-                    "superhero/chevron-down.svg"
-                } else {
-                    "superhero/chevron-right.svg"
-                };
-                (chevron, 12.0, muted)
+            // A solid Pierre folder (closed or open) fills the icon slot; there is no arrow.
+            let icon = if is_dir {
+                crate::file_icons::folder_icon(row.expanded, self.tokens.appearance)
             } else {
-                let icon = crate::file_icons::file_icon(&row.name);
-                let color = icon
-                    .color
-                    .map(|c| to_hsla(c.for_appearance(self.tokens.appearance)))
-                    .unwrap_or(muted);
-                (icon.asset, 16.0, color)
+                crate::file_icons::file_icon(&row.name, self.tokens.appearance)
             };
 
             let item = h_flex()
@@ -1577,7 +1568,7 @@ impl FilesPanel {
                         .flex_shrink_0()
                         .items_center()
                         .justify_center()
-                        .child(superhero_icon(icon, icon_size, icon_color)),
+                        .child(crate::file_icons::icon_img(icon.asset, 16.0)),
                 )
                 .child(
                     div()
@@ -2411,10 +2402,13 @@ impl FilesPanel {
                 .line_height(px(UI_LINE_HEIGHT_PX))
                 .text_color(fg)
                 .hover(move |s| hover.hover_style(s))
-                .child(
+                .child(if crate::file_icons::is_file_icon_asset(icon) {
+                    crate::file_icons::icon_img(icon, 14.0).into_any_element()
+                } else {
                     superhero_icon(icon, 14.0, muted)
-                        .group_hover(group, move |s| s.text_color(hover.fg)),
-                )
+                        .group_hover(group, move |s| s.text_color(hover.fg))
+                        .into_any_element()
+                })
                 .child(div().flex_1().min_w_0().truncate().child(label))
         };
         let status = |text: &str| {
@@ -2480,9 +2474,9 @@ impl FilesPanel {
                     let is_dir = child.kind == ProjectEntryKind::Directory;
                     let current = !is_dir && child.path == current_path;
                     let icon = if is_dir {
-                        "superhero/folder.svg"
+                        crate::file_icons::folder_icon(false, tokens.appearance).asset
                     } else {
-                        crate::file_icons::file_icon(&child.label).asset
+                        crate::file_icons::file_icon(&child.label, tokens.appearance).asset
                     };
                     let target = child.path.clone();
                     let mut item = row(
@@ -3318,3 +3312,7 @@ mod tests {
         .unwrap();
     }
 }
+
+#[cfg(test)]
+#[path = "file_icon_shots.rs"]
+mod file_icon_shots;

@@ -208,10 +208,169 @@
     if (!input) {
       return { ok: false, status: "field_not_found" };
     }
-    input.focus();
-    setNativeValue(input, value);
+    // Conn moves focus to fill; the inline picker must not reopen over its own fill.
+    const fill = () => {
+      input.focus();
+      setNativeValue(input, value);
+    };
+    if (credentialInline) credentialInline.quiet(fill);
+    else fill();
     return { ok: true, status: "filled" };
   }
+
+  // ── Inline Vault login suggestions (port of T3's `credentialInline.ts` watcher) ─
+  // The page reports only the kind of the focused sign-in field and its rectangle. Account
+  // labels, usernames and values never enter the page: Conn draws the picker itself.
+  function startCredentialInlineWatcher() {
+    if (location.protocol !== "https:") return null;
+    let input = null;
+    let ignored = null;
+    let frame = 0;
+    let revision = 0;
+    let latest = null;
+    const controller = new AbortController();
+    const options = { capture: true, signal: controller.signal };
+
+    const focused = () => {
+      let element = document.activeElement;
+      while (element && element.shadowRoot && element.shadowRoot.activeElement) {
+        element = element.shadowRoot.activeElement;
+      }
+      return element;
+    };
+    const kind = (element) => {
+      if (!(element instanceof HTMLInputElement) || element.disabled || element.readOnly || !element.isConnected) return null;
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      if (style.display === "none" || style.visibility !== "visible" || Number(style.opacity) === 0 || rect.width <= 0 || rect.height <= 0) return null;
+      const tokens = (element.autocomplete || "").toLowerCase().split(/\s+/);
+      if (tokens.includes("new-password") || (element.form && element.form.querySelector('input[autocomplete~="new-password"]'))) return null;
+      if (tokens.includes("one-time-code")) return "otp";
+      if (element.type === "password") return "password";
+      if (!["text", "email", "tel"].includes(element.type)) return null;
+      const hint = [element.name, element.id, element.getAttribute("aria-label"), element.placeholder].filter(Boolean).join(" ");
+      if (/search/i.test(hint)) return null;
+      if (element.type === "email" || tokens.includes("username") || tokens.includes("email") || /user|login|e-?mail|account|identifier/i.test(hint)) return "username";
+      return null;
+    };
+    // Many sites draw the visible field on a wrapper and inset the real input inside it. Align
+    // the picker with that wrapper, as Vault's browser extension does (`inline.js` `fieldBox`):
+    // the nearest of three ancestors that hugs the input and draws a border, background or shadow.
+    const fieldBox = (element) => {
+      const own = element.getBoundingClientRect();
+      let node = element.parentElement;
+      for (let depth = 0; node && depth < 3; node = node.parentElement, depth++) {
+        const rect = node.getBoundingClientRect();
+        const style = getComputedStyle(node);
+        if (rect.height > own.height + 24 || rect.width > own.width + 80 || rect.left > own.left || rect.right < own.right) break;
+        const drawn = parseFloat(style.borderLeftWidth) > 0 || style.boxShadow !== "none" ||
+          (style.backgroundColor !== "rgba(0, 0, 0, 0)" && style.backgroundColor !== "transparent");
+        if (drawn) return rect;
+      }
+      return own;
+    };
+    const geometry = () => {
+      const field = kind(input);
+      if (!field || input === ignored) return null;
+      const r = fieldBox(input);
+      if (r.bottom <= 0 || r.top >= innerHeight || r.right <= 0 || r.left >= innerWidth) return null;
+      return { field, page: pageFields(), x: r.x, y: r.y, width: r.width, height: r.height, viewportWidth: innerWidth, viewportHeight: innerHeight };
+    };
+    // Which sign-in fields the page shows, so one pick fills them like T3's `fieldsToFill`.
+    // Booleans only.
+    const pageFields = () => {
+      const page = { username: false, password: false, otp: false };
+      let seen = 0;
+      for (const element of document.querySelectorAll("input")) {
+        if (++seen > 40) break;
+        const found = kind(element);
+        if (found) page[found] = true;
+      }
+      return page;
+    };
+    let muted = false;
+    const report = (eventKind) => {
+      if (muted) return;
+      const anchor = geometry();
+      if (eventKind === "layout" && JSON.stringify(anchor) === JSON.stringify(latest)) return;
+      latest = anchor;
+      emit({ type: "credentialInline", event: { revision: ++revision, kind: eventKind, anchor } });
+    };
+    const layout = () => {
+      if (!input || frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        report("layout");
+      });
+    };
+    const resize = new ResizeObserver(layout);
+    const inspect = (explicit = false) => {
+      const element = focused();
+      if (explicit || element !== input) ignored = null;
+      if (!explicit && element === input) return;
+      resize.disconnect();
+      input = kind(element) ? element : null;
+      if (input) resize.observe(input);
+      report(input ? "focus" : "dismiss");
+    };
+    document.addEventListener("focusin", () => inspect(), options);
+    document.addEventListener("focusout", () => queueMicrotask(() => inspect()), options);
+    document.addEventListener("pointerdown", (event) => {
+      const target = event.composedPath()[0];
+      if (target === input) inspect(true);
+      else if (!(target instanceof HTMLInputElement)) {
+        ignored = input;
+        report("dismiss");
+      }
+    }, options);
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") {
+        ignored = input;
+        report("dismiss");
+      }
+    }, options);
+    window.addEventListener("scroll", layout, options);
+    window.addEventListener("resize", layout, options);
+    const mutations = new MutationObserver(layout);
+    mutations.observe(document.documentElement, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["style", "class", "hidden", "disabled", "readonly"],
+    });
+    inspect();
+    return {
+      // Runs `action` without reports. `focusout` re-inspects in a microtask, so the mute lifts
+      // in one queued after it.
+      quiet(action) {
+        muted = true;
+        try {
+          action();
+        } finally {
+          queueMicrotask(() => {
+            muted = false;
+          });
+        }
+      },
+      // Conn closed the picker (Escape, a choice, or a click on it): keep it closed for this field.
+      dismiss(restore) {
+        ignored = input;
+        if (restore && input) input.focus({ preventScroll: true });
+        report("dismiss");
+      },
+      dispose() {
+        controller.abort();
+        resize.disconnect();
+        mutations.disconnect();
+        cancelAnimationFrame(frame);
+      },
+    };
+  }
+
+  let credentialInline = null;
+  try {
+    credentialInline = startCredentialInlineWatcher();
+  } catch {}
 
   // ── Agent `preview_*` DOM snapshot / act / eval helpers ────────────────────
   function previewSnapshot() {
@@ -391,6 +550,9 @@
       return null;
     },
     fillCredential,
+    dismissCredentialInline(restore) {
+      if (credentialInline) credentialInline.dismiss(Boolean(restore));
+    },
     previewEval,
     previewCall,
   };

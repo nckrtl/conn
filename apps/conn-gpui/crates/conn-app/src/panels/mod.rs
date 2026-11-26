@@ -6,6 +6,7 @@ pub(crate) mod annotations;
 mod api;
 mod browser;
 mod browser_context_menu;
+mod browser_inline_logins;
 pub(crate) mod chrome;
 mod color;
 mod database;

@@ -45,6 +45,9 @@ mod preview;
 mod rail_workspaces;
 #[cfg(test)]
 mod reconnect_tests;
+mod send_pending;
+#[cfg(test)]
+mod send_pending_tests;
 mod sidebar_keys;
 mod sidebar_more;
 mod thread_links;
@@ -276,6 +279,9 @@ pub(crate) struct ConnApp {
     theme_id: String,
     connection: Option<Connection>,
     status: Option<ConnectionStatus>,
+    /// Messages sent but not yet taken by the server, and the ids of messages that came back
+    /// to the composer, for a resend that must not post them twice.
+    sends: send_pending::PendingSends,
     /// True when the active connection came from `CONN_GPUI_*` env vars (skip overwriting
     /// persisted user `server.json`).
     env_pinned_server: bool,
@@ -777,6 +783,7 @@ impl ConnApp {
             theme_id,
             connection,
             status: None,
+            sends: send_pending::PendingSends::default(),
             env_pinned_server,
             threads: HashMap::new(),
             chat,
@@ -881,15 +888,9 @@ impl ConnApp {
             panel.set_preview_handles(preview_handles, cx)
         });
         Self::pump_preview_requests(preview_ui_rx, cx);
-        // The write in flight finishes, and the latest layout follows if it differs.
         cx.on_app_quit(|app, cx| {
             app.preview_host.close_all();
-            let panels = app.thread_panels_on_quit(cx);
-            let offline = app.offline_on_quit();
-            async move {
-                panels.await;
-                offline.await;
-            }
+            app.quit_saves(cx)
         })
         .detach();
         app.sync_chat(cx);
@@ -1599,6 +1600,7 @@ impl ConnApp {
                 chat.set_model_selection(model_instance, model, model_options, cx);
             }
         });
+        self.sync_pending_sends(cx);
         self.sync_annotations_state(project_id.as_deref(), cx);
     }
 
@@ -3195,12 +3197,15 @@ impl ConnApp {
         } else {
             None
         };
-        let command = match crate::commands::send_message(
+        // An unchanged resend of a message that came back without an answer keeps its ids.
+        let ids = self.sends.ids_for(&thread_id, &text, &attachments);
+        let command = match crate::commands::send_message_with_ids(
             &thread_id,
             &text,
             &attachments,
             working,
             steer_target.as_deref(),
+            &ids,
         ) {
             Ok(command) => command,
             Err(e) => {
@@ -3212,36 +3217,18 @@ impl ConnApp {
             }
         };
         self.chat.update(cx, |chat, cx| chat.set_error(None, cx));
-        let generation = self.connection_gen;
-        let fallback_text = text;
-        cx.spawn(async move |this, cx| {
-            let result = connection.dispatch_command(command).await.map_err(|err| {
-                format!(
-                    "Send failed: {}",
-                    crate::commands::format_client_error(&err)
-                )
-            });
-            if let Err(msg) = result {
-                eprintln!("send: dispatchCommand failed: {msg}");
-                let _ = this.update(cx, |app, cx| {
-                    if app.connection_gen != generation {
-                        return;
-                    }
-                    app.chat.update(cx, |chat, cx| {
-                        chat.set_error(Some(msg), cx);
-                    });
-                    if let Some(win) = send_window {
-                        let chat = app.chat.clone();
-                        let restore = fallback_text.clone();
-                        let _ = win.update(cx, |_, window, cx| {
-                            chat.update(cx, |c, cx| c.set_draft_text(restore, window, cx));
-                        });
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
+        self.run_send(
+            send_pending::Outgoing {
+                connection,
+                thread_id,
+                text,
+                attachments,
+                ids,
+                command,
+                window: send_window,
+            },
+            cx,
+        );
     }
 
     /// A composer send over pending approvals (`useComposerSend`). With feedback support it

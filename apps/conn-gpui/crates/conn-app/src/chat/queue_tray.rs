@@ -305,6 +305,37 @@ pub(super) struct QueueRow {
     pub(super) preview: String,
 }
 
+/// A message on its way to the server, as the tray shows it below the queued ones.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingSendRow {
+    /// The app's id for the send.
+    pub(crate) id: u64,
+    pub(crate) preview: String,
+    /// The thread's server is away: the message goes once it is back.
+    pub(crate) waiting: bool,
+}
+
+impl PendingSendRow {
+    #[must_use]
+    pub(crate) fn new(id: u64, text: &str, attachment_count: usize, waiting: bool) -> Self {
+        Self {
+            id,
+            preview: preview_text(text, attachment_count),
+            waiting,
+        }
+    }
+
+    /// What the row says about the send.
+    #[must_use]
+    pub(crate) fn status(&self) -> &'static str {
+        if self.waiting {
+            "Waiting for connection"
+        } else {
+            "Sending…"
+        }
+    }
+}
+
 /// The tray's surface colours: the fill, one step off the composer's so the two read apart in
 /// light and dark themes, and the border they share.
 #[must_use]
@@ -741,10 +772,11 @@ impl ChatView {
 
     // ----- the tray ------------------------------------------------------------------------
 
-    /// The tray: one row per queued message, or `None` for an empty queue.
+    /// The tray: one row per queued message, then one per message on its way to the server, or
+    /// `None` when there are neither.
     pub(super) fn render_queue_tray(&self, cx: &mut Context<'_, Self>) -> Option<AnyElement> {
         let rows = self.queue_rows();
-        if rows.is_empty() {
+        if rows.is_empty() && self.pending_sends.is_empty() {
             return None;
         }
         let total = rows.len();
@@ -775,6 +807,9 @@ impl ChatView {
         for (index, row) in rows.iter().enumerate() {
             list = list.child(self.render_queue_row(index, total, row, drop_slot, cx));
         }
+        for pending in &self.pending_sends {
+            list = list.child(self.render_pending_send_row(pending));
+        }
 
         let tray = div()
             .id("chat-queue-tray")
@@ -794,6 +829,62 @@ impl ChatView {
         #[cfg(test)]
         let tray = gpui_kit::TestSupportExt::test_support(tray);
         Some(tray.into_any_element())
+    }
+
+    /// A message on its way: a turning arc, its text, and whether it waits for the connection.
+    /// It has no actions: the server does not have it yet.
+    fn render_pending_send_row(&self, row: &PendingSendRow) -> AnyElement {
+        let tokens = &self.tokens;
+        let muted = hsla(tokens.muted_foreground);
+        let status = row.status();
+        let row_el = div()
+            .id(SharedString::from(format!("chat-pending-send-{}", row.id)))
+            .a11y_group(
+                SharedString::from(format!("chat.pending-send.{}", row.id)),
+                format!("{status}: {}", row.preview),
+            )
+            .flex()
+            .flex_row()
+            .flex_shrink_0()
+            .items_center()
+            .gap(px(8.0))
+            .w_full()
+            .h(px(ROW_HEIGHT_PX))
+            .pl(px(10.0))
+            .pr(px(10.0))
+            .child(
+                div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .justify_center()
+                    .size(px(14.0))
+                    .child(super::spinner::TurningArc::new(
+                        12.0,
+                        hsla_alpha(tokens.muted_foreground, 0.8),
+                    )),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(13.0))
+                    .line_height(px(18.0))
+                    .text_color(hsla_alpha(tokens.foreground, ROW_TEXT_ALPHA))
+                    .child(SharedString::from(row.preview.clone())),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(12.0))
+                    .line_height(px(16.0))
+                    .text_color(muted)
+                    .child(status),
+            );
+        #[cfg(test)]
+        let row_el = gpui_kit::TestSupportExt::test_support(row_el);
+        row_el.into_any_element()
     }
 
     fn render_queue_row(

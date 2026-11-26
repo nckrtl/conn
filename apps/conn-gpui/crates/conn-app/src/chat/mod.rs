@@ -43,6 +43,7 @@ mod provider_banner;
 mod question_logic;
 mod question_panel;
 mod queue_tray;
+pub(crate) use self::queue_tray::PendingSendRow;
 mod request_stack;
 pub(crate) mod selection;
 #[cfg(test)]
@@ -324,6 +325,8 @@ pub(crate) struct ChatView {
     editing_queued_run_id: Option<String>,
     /// The queued-message tray above the composer: its menu, drag and scroll.
     queue: queue_tray::QueueState,
+    /// Messages on their way to the server, which the tray shows below the queued ones.
+    pending_sends: Vec<PendingSendRow>,
     composer: Entity<Composer>,
     _input_sub: Subscription,
     /// Live connection for card actions (answers, secrets, omitted tool output).
@@ -587,6 +590,7 @@ impl ChatView {
             toc_pinned_slot: None,
             editing_queued_run_id: None,
             queue: queue_tray::QueueState::new(),
+            pending_sends: Vec::new(),
             composer,
             _input_sub: input_sub,
             connection,
@@ -832,6 +836,38 @@ impl ChatView {
     }
 
     /// Displays (or clears) a dismissible error banner directly above the composer.
+    /// Shows `rows` as the messages on their way to the server.
+    pub(crate) fn set_pending_sends(
+        &mut self,
+        rows: Vec<PendingSendRow>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.pending_sends != rows {
+            self.pending_sends = rows;
+            cx.notify();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_sends_for_test(&self) -> Vec<PendingSendRow> {
+        self.pending_sends.clone()
+    }
+
+    /// Puts a message whose send failed back in `thread_id`'s draft, with its attachments.
+    pub(crate) fn return_unsent(
+        &mut self,
+        thread_id: &str,
+        text: String,
+        attachments: Vec<conn_contract::ChatAttachment>,
+        window: Option<&mut Window>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let key = composer_state::thread_draft_key(thread_id);
+        self.composer.update(cx, |composer, cx| {
+            composer.return_unsent(&key, text, attachments, window, cx);
+        });
+    }
+
     pub(crate) fn set_error(&mut self, error: Option<String>, cx: &mut Context<'_, Self>) {
         if self.error_banner != error {
             self.error_banner = error;

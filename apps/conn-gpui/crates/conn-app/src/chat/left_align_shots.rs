@@ -335,3 +335,48 @@ fn render_queue_tray_screenshots() {
         );
     }
 }
+
+/// Renders messages on their way to the server in the tray: one waiting for the connection
+/// below a queued message, and one alone that is slow to send.
+///
+/// `CONN_THREAD_SHOTS_DIR=<dir> cargo test -p conn-app render_pending_send_screenshots -- --ignored`
+#[test]
+#[ignore = "writes PNGs; set CONN_THREAD_SHOTS_DIR"]
+fn render_pending_send_screenshots() {
+    let Some(dir) = std::env::var_os("CONN_THREAD_SHOTS_DIR") else {
+        return;
+    };
+    let dir = Path::new(&dir);
+    render_pngs(
+        dir,
+        "pending-waiting",
+        &|| queued_thread(1, 0),
+        &|chat, cx| {
+            chat.set_pending_sends(
+                vec![crate::chat::PendingSendRow::new(
+                    1,
+                    "Can you also check the light theme before you push?",
+                    0,
+                    true,
+                )],
+                cx,
+            );
+        },
+    );
+    render_pngs(
+        dir,
+        "pending-sending",
+        &|| queued_thread(0, 0),
+        &|chat, cx| {
+            chat.set_pending_sends(
+                vec![crate::chat::PendingSendRow::new(
+                    2,
+                    "Run the reconnect tests again",
+                    1,
+                    false,
+                )],
+                cx,
+            );
+        },
+    );
+}

@@ -25,6 +25,7 @@ use gpui_kit::{
     anchored, deferred, div, hsla, img, point, px, rgb, rgba, svg,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -58,6 +59,9 @@ const TILE_PX: f32 = 29.0;
 const TILE_RADIUS_PX: f32 = 7.0;
 const SITE_ICON_PX: f32 = 21.0;
 const SITE_ICON_RADIUS_PX: f32 = 5.0;
+/// The toolbar popover's icon, beside the login's name.
+const POPOVER_ICON_PX: f32 = 16.0;
+const POPOVER_ICON_RADIUS_PX: f32 = 4.0;
 /// `.icon svg { 17px }` (the key) and `.icon svg.mark { 15px }` (the Vault mark).
 const KEY_PX: f32 = 17.0;
 const MARK_PX: f32 = 15.0;
@@ -417,6 +421,51 @@ fn https_host(address: &str) -> Option<String> {
         .flatten()
 }
 
+/// The most item icons kept at once. Vault sends at most 40 logins per list.
+const MAX_ITEM_ICONS: usize = 128;
+
+struct CachedIcon {
+    png: Vec<u8>,
+    image: Arc<Image>,
+}
+
+/// The site icons Vault sent with its logins, decoded once and kept per item id. The same
+/// `Arc<Image>` is handed out on every frame, so GPUI decodes and uploads each icon once. An id
+/// keeps its icon across lookups; a changed icon replaces it.
+#[derive(Default)]
+pub(super) struct ItemIcons {
+    by_id: HashMap<String, CachedIcon>,
+}
+
+impl ItemIcons {
+    /// Takes the icons of a lookup's items. An item with no icon keeps the one it had.
+    pub(super) fn update(&mut self, items: &[VaultLoginItem]) {
+        let incoming = items.iter().filter(|item| item.icon_png.is_some()).count();
+        if self.by_id.len() + incoming > MAX_ITEM_ICONS {
+            self.by_id.clear();
+        }
+        for item in items {
+            let Some(png) = item.icon_png.as_ref().filter(|png| !png.is_empty()) else {
+                continue;
+            };
+            if self.by_id.get(&item.id).is_some_and(|c| c.png == *png) {
+                continue;
+            }
+            self.by_id.insert(
+                item.id.clone(),
+                CachedIcon {
+                    png: png.clone(),
+                    image: Arc::new(Image::from_bytes(ImageFormat::Png, png.clone())),
+                },
+            );
+        }
+    }
+
+    pub(super) fn get(&self, id: &str) -> Option<Arc<Image>> {
+        self.by_id.get(id).map(|cached| cached.image.clone())
+    }
+}
+
 #[derive(Default)]
 pub(super) struct InlineLogins {
     anchor: Option<InlineAnchor>,
@@ -435,6 +484,8 @@ pub(super) struct InlineLogins {
     generation: u64,
     /// The page's own icon. A reload keeps it; another site's address hides it.
     icon: Option<PageIcon>,
+    /// The icons Vault stored for the logins. They show before the page's icon.
+    item_icons: ItemIcons,
 }
 
 impl InlineLogins {
@@ -459,6 +510,11 @@ impl InlineLogins {
         let image = Arc::new(Image::from_bytes(ImageFormat::Png, png));
         self.icon = Some(PageIcon { host, image });
         true
+    }
+
+    /// The icon Vault stored for the login `id`, if it sent one.
+    pub(super) fn item_icon(&self, id: &str) -> Option<Arc<Image>> {
+        self.item_icons.get(id)
     }
 
     /// The icon for the site at `page`, if the browser reported one for that host.
@@ -531,6 +587,7 @@ impl InlineLogins {
         self.unlocking = false;
         self.status = Some(response.status);
         self.error = response.error;
+        self.item_icons.update(&response.items);
         self.items = response.items;
         if !self
             .cursor
@@ -745,9 +802,14 @@ pub(super) struct PickerActions<T> {
     pub(super) dismiss: fn(&mut T, &mut Window, &mut Context<'_, T>),
 }
 
-/// The 29 px tile at a row's start: the page's icon on a rounded square, or `fallback` (the key)
-/// when the browser reported none.
-fn tile(site_icon: Option<Arc<Image>>, fallback: AnyElement, palette: &Palette) -> AnyElement {
+/// The 29 px tile at a row's start: a site icon on a rounded square (`icon` is its test id and
+/// image: Vault's icon for the login, else the page's), or `fallback` (the key) when there is
+/// none.
+fn tile(
+    icon: Option<(SharedString, Arc<Image>)>,
+    fallback: AnyElement,
+    palette: &Palette,
+) -> AnyElement {
     div()
         .size(px(TILE_PX))
         .flex_none()
@@ -757,14 +819,59 @@ fn tile(site_icon: Option<Arc<Image>>, fallback: AnyElement, palette: &Palette) 
         .rounded(px(TILE_RADIUS_PX))
         .overflow_hidden()
         .bg(palette.tile)
-        .child(match site_icon {
-            Some(image) => img(image)
+        .child(match icon {
+            Some((id, image)) => div()
+                .id(id)
+                .test_support()
                 .size(px(SITE_ICON_PX))
-                .rounded(px(SITE_ICON_RADIUS_PX))
-                .object_fit(ObjectFit::Contain)
+                .child(
+                    img(image)
+                        .size(px(SITE_ICON_PX))
+                        .rounded(px(SITE_ICON_RADIUS_PX))
+                        .object_fit(ObjectFit::Contain),
+                )
                 .into_any_element(),
             None => fallback,
         })
+        .into_any_element()
+}
+
+/// The toolbar popover's first line for the login `id`: Vault's icon for it (16 px, when Vault
+/// sent one) before the name.
+pub(super) fn popover_title(
+    id: &str,
+    icon: Option<Arc<Image>>,
+    title: String,
+    color: Hsla,
+) -> AnyElement {
+    h_flex()
+        .gap(px(6.0))
+        .items_center()
+        .children(icon.map(|image| {
+            div()
+                .id(SharedString::from(format!(
+                    "browser-vault-popover-icon-{id}"
+                )))
+                .test_support()
+                .size(px(POPOVER_ICON_PX))
+                .flex_none()
+                .child(
+                    img(image)
+                        .size(px(POPOVER_ICON_PX))
+                        .rounded(px(POPOVER_ICON_RADIUS_PX))
+                        .object_fit(ObjectFit::Contain),
+                )
+        }))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .text_size(px(12.0))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(color)
+                .truncate()
+                .child(title),
+        )
         .into_any_element()
 }
 
@@ -890,7 +997,29 @@ pub(super) fn render_picker<T: 'static>(
                         .w_full()
                         .gap(px(ROW_GAP_PX))
                         .items_center()
-                        .child(tile(site_icon.cloned(), key, &palette))
+                        // Vault's icon for this login, else the page's own, else the key.
+                        .child(tile(
+                            state
+                                .item_icon(&id)
+                                .map(|image| {
+                                    (
+                                        SharedString::from(format!(
+                                            "browser-vault-inline-icon-{id}"
+                                        )),
+                                        image,
+                                    )
+                                })
+                                .or_else(|| {
+                                    site_icon.map(|image| {
+                                        (
+                                            SharedString::from("browser-vault-inline-page-icon"),
+                                            image.clone(),
+                                        )
+                                    })
+                                }),
+                            key,
+                            &palette,
+                        ))
                         .child(text),
                 ));
             }
@@ -1034,6 +1163,7 @@ pub(super) fn stub_logins(url: &str, allow_unlock: bool) -> VaultLoginsResponse 
         title: title.to_owned(),
         username: Some(username.to_owned()),
         source: "vault".to_owned(),
+        icon_png: None,
     };
     if url.contains("locked.example") && !allow_unlock {
         return answer(VaultLoginsStatus::Locked, Vec::new());
@@ -1123,6 +1253,7 @@ mod tests {
                     title: (*title).to_owned(),
                     username: username.map(str::to_owned),
                     source: "vault".to_owned(),
+                    icon_png: None,
                 })
                 .collect(),
             error: None,
@@ -1858,6 +1989,8 @@ mod tests {
 
     struct Harness {
         state: InlineLogins,
+        /// The page's own icon, as the Browser panel passes it.
+        page_icon: Option<Arc<Image>>,
         tokens: Tokens,
         chosen: Rc<RefCell<Vec<usize>>>,
         outside_presses: Rc<Cell<usize>>,
@@ -1889,7 +2022,7 @@ mod tests {
                     (40.0, 40.0),
                     (HARNESS_WIDTH_PX, 200.0),
                     &self.tokens,
-                    None,
+                    self.page_icon.as_ref(),
                     &actions,
                     cx,
                 ))
@@ -1904,6 +2037,14 @@ mod tests {
     }
 
     fn mount(cx: &mut TestAppContext, state: InlineLogins) -> Mounted {
+        mount_with_page_icon(cx, state, None)
+    }
+
+    fn mount_with_page_icon(
+        cx: &mut TestAppContext,
+        state: InlineLogins,
+        page_icon: Option<Arc<Image>>,
+    ) -> Mounted {
         let chosen = Rc::new(RefCell::new(Vec::new()));
         let outside_presses = Rc::new(Cell::new(0));
         let behind_hovered = Rc::new(Cell::new(false));
@@ -1927,9 +2068,11 @@ mod tests {
                 ..Default::default()
             };
             let mut state = Some(state);
+            let mut page_icon = Some(page_icon);
             let Ok((window, _view)) = gpui_kit::open_window(options, cx, move |_, cx| {
                 cx.new(|_| Harness {
                     state: state.take().unwrap_or_default(),
+                    page_icon: page_icon.take().flatten(),
                     tokens,
                     chosen: c,
                     outside_presses: o,
@@ -2066,6 +2209,209 @@ mod tests {
         assert_eq!(f32::from(first.size.height), 53.0);
         assert_eq!(f32::from(second.top()), f32::from(first.bottom()));
         assert_eq!(f32::from(card.size.height), 2.0 * 53.0 + 12.0);
+    }
+
+    // ── Vault's own icon for a login ────────────────────────────────────────────────
+
+    /// A small valid PNG, `shade` apart from the next one.
+    fn tiny_png(shade: u8) -> Vec<u8> {
+        use image::ImageEncoder as _;
+        let rgba: Vec<u8> = (0..16).flat_map(|_| [shade, 0x40, 0xa0, 0xff]).collect();
+        let mut png = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut png)
+            .write_image(&rgba, 4, 4, image::ExtendedColorType::Rgba8)
+            .expect("an encoded icon");
+        png
+    }
+
+    fn item_with_icon(id: &str, icon: Option<Vec<u8>>) -> VaultLoginItem {
+        VaultLoginItem {
+            id: id.to_owned(),
+            title: format!("Login {id}"),
+            username: None,
+            source: "vault".to_owned(),
+            icon_png: icon,
+        }
+    }
+
+    /// A picker open on a username field with `items`, answered as Vault would.
+    fn picker_with(items: Vec<VaultLoginItem>) -> InlineLogins {
+        let mut state = InlineLogins::default();
+        assert!(state.apply_event(&event("focus", "username")));
+        let generation = state.begin_lookup(false).expect("a lookup starts");
+        assert!(state.finish_lookup(
+            generation,
+            VaultLoginsResponse {
+                status: VaultLoginsStatus::Ok,
+                items,
+                error: None,
+            },
+        ));
+        state
+    }
+
+    #[test]
+    fn a_lookup_keeps_each_logins_icon_decoded_once() {
+        let mut state = picker_with(vec![
+            item_with_icon("a", Some(tiny_png(1))),
+            item_with_icon("b", None),
+        ]);
+        let first = state.item_icon("a").expect("a has an icon");
+        assert!(state.item_icon("b").is_none());
+        assert!(state.item_icon("missing").is_none());
+
+        // The same bytes again: the same decoded image, not a new one.
+        let generation = state.begin_lookup(false).expect("a lookup starts");
+        state.finish_lookup(
+            generation,
+            VaultLoginsResponse {
+                status: VaultLoginsStatus::Ok,
+                items: vec![item_with_icon("a", Some(tiny_png(1)))],
+                error: None,
+            },
+        );
+        assert!(Arc::ptr_eq(&first, &state.item_icon("a").expect("kept")));
+
+        // Other bytes replace it. A later reply with none keeps what was there.
+        let generation = state.begin_lookup(false).expect("a lookup starts");
+        state.finish_lookup(
+            generation,
+            VaultLoginsResponse {
+                status: VaultLoginsStatus::Ok,
+                items: vec![item_with_icon("a", Some(tiny_png(2)))],
+                error: None,
+            },
+        );
+        let replaced = state.item_icon("a").expect("replaced");
+        assert!(!Arc::ptr_eq(&first, &replaced));
+        let generation = state.begin_lookup(false).expect("a lookup starts");
+        state.finish_lookup(
+            generation,
+            VaultLoginsResponse {
+                status: VaultLoginsStatus::Ok,
+                items: vec![item_with_icon("a", None)],
+                error: None,
+            },
+        );
+        assert!(Arc::ptr_eq(&replaced, &state.item_icon("a").expect("kept")));
+    }
+
+    #[test]
+    fn an_empty_icon_is_no_icon_and_the_cache_stays_bounded() {
+        let mut icons = ItemIcons::default();
+        icons.update(&[item_with_icon("a", Some(Vec::new()))]);
+        assert!(icons.get("a").is_none(), "no empty icon");
+        let many: Vec<VaultLoginItem> = (0..MAX_ITEM_ICONS)
+            .map(|n| item_with_icon(&format!("old-{n}"), Some(tiny_png(3))))
+            .collect();
+        icons.update(&many);
+        assert_eq!(icons.by_id.len(), MAX_ITEM_ICONS);
+        icons.update(&[item_with_icon("new", Some(tiny_png(4)))]);
+        assert!(icons.get("new").is_some());
+        assert!(
+            icons.by_id.len() <= MAX_ITEM_ICONS,
+            "never grows past the cap"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_login_with_a_vault_icon_draws_it_and_the_others_fall_back(cx: &mut TestAppContext) {
+        let state = picker_with(vec![
+            item_with_icon("a", Some(tiny_png(1))),
+            item_with_icon("b", None),
+        ]);
+        let mounted = mount(cx, state);
+        let drawn = cx.update_window(mounted.window, |_, window, cx| {
+            window.render_frame(cx);
+            (
+                window.try_find("browser-vault-inline-icon-a").is_some(),
+                window.try_find("browser-vault-inline-icon-b").is_some(),
+                window.try_find("browser-vault-inline-page-icon").is_some(),
+            )
+        });
+        assert_eq!(
+            drawn.ok(),
+            Some((true, false, false)),
+            "a: Vault's icon; b: the key, with no page icon to use"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn a_login_without_a_vault_icon_shows_the_page_icon_then_the_key(cx: &mut TestAppContext) {
+        let state = picker_with(vec![
+            item_with_icon("a", Some(tiny_png(1))),
+            item_with_icon("b", None),
+        ]);
+        let page = Arc::new(Image::from_bytes(ImageFormat::Png, tiny_png(9)));
+        let mounted = mount_with_page_icon(cx, state, Some(page));
+        let drawn = cx.update_window(mounted.window, |_, window, cx| {
+            window.render_frame(cx);
+            (
+                window.try_find("browser-vault-inline-icon-a").is_some(),
+                window.try_find("browser-vault-inline-icon-b").is_some(),
+                window.try_find("browser-vault-inline-page-icon").is_some(),
+            )
+        });
+        // Vault's icon wins for a; b has none of its own, so the page's icon (one per row, found once).
+        assert_eq!(drawn.ok(), Some((true, false, true)));
+    }
+
+    /// The toolbar popover's rows, as the Browser panel draws them from its `ItemIcons`.
+    struct PopoverHarness {
+        icons: ItemIcons,
+        items: Vec<VaultLoginItem>,
+    }
+
+    impl Render for PopoverHarness {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut Context<'_, Self>,
+        ) -> impl IntoElement {
+            v_flex().children(self.items.iter().map(|item| {
+                popover_title(
+                    &item.id,
+                    self.icons.get(&item.id),
+                    item.title.clone(),
+                    hsla(0.0, 0.0, 1.0, 1.0),
+                )
+            }))
+        }
+    }
+
+    #[gpui_kit::test]
+    fn the_toolbar_popover_shows_vaults_icon_beside_the_name(cx: &mut TestAppContext) {
+        let items = vec![
+            item_with_icon("a", Some(tiny_png(1))),
+            item_with_icon("b", None),
+        ];
+        let mut icons = ItemIcons::default();
+        icons.update(&items);
+        let window = cx.update(|cx| {
+            gpui_kit::init(cx);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                    Point::default(),
+                    size(px(400.0), px(200.0)),
+                ))),
+                ..Default::default()
+            };
+            let mut harness = Some(PopoverHarness { icons, items });
+            let Ok((window, _view)) = gpui_kit::open_window(options, cx, move |_, cx| {
+                cx.new(|_| harness.take().expect("one harness"))
+            }) else {
+                panic!("failed to open headless test window");
+            };
+            window
+        });
+        let drawn = cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            (
+                window.try_find("browser-vault-popover-icon-a").is_some(),
+                window.try_find("browser-vault-popover-icon-b").is_some(),
+            )
+        });
+        assert_eq!(drawn.ok(), Some((true, false)), "only a has Vault's icon");
     }
 
     // ── Offscreen renders (`#[ignore]`d; they write PNGs) ───────────────────────────

@@ -20,7 +20,9 @@ use gpui_kit::{
     Window, div, px,
 };
 
-use super::charts::{AXIS_TOP_OVERHANG_PX, render_sparkline, render_trend_chart};
+use super::charts::{
+    AXIS_TOP_OVERHANG_PX, SPARKLINE_BASE_HEIGHT_PX, render_sparkline, render_trend_chart,
+};
 use super::format::{insight_grid_layout, insight_hint};
 use crate::panels::chrome::{self, ConnTooltipExt as _, UI_LINE_HEIGHT_PX, UI_TEXT_PX};
 use crate::panels::color::to_hsla;
@@ -32,23 +34,40 @@ const CARD_MIN_WIDTH_PX: f32 = 130.0;
 /// Value font size (`text-lg leading-6` = 18px / 24px).
 const VALUE_FONT_PX: f32 = 18.0;
 const VALUE_LINE_HEIGHT_PX: f32 = 24.0;
-/// Height of one insight card: top border 1 + padding 10 + label 20 + gap 4 + value 24 + gap 4 +
-/// sparkline 32 (4 above, 28 tall) + padding 8. Cards are set to it, so the strip's height is
-/// known and the expanded chart can take exactly the same space.
-const CARD_HEIGHT_PX: f32 = 103.0;
+/// How much taller the cards and the open chart are than before. Only the charts take the extra
+/// height: the label, the number row and the gaps around them keep their positions.
+const STAT_HEIGHT_SCALE: f32 = 1.25;
+/// Height one insight card had before it grew: top border 1 + padding 10 + label 20 + gap 4 +
+/// value 24 + gap 4 + sparkline 32 (4 above, 28 tall) + padding 8.
+const BASE_CARD_HEIGHT_PX: f32 = 103.0;
+/// Height of one insight card. Cards are set to it, so the strip's height is known and the
+/// expanded chart can take exactly the same space.
+const CARD_HEIGHT_PX: f32 = BASE_CARD_HEIGHT_PX * STAT_HEIGHT_SCALE;
+/// Height a lone row of cards (and so the strip) had before it grew.
+const BASE_MIN_STRIP_HEIGHT_PX: f32 = 168.0;
 /// Top padding of an insight card and of the open chart's box.
 const CARD_PAD_TOP_PX: f32 = 10.0;
 /// Flex gap between the rows inside an insight card and the open chart's box.
 const CARD_GAP_PX: f32 = 4.0;
+/// Extra room between the open chart's number row and its top y label, beyond the card's top
+/// padding, so the chart reads as its own block under the header.
+const CHART_EXTRA_TOP_GAP_PX: f32 = 8.0;
 /// Space above the chart's wrapper, on top of the box's flex gap. The visible gap from the number
-/// row to the first y label (whose text box starts `AXIS_TOP_OVERHANG_PX` above the chart) equals
-/// the card's top padding, i.e. the gap from the card's top edge to the title.
-const CHART_TOP_GAP_PX: f32 = CARD_PAD_TOP_PX - CARD_GAP_PX + AXIS_TOP_OVERHANG_PX;
+/// row to the first y label (whose text box starts `AXIS_TOP_OVERHANG_PX` above the chart) is the
+/// card's top padding plus `CHART_EXTRA_TOP_GAP_PX`. The chart gives up that height.
+const CHART_TOP_GAP_PX: f32 =
+    CARD_PAD_TOP_PX - CARD_GAP_PX + AXIS_TOP_OVERHANG_PX + CHART_EXTRA_TOP_GAP_PX;
 
-/// A single row stretches to 168px; two rows retain 103px each. Opening a
+/// A single row stretches to 168px × the scale; two rows keep one card height each. Opening a
 /// metric keeps that exact height so the task lanes stay in place.
 fn strip_height(rows: usize) -> f32 {
-    (rows as f32 * CARD_HEIGHT_PX).max(168.0)
+    (rows as f32 * CARD_HEIGHT_PX).max(BASE_MIN_STRIP_HEIGHT_PX * STAT_HEIGHT_SCALE)
+}
+
+/// Height of a card's sparkline. It keeps its old height and its old top edge; the card's extra
+/// height (what the card gained over `card_height / STAT_HEIGHT_SCALE`) all goes to the chart.
+fn sparkline_height(card_height: f32) -> f32 {
+    SPARKLINE_BASE_HEIGHT_PX + (card_height - card_height / STAT_HEIGHT_SCALE)
 }
 
 /// Callbacks for user interactions inside the insights strip.
@@ -207,6 +226,7 @@ fn render_insight_card(
                 formatted_value.as_deref().unwrap_or("no data")
             ),
         )
+        .test_support()
         .h(px(height))
         .min_w(px(min_w))
         .flex_grow(span as f32)
@@ -233,6 +253,11 @@ fn render_insight_card(
 
     card.child(
         div()
+            .id(SharedString::from(format!(
+                "tasks-insight-label-{:?}",
+                spec.id
+            )))
+            .test_support()
             .truncate()
             .text_size(px(14.0))
             .line_height(px(UI_LINE_HEIGHT_PX))
@@ -241,6 +266,11 @@ fn render_insight_card(
     )
     .child(
         h_flex()
+            .id(SharedString::from(format!(
+                "tasks-insight-value-{:?}",
+                spec.id
+            )))
+            .test_support()
             .min_w_0()
             .items_baseline()
             .gap(px(8.0))
@@ -257,7 +287,12 @@ fn render_insight_card(
                 el.child(change)
             }),
     )
-    .child(render_sparkline(trend.unwrap_or_default(), tokens))
+    .child(render_sparkline(
+        SharedString::from(format!("tasks-insight-spark-{:?}", spec.id)),
+        trend.unwrap_or_default(),
+        sparkline_height(height),
+        tokens,
+    ))
     .into_any_element()
 }
 
@@ -440,17 +475,27 @@ mod tests {
 
     #[test]
     fn the_insight_strip_uses_the_same_height_when_expanded() {
-        assert_eq!(strip_height(insight_grid_layout(1).rows), 168.0);
-        assert_eq!(strip_height(insight_grid_layout(2).rows), 168.0);
-        assert_eq!(strip_height(insight_grid_layout(7).rows), 206.0);
-        assert_eq!(strip_height(insight_grid_layout(8).rows), 206.0);
+        // The heights before the cards grew, times 1.25.
+        assert_eq!(strip_height(insight_grid_layout(1).rows), 168.0 * 1.25);
+        assert_eq!(strip_height(insight_grid_layout(2).rows), 168.0 * 1.25);
+        assert_eq!(strip_height(insight_grid_layout(7).rows), 206.0 * 1.25);
+        assert_eq!(strip_height(insight_grid_layout(8).rows), 206.0 * 1.25);
+        assert_eq!(CARD_HEIGHT_PX, 103.0 * 1.25);
+    }
+
+    #[test]
+    fn the_sparkline_keeps_its_top_and_takes_all_the_extra_height() {
+        // Two rows: the card is 128.75px, was 103px. The sparkline was 28px.
+        assert_eq!(sparkline_height(CARD_HEIGHT_PX), 28.0 + (128.75 - 103.0));
+        // A lone row stretched to 168px, now 210px.
+        assert_eq!(sparkline_height(210.0), 28.0 + (210.0 - 168.0));
     }
 
     struct ChartHost {
         tokens: Tokens,
         scroll: ScrollHandle,
         data: Option<TaskInsights>,
-        expanded: InsightId,
+        expanded: Option<InsightId>,
         bounds: Rc<Cell<Bounds<Pixels>>>,
     }
 
@@ -465,7 +510,7 @@ mod tests {
                     InsightsPeriod::Month,
                     false,
                     &[],
-                    Some(self.expanded),
+                    self.expanded,
                     None,
                     self.bounds.clone(),
                     &self.scroll,
@@ -528,7 +573,7 @@ mod tests {
                     tokens,
                     scroll: ScrollHandle::new(),
                     data: Some(chart_data()),
-                    expanded,
+                    expanded: Some(expanded),
                     bounds: Rc::default(),
                 })
             })
@@ -564,6 +609,199 @@ mod tests {
         }
     }
 
+    /// Layout snaps to half a pixel, so a fractional height (128.75) lands within 0.5px of it.
+    #[track_caller]
+    fn assert_near(actual: f32, expected: f32, what: &str) {
+        assert!(
+            (actual - expected).abs() <= 0.5,
+            "{what} is {actual}px, expected {expected}px"
+        );
+    }
+
+    /// Bounds of one card's label, number row and sparkline, and of the card.
+    struct MeasuredCard {
+        card: Bounds<Pixels>,
+        label: Bounds<Pixels>,
+        value: Bounds<Pixels>,
+        spark: Bounds<Pixels>,
+    }
+
+    /// Renders the collapsed strip (all eight cards) and measures the "Tasks completed" card.
+    fn measure_card(cx: &mut gpui_kit::TestAppContext, width: f32) -> MeasuredCard {
+        use gpui_kit::test::TestWindowExt as _;
+        use gpui_kit::{AppContext as _, Point, WindowBounds, WindowOptions, size};
+        let window = cx.update(|cx| {
+            gpui_kit::init(cx);
+            let theme = conn_theme::theme_by_id("dark-ocean").expect("dark-ocean theme");
+            let tokens = Tokens::derive(&theme);
+            crate::theme::apply_kit_theme(&tokens, cx);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                    Point::default(),
+                    size(px(width), px(420.0)),
+                ))),
+                ..Default::default()
+            };
+            gpui_kit::open_window(options, cx, move |_, cx| {
+                cx.new(|_| ChartHost {
+                    tokens,
+                    scroll: ScrollHandle::new(),
+                    data: Some(chart_data()),
+                    expanded: None,
+                    bounds: Rc::default(),
+                })
+            })
+            .expect("headless window opens")
+            .0
+        });
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.render_frame(cx);
+        })
+        .expect("window renders");
+        cx.update_window(window, |_, window, _| MeasuredCard {
+            card: window.find("tasks-insight-Completed").bounds(),
+            label: window.find("tasks-insight-label-Completed").bounds(),
+            value: window.find("tasks-insight-value-Completed").bounds(),
+            spark: window.find("tasks-insight-spark-Completed").bounds(),
+        })
+        .expect("window queried")
+    }
+
+    /// Renders the collapsed strip and the open "Tasks completed" chart offscreen to PNG, in Dark
+    /// Ocean and Light. It opens no window on screen and takes no focus: GPUI's headless
+    /// renderer draws into a texture.
+    ///
+    /// `CONN_TASKS_SHOTS_DIR=<dir> CONN_TASKS_SHOTS_TAG=after cargo test -p conn-app \
+    ///  render_task_stats_screenshots -- --ignored`
+    #[test]
+    #[ignore = "writes PNGs; set CONN_TASKS_SHOTS_DIR"]
+    fn render_task_stats_screenshots() {
+        use gpui_kit::test::TestWindowExt as _;
+        use gpui_kit::{AppContext as _, Point, WindowBounds, WindowOptions, size};
+        let Some(dir) = std::env::var_os("CONN_TASKS_SHOTS_DIR") else {
+            return;
+        };
+        let tag = std::env::var("CONN_TASKS_SHOTS_TAG").unwrap_or_else(|_| "after".to_owned());
+        let dir = std::path::Path::new(&dir);
+        std::fs::create_dir_all(dir).expect("an output folder");
+        let mut ctx = gpui_kit::HeadlessAppContext::with_platform(
+            gpui_kit::platform::current_platform(true).text_system(),
+            std::sync::Arc::new(crate::superhero::AppAssets),
+            gpui_kit::platform::current_headless_renderer,
+        );
+        for (theme, label) in [("dark-ocean", "dark"), ("t3-code-light", "light")] {
+            for (view, expanded) in [("card", None), ("expanded", Some(InsightId::Completed))] {
+                let tokens = Tokens::derive(&conn_theme::theme_by_id(theme).expect("a theme"));
+                let (window, _) = ctx.update(|cx| {
+                    gpui_kit::init(cx);
+                    crate::fonts::register(cx);
+                    crate::theme::apply_kit_theme(&tokens, cx);
+                    gpui_kit::open_window(
+                        WindowOptions {
+                            window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                                Point::default(),
+                                size(px(560.0), px(270.0)),
+                            ))),
+                            focus: false,
+                            show: false,
+                            ..Default::default()
+                        },
+                        cx,
+                        move |_, cx| {
+                            cx.new(|_| ChartHost {
+                                tokens,
+                                scroll: ScrollHandle::new(),
+                                data: Some(chart_data()),
+                                expanded,
+                                bounds: Rc::default(),
+                            })
+                        },
+                    )
+                    .expect("a window")
+                });
+                for _ in 0..3 {
+                    ctx.update_window(window, |_, w, c| w.render_frame(c))
+                        .expect("a frame");
+                    ctx.run_until_parked();
+                }
+                ctx.capture_screenshot(window)
+                    .expect("a screenshot")
+                    .save(dir.join(format!("{view}-{label}-{tag}.png")))
+                    .expect("a saved PNG");
+            }
+        }
+    }
+
+    #[gpui_kit::test]
+    fn a_card_is_taller_and_only_its_sparkline_takes_the_height(cx: &mut gpui_kit::TestAppContext) {
+        for width in [560.0, 780.0] {
+            let m = measure_card(cx, width);
+            let top = f32::from(m.card.origin.y);
+            let rel = |b: Bounds<Pixels>| f32::from(b.origin.y) - top;
+            // 25% taller than the 103px it had.
+            assert_near(f32::from(m.card.size.height), 103.0 * 1.25, "card height");
+            // The label, the number row and the gaps keep the positions they had: padding 10,
+            // label 20, gap 4, number row 24, gap 4.
+            assert_eq!(rel(m.label), 10.0, "label top at {width}px");
+            assert_eq!(
+                f32::from(m.label.size.height),
+                20.0,
+                "label height at {width}px"
+            );
+            assert_eq!(rel(m.value), 34.0, "number row top at {width}px");
+            assert_eq!(
+                f32::from(m.value.size.height),
+                27.0,
+                "number row height at {width}px (24px number, baseline-aligned with the 20px change)"
+            );
+            // The sparkline keeps its old top edge (card top + 103 - 8 padding - 28 tall = 67)
+            // and still ends 8px above the card's bottom; all the added 25.75px is its height.
+            assert_near(rel(m.spark), 67.0, "sparkline top");
+            assert_near(
+                f32::from(m.spark.size.height),
+                28.0 + 103.0 * 0.25,
+                "sparkline height",
+            );
+            assert_near(
+                f32::from(m.card.bottom()) - f32::from(m.spark.bottom()),
+                8.0,
+                "bottom padding",
+            );
+        }
+    }
+
+    #[gpui_kit::test]
+    fn the_open_chart_is_taller_and_the_text_above_it_stays_put(cx: &mut gpui_kit::TestAppContext) {
+        let Measured {
+            chart,
+            summary,
+            title,
+            card,
+            ..
+        } = measure(cx, 780.0, InsightId::Completed);
+        let rel = |b: Bounds<Pixels>| f32::from(b.origin.y) - f32::from(card.origin.y);
+        // The strip was 206px (two rows of 103px); now 25% taller.
+        assert_near(
+            f32::from(card.size.height),
+            206.0 * 1.25,
+            "open card height",
+        );
+        // Title at 10, number row at 10 + 20 + 4 = 34, as before.
+        assert_eq!(rel(title), 10.0);
+        assert_eq!(rel(summary), 34.0);
+        assert_eq!(f32::from(summary.size.height), 24.0);
+        // The chart starts at 34 + 24 + 4 gap + the 7px tuned gap + the extra gap and ends 8px
+        // above the bottom; it was 129px tall, gains the 51.5px and gives up the extra gap.
+        assert_eq!(rel(chart), 69.0 + CHART_EXTRA_TOP_GAP_PX);
+        assert_near(
+            f32::from(chart.size.height),
+            129.0 + 206.0 * 0.25 - CHART_EXTRA_TOP_GAP_PX,
+            "open chart height",
+        );
+        assert_eq!(f32::from(card.bottom()) - f32::from(chart.bottom()), 8.0);
+    }
+
     #[gpui_kit::test]
     fn the_axis_labels_start_on_the_left_edge_and_the_chart_sits_below_the_numbers(
         cx: &mut gpui_kit::TestAppContext,
@@ -594,7 +832,7 @@ mod tests {
                 );
             }
             // The gap above the title is the card's top padding; the gap from the number row to
-            // the top y label's text box must be the same, so the chart does not look detached.
+            // the top y label's text box is that padding plus the open chart's extra gap.
             let top_gap = f32::from(title.origin.y) - f32::from(card.origin.y);
             let first_label_top = labels
                 .iter()
@@ -603,7 +841,7 @@ mod tests {
             let chart_gap = first_label_top - f32::from(summary.bottom());
             assert_eq!(top_gap, CARD_PAD_TOP_PX, "card top padding at {width}px");
             assert!(
-                (chart_gap - top_gap).abs() <= 0.5,
+                (chart_gap - top_gap - CHART_EXTRA_TOP_GAP_PX).abs() <= 0.5,
                 "number row to top y label is {chart_gap}px, card top to title is {top_gap}px \
                  at {width}px ({expanded:?})"
             );

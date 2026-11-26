@@ -49,6 +49,24 @@ struct MessageFooter: View {
     }
 }
 
+/// An agent-side card with its sent time underneath. It is one timeline item, so the stack's
+/// spacing sits equally above the card and below its time. The time uses `MessageFooter`, 2 pt
+/// under the card like a user bubble's, left-aligned because the card is on the agent side.
+struct AgentCardEntry<Card: View>: View {
+    let text: String
+    let timestamp: String?
+    @ViewBuilder let card: Card
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            card
+            if threadDate(timestamp) != nil || !text.isEmpty {
+                MessageFooter(text: text, timestamp: timestamp)
+            }
+        }
+    }
+}
+
 struct ThreadMessage: View {
     let text: String
     let date: String?
@@ -78,18 +96,20 @@ struct ThreadMessage: View {
 
     var body: some View {
         if agent {
-            ThreadCard {
-                Label("Agent", systemImage: "person.crop.square")
-                if let badge { Text(badge) }
-                Spacer()
-                if let id = metadata.thread {
-                    Button { onOpenThread(id, metadata.environment) } label: { Image(systemName: "arrow.up.right").padding(6) }
-                        .accessibilityLabel("Open sender thread")
-                }
-            } content: {
-                VStack(alignment: .leading, spacing: 3) {
-                    AgentSummary(title: metadata.sender ?? "Message", text: text)
-                    if !files.isEmpty { ThreadAttachments(files: files, store: store) }
+            AgentCardEntry(text: text, timestamp: date) {
+                ThreadCard {
+                    Label("Agent", systemImage: "person.crop.square")
+                    if let badge { Text(badge) }
+                    Spacer()
+                    if let id = metadata.thread {
+                        Button { onOpenThread(id, metadata.environment) } label: { Image(systemName: "arrow.up.right").padding(6) }
+                            .accessibilityLabel("Open sender thread")
+                    }
+                } content: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        AgentSummary(title: metadata.sender ?? "Message", text: text)
+                        if !files.isEmpty { ThreadAttachments(files: files, store: store) }
+                    }
                 }
             }
         } else {

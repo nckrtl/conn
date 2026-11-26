@@ -7,6 +7,7 @@ mod attachment_thumb;
 mod cache;
 mod card_face;
 mod cards;
+pub(crate) use cards::subagent_model_text;
 mod child_approvals;
 pub(crate) use self::child_approvals::ChildApprovalCard;
 mod color;

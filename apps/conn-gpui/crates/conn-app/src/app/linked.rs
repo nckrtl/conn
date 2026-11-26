@@ -252,7 +252,7 @@ impl ConnApp {
             .map(|(_, environment)| environment.as_str())
     }
 
-    pub(super) fn open_remote_child(
+    pub(crate) fn open_remote_child(
         &mut self,
         environment: &str,
         child: &str,

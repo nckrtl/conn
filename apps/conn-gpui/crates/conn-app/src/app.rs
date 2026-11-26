@@ -6012,6 +6012,8 @@ impl ConnApp {
                     thread,
                     state: &self.thread_details,
                     task_links: self.selected_timeline().map(|t| &t.task_links),
+                    timeline: self.selected_timeline(),
+                    catalog: self.server_config.catalog(),
                     environment_label: &environment_label,
                     max_height: (viewport_h
                         - self.geometry.header_height_px

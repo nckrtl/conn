@@ -21,6 +21,7 @@ struct ConnComposerPill<Trailing: View>: View {
     @State private var showingPhotos = false
     @State private var showingFiles = false
     @State private var dictation = DictationController()
+    @State private var sendAfterDictation = false
     @State private var selection: TextSelection?
     @State private var keyboardUp = false
     @FocusState private var inputFocused: Bool
@@ -88,7 +89,7 @@ struct ConnComposerPill<Trailing: View>: View {
                 ComposerRowLayout(expanded: expanded) {
                     if dictation.isActive {
                         if dictation.phase != .transcribing {
-                            Button { dictation.cancel() } label: {
+                            Button { sendAfterDictation = false; dictation.cancel() } label: {
                                 ThreadGlyph(name: "close", size: 20)
                                     .frame(width: Self.control, height: Self.control)
                                     .contentShape(Rectangle())
@@ -233,8 +234,9 @@ struct ConnComposerPill<Trailing: View>: View {
         }
     }
 
-    /// While dictating, the trailing controls become the elapsed time and a primary circle that
-    /// stops (Conn mobile's dictation toolbar). The text field stays, so the keyboard does too.
+    /// While dictating: the elapsed time, a bare stop where the mic sits, and the send circle.
+    /// Stop puts the transcript in the field; send puts it in and sends it as soon as it's ready.
+    /// The text field stays, so the keyboard does too.
     private var dictationControls: some View {
         HStack(spacing: 0) {
             if case let .recording(since) = dictation.phase {
@@ -252,35 +254,55 @@ struct ConnComposerPill<Trailing: View>: View {
                 .frame(minHeight: Self.control)
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("Recording")
-                Button { finishDictation() } label: {
-                    ZStack {
-                        Circle().fill(theme.primary).frame(width: 30, height: 30)
-                        ThreadGlyph(name: "stop", size: 12).foregroundStyle(theme.primaryForeground)
-                    }
-                    .frame(width: Self.control, height: Self.control)
-                    .contentShape(Rectangle())
+                Button { finishDictation(send: false) } label: {
+                    ThreadGlyph(name: "stop", size: 14)
+                        .foregroundStyle(theme.foreground)
+                        .frame(width: 36, height: Self.control)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Stop dictation")
+                .accessibilityIdentifier("composer.stopDictation")
             } else {
-                ProgressView().frame(width: Self.control, height: Self.control)
+                ProgressView().frame(width: 36, height: Self.control)
             }
+            Button { finishDictation(send: true) } label: {
+                ZStack {
+                    Circle().fill(theme.primary).frame(width: 30, height: 30)
+                    ThreadGlyph(name: "arrow-up", size: 16).foregroundStyle(theme.primaryForeground)
+                }
+                .opacity(sendAfterDictation ? 0.55 : 1)
+                .frame(width: Self.control, height: Self.control)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(sendAfterDictation)
+            .accessibilityLabel("Send dictation")
+            .accessibilityIdentifier("composer.sendDictation")
         }
     }
 
     /// Recording keeps the text field and its focus: the keyboard stays as it was.
     private func startDictation() {
         guard !draft.locked else { return }
+        sendAfterDictation = false
         dictation.start()
     }
 
-    /// The text goes in at the caret as it is when the transcript arrives.
-    private func finishDictation() {
+    /// The text goes in at the caret as it is when the transcript arrives. A send tapped while
+    /// recording or transcribing sends the draft right after that.
+    private func finishDictation(send: Bool) {
+        if send { sendAfterDictation = true }
+        guard case .recording = dictation.phase else { return }
         dictation.finish { text in
             let range = ComposerSelection.characterRange(selection, in: draft.text)
             let result = DictationInsertion.insert(text, into: draft.text, at: range)
             draft.text = result.text
             selection = TextSelection(insertionPoint: draft.text.index(draft.text.startIndex, offsetBy: result.cursor))
+            guard sendAfterDictation else { return }
+            sendAfterDictation = false
+            // The parent reads the new draft on the next pass.
+            Task { @MainActor in onSend() }
         }
     }
 

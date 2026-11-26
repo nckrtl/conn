@@ -586,7 +586,7 @@ impl ChatView {
                 }
             };
             let radii = file_row_radii(offset, run.len());
-            let file_icon = crate::file_icons::file_icon(name);
+            let file_icon = crate::file_icons::file_icon(name, self.tokens.appearance);
             let downloadable = attachment_downloadable(id);
             let (save_id, save_name) = (id.clone(), name.clone());
             let row = div()
@@ -621,7 +621,7 @@ impl ChatView {
                 .opacity(0.6)
             };
             stack = stack.child(
-                row.child(icons::icon(file_icon.asset, 14.0, muted))
+                row.child(crate::file_icons::icon_img(file_icon.asset, 14.0))
                     .child(
                         div()
                             .min_w_0()
@@ -704,7 +704,7 @@ impl ChatView {
         let added = hsla(self.tokens.diff_added);
         let removed = hsla(self.tokens.diff_removed);
         let label = comment.label();
-        let file_icon = crate::file_icons::file_icon(&comment.file_path);
+        let file_icon = crate::file_icons::file_icon(&comment.file_path, self.tokens.appearance);
         let mut body = div()
             .flex()
             .flex_col()
@@ -754,7 +754,7 @@ impl ChatView {
                     .text_size(px(UI_FONT_PX))
                     .line_height(px(UI_LINE_HEIGHT_PX))
                     .text_color(muted)
-                    .child(icons::icon(file_icon.asset, 14.0, muted))
+                    .child(crate::file_icons::icon_img(file_icon.asset, 14.0))
                     .child(div().min_w_0().truncate().child(label)),
             )
             .when(!comment.diff.is_empty(), |card| card.child(body))
@@ -2322,11 +2322,7 @@ impl ChatView {
             } else {
                 let file_run = run_id.clone();
                 let file_path = row.path.clone();
-                let file_icon = crate::file_icons::file_icon(&row.name);
-                let icon_color = file_icon
-                    .color
-                    .map(|c| hsla(c.for_appearance(self.tokens.appearance)))
-                    .unwrap_or_else(|| hsla_alpha(self.tokens.muted_foreground, 0.7));
+                let file_icon = crate::file_icons::file_icon(&row.name, self.tokens.appearance);
                 el = el
                     .a11y_button(
                         SharedString::from(format!("chat.changed-files.file.{run_id}.{row_idx}")),
@@ -2342,7 +2338,7 @@ impl ChatView {
                     .when(has_dirs || row.depth > 0, |d| {
                         d.child(div().size(px(16.0)).flex_none())
                     })
-                    .child(icons::icon(file_icon.asset, 14.0, icon_color))
+                    .child(crate::file_icons::icon_img(file_icon.asset, 14.0))
                     .child(
                         div()
                             .min_w_0()

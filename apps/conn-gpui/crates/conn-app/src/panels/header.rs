@@ -6,7 +6,7 @@
 use std::rc::Rc;
 
 use conn_state::{PanelSurface, RightPanelTab};
-use conn_theme::Tokens;
+use conn_theme::{Appearance, Tokens};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::h_flex;
 use gpui_kit::prelude::*;
@@ -114,25 +114,22 @@ pub(crate) fn surface_ax_slug(surface: &PanelSurface, label: &str) -> String {
     }
 }
 
-/// The tab icon of an open surface: a file's `@pierre/trees` type icon, else the surface icon.
+/// The tab icon of an open surface: a file's Pierre type icon, else the surface icon.
 #[must_use]
-pub(crate) fn surface_icon_path(surface: &PanelSurface) -> &'static str {
+pub(crate) fn surface_icon_path(surface: &PanelSurface, appearance: Appearance) -> &'static str {
     match surface {
         PanelSurface::Kind(tab) => panel_tab_icon_path(*tab),
-        PanelSurface::File(path) => crate::file_icons::file_icon(path).asset,
+        PanelSurface::File(path) => crate::file_icons::file_icon(path, appearance).asset,
         PanelSurface::Browser(_) => panel_tab_icon_path(RightPanelTab::Browser),
     }
 }
 
-/// Optional themed tint for an open surface's tab icon (`@pierre/trees` file-type colors).
-#[must_use]
-fn surface_icon_color(surface: &PanelSurface, tokens: &Tokens, fallback: Hsla) -> Hsla {
-    match surface {
-        PanelSurface::Kind(_) | PanelSurface::Browser(_) => fallback,
-        PanelSurface::File(path) => crate::file_icons::file_icon(path)
-            .color
-            .map(|c| to_hsla(c.for_appearance(tokens.appearance)))
-            .unwrap_or(fallback),
+/// The tab icon element: a Pierre icon in its own colours, else a glyph tinted with `color`.
+fn surface_icon(asset: &'static str, color: Hsla) -> gpui_kit::AnyElement {
+    if crate::file_icons::is_file_icon_asset(asset) {
+        crate::file_icons::icon_img(asset, HEADER_ICON_PX).into_any_element()
+    } else {
+        superhero_icon(asset, HEADER_ICON_PX, color).into_any_element()
     }
 }
 
@@ -263,8 +260,7 @@ pub(crate) fn render_panel_header(
             _ => surface_label(tab),
         };
         let ax_slug = surface_ax_slug(tab, &label);
-        let icon_path = surface_icon_path(tab);
-        let icon_color = surface_icon_color(tab, props.tokens, text_color);
+        let icon_path = surface_icon_path(tab, props.tokens.appearance);
         let group = SharedString::from(format!("right-panel-tab-group-{idx}"));
         let on_select = callbacks.on_select_tab.clone();
         let on_close_middle = callbacks.on_close_tab.clone();
@@ -303,7 +299,7 @@ pub(crate) fn render_panel_header(
                     .items_center()
                     .justify_center()
                     .group_hover(group.clone(), |s| s.invisible())
-                    .child(superhero_icon(icon_path, HEADER_ICON_PX, icon_color)),
+                    .child(surface_icon(icon_path, text_color)),
             )
             .child(
                 div()

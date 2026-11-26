@@ -497,8 +497,10 @@ struct ThreadView: View {
             // Card edges line up with the composer's 12-point inset.
             .padding(.horizontal, 12)
             .padding(.top, 12)
-            // The stack gap and bottom anchor already contribute 13 of the 14 points.
-            .padding(.bottom, 1)
+            // The stack gap and bottom anchor already contribute 13 of the 14 points. Over a
+            // capsule, 10 less: the last row sits as far above it as "Working for" sits under the
+            // item before it.
+            .padding(.bottom, capsuleShown ? -9 : 1)
         }
         .background(theme.background.ignoresSafeArea())
         .defaultScrollAnchor(.bottom, for: .alignment)
@@ -649,6 +651,13 @@ struct ThreadView: View {
     /// Mobile's `FloatingWorkingControl`, above the approvals and the composer: a glass capsule for
     /// the running subagents ("2/3", or "3 done" once they settle) and the jump-to-latest circle,
     /// 16 apart, 12 above the composer.
+    private var syncing: Bool {
+        snapshot.map { !$0.synchronized } ?? false && !store.showsOffline && readingWindow == nil
+    }
+
+    /// The agents or syncing capsule floats over the end of the feed.
+    private var capsuleShown: Bool { !turnSubagents.isEmpty || syncing }
+
     @ViewBuilder
     private func floatingControl() -> some View {
         let agents = turnSubagents
@@ -656,7 +665,7 @@ struct ThreadView: View {
         let showsJump = snapshot != nil && (endBand == 2 || readingWindow != nil)
         // A cached or restored feed the live projection hasn't replaced yet, while connected or
         // connecting (never while the offline pill shows).
-        let syncing = snapshot.map { !$0.synchronized } ?? false && !store.showsOffline && readingWindow == nil
+        let syncing = self.syncing
         let visible = showsJump || !agents.isEmpty || syncing
         // The row stays in place, so the jump circle can fade and shrink out, the reverse of how
         // it appears; removing the row with it used to cut the exit short.

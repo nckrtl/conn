@@ -52,6 +52,9 @@ final class CoreStore {
     /// Bumped whenever the server's provider list changes; model pickers re-read on it.
     private(set) var providersRevision = 0
     @ObservationIgnored private var drafts: [ComposerDraftKey: ComposerDraft] = [:]
+    /// The files of replies still uploading, by their pending attachment id (`pending:<key>:<n>`),
+    /// so the pending row shows them and their copies live until the upload has read them.
+    @ObservationIgnored private(set) var pendingUploads: [String: ComposerFile] = [:]
 
     func composerDraft(_ key: ComposerDraftKey, initialText: String = "") -> ComposerDraft {
         if let existing = drafts[key] { return existing }
@@ -430,23 +433,44 @@ final class CoreStore {
         session?.closeThread(threadId: threadId)
     }
 
+    /// A reply leaves the composer at once: the core shows it as a pending row keyed by the draft's
+    /// idempotency key, and the field is free for the next message. A failed reply comes back into
+    /// the draft after anything typed since. A new thread keeps its draft until it launches.
     func submit(_ draft: ComposerDraft, for draftKey: ComposerDraftKey, to target: FfiComposerTarget) async -> String? {
         guard status == .connected, let core, drafts[draftKey] === draft, draft.hasContent, !draft.locked else { return nil }
-        draft.sending = true
         draft.error = nil
-        defer { draft.sending = false }
         let epoch = identityEpoch
-        let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let files = draft.files.map { FfiComposerFile(path: $0.url.path, name: $0.name, mimeType: $0.mime) }
-        do {
-            let id = try await core.submitComposer(target: target, key: draft.key, text: text, files: files)
-            guard epoch == identityEpoch, drafts[draftKey] === draft else { return nil }
+        let key = draft.key
+        let sentText = draft.text
+        let sentFiles = draft.files
+        let text = sentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let files = sentFiles.map { FfiComposerFile(path: $0.url.path, name: $0.name, mimeType: $0.mime) }
+        let reply: Bool = if case .reply = target { true } else { false }
+        let uploads = sentFiles.indices.map { "pending:\(key):\($0)" }
+        if reply {
+            for (id, file) in zip(uploads, sentFiles) { pendingUploads[id] = file }
             draft.text = ""
             draft.files = []
+        } else {
+            draft.sending = true
+        }
+        defer {
+            for id in uploads { pendingUploads[id] = nil }
+            if !reply { draft.sending = false }
+        }
+        do {
+            let id = try await core.submitComposer(target: target, key: key, text: text, files: files)
+            guard epoch == identityEpoch, drafts[draftKey] === draft else { return nil }
+            if !reply, draft.key == key {
+                draft.text = ""
+                draft.files = []
+            }
             if case .new = draftKey { drafts[draftKey] = nil }
             PushRegistration.shared.noteThreadActivity()
             return id
         } catch {
+            guard epoch == identityEpoch, drafts[draftKey] === draft else { return nil }
+            if reply { draft.restore(text: sentText, files: sentFiles, key: key) }
             draft.error = connectionMessage(error)
             return nil
         }
@@ -852,8 +876,10 @@ final class CoreStore {
 
     fileprivate func handleThread(_ snapshot: FfiThreadSnapshot, connectionId: UInt64) {
         guard session?.state().connectionId == connectionId else { return }
-        if openThreadId == snapshot.threadId {
+        // An equal snapshot would still re-run every view that reads the thread.
+        if openThreadId == snapshot.threadId, openThread != snapshot {
             logFirstSnapshot(snapshot, source: "core")
+            BodyCount.tick("store.thread")
             openThread = snapshot
         }
     }

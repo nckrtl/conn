@@ -99,6 +99,7 @@ private struct AttachmentTile: View {
     }
 
     private var thumbnail: UIImage? {
+        if file.id.hasPrefix("pending:") { return loaded }
         if store.offlineReader?.retainsThread(thread: thread) == true {
             return loaded ?? store.imageThumbnails.image(thumbnailKey)
         }
@@ -153,6 +154,14 @@ private struct AttachmentTile: View {
         .accessibilityLabel(file.name)
         .task(id: "\(file.id)|\(attempt)|\(store.status == .connected)|\(String(describing: store.offlineReader.map(ObjectIdentifier.init)))") {
             do {
+                if file.isImage, let local = store.pendingUploads[file.id] {
+                    // A reply still uploading: its picked copy stands in.
+                    let bytes = try Data(contentsOf: local.url)
+                    if let thumbnail = await Task.detached(operation: { AttachmentThumbnails.decode(bytes) }).value {
+                        loaded = UIImage(cgImage: thumbnail)
+                    }
+                    return
+                }
                 if file.isImage {
                     guard let reader = store.offlineReader, thumbnail == nil else { return }
                     for pass in 0..<2 {
@@ -214,6 +223,10 @@ private struct AttachmentTile: View {
 
     private func openFile() async {
         guard !busy else { return }
+        if let local = store.pendingUploads[file.id] {
+            preview = local.url
+            return
+        }
         busy = true
         defer { busy = false }
         do {

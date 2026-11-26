@@ -15,14 +15,16 @@ enum ThreadFeed {
     static let spacing: CGFloat = 36
 }
 
-struct WorkGroupCard: View {
+struct WorkGroupCard: View, Equatable {
     let group: FfiWorkGroupTiming
     let entries: [FfiTimelineEntry]
+    /// The running turn's work start (server clock, Unix ms): every "Working for" row of the run
+    /// counts from it, so the count never restarts between tool batches or on a rebuilt row.
+    var workStartedAtMs: Int64? = nil
+    var clockOffsetMs: Int64 = 0
     @Environment(\.connTheme) private var theme
     @Environment(\.colorScheme) private var appearance
     @State private var expanded = false
-    /// When the running group started, from the server's elapsed time at the last snapshot.
-    @State private var startedAt = Date()
 
     @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
 
@@ -37,12 +39,18 @@ struct WorkGroupCard: View {
     /// The paragraph gap (MarkdownView `blockSpacing`): the space above and below the divider.
     private var gap: CGFloat { size * 0.85 }
 
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.group == rhs.group && lhs.entries == rhs.entries
+            && lhs.workStartedAtMs == rhs.workStartedAtMs && lhs.clockOffsetMs == rhs.clockOffsetMs
+    }
+
     var body: some View {
+        let _ = BodyCount.tick("WorkGroupCard")
         VStack(alignment: .leading, spacing: gap) {
             if group.hasActive {
                 // Mobile's `RunFoldWorking` and desktop's working row: plain text, no chevron.
                 // The plain gap to its rule, like "Worked for"; the live row the same gap below.
-                WorkingFoldLabel(since: startedAt, size: size)
+                WorkingFoldLabel(startedAtMs: workStartedAtMs ?? group.startedAtMs, offsetMs: clockOffsetMs, size: size)
             } else {
                 Button {
                     withAnimation(Kit.Motion.fast) {
@@ -112,35 +120,13 @@ struct WorkGroupCard: View {
         }
         // The feed pulls the next item up to a paragraph gap (ThreadView `foldGap`).
         .accessibilityIdentifier("thread.workGroup.\(group.id)")
-        .onAppear { anchor() }
-        .onChange(of: group.startedAtMs) { anchor() }
     }
-
-    /// A running group counts from its real start (the core's `started_at_ms`). `duration_ms` is
-    /// only the span of its finished steps, so "now minus duration" jumped back whenever a step
-    /// finished or the lazy feed rebuilt the row. Without a start, the first time this group was
-    /// seen is kept across rebuilds.
-    private func anchor() {
-        guard group.hasActive else { return }
-        if let ms = group.startedAtMs {
-            startedAt = Date(timeIntervalSince1970: Double(ms) / 1000)
-        } else if let known = WorkGroupClock.starts[group.id] {
-            startedAt = known
-        } else {
-            WorkGroupClock.starts[group.id] = startedAt
-        }
-    }
-}
-
-/// When each running work group was first seen, for groups the core gives no start for.
-@MainActor
-enum WorkGroupClock {
-    static var starts: [String: Date] = [:]
 }
 
 /// The working divider when no work group is running yet: the same row and rule as a group's.
 struct WorkingFold: View {
-    let since: Date
+    let startedAtMs: Int64?
+    let offsetMs: Int64
     @Environment(\.connTheme) private var theme
     @Environment(\.colorScheme) private var appearance
     @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
@@ -150,7 +136,7 @@ struct WorkingFold: View {
         // The same rule as under "Worked for", then the live row a paragraph gap below it.
         // The plain gap above and below the rule, like "Worked for" to its rule.
         VStack(alignment: .leading, spacing: gap) {
-            WorkingFoldLabel(since: since, size: size)
+            WorkingFoldLabel(startedAtMs: startedAtMs, offsetMs: offsetMs, size: size)
             Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
         }
         .padding(.bottom, gap)
@@ -158,15 +144,26 @@ struct WorkingFold: View {
 }
 
 /// "Working for 59s", ticking once a second (mobile `RunFoldWorking`, desktop `format_working_elapsed`).
+/// It counts from the run's start on the server's clock: this device's clock plus the core's offset
+/// (mobile `toServerClock`), worked out each tick, so a rebuilt row never shows 0 s.
 struct WorkingFoldLabel: View {
-    let since: Date
+    let startedAtMs: Int64?
+    let offsetMs: Int64
     let size: CGFloat
     @Environment(\.connTheme) private var theme
 
+    static func seconds(at date: Date, startedAtMs: Int64, offsetMs: Int64) -> Int {
+        let nowMs = Int64((date.timeIntervalSince1970 * 1000).rounded(.down)) + offsetMs
+        return max(0, Int((nowMs - startedAtMs) / 1000))
+    }
+
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
-            let seconds = max(0, Int(context.date.timeIntervalSince(since)))
-            Text("Working for \(durationText(UInt64(seconds) * 1000))")
+            let label = startedAtMs.map { start in
+                let seconds = Self.seconds(at: context.date, startedAtMs: start, offsetMs: offsetMs)
+                return "Working for \(durationText(UInt64(seconds) * 1000))"
+            } ?? "Working"
+            Text(label)
                 .font(.system(size: size))
                 .monospacedDigit()
                 .foregroundStyle(theme.mutedForeground)
@@ -304,7 +301,7 @@ struct ShimmerSchedule: TimelineSchedule {
     }
 }
 
-struct TimelineEntryRow: View {
+struct TimelineEntryRow: View, Equatable {
     let threadId: String
     let entry: FfiTimelineEntry
     @Bindable var store: CoreStore
@@ -316,7 +313,14 @@ struct TimelineEntryRow: View {
     @ScaledMetric(relativeTo: .body) private var messageSize: CGFloat = ThreadText.size
     @Environment(\.colorScheme) private var appearance
 
+    /// The closures and store never change for a thread's rows; the drawn inputs decide.
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.threadId == rhs.threadId && lhs.entry == rhs.entry && lhs.detail == rhs.detail
+            && lhs.interactive == rhs.interactive && lhs.store === rhs.store
+    }
+
     var body: some View {
+        let _ = BodyCount.tick("Row")
         switch detail {
         case let .html(attachment, title, height):
             ThreadEmbed(store: store, thread: threadId, item: entry.entryId, attachment: attachment, title: title, height: CGFloat(height), mcp: false)
@@ -341,7 +345,7 @@ struct TimelineEntryRow: View {
             // A tap shows the copy button and time below the message (MessageReveal).
             MessageReveal(text: markdown, timestamp: timestamp, enabled: !streaming) {
                 VStack(alignment: .leading, spacing: 6) {
-                    MarkdownView(source: markdown, messageStyle: .assistant, onTemplate: onTemplate)
+                    MarkdownView(source: markdown, messageStyle: .assistant, onTemplate: onTemplate, cacheID: entry.entryId)
                     if streaming { KitStatusIcon(.working, size: 12, label: "Streaming") }
                     if !streaming, status == .failed {
                         Label("Response interrupted", systemImage: "exclamationmark.circle").font(.caption)
@@ -764,7 +768,7 @@ private struct WorkLogRow: View {
                 if monospaced {
                     // Tool output as a code card: no wrapping, sideways scrolling, capped height; JSON
                     // pretty-printed (nested JSON strings decoded in place) and highlighted.
-                    let pretty = PrettyJSON.format(detail)
+                    let pretty = PrettyJSON.cached(detail)
                     CodeCard(code: pretty ?? detail, language: pretty == nil ? nil : "json",
                              maxHeight: 320, codeSize: ThreadText.codeSize - 1)
                         .padding(.bottom, 10)
@@ -787,7 +791,20 @@ private struct WorkLogRow: View {
 /// object or array (an MCP result's `content`, say) is decoded and printed in place, so no escaped
 /// quotes show. Anything that isn't JSON returns nil and shows as it is.
 enum PrettyJSON {
+    @MainActor private static var memo: [String: String?] = [:]
+
+    /// `format`, kept per text: an expanded row's body re-runs on every scroll and snapshot.
+    @MainActor
+    static func cached(_ text: String) -> String? {
+        if let hit = memo[text] { return hit }
+        let pretty = format(text)
+        if memo.count >= 200 { memo.removeAll(keepingCapacity: true) }
+        memo[text] = pretty
+        return pretty
+    }
+
     static func format(_ text: String) -> String? {
+        BodyCount.tick("prettyJSON")
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let first = trimmed.first, first == "{" || first == "[", trimmed.utf8.count <= 256 * 1024,
               let object = parse(trimmed) else { return nil }

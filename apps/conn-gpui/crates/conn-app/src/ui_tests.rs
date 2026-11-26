@@ -4581,6 +4581,11 @@ fn a_background_database_query_waits_for_its_thread_and_connections(cx: &mut Tes
             db.finish_vault_load_for_test(second, vec![unreachable_database()], cx)
         })
     });
+    assert!(
+        waiting(cx).is_some(),
+        "the panel never opens a database nobody chose, so the query keeps waiting"
+    );
+    cx.update(|cx| database.update(cx, |db, cx| db.choose_first_connection_for_test(cx)));
     assert_eq!(waiting(cx), None);
     assert_eq!(
         cx.update(|cx| database.read(cx).sql_for_test()).as_deref(),

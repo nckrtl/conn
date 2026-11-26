@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use conn_desktop::database::api::{
-    DatabaseProjectState, DatabaseQueryResult, PanelConnection, connection_from_env,
-    connection_target, default_connection,
+    ConnectionSource, DatabaseProjectState, DatabaseQueryResult, PanelConnection,
+    connection_from_env, connection_target,
 };
 use conn_desktop::database::{DatabaseColumn, DatabaseDriver};
 use serde::{Deserialize, Serialize};
@@ -142,12 +142,22 @@ pub(crate) fn project_connections(
     all
 }
 
-/// Resolves the active connection from the combined list and the remembered connection id.
+/// Resolves the active connection from the combined list and the remembered connection id: the
+/// remembered one, else the project's `.env` database, else none. Nothing else opens by itself:
+/// a Vault or saved database is never picked for the user (`DatabasePanel.tsx` in the desktop lab).
 pub(crate) fn active_connection(
     connections: &[PanelConnection],
     remembered: Option<&str>,
 ) -> Option<PanelConnection> {
-    default_connection(connections, remembered).cloned()
+    connections
+        .iter()
+        .find(|connection| Some(connection.id.as_str()) == remembered)
+        .or_else(|| {
+            connections
+                .iter()
+                .find(|connection| connection.source == ConnectionSource::Env)
+        })
+        .cloned()
 }
 
 /// Case-insensitive substring filter over table names, matching Conn's `TableList`.
@@ -181,14 +191,14 @@ pub(crate) const fn default_port_placeholder(driver: DatabaseDriver) -> &'static
     }
 }
 
-/// Placeholder for the Name field (`connectionTarget(draft) || "My database"`).
+/// Placeholder for the Name field: the target once a database is typed, else "My database"
+/// (`draft.database.trim() ? connectionTarget(draft) : "My database"` in the desktop lab). A
+/// blank form has a host but no database, so its target alone would read as `127.0.0.1/`.
 pub(crate) fn name_placeholder(draft: &PanelConnection) -> String {
-    let target = connection_target(&draft.connection, draft.ssh_host.as_deref());
-    if target.is_empty() || target == "/" {
-        "My database".to_owned()
-    } else {
-        target
+    if draft.connection.database.trim().is_empty() {
+        return "My database".to_owned();
     }
+    connection_target(&draft.connection, draft.ssh_host.as_deref())
 }
 
 /// Normalizes a connection draft before saving: trims the name and falls back to `connectionTarget`.

@@ -552,6 +552,38 @@ private struct QuestionRow: View {
     }
 }
 
+/// Lab `.m-gallery-card-body input`: 32 pt tall, 5/10 padding, 8 pt corners, a fill 7% lighter
+/// than the card's inner surface with a 1 pt border 17% lighter (light mode: white on a soft
+/// input border).
+private struct SecretInput: View {
+    let placeholder: String
+    @Binding var text: String
+    @Environment(\.connTheme) private var theme
+    @Environment(\.colorScheme) private var appearance
+
+    var body: some View {
+        let outer = threadCardSurface(theme, appearance)
+        let inner = appearance == .light ? Color.white : outer.mix(with: .white, by: 0.06, in: .device)
+        let fill = appearance == .light ? Color.white : inner.mix(with: .white, by: 0.07, in: .device)
+        let stroke = appearance == .light
+            ? theme.border.mix(with: .white, by: 0.28, in: .device)
+            : inner.mix(with: .white, by: 0.17, in: .device)
+        SecureField(placeholder, text: $text, prompt: Text(placeholder).foregroundStyle(theme.placeholder))
+            .textFieldStyle(.plain)
+            .font(.system(size: 14))
+            .foregroundStyle(theme.foreground)
+            .tint(theme.foreground)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .privacySensitive()
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .frame(minHeight: 32)
+            .background(fill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(stroke, lineWidth: 1))
+    }
+}
+
 private struct SecretRequestCard: View {
     let threadId: String
     let turnItemId: String
@@ -605,9 +637,7 @@ private struct SecretRequestCard: View {
                     if let url, let source = URL(string: url), source.scheme == "https" {
                         Link("Open secret provider", destination: source)
                     }
-                    SecureField(placeholder ?? "Enter secret…", text: $secret)
-                        .textFieldStyle(.roundedBorder).textInputAutocapitalization(.never)
-                        .autocorrectionDisabled().privacySensitive()
+                    SecretInput(placeholder: placeholder ?? "Enter secret…", text: $secret)
                         .disabled(submitting)
                 }
             }.padding(11)

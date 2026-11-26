@@ -147,6 +147,20 @@ impl Offline {
                 .contains_key(&(env.to_owned(), id.to_owned()))
         })
     }
+    /// Whether a reducer for `id` on `env` waits in the shadow, because another environment owns
+    /// the thread's visible reducer.
+    pub(super) fn shadows(&self, env: &str, id: &str) -> bool {
+        self.shadow.contains_key(&(env.to_owned(), id.to_owned()))
+    }
+    /// Forgets the snapshot bookkeeping of a stream that was dropped with its reducer. What was
+    /// saved before stays, and the next snapshot starts the bookkeeping again.
+    pub(super) fn forget_stream(&mut self, env: &str, id: &str) {
+        let key = (env.to_owned(), id.to_owned());
+        self.snapshots.remove(&key);
+        self.snapshot_cursors.remove(&key);
+        self.commits.remove(&key);
+        self.backfills.retain(|job| job.key != key);
+    }
     pub(super) fn snapshot_cursor(&self, env: Option<&str>, id: &str) -> Option<String> {
         self.snapshot_cursors
             .get(&(env?.to_owned(), id.to_owned()))

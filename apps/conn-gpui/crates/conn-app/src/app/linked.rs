@@ -239,6 +239,14 @@ impl ConnApp {
         self.connection.is_some() && crate::orbit_sync::orbit_sync_enabled_by_env()
     }
 
+    /// The id a linked environment's own server reports for itself, once its config has loaded.
+    pub(super) fn linked_server_environment_id(&self, environment_id: &str) -> Option<&str> {
+        self.linked
+            .configs
+            .get(environment_id)
+            .and_then(|config| config.environment_id())
+    }
+
     /// The environment a thread of the merged list lives on; `None` is the primary one.
     pub(crate) fn linked_environment_of_thread(&self, thread_id: &str) -> Option<&str> {
         let origins = self.linked.origins();
@@ -252,7 +260,7 @@ impl ConnApp {
             .map(|(_, environment)| environment.as_str())
     }
 
-    pub(super) fn open_remote_child(
+    pub(crate) fn open_remote_child(
         &mut self,
         environment: &str,
         child: &str,
@@ -558,6 +566,10 @@ impl ConnApp {
         self.threads
             .entry(thread_id.to_owned())
             .or_insert_with(|| ThreadState::new(thread_id.to_owned()));
+        // A hover prefetch of this thread becomes the open stream: the client holds it already, so
+        // this subscribe sends nothing again.
+        self.speculative.promote(thread_id);
+        self.launched_threads.remove(thread_id);
         connection.subscribe_thread(thread_id);
         self.subscribed_thread_id = Some(thread_id.to_owned());
         self.linked.subscribed_env = environment;
@@ -1434,12 +1446,22 @@ impl ConnApp {
                 }
                 changed
             }
+            // A late item of a stream dropped with its reducer finds nobody to apply to.
+            ClientEvent::Thread { thread_id, .. }
+                if self.thread_item_is_orphaned(Some(&environment_id), &thread_id) =>
+            {
+                false
+            }
             ClientEvent::Thread { thread_id, item } => {
                 self.apply_cache_stream(&environment_id, &thread_id, item);
                 false
             }
             ClientEvent::StreamEnded { tag, key, error } => {
-                if tag == "orchestration.subscribeThread" && self.threads.contains_key(&key) {
+                // A stream nobody wants any more (closed thread, dropped prefetch) stays down.
+                if tag == "orchestration.subscribeThread"
+                    && self.threads.contains_key(&key)
+                    && self.thread_stream_wanted(&key)
+                {
                     if let Some(error) = error {
                         eprintln!("thread stream {key} ended: {error}");
                     }

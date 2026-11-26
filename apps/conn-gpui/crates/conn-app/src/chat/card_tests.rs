@@ -5,7 +5,10 @@ use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
 use gpui_kit::{Bounds, HeadlessAppContext, Pixels, point, px};
 
 use super::card_face::CARD_INSET_PX;
-use super::card_shots::{AGENT_CARD_LABEL, bounds_of, hover, open_scene};
+use super::card_shots::{
+    AGENT_CARD_LABEL, bounds_of, hover, open_scene, open_thread_scene, subagent_card_id,
+    subagent_scene,
+};
 
 /// An offscreen context for a test: `current_platform(true)` needs the main thread, which libtest
 /// does not give a test.
@@ -179,4 +182,50 @@ fn only_the_inner_card_takes_the_hover() {
             );
         }
     }
+}
+
+/// The accessibility label of the provider mark on the subagent card `driver` in the scene.
+fn provider_mark_label(
+    ctx: &mut HeadlessAppContext,
+    window: gpui_kit::AnyWindowHandle,
+    driver: &str,
+) -> String {
+    let prefix = format!("subagent-provider-{}", subagent_card_id(driver));
+    ctx.update_window(window, |_, window, _| {
+        window
+            .elements()
+            .iter()
+            .find(|e| {
+                e.path()
+                    .last()
+                    .is_some_and(|id| id.to_string().starts_with(&prefix))
+            })
+            .unwrap_or_else(|| panic!("no provider mark on the `{driver}` card"))
+            .label()
+            .unwrap_or_default()
+            .to_owned()
+    })
+    .unwrap_or_else(|error| panic!("no window: {error}"))
+}
+
+/// A subagent card shows its provider's mark: Claude for a Claude agent, OpenAI for Codex. A task
+/// on another machine has the driver `remote`, so its mark comes from the instance it runs; an
+/// unknown provider keeps the generic agent glyph.
+#[test]
+fn subagent_card_shows_the_provider_mark() {
+    let mut ctx = headless();
+    let thread = subagent_scene(&[
+        ("claudeAgent", "claudeAgent", "claude-opus-5-5", None),
+        ("codex", "codex", "gpt-5.5", None),
+        ("remote", "claudeAgent", "claude-opus-5-5", Some("nick")),
+        ("mystery", "mystery", "mystery-1", None),
+    ]);
+    let (window, _) = open_thread_scene(&mut ctx, "dark-ocean", 900.0, 1200.0, thread);
+    assert_eq!(
+        provider_mark_label(&mut ctx, window, "claudeAgent"),
+        "Claude"
+    );
+    assert_eq!(provider_mark_label(&mut ctx, window, "codex"), "OpenAI");
+    assert_eq!(provider_mark_label(&mut ctx, window, "remote"), "Claude");
+    assert_eq!(provider_mark_label(&mut ctx, window, "mystery"), "Agent");
 }

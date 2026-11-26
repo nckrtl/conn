@@ -125,3 +125,85 @@ fn a_clicked_thread_chip_opens_its_thread(cx: &mut TestAppContext) {
     });
     assert_eq!(selected(cx, &app).as_deref(), Some("thread-selected"));
 }
+
+/// The config a server that calls itself `environment_id` reports (a recorded `snapshot`).
+fn config_of(environment_id: &str) -> std::sync::Arc<conn_state::providers::ServerConfigState> {
+    let mut snapshot: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../../crates/conn-state/tests/fixtures/server-config-snapshot.json"
+    ))
+    .expect("the server config fixture is JSON");
+    snapshot["config"]["environment"]["environmentId"] = serde_json::json!(environment_id);
+    let event: conn_contract::ServerConfigStreamEvent =
+        conn_contract::from_json(snapshot).expect("the server config fixture decodes");
+    let mut state = conn_state::providers::ServerConfigState::new();
+    state.apply(event);
+    std::sync::Arc::new(state)
+}
+
+fn copied_link(
+    cx: &mut TestAppContext,
+    window: gpui_kit::AnyWindowHandle,
+    app: &gpui_kit::Entity<super::ConnApp>,
+    thread_id: &str,
+) -> Option<String> {
+    cx.update_window(window, |_, window, cx| {
+        app.update(cx, |app, cx| {
+            app.run_thread_menu_action(
+                thread_id.to_owned(),
+                ThreadMenuAction::CopyThreadLink,
+                window,
+                cx,
+            );
+        });
+    })
+    .expect("the window is open");
+    cx.read(|cx| cx.read_from_clipboard().and_then(|item| item.text()))
+}
+
+#[gpui_kit::test]
+fn copy_thread_link_on_a_linked_thread_names_its_servers_own_id(cx: &mut TestAppContext) {
+    let (window, app) = mount_with_threads(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.add_linked_shell_for_test(
+                "mini",
+                "mini",
+                crate::ui_tests::linked_mini_shell("/work/mini", "Mini thread"),
+                cx,
+            );
+        });
+    });
+
+    // Until the linked server reports its config, the Orbit target id stands in.
+    assert_eq!(
+        copied_link(cx, window, &app, "thread-mini").as_deref(),
+        Some("conn://thread/mini/thread-mini")
+    );
+
+    // The server's own id wins once known, as in the links that server writes. The Orbit target
+    // id (`mini`) differs from it.
+    cx.update(|cx| {
+        app.update(cx, |app, _| {
+            app.set_linked_config_for_test("mini", config_of("desc-mini"));
+        });
+    });
+    let copied = copied_link(cx, window, &app, "thread-mini");
+    assert_eq!(
+        copied.as_deref(),
+        Some("conn://thread/desc-mini/thread-mini")
+    );
+
+    // That link still opens the thread, though the shell lists it under the target id.
+    let parsed = parse_thread_link(copied.as_deref().unwrap_or_default()).expect("a thread link");
+    let chat = cx.update(|cx| app.read(cx).chat_for_test());
+    cx.update(|cx| {
+        chat.update(cx, |_, cx| cx.emit(ChatEvent::OpenThreadLink(parsed)));
+    });
+    assert_eq!(selected(cx, &app).as_deref(), Some("thread-mini"));
+
+    // A primary thread still names the primary server.
+    assert_eq!(
+        copied_link(cx, window, &app, "thread-pinned").as_deref(),
+        Some("conn://thread/env-main/thread-pinned")
+    );
+}

@@ -1964,12 +1964,37 @@ impl ChatView {
             meta_parts.push(format!("on {}", remote.label));
         }
         meta_parts.extend(model_text);
+        // A task on another machine has the driver `remote` here, a label and not a provider, so the
+        // mark comes from the instance and model it runs.
+        let (provider_key, provider_label) = subagent_provider(
+            role,
+            self.subagent_models.get(id),
+            self.server_config.catalog(),
+        );
+        let provider_mark = div()
+            .id(SharedString::from(format!("subagent-provider-{id}")))
+            .a11y(
+                gpui_kit::Role::Image,
+                format!("chat.subagent.{id}.provider"),
+                provider_label,
+            )
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .child(crate::icons::provider_mark(
+                &provider_key,
+                CARD_ICON_PX,
+                muted,
+            ));
+        #[cfg(test)]
+        let provider_mark = gpui_kit::TestSupportExt::test_support(provider_mark);
         if elapsed.is_none() {
             meta_parts.push(status_label.to_owned());
         }
         let mut header = card_header(false)
             .child(icon_with_dot(
-                crate::icons::provider_mark(role, CARD_ICON_PX, muted),
+                provider_mark.into_any_element(),
                 dot.map(|core| (core, colors.surface())),
             ))
             .child(
@@ -2673,10 +2698,43 @@ pub(super) fn outline_button_surface(
         .hover(move |s| s.bg(hover_bg))
 }
 
+/// The provider id the subagent card's mark is drawn from, and the mark's accessibility label
+/// (`Agent` for a provider with no mark of its own).
+///
+/// The subagent's driver names the provider, except for a task on another machine: its driver is
+/// `remote`. Then the provider comes from the model catalog, the instance id, or the model slug,
+/// in that order.
+fn subagent_provider(
+    role: &str,
+    model: Option<&conn_state::SubagentModel>,
+    catalog: &conn_state::providers::ModelCatalog,
+) -> (String, &'static str) {
+    let catalog_driver = model.and_then(|model| {
+        let slug = model.model.as_deref()?;
+        catalog
+            .find_model(model.instance_id.as_deref(), slug)
+            .map(|found| found.driver.as_str())
+    });
+    let candidates = [
+        Some(role),
+        catalog_driver,
+        model.and_then(|model| model.instance_id.as_deref()),
+        model.and_then(|model| model.model.as_deref()),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find_map(|candidate| {
+            crate::icons::provider_brand(candidate)
+                .map(|brand| (candidate.to_owned(), brand.label()))
+        })
+        .unwrap_or_else(|| (role.to_owned(), "Agent"))
+}
+
 /// `<model> · <effort>` for a subagent card, for example `Opus 5.5 · medium`. The model name is the
 /// composer's trigger label; the effort is the composer's effort label, lowercased. A model the
 /// catalog does not list shows its slug and the raw reasoning option.
-fn subagent_model_text(
+pub(crate) fn subagent_model_text(
     catalog: &conn_state::providers::ModelCatalog,
     model: &conn_state::SubagentModel,
 ) -> Option<String> {
@@ -2714,7 +2772,7 @@ fn subagent_model_text(
 
 #[cfg(test)]
 mod subagent_model_tests {
-    use super::subagent_model_text;
+    use super::{subagent_model_text, subagent_provider};
     use conn_state::SubagentModel;
     use conn_state::providers::ModelCatalog;
     use std::collections::HashMap;
@@ -2742,6 +2800,56 @@ mod subagent_model_tests {
         assert_eq!(
             subagent_model_text(&catalog, &SubagentModel::default()),
             None
+        );
+    }
+
+    fn model(instance: &str, slug: &str) -> SubagentModel {
+        SubagentModel {
+            model: Some(slug.to_owned()),
+            instance_id: Some(instance.to_owned()),
+            options: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn the_driver_names_the_provider_mark() {
+        let catalog = ModelCatalog::default();
+        assert_eq!(subagent_provider("claudeAgent", None, &catalog).1, "Claude");
+        assert_eq!(subagent_provider("codex", None, &catalog).1, "OpenAI");
+        assert_eq!(subagent_provider("grok", None, &catalog).1, "Grok");
+        assert_eq!(
+            subagent_provider("antigravity", None, &catalog).1,
+            "Antigravity"
+        );
+    }
+
+    #[test]
+    fn a_remote_task_takes_its_provider_from_the_instance_and_model() {
+        let catalog = ModelCatalog::default();
+        let claude = model("claudeAgent", "claude-opus-5-5");
+        assert_eq!(
+            subagent_provider("remote", Some(&claude), &catalog),
+            ("claudeAgent".to_owned(), "Claude")
+        );
+        // A custom instance id says nothing; the model slug does.
+        let codex = model("work-box", "gpt-5.5");
+        assert_eq!(
+            subagent_provider("remote", Some(&codex), &catalog).1,
+            "OpenAI"
+        );
+    }
+
+    #[test]
+    fn an_unknown_provider_keeps_the_agent_glyph() {
+        let catalog = ModelCatalog::default();
+        let unknown = model("mystery", "mystery-1");
+        assert_eq!(
+            subagent_provider("remote", Some(&unknown), &catalog),
+            ("remote".to_owned(), "Agent")
+        );
+        assert_eq!(
+            subagent_provider("remote", None, &catalog),
+            ("remote".to_owned(), "Agent")
         );
     }
 }

@@ -33,8 +33,10 @@ use crate::theme::apply_kit_theme;
 mod annotations_popover;
 mod browser_inline_logins;
 mod browser_passkeys;
+mod details_agents;
 pub(crate) mod details_tasks;
 mod floating_surfaces;
+mod hover_prefetch;
 mod image_viewer;
 mod preview_host;
 mod queue_tray;
@@ -6315,7 +6317,7 @@ fn threads_of_a_linked_environment_are_listed_and_name_their_environment_in_the_
     });
 }
 
-fn linked_mini_shell(project_root: &str, thread_title: &str) -> ShellState {
+pub(crate) fn linked_mini_shell(project_root: &str, thread_title: &str) -> ShellState {
     let project: ProjectShell = match from_json(json!({
         "id": "proj-mini",
         "title": "No project",

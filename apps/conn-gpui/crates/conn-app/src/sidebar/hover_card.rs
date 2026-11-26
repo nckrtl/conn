@@ -66,14 +66,21 @@ impl ConnApp {
             return;
         }
         match self.thread_hover.enter(thread_id, now) {
-            Entered::Shown => cx.notify(),
+            Entered::Shown => {
+                cx.notify();
+                let generation = self.thread_hover.generation();
+                self.prefetch_after_dwell(thread_id, generation, cx);
+            }
             Entered::Unchanged => {}
             Entered::Wait(generation) => {
+                let thread_id = thread_id.to_owned();
                 cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(OPEN_DELAY).await;
                     let _ = this.update(cx, |app, cx| {
                         if app.thread_hover.elapse(generation) {
                             cx.notify();
+                            // The pointer rested for the open delay: warm the thread.
+                            app.prefetch_hovered_thread(&thread_id, cx);
                         }
                     });
                 })

@@ -45,6 +45,8 @@ pub(crate) enum Command {
     SubscribeThread(String),
     RefreshThread(String),
     UnsubscribeThread(String),
+    /// Ends the thread subscription and also drops its kept sequence.
+    ForgetThread(String),
     SubscribePanelRequests(DesktopPanelSubscription),
     UnsubscribePanelRequests,
     SubscribeAnnotations(String),
@@ -205,6 +207,14 @@ impl DriverState {
             .and_then(|sub| sub.request_id)
     }
 
+    /// Ends `thread_id`'s subscription and drops its cursor. Returns the stream to interrupt.
+    fn forget_thread(&mut self, thread_id: &str) -> Option<RequestId> {
+        self.thread_last_sequences.remove(thread_id);
+        self.thread_subs
+            .remove(thread_id)
+            .and_then(|sub| sub.request_id)
+    }
+
     fn handle_offline_command(&mut self, cmd: Command) {
         match cmd {
             Command::SubscribeShell {
@@ -233,6 +243,9 @@ impl DriverState {
                 {
                     self.thread_last_sequences.insert(thread_id, seq);
                 }
+            }
+            Command::ForgetThread(thread_id) => {
+                self.forget_thread(&thread_id);
             }
             Command::SubscribePanelRequests(subscription) => {
                 self.panel_subscription = Some(subscription);
@@ -824,6 +837,12 @@ where
                     state.in_flight_streams.remove(&request_id);
                     send_client_frame(ws_write, &FromClient::Interrupt { request_id }).await?;
                 }
+            }
+        }
+        Command::ForgetThread(thread_id) => {
+            if let Some(request_id) = state.forget_thread(&thread_id) {
+                state.in_flight_streams.remove(&request_id);
+                send_client_frame(ws_write, &FromClient::Interrupt { request_id }).await?;
             }
         }
         Command::SubscribePanelRequests(subscription) => {

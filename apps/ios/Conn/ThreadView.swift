@@ -654,6 +654,10 @@ struct ThreadView: View {
         .background(theme.background.ignoresSafeArea())
         .defaultScrollAnchor(.bottom, for: .alignment)
         .defaultScrollAnchor(.bottom, for: .initialOffset)
+        // Pinned to the end, growth keeps the bottom in place: new messages push older ones up and
+        // the reader stays at the end. Scrolled up, the top holds, so appended content below never
+        // moves what is being read.
+        .defaultScrollAnchor(stickToBottom ? .bottom : .top, for: .sizeChanges)
         // Thread links in messages (`t3-thread://v2/…`, `conn://thread/…`) open in the app; other
         // links go to the system.
         .environment(\.openURL, OpenURLAction { url in
@@ -695,13 +699,9 @@ struct ThreadView: View {
             guard stickToBottom && !userScrolling && readingWindow == nil else { return }
             // The first snapshot and the updates right after opening are not new messages: an
             // animated scroll there ran during the push and looked like the thread scrolling down.
-            if old == "loading" || Date().timeIntervalSince(openedAt) < 1 {
-                proxy.scrollTo("timeline-bottom", anchor: .bottom)
-            } else {
-                withAnimation(Kit.Motion.fast) {
-                    proxy.scrollTo("timeline-bottom", anchor: .bottom)
-                }
-            }
+            // The size-change anchor keeps the end in place; this only corrects any remainder,
+            // without an animation that would slide against it.
+            proxy.scrollTo("timeline-bottom", anchor: .bottom)
         }
         .onChange(of: scrollTarget) { _, target in
             if let target {

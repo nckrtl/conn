@@ -872,6 +872,8 @@ impl ChatView {
                 cx,
             ));
         }
+        #[cfg(test)]
+        let actions = gpui_kit::TestSupportExt::test_support(actions);
         actions.into_any_element()
     }
 
@@ -970,6 +972,8 @@ impl ChatView {
         if let Some(ts) = self.render_timestamp(&format!("assistant-{id}"), created_at) {
             meta = meta.child(ts);
         }
+        #[cfg(test)]
+        let meta = gpui_kit::TestSupportExt::test_support(meta);
         meta.into_any_element()
     }
 

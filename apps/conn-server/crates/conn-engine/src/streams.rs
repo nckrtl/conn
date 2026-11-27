@@ -180,46 +180,43 @@ pub(crate) async fn subscribe_thread(
     let wake = inner.thread_wakes.subscribe(&thread_id);
     let id = thread_id.clone();
     let first = inner
-        .db(
-            move |store| -> Result<Option<Opening>, String> {
-                let high = store.high_water();
-                let imported = store.imported_through();
-                // Rows a client holds are patched by changed rows unless the server now hides some
-                // (a rollback) or the thread was created again; then the snapshot below replaces them.
-                if let Some(after) =
-                    changes_after.filter(|after| can_replay(*after, high, imported))
-                    && store.thread_known(&id)?
-                    && !store.thread_changes_need_reset(&id, after)?
-                {
-                    return Ok(Some((vec![], after, Some(after))));
-                }
-                let first = |items, high| Ok(Some((items, high, None)));
-                // T3 replays a resumed stream before it looks for the thread (`ws.ts`), so a
-                // client that missed a deletion gets `thread.deleted`.
-                if let Some(after) = after
-                    .filter(|after| can_replay(*after, high, imported))
-                    .filter(|_| changes_after.is_none())
-                    && store.thread_known(&id)?
-                    && let Some(items) = replay(store, &id, after)?
-                {
-                    return first(items, high);
-                }
-                if !store.thread_exists(&id)? {
-                    return Ok(None);
-                }
-                if bounded && let Some(window) = store.bounded_thread(&id)? {
-                    let mut item = snapshot_item(window.projection, high, dedupe, false);
-                    item["historyCursor"] = json!(window.history_cursor);
-                    item["hasMoreHistory"] = json!(window.has_more_history);
-                    item["latestLocalTurnOrdinal"] = json!(window.latest_local_turn_ordinal);
-                    return first(vec![item], high);
-                }
-                let (projection, omitted) = store
-                    .thread_projection_with(&id, omit_local)?
-                    .unwrap_or((Value::Null, false));
-                first(vec![snapshot_item(projection, high, dedupe, omitted)], high)
-            },
-        )
+        .db(move |store| -> Result<Option<Opening>, String> {
+            let high = store.high_water();
+            let imported = store.imported_through();
+            // Rows a client holds are patched by changed rows unless the server now hides some
+            // (a rollback) or the thread was created again; then the snapshot below replaces them.
+            if let Some(after) = changes_after.filter(|after| can_replay(*after, high, imported))
+                && store.thread_known(&id)?
+                && !store.thread_changes_need_reset(&id, after)?
+            {
+                return Ok(Some((vec![], after, Some(after))));
+            }
+            let first = |items, high| Ok(Some((items, high, None)));
+            // T3 replays a resumed stream before it looks for the thread (`ws.ts`), so a
+            // client that missed a deletion gets `thread.deleted`.
+            if let Some(after) = after
+                .filter(|after| can_replay(*after, high, imported))
+                .filter(|_| changes_after.is_none())
+                && store.thread_known(&id)?
+                && let Some(items) = replay(store, &id, after)?
+            {
+                return first(items, high);
+            }
+            if !store.thread_exists(&id)? {
+                return Ok(None);
+            }
+            if bounded && let Some(window) = store.bounded_thread(&id)? {
+                let mut item = snapshot_item(window.projection, high, dedupe, false);
+                item["historyCursor"] = json!(window.history_cursor);
+                item["hasMoreHistory"] = json!(window.has_more_history);
+                item["latestLocalTurnOrdinal"] = json!(window.latest_local_turn_ordinal);
+                return first(vec![item], high);
+            }
+            let (projection, omitted) = store
+                .thread_projection_with(&id, omit_local)?
+                .unwrap_or((Value::Null, false));
+            first(vec![snapshot_item(projection, high, dedupe, omitted)], high)
+        })
         .await
         .map_err(EngineError::Internal)?;
     let Some((first, mut cursor, changes)) = first else {

@@ -757,6 +757,12 @@ impl ChatView {
         self.composer.clone()
     }
 
+    /// The timeline rows drawn: with any, the view draws them, never the loader.
+    #[cfg(test)]
+    pub(crate) fn timeline_rows_for_test(&self) -> usize {
+        self.cache.items().len()
+    }
+
     /// Returns the composer's currently resolved `(instance_id, model_slug, options)` selection.
     #[must_use]
     pub(crate) fn current_model_selection(

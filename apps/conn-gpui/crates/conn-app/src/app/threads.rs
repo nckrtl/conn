@@ -18,6 +18,8 @@ use crate::chat::{ThreadOutline, TocEntry};
 
 /// How long shell changes settle before the kept sets are brought in line.
 const KEPT_DELAY: Duration = Duration::from_millis(300);
+/// How often the primary thread list is saved on the device at most.
+const SHELL_SAVE_EVERY: Duration = Duration::from_secs(5);
 
 struct Slot {
     engine: Engine,
@@ -45,6 +47,8 @@ pub(super) struct Threads {
     /// Linked environments whose live shell has synchronized since they connected.
     synced: HashSet<String>,
     kept_scheduled: bool,
+    /// When the primary thread list was last handed to its engine to save.
+    shell_saved_at: Option<Instant>,
     /// Outlines of opened threads, with the `updatedAt` each was read at.
     outlines: HashMap<String, (String, Arc<ThreadOutline>)>,
     outline_loading: Option<String>,
@@ -153,9 +157,73 @@ impl ConnApp {
                 self.threads
                     .engines
                     .insert(env.to_owned(), Slot { engine, generation });
+                if self.server_url.as_deref() == Some(env) {
+                    self.draw_saved_shell(env, cx);
+                }
                 self.schedule_kept(cx);
             }
             Err(err) => eprintln!("thread database: {err}"),
+        }
+    }
+
+    /// Draws the primary thread list saved on the device (not synchronized) until the server's
+    /// shell replaces it.
+    fn draw_saved_shell(&mut self, env: &str, cx: &mut Context<'_, Self>) {
+        if self.shell.synchronized || self.shell.sequence.is_some() {
+            return;
+        }
+        let Some(saved) = self
+            .threads
+            .engines
+            .get_mut(env)
+            .and_then(|slot| slot.engine.take_saved_shell())
+        else {
+            return;
+        };
+        let threads_changed = saved
+            .threads
+            .iter()
+            .chain(&saved.archived_threads)
+            .map(|t| t.id.clone())
+            .collect();
+        self.shell = saved;
+        self.pending_shell = Some(conn_state::ShellChange {
+            projects_changed: true,
+            threads_changed,
+            snapshot_required: false,
+        });
+        conn_client::perf::shell_cached();
+        self.settle_shell(cx);
+    }
+
+    /// Saves the primary environment's own thread list on the device for the next launch, at
+    /// most every [`SHELL_SAVE_EVERY`] unless `now`. Only a synchronized list is saved.
+    pub(super) fn save_primary_shell(&mut self, now: bool) {
+        if !self.shell.synchronized
+            || (!now
+                && self
+                    .threads
+                    .shell_saved_at
+                    .is_some_and(|at| at.elapsed() < SHELL_SAVE_EVERY))
+        {
+            return;
+        }
+        let Some(slot) = self
+            .server_url
+            .as_deref()
+            .and_then(|env| self.threads.engines.get_mut(env))
+        else {
+            return;
+        };
+        self.threads.shell_saved_at = Some(Instant::now());
+        // Throttled here so the merged list is copied only when a save is due.
+        let origins = self.linked.origins();
+        if *origins == conn_state::environments::Origins::default() {
+            slot.engine.save_shell(&self.shell, true);
+        } else {
+            let mut own = self.shell.clone();
+            origins.strip_from(&mut own);
+            slot.engine.save_shell(&own, true);
         }
     }
 
@@ -665,6 +733,13 @@ mod tests {
 
     /// An app whose primary environment keeps its threads in `db`, on a server that never answers.
     fn app_on(cx: &mut TestAppContext, db: &std::path::Path) -> Entity<ConnApp> {
+        let app = launch_on(cx, db);
+        cx.update(|cx| app.update(cx, |app, cx| app.set_shell(kitchen_sink_shell(), cx)));
+        app
+    }
+
+    /// [`app_on`] before the server sent any shell item.
+    fn launch_on(cx: &mut TestAppContext, db: &std::path::Path) -> Entity<ConnApp> {
         let (_, app) = mount_app(cx);
         let config = ServerConfig {
             http_base_url: url::Url::parse(ENV).expect("server URL"),
@@ -678,8 +753,9 @@ mod tests {
                     ..Threads::default()
                 };
                 app.server_url = Some(ENV.to_owned());
+                // A launch with a server starts with an empty list, not the demo.
+                app.shell = conn_state::ShellState::default();
                 app.start_engine(ENV, connection, cx);
-                app.set_shell(kitchen_sink_shell(), cx);
             })
         });
         app
@@ -695,6 +771,8 @@ mod tests {
     /// fresh app on the same device draws it before any stream item arrives.
     #[gpui_kit::test]
     async fn an_opened_thread_reopens_from_the_device(cx: &mut TestAppContext) {
+        // The engine answers from its database task on the runtime thread.
+        cx.executor().allow_parking();
         let dir = tempfile::tempdir().expect("database folder");
         let db = dir.path().join("threads.sqlite3");
         let first = app_on(cx, &db);
@@ -728,7 +806,47 @@ mod tests {
         cx.read(|cx| {
             let app = second.read(cx);
             assert_eq!(entry_ids(app, THREAD), drawn, "drawn from the device");
-            assert!(app.selected_timeline().is_some_and(|t| t.synchronized));
+            assert!(
+                app.selected_timeline().is_some_and(|t| !t.synchronized),
+                "ready to draw, not caught up"
+            );
+            assert!(
+                app.chat.read(cx).timeline_rows_for_test() > 0,
+                "rows, no loader"
+            );
+        });
+    }
+
+    /// The thread list saved on one launch draws on the next before the server sends any
+    /// shell item, and is not taken as current.
+    #[gpui_kit::test]
+    async fn the_saved_thread_list_draws_before_the_server_answers(cx: &mut TestAppContext) {
+        // The engine answers from its database task on the runtime thread.
+        cx.executor().allow_parking();
+        let dir = tempfile::tempdir().expect("database folder");
+        let db = dir.path().join("threads.sqlite3");
+        let first = app_on(cx, &db);
+        cx.update(|cx| {
+            first.update(cx, |app, cx| {
+                app.shell.synchronized = true;
+                app.save_primary_shell(true);
+                // The database task answers this read after the save.
+                app.select_thread(OTHER, cx);
+            })
+        });
+        cx.condition(&first, |app, _| app.thread(OTHER).is_some())
+            .await;
+        let ids = |shell: &conn_state::ShellState| -> Vec<String> {
+            shell.threads.iter().map(|t| t.id.clone()).collect()
+        };
+        let saved = cx.read(|cx| ids(&first.read(cx).shell));
+        assert!(!saved.is_empty());
+
+        let second = launch_on(cx, &db);
+        cx.read(|cx| {
+            let app = second.read(cx);
+            assert_eq!(ids(&app.shell), saved, "drawn from the device");
+            assert!(!app.shell.synchronized, "not current yet");
         });
     }
 }

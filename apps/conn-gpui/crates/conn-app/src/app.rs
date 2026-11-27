@@ -1766,6 +1766,7 @@ impl ConnApp {
         if self.shell.synchronized && std::mem::take(&mut self.perf_shell_pending) {
             conn_client::perf::shell_current();
         }
+        self.save_primary_shell(false);
         if self.shell.synchronized
             && self
                 .layout

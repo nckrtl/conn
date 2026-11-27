@@ -903,8 +903,9 @@ impl ConnApp {
         .detach();
     }
 
-    /// The writes a quit runs: the linked shells, then the panel layout (the write in flight
-    /// finishes, and the latest layout follows if it differs).
+    /// The writes a quit runs: the primary thread list (queued on its engine), the linked
+    /// shells, then the panel layout (the write in flight finishes, and the latest layout
+    /// follows if it differs).
     ///
     /// GPUI gives every quit hook 200 ms in total. The two run side by side, so a slow panel
     /// write cannot keep the shells from being written: their writes have no await point.
@@ -912,6 +913,7 @@ impl ConnApp {
         &mut self,
         cx: &mut Context<'_, Self>,
     ) -> impl std::future::Future<Output = ()> + use<> {
+        self.save_primary_shell(true);
         let linked = self.linked_on_quit();
         let panels = self.thread_panels_on_quit(cx);
         async move {

@@ -1880,7 +1880,6 @@ impl ConnApp {
                 let apply_start = std::time::Instant::now();
                 let env = self.server_url.clone();
                 self.apply_thread_item(env.as_deref(), &thread_id, item);
-                self.finish_reloads(env.as_deref(), cx);
                 if let Some((kind, opened_at)) = perf_kind
                     && kind != "event"
                 {

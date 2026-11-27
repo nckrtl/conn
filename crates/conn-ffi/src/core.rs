@@ -1997,14 +1997,6 @@ impl PumpState {
                     .engine
                     .as_mut()
                     .is_some_and(|engine| engine.handle(&thread_id, item));
-                let reloads = self
-                    .engine
-                    .as_mut()
-                    .map(conn_cache::Engine::take_reloads)
-                    .unwrap_or_default();
-                for (id, pending) in reloads {
-                    self.finish_open_later(id, pending);
-                }
                 let apply_ms = conn_client::perf::ms_since(applying);
                 if let Some(state) = self.thread(&thread_id) {
                     if changed && let Some(reader) = &self.reader {

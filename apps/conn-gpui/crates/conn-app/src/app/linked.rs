@@ -1683,7 +1683,6 @@ impl ConnApp {
             }
             ClientEvent::Thread { thread_id, item } => {
                 self.apply_thread_item(Some(&environment_id), &thread_id, item);
-                self.finish_reloads(Some(&environment_id), cx);
                 None
             }
             ClientEvent::ThreadStale { thread_id } => {

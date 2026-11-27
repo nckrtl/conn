@@ -85,9 +85,6 @@ struct Held {
     generation: u64,
 }
 
-/// Changes a catch-up may reduce in memory before the window is read again instead.
-const CATCH_UP_IN_MEMORY: usize = 256;
-
 /// A window on its way from the device, for [`Engine::finish_open`] or [`Engine::finish_older`].
 pub type Pending = oneshot::Receiver<Option<Window>>;
 
@@ -111,11 +108,8 @@ pub struct Engine {
     stale: HashSet<String>,
     /// Threads whose rows a rollback hid: they wait for a fresh window.
     resetting: HashSet<String>,
-    /// Stream items since each (re)subscription, until its `synchronized`.
-    catching_up: HashMap<String, usize>,
-    /// Open threads whose catch-up was too long to reduce in memory: their window is read
-    /// again from the device ([`Self::take_reloads`]).
-    reloads: Vec<(String, Pending)>,
+    /// Threads (re)subscribed whose `synchronized` has not come yet.
+    catching_up: HashSet<String>,
     /// Older pages on their way, by thread, with the window generation they were asked for.
     older_in_flight: HashMap<String, u64>,
     next_generation: u64,
@@ -179,8 +173,7 @@ impl Engine {
             subscribed: HashMap::new(),
             stale: HashSet::new(),
             resetting: HashSet::new(),
-            catching_up: HashMap::new(),
-            reloads: vec![],
+            catching_up: HashSet::new(),
             older_in_flight: HashMap::new(),
             next_generation: 1,
             runtime: tokio::runtime::Handle::current(),
@@ -318,16 +311,9 @@ impl Engine {
             self.write(thread, write);
         }
         let synchronized = matches!(item, Item::Synchronized(_));
-        let caught_up = if synchronized {
-            self.catching_up.remove(thread)
-        } else {
-            if let Some(count) = self.catching_up.get_mut(thread) {
-                *count += 1;
-            }
-            None
-        };
+        let caught_up = synchronized && self.catching_up.remove(thread);
         if synchronized && conn_client::perf::enabled() {
-            self.note_synchronized(thread, caught_up.is_some());
+            self.note_synchronized(thread, caught_up);
         }
         if let Some(buffer) = self.loading.get_mut(thread) {
             buffer.push(item);
@@ -336,24 +322,6 @@ impl Engine {
         let Some(held) = self.held.get_mut(thread) else {
             return false;
         };
-        // A long catch-up is written to the device and read back as one window, instead of
-        // reducing every change of the time away in memory.
-        let long = |count: usize| count > CATCH_UP_IN_MEMORY;
-        if synchronized && caught_up.is_some_and(long) {
-            held.state.apply(item);
-            self.loading.insert(thread.to_owned(), vec![]);
-            let pending = self.read(thread, None);
-            self.reloads.push((thread.to_owned(), pending));
-            return false;
-        }
-        if self
-            .catching_up
-            .get(thread)
-            .is_some_and(|count| long(*count))
-            && !matches!(item, Item::Snapshot(_))
-        {
-            return false;
-        }
         if let Item::Snapshot(snapshot) = &item {
             held.generation = self.next_generation;
             self.next_generation += 1;
@@ -408,12 +376,6 @@ impl Engine {
         }
     }
 
-    /// Windows to read again after a long catch-up. Pass each to [`Self::finish_open`] once
-    /// it arrives, as for an open; until then the thread draws what it drew before.
-    pub fn take_reloads(&mut self) -> Vec<(String, Pending)> {
-        std::mem::take(&mut self.reloads)
-    }
-
     /// A run of the thread was rolled back: the server now hides rows the device holds. Keep
     /// the cursor where it is and ask for a fresh window, which replaces them.
     fn reset(&mut self, thread: &str) {
@@ -425,7 +387,7 @@ impl Engine {
         self.connection.unsubscribe_thread(thread);
         self.connection.subscribe_thread_from(thread, None, rank);
         self.subscribed.insert(thread.to_owned(), rank);
-        self.catching_up.insert(thread.to_owned(), 0);
+        self.catching_up.insert(thread.to_owned());
     }
 
     /// Subscribes a kept thread again after its stream ended, at its rank and committed cursor.
@@ -436,7 +398,7 @@ impl Engine {
         };
         let after = self.index.get(id).and_then(|ix| ix.cursor);
         self.connection.subscribe_thread_from(id, after, *rank);
-        self.catching_up.insert(id.to_owned(), 0);
+        self.catching_up.insert(id.to_owned());
         true
     }
 
@@ -466,7 +428,7 @@ impl Engine {
         let after = self.index.get(id).and_then(|ix| ix.cursor);
         if self.subscribed.get(id) != Some(&0) {
             if !self.subscribed.contains_key(id) {
-                self.catching_up.insert(id.to_owned(), 0);
+                self.catching_up.insert(id.to_owned());
             }
             self.connection.subscribe_thread_from(id, after, 0);
             self.subscribed.insert(id.to_owned(), 0);
@@ -474,7 +436,7 @@ impl Engine {
         // A thread already current opens current: the line goes out once it is in memory.
         let current = conn_client::perf::enabled()
             && self.perf.synchronized.contains(id)
-            && !self.catching_up.contains_key(id);
+            && !self.catching_up.contains(id);
         if self.held.contains_key(id) && !self.loading.contains_key(id) {
             if current {
                 conn_client::perf::open_current(id);
@@ -679,7 +641,7 @@ impl Engine {
             if self.subscribed.get(&id) != Some(&rank) {
                 let after = self.index.get(&id).and_then(|ix| ix.cursor);
                 if !self.subscribed.contains_key(&id) {
-                    self.catching_up.insert(id.clone(), 0);
+                    self.catching_up.insert(id.clone());
                 }
                 self.connection.subscribe_thread_from(&id, after, rank);
                 self.subscribed.insert(id, rank);
@@ -994,62 +956,6 @@ mod tests {
         assert!(engine.stale.is_empty() && engine.resetting.is_empty());
     }
 
-    /// A catch-up too long to reduce in memory is written to the device and read back as one
-    /// window at `synchronized`, with every change in it.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-    async fn a_long_catch_up_reloads_the_window_from_the_device() {
-        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
-        let path = dir.path().join("local.sqlite3");
-        let items = stream("thread_turn_stream.json");
-        let thread = items[0]["projection"]["thread"]["id"]
-            .as_str()
-            .unwrap_or("")
-            .to_owned();
-        let mut engine = engine(&path, Settings::default()).await;
-        engine.handle(
-            &thread,
-            from_json(items[0].clone()).unwrap_or_else(|e| panic!("{e}")),
-        );
-        open(&mut engine, &thread).await;
-        engine.resubscribe(&thread);
-        let item = items
-            .iter()
-            .find(|item| item["event"]["type"] == "turn-item.updated")
-            .cloned()
-            .unwrap_or_default();
-        let mut last = String::new();
-        for n in 0..=CATCH_UP_IN_MEMORY {
-            let mut change = item.clone();
-            last = format!("item-{n}");
-            change["sequence"] = json!(9_000_000 + n);
-            change["event"]["payload"]["id"] = json!(last);
-            change["event"]["payload"]["ordinal"] = json!(2_000_000 + n);
-            engine.handle(&thread, from_json(change).unwrap_or_else(|e| panic!("{e}")));
-        }
-        let drawn = |engine: &Engine| {
-            engine
-                .thread(&thread)
-                .is_some_and(|s| s.entries.iter().any(|e| e.id().contains(&last)))
-        };
-        assert!(!drawn(&engine), "not reduced in memory");
-        engine.handle(
-            &thread,
-            from_json(json!({"kind": "synchronized"})).unwrap_or_else(|e| panic!("{e}")),
-        );
-        let reloads = engine.take_reloads();
-        assert_eq!(reloads.len(), 1);
-        for (id, pending) in reloads {
-            let window = pending.await.ok().flatten();
-            engine.finish_open(&id, window);
-        }
-        assert!(
-            drawn(&engine),
-            "the reloaded window holds the newest change"
-        );
-    }
-
-    /// A failed write freezes the cursor of its threads: a later write that succeeds must not
-    /// move it past the lost change. The next fresh window moves it again.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_failed_write_holds_the_cursor_until_a_fresh_window() {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));

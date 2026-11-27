@@ -46,9 +46,9 @@ pub(super) const TRAY_INSET_PX: f32 = 20.0;
 const TRAY_RADIUS_PX: f32 = 16.0;
 /// How far from the composer's fill toward the border colour the light tray's fill sits.
 const LIGHT_FILL_MIX: f32 = 0.75;
-/// How far the dark tray's fill sits from `shell_raised` toward the page background, so the
-/// tray reads as set back behind the composer.
-const DARK_FILL_MIX: f32 = 0.5;
+/// How much of the composer's fill the dark tray keeps. The rest is the page background, so the
+/// tray is a little darker than the composer and reads as set back behind it.
+const DARK_FILL_COMPOSER_SHARE: f32 = 0.86;
 /// Text opacity of a queued message's preview: dimmer than the composer's text.
 const ROW_TEXT_ALPHA: f32 = 0.7;
 /// An optimistic order the server has not confirmed is dropped after this long.
@@ -336,33 +336,31 @@ impl PendingSendRow {
     }
 }
 
-/// The tray's surface colours: the fill, one step off the composer's so the two read apart in
-/// light and dark themes, and the border they share.
+/// The tray's fill as a colour: the composer's fill, a little darker so the two read apart in
+/// light and dark themes.
+#[must_use]
+pub(super) fn tray_fill(tokens: &Tokens) -> conn_theme::Rgba {
+    let composer = super::composer::composer_fill(tokens);
+    let (toward, amount) = match tokens.appearance {
+        // The light theme's surfaces are all within a few percent of white, so the page does not
+        // read apart from the composer's `card`. Toward the opaque `border` colour does.
+        conn_theme::Appearance::Light => (tokens.border, LIGHT_FILL_MIX),
+        // Dark: mostly the composer's fill, a little of the page behind it. The page has to be
+        // opaque for this to darken, so the mix ignores any alpha on either colour.
+        conn_theme::Appearance::Dark => (tokens.background, 1.0 - DARK_FILL_COMPOSER_SHARE),
+    };
+    conn_theme::Rgba {
+        r: composer.r + (toward.r - composer.r) * amount,
+        g: composer.g + (toward.g - composer.g) * amount,
+        b: composer.b + (toward.b - composer.b) * amount,
+        a: 1.0,
+    }
+}
+
+/// The tray's surface colours: the fill, and the border it shares with the composer.
 #[must_use]
 pub(super) fn tray_surface_colors(tokens: &Tokens) -> (Hsla, Hsla) {
-    let fill = match tokens.appearance {
-        // The light theme's surfaces are all within a few percent of white, so no single one
-        // reads apart from the composer's `card`. Halfway to the opaque `border` colour does.
-        conn_theme::Appearance::Light => {
-            let (card, border) = (tokens.card, tokens.border);
-            hsla(conn_theme::Rgba {
-                r: card.r + (border.r - card.r) * LIGHT_FILL_MIX,
-                g: card.g + (border.g - card.g) * LIGHT_FILL_MIX,
-                b: card.b + (border.b - card.b) * LIGHT_FILL_MIX,
-                a: 1.0,
-            })
-        }
-        conn_theme::Appearance::Dark => {
-            let (raised, page) = (tokens.shell_raised, tokens.background);
-            hsla(conn_theme::Rgba {
-                r: raised.r + (page.r - raised.r) * DARK_FILL_MIX,
-                g: raised.g + (page.g - raised.g) * DARK_FILL_MIX,
-                b: raised.b + (page.b - raised.b) * DARK_FILL_MIX,
-                a: 1.0,
-            })
-        }
-    };
-    (fill, hsla(tokens.shell_inner_border))
+    (hsla(tray_fill(tokens)), hsla(tokens.shell_inner_border))
 }
 
 impl ChatView {
@@ -1135,10 +1133,88 @@ fn drop_line(color: Hsla, top: bool) -> AnyElement {
 mod tests {
     use super::{
         QueueMenuAction, menu_actions, moved_order, preview_text, reorder_target, step_cursor,
-        step_slot,
+        step_slot, tray_fill,
     };
+    use crate::chat::composer::composer_fill;
+    use conn_theme::{Appearance, Rgba, Tokens};
 
     const IDS: [&str; 4] = ["a", "b", "c", "d"];
+
+    fn tokens_for(theme_id: &str) -> Tokens {
+        Tokens::derive(&conn_theme::theme_by_id(theme_id).expect("a built-in theme"))
+    }
+
+    /// The largest difference between two colours' channels.
+    fn gap(a: Rgba, b: Rgba) -> f32 {
+        (a.r - b.r)
+            .abs()
+            .max((a.g - b.g).abs())
+            .max((a.b - b.b).abs())
+    }
+
+    fn luma(c: Rgba) -> f32 {
+        0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
+    }
+
+    /// The page the timeline, and so the tray's surroundings, is drawn on (`chat_page`).
+    fn page(tokens: &Tokens) -> Rgba {
+        tokens.shell_card.with_alpha(1.0)
+    }
+
+    #[test]
+    fn the_dark_tray_is_filled_a_little_darker_than_the_composer() {
+        let tokens = tokens_for("dark-ocean");
+        assert_eq!(tokens.appearance, Appearance::Dark);
+        let (fill, composer, page) = (tray_fill(&tokens), composer_fill(&tokens), page(&tokens));
+        // Filled: clearly not the timeline showing through.
+        assert!(gap(fill, page) > 0.03, "fill {fill:?} is the page {page:?}");
+        // Derived from the composer, but not equal to it: a little darker, nearer the composer
+        // than the page.
+        assert!(gap(fill, composer) > 0.01, "fill {fill:?} is the composer");
+        assert!(
+            gap(fill, composer) < gap(fill, page),
+            "fill is nearer the page"
+        );
+        assert!(
+            luma(fill) < luma(composer),
+            "fill is not darker than the composer"
+        );
+        assert!(luma(fill) > luma(page), "fill is darker than the page");
+        assert!((fill.a - 1.0).abs() < f32::EPSILON, "fill must be opaque");
+    }
+
+    #[test]
+    fn the_light_tray_is_filled_and_slightly_darker_than_the_composer() {
+        let tokens = tokens_for("t3-code-light");
+        assert_eq!(tokens.appearance, Appearance::Light);
+        let (fill, composer, page) = (tray_fill(&tokens), composer_fill(&tokens), page(&tokens));
+        assert!(gap(fill, page) > 0.01, "fill {fill:?} is the page {page:?}");
+        assert!(gap(fill, composer) > 0.01, "fill {fill:?} is the composer");
+        assert!(
+            luma(fill) < luma(composer),
+            "fill is not darker than the composer"
+        );
+    }
+
+    #[test]
+    fn every_theme_gets_a_tray_fill_that_is_not_the_page_or_the_composer() {
+        for theme in conn_theme::builtin_themes() {
+            let tokens = Tokens::derive(&theme);
+            let (fill, composer, page) =
+                (tray_fill(&tokens), composer_fill(&tokens), page(&tokens));
+            assert!(
+                gap(fill, page) > 0.004,
+                "{}: the fill is the page",
+                theme.id
+            );
+            // A theme whose composer sits close to its page leaves little room to darken.
+            assert!(
+                gap(fill, composer) > 0.0,
+                "{}: the fill is the composer",
+                theme.id
+            );
+        }
+    }
 
     #[test]
     fn a_row_dropped_in_a_gap_goes_before_the_row_below_that_gap() {

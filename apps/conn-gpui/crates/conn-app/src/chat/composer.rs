@@ -3229,13 +3229,20 @@ impl Render for Composer {
 /// Mirrors Conn's `--shell-composer` (`var(--card)` in light, lifted surface in dark)
 /// and `--chat-composer-outline` (`8%` black/white hairline via `shell_inner_border`).
 pub(crate) fn composer_surface_colors(tokens: &Tokens) -> (gpui_kit::Hsla, gpui_kit::Hsla) {
-    let bg = match tokens.appearance {
-        Appearance::Light => hsla(tokens.card),
-        Appearance::Dark => hsla(tokens.shell_field),
-    };
+    let bg = hsla(composer_fill(tokens));
     // Web Conn's glass is 80% over a 12px backdrop blur. GPUI has no per-element backdrop blur
     // (gpui-kit#3598), so the card stays opaque until it lands (Nick, 2026-11-23).
     (bg, hsla(tokens.shell_inner_border))
+}
+
+/// The composer card's fill token: `card` in light, `shell_field` in dark. The queue tray
+/// derives its own fill from this, so the two stay related when the theme changes.
+#[must_use]
+pub(crate) fn composer_fill(tokens: &Tokens) -> conn_theme::Rgba {
+    match tokens.appearance {
+        Appearance::Light => tokens.card,
+        Appearance::Dark => tokens.shell_field,
+    }
 }
 
 /// The composer card's soft ambient shadow.

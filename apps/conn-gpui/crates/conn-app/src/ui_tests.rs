@@ -838,6 +838,24 @@ fn spawn_scratch_server(
                                     ))
                                     .await
                                     .expect("send scratch project");
+                                } else if req.tag == "projects.readFile" {
+                                    // Every file is missing here, as a link to a deleted file.
+                                    let path = req.payload["relativePath"].clone();
+                                    let reply = conn_wire::FromServer::Exit {
+                                        request_id: req.id,
+                                        exit: conn_wire::Exit::success(json!({
+                                            "relativePath": path,
+                                            "contents": "",
+                                            "byteLength": 0,
+                                            "truncated": false,
+                                            "exists": false,
+                                        })),
+                                    };
+                                    ws.send(Message::Text(
+                                        conn_wire::encode_server_frame(&reply).into(),
+                                    ))
+                                    .await
+                                    .expect("send missing file");
                                 } else if req.tag == "orchestration.launchThread" {
                                     let _ = launch_tx.send(req.payload);
                                     let reply = conn_wire::FromServer::Exit {
@@ -4795,7 +4813,8 @@ fn a_background_database_query_waits_for_its_thread_and_connections(cx: &mut Tes
 }
 
 /// A thread without a project (General) has no Files, MCP or API: the `+` menu and the tab strip
-/// leave them out, Database stays, and a request to open one opens Tasks instead.
+/// leave them out, Database stays, and a request to open one opens Tasks instead. A single file
+/// (a chat link) still opens, as in Conn's web app.
 #[gpui_kit::test]
 fn a_thread_without_a_project_offers_no_files_mcp_or_api_and_opens_tasks_instead(
     cx: &mut TestAppContext,
@@ -4829,15 +4848,14 @@ fn a_thread_without_a_project_offers_no_files_mcp_or_api_and_opens_tasks_instead
         assert!(offered.contains(&RightPanelTab::Database));
         assert!(offered.contains(&RightPanelTab::Tasks));
     });
-    // Every way in: the menu and its keys, the palette and agent requests (select), the
-    // panel's own events (select) and a file.
-    for open in 0..4 {
+    // Every way in: the menu and its keys, the palette and agent requests (select), and the
+    // panel's own events (select).
+    for open in 0..3 {
         cx.update(|cx| {
             app.update(cx, |app, cx| match open {
                 0 => app.add_right_panel_tab(RightPanelTab::Files, cx),
                 1 => app.select_right_panel_tab(RightPanelTab::Mcp, cx),
-                2 => app.select_right_panel_tab(RightPanelTab::Api, cx),
-                _ => app.select_right_panel_surface(PanelSurface::File("a.rs".into()), cx),
+                _ => app.select_right_panel_tab(RightPanelTab::Api, cx),
             })
         });
         render_frames(cx, window);
@@ -4862,6 +4880,14 @@ fn a_thread_without_a_project_offers_no_files_mcp_or_api_and_opens_tasks_instead
             Some(&PanelSurface::Kind(RightPanelTab::Database))
         );
     });
+    let file = PanelSurface::File("a.rs".into());
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_right_panel_surface(file.clone(), cx)
+        })
+    });
+    render_frames(cx, window);
+    cx.update(|cx| assert_eq!(app.read(cx).right_panel_tabs().active(), Some(&file)));
 }
 
 /// An agent's `files_reveal` and `files_selection` on a thread without a project get an error at
@@ -7351,4 +7377,145 @@ fn settle_timeline(cx: &mut TestAppContext, window: AnyWindowHandle) {
             .expect("mounted window");
         cx.run_until_parked();
     }
+}
+
+/// A Markdown link to a file opens it in the right panel on any thread, as in Conn's web app.
+/// A General thread (no project of its own) shows the file too, not Tasks, and a link to a
+/// workspace folder opens the Files tree.
+#[gpui_kit::test]
+fn a_file_link_opens_the_file_on_a_thread_without_a_project(cx: &mut TestAppContext) {
+    use conn_contract::source::{SourceLines, SourceLocation};
+    let (window, app) = mount_two_thread_app(cx);
+    let file = "/Users/me/scratch/review-astra.md";
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_scratch_project_for_test(Some("proj-other"));
+            app.select_thread("thread-other", cx);
+            app.show_source_location(
+                &SourceLocation {
+                    path: file.to_owned(),
+                    lines: Some(SourceLines {
+                        start_line: 42,
+                        end_line: 42,
+                    }),
+                },
+                cx,
+            );
+        })
+    });
+    render_frames(cx, window);
+    cx.update(|cx| {
+        assert_eq!(
+            app.read(cx).right_panel_tabs().active(),
+            Some(&conn_state::PanelSurface::File(file.to_owned()))
+        );
+    });
+
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_thread("thread-selected", cx);
+            app.show_source_location(
+                &SourceLocation {
+                    path: "src/".to_owned(),
+                    lines: None,
+                },
+                cx,
+            );
+        })
+    });
+    render_frames(cx, window);
+    cx.update(|cx| {
+        assert_eq!(
+            app.read(cx).right_panel_tabs().active(),
+            Some(&conn_state::PanelSurface::Kind(
+                conn_state::RightPanelTab::Files
+            ))
+        );
+    });
+}
+
+/// A file link in a linked thread opens on that thread's own machine: the Files panel reads it
+/// over the linked connection, never over this Mac's server. The file is missing there, so the
+/// preview says so in place of any system dialog.
+#[gpui_kit::test]
+async fn a_file_link_in_a_linked_thread_reads_on_its_own_environment(cx: &mut TestAppContext) {
+    use conn_contract::source::SourceLocation;
+    cx.executor().allow_parking();
+    let (primary_url, primary_tags, _primary_launch) = spawn_scratch_server("nick-scratch");
+    let (agent_url, agent_tags, _agent_launch) = spawn_scratch_server("agent-scratch");
+    let (window, app) = mount_with_agent_node(cx, primary_url, &primary_tags, agent_url);
+    wait_for_tag(&agent_tags, "subscribeServerConfig");
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read(|cx| app.read(cx).linked_connected_for_test("agent")) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.add_linked_shell_for_test(
+                "agent",
+                "agent",
+                linked_mini_shell("/work/mini", "Mini diagnostics"),
+                cx,
+            );
+        })
+    });
+    render_frames(cx, window);
+    let linked_thread = cx.update(|cx| {
+        app.read(cx)
+            .shell()
+            .threads
+            .iter()
+            .find(|t| t.title == "Mini diagnostics")
+            .map(|t| t.id.clone())
+            .expect("the linked thread is listed")
+    });
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread(&linked_thread, cx)));
+    render_frames(cx, window);
+    while primary_tags.try_recv().is_ok() {}
+
+    let file = "/work/notes/plan.md";
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.show_source_location(
+                &SourceLocation {
+                    path: file.to_owned(),
+                    lines: None,
+                },
+                cx,
+            );
+        })
+    });
+    let mut read_on_agent = false;
+    let mut error = None;
+    for _ in 0..300 {
+        cx.run_until_parked();
+        let _ = cx.update_window(window, |_, w, cx| w.render_frame(cx));
+        read_on_agent |= agent_tags.try_iter().any(|tag| tag == "projects.readFile");
+        error = cx.read(|cx| {
+            app.read(cx)
+                .right_panel_for_test()
+                .read(cx)
+                .files_for_test()
+                .read(cx)
+                .preview_error_for_test()
+        });
+        if read_on_agent && error.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(read_on_agent, "the linked machine reads the file");
+    assert!(
+        primary_tags
+            .try_iter()
+            .all(|tag| tag != "projects.readFile"),
+        "this Mac's server never reads it"
+    );
+    assert_eq!(
+        error,
+        Some((file.to_owned(), "This file does not exist.".to_owned()))
+    );
 }

@@ -571,6 +571,7 @@ mod tests {
 
     const FILES: PanelSurface = PanelSurface::Kind(RightPanelTab::Files);
 
+    /// A file opened from a chat link stays: it reads one file, not the project tree.
     #[test]
     fn a_thread_without_a_project_hides_files_mcp_and_api_but_keeps_database() {
         let mut tabs = RightPanelTabs::default();
@@ -588,7 +589,11 @@ mod tests {
             |tabs: Vec<PanelSurface>| tabs.iter().map(PanelSurface::kind).collect::<Vec<_>>();
         assert_eq!(
             kinds(tabs.visible(false)),
-            [RightPanelTab::Database, RightPanelTab::Tasks]
+            [
+                RightPanelTab::Database,
+                RightPanelTab::Tasks,
+                RightPanelTab::File
+            ]
         );
         assert_eq!(tabs.visible(true).len(), 6, "a project shows them all");
         assert_eq!(tabs.tabs().len(), 6, "hidden tabs stay open");
@@ -612,16 +617,12 @@ mod tests {
 
     #[test]
     fn project_surfaces_fall_back_to_tasks() {
-        for tab in [
-            RightPanelTab::Files,
-            RightPanelTab::File,
-            RightPanelTab::Mcp,
-            RightPanelTab::Api,
-        ] {
+        for tab in [RightPanelTab::Files, RightPanelTab::Mcp, RightPanelTab::Api] {
             assert!(tab.needs_project(), "{tab:?}");
             assert_eq!(tab.without_project(), RightPanelTab::Tasks);
         }
         for tab in [
+            RightPanelTab::File,
             RightPanelTab::Database,
             RightPanelTab::Browser,
             RightPanelTab::Terminal,
@@ -632,7 +633,7 @@ mod tests {
         }
         assert_eq!(
             PanelSurface::File("a".to_owned()).without_project(),
-            PanelSurface::Kind(RightPanelTab::Tasks)
+            PanelSurface::File("a".to_owned())
         );
         assert_eq!(
             PanelSurface::Browser(1).without_project(),

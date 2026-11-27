@@ -778,6 +778,11 @@ impl RightPanel {
     }
 
     #[cfg(test)]
+    pub(crate) fn files_for_test(&self) -> Entity<FilesPanel> {
+        self.files.clone()
+    }
+
+    #[cfg(test)]
     pub(crate) fn database_for_test(&self) -> Entity<DatabasePanel> {
         self.database.clone()
     }
@@ -1165,6 +1170,31 @@ impl RightPanel {
     ) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
         self.files
             .update(cx, |files, cx| files.reveal_lines(path, lines, excerpt, cx))
+    }
+
+    /// Shows the Files tree with the workspace folder `folder` expanded and selected (a link to
+    /// a folder was clicked).
+    pub fn reveal_folder(&mut self, folder: String, cx: &mut Context<'_, Self>) {
+        self.files
+            .update(cx, |files, cx| files.reveal_folder(folder, cx));
+    }
+
+    /// Gives the Files panel the connection of the environment the shown thread lives on, so a
+    /// linked thread reads its files from its own machine. The same connection changes nothing.
+    pub fn set_files_connection(
+        &mut self,
+        connection: Option<Connection>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let same = match (self.files.read(cx).connection(), &connection) {
+            (Some(current), Some(next)) => current.same_connection(next),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.files
+                .update(cx, |files, cx| files.set_connection(connection, cx));
+        }
     }
 
     /// Shows the file at `path` (project-relative) as its own surface, as Conn's `file` tab.

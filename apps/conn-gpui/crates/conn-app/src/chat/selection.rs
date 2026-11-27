@@ -965,6 +965,26 @@ mod tests {
         assert!(!has_selection(cx, window), "a click is not a selection");
     }
 
+    /// A link to a file outside the workspace opens its host path in the Files panel; it never
+    /// goes to the system's URL handler.
+    #[gpui_kit::test]
+    fn a_click_on_a_host_file_link_opens_it_in_the_panel(cx: &mut TestAppContext) {
+        let (window, _, opened) = open(
+            cx,
+            "See [plan](/Users/me/notes/plan.md:42) now",
+            Body::Markdown,
+        );
+        let on_link = x_after(cx, window, "See ") + 4.0;
+        act(cx, window, |window, cx| {
+            window.click_with_options(
+                "probe",
+                ClickOptions::new().with_offset(point(px(on_link), px(LINE_MID))),
+                cx,
+            );
+        });
+        assert_eq!(opened.borrow().as_slice(), ["/Users/me/notes/plan.md"]);
+    }
+
     #[gpui_kit::test]
     fn a_drag_inside_a_link_selects_and_does_not_open_it(cx: &mut TestAppContext) {
         let (window, _, opened) = open(

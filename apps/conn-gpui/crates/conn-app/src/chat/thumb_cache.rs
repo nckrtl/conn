@@ -12,9 +12,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use image::RgbaImage;
 
-/// Decoded thumbnail pixels the chat keeps at most: about 15 full-width tiles at 2x. The rows
-/// on screen plus the list's overdraw must fit, or visible tiles would evict each other.
-pub(super) const THUMB_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+/// Decoded thumbnail pixels the chat keeps at most: about 30 full-width tiles at 2x, across
+/// threads, so a thread opened again shows its pictures in the first frame. The rows on screen
+/// plus the list's overdraw must fit, or visible tiles would evict each other. What falls out
+/// decodes again from the bytes on disk ([`super::image_store`]), never the network.
+pub(super) const THUMB_BUDGET_BYTES: usize = 128 * 1024 * 1024;
 
 /// Pixels one entry may hold: a quarter of the budget, so four of the
 /// largest entries fit at once and never push each other out.
@@ -108,19 +110,9 @@ pub(super) fn scaled_size(
 
 /// Crops `frame` to what a `target` tile shows and scales it down to fit (channel order kept).
 pub(super) fn fit_frame(frame: &RgbaImage, target: TargetPx, max_bytes: usize) -> RgbaImage {
-    let (x, y, width, height) = visible_region(frame.width(), frame.height(), target);
-    let (scaled_width, scaled_height) = scaled_size(width, height, target, max_bytes);
-    let region = image::imageops::crop_imm(frame, x, y, width, height);
-    if (scaled_width, scaled_height) == (width, height) {
-        region.to_image()
-    } else {
-        image::imageops::resize(
-            &*region,
-            scaled_width,
-            scaled_height,
-            image::imageops::FilterType::Triangle,
-        )
-    }
+    let region = visible_region(frame.width(), frame.height(), target);
+    let size = scaled_size(region.2, region.3, target, max_bytes);
+    conn_image_cache::pixels::crop_resize(frame, region, size)
 }
 
 /// A thumbnail in GPUI's `RenderImage` pixel order (BGRA, straight alpha, as GPUI's own
@@ -134,9 +126,7 @@ impl Thumbnail {
     pub(super) fn fit(picture: &RgbaImage, target: TargetPx, to_bgra: bool) -> Self {
         let mut pixels = fit_frame(picture, target, ENTRY_MAX_BYTES);
         if to_bgra {
-            for pixel in pixels.as_chunks_mut::<4>().0 {
-                pixel.swap(0, 2);
-            }
+            conn_image_cache::pixels::swap_red_blue(&mut pixels);
         }
         Self { pixels }
     }
@@ -197,21 +187,10 @@ fn decode_upright(bytes: &[u8], cancel: &AtomicBool) -> Option<RgbaImage> {
 pub(super) fn whole_picture(picture: &RgbaImage, max_bytes: usize, to_bgra: bool) -> Thumbnail {
     let (width, height) = (picture.width(), picture.height());
     let own_size = TargetPx { width, height };
-    let (scaled_width, scaled_height) = scaled_size(width, height, own_size, max_bytes);
-    let mut pixels = if (scaled_width, scaled_height) == (width, height) {
-        picture.clone()
-    } else {
-        image::imageops::resize(
-            picture,
-            scaled_width,
-            scaled_height,
-            image::imageops::FilterType::Triangle,
-        )
-    };
+    let size = scaled_size(width, height, own_size, max_bytes);
+    let mut pixels = conn_image_cache::pixels::crop_resize(picture, (0, 0, width, height), size);
     if to_bgra {
-        for pixel in pixels.as_chunks_mut::<4>().0 {
-            pixel.swap(0, 2);
-        }
+        conn_image_cache::pixels::swap_red_blue(&mut pixels);
     }
     Thumbnail { pixels }
 }
@@ -368,7 +347,25 @@ impl<K: Eq + Hash + Clone, V> ByteLru<K, V> {
         Some(slot.value)
     }
 
+    /// Keeps the entries `keep` accepts and returns the rest.
+    #[must_use]
+    pub(super) fn retain(&mut self, mut keep: impl FnMut(&K, &V) -> bool) -> Vec<V> {
+        let dropped: Vec<Slot<V>> = self
+            .entries
+            .extract_if(|key, slot| !keep(key, &slot.value))
+            .map(|(_, slot)| slot)
+            .collect();
+        dropped
+            .into_iter()
+            .map(|slot| {
+                self.total -= slot.cost;
+                slot.value
+            })
+            .collect()
+    }
+
     /// Empties the map and returns every value.
+    #[cfg(test)]
     #[must_use]
     pub(super) fn clear(&mut self) -> Vec<V> {
         self.total = 0;
@@ -712,9 +709,9 @@ mod tests {
 
     #[test]
     fn visible_tiles_past_the_budget_settle_without_reloading() {
-        // The re-check case: 280 tiles on screen together need more than the budget.
+        // The re-check case: 600 tiles on screen together need more than the budget.
         let cost = 246 * 1024;
-        let tiles = 280;
+        let tiles = 600;
         assert!(tiles * cost > THUMB_BUDGET_BYTES);
         let mut cache = ByteLru::new(THUMB_BUDGET_BYTES);
         let mut loads = 0;

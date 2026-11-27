@@ -248,7 +248,7 @@ fn render_timeline_warning_screenshots() {
 
 /// A live turn (a settled thought and tool, then a running tool) with two messages queued behind
 /// it.
-fn queued_thread(count: u32, first: usize) -> ThreadState {
+pub(super) fn queued_thread(count: u32, first: usize) -> ThreadState {
     let mut thread = ThreadState::new("thread-selected");
     thread.synchronized = true;
     thread.working = true;

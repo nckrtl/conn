@@ -1,0 +1,128 @@
+{
+  "repositoryIdentity": {
+    "undecided": "sent as false: this engine's project rows carry no repositoryIdentity"
+  },
+  "connectionProbe": {
+    "methods": ["server.probe"],
+    "off": "server.probe answers; no client in the monorepo reads the flag, and nobody compared the answer with the T3 server's"
+  },
+  "accessTokenRenewal": { "undecided": "a DPoP session from a pairing link renews at /oauth/token" },
+  "attachmentUploads": { "methods": ["attachments.createUploadUrl", "attachments.delete"] },
+  "questionAttachments": { "undecided": "attachments on an answer to a provider question" },
+  "fileAttachments": { "behaviour": "the upload limit of conn_files::attachments" },
+  "pullRequests": { "methods": ["pullRequests.list", "pullRequests.detail"] },
+  "pullRequestChecks": { "methods": ["pullRequests.checks"] },
+  "issues": { "methods": ["issues.list", "issueTrackers.list"] },
+  "sideChats": { "undecided": "hidden lineage.sideChat forks" },
+  "vcsBranchStatus": {
+    "methods": ["subscribeVcsBranch", "vcs.refreshBranch"],
+    "off": "both answer (methods/vcs.rs); the client falls back to subscribeVcsStatus, and nobody compared the stream with the T3 server's"
+  },
+  "inlineMessageContext": { "undecided": "every protocol-2 T3 server sends it; older mobile builds read it" },
+  "requiredWorktreeBootstrap": { "undecided": "a worktree thread waits for its setup script" },
+  "threadSettlement": {
+    "commands": ["thread.settle", "thread.unsettle"],
+    "off": "the engine accepts both; no client in the monorepo reads the flag"
+  },
+  "threadAutoSettlement": { "undecided": "the server settles idle threads by the settings" },
+  "storageCleanup": { "methods": ["server.getStorageCleanupReport"] },
+  "storageCleanupRun": { "methods": ["server.runStorageCleanup"] },
+  "databaseStorage": {
+    "methods": ["server.getDatabaseStorage", "server.reclaimDatabaseSpace"],
+    "off": "stand-ins (methods/server.rs): the stream sends null and the reclaim refuses"
+  },
+  "otlpEndpointCheck": { "methods": ["server.checkOtlpEndpoint"] },
+  "secretSourceCheck": { "methods": ["server.checkSecretSource"] },
+  "projectWorktreeCleanup": { "undecided": "the per-project worktree cleanup settings" },
+  "settledWorktreeCleanup": { "undecided": "the cleanup of a settled thread's worktree" },
+  "worktreesDirectory": { "undecided": "the worktreesDirectory setting" },
+  "fastWorktreeCheckout": { "undecided": "sent by macOS T3 servers, which honor the setting" },
+  "threadAutoSettlementScope": { "undecided": "the scope of the auto-settle settings" },
+  "threadRestartContinuation": { "undecided": "a thread continues after the server restarts" },
+  "projectSettingsOverrides": { "undecided": "per-project settings overrides" },
+  "projectProviderInstanceOverrides": { "undecided": "per-project provider patches" },
+  "threadSnooze": {
+    "commands": ["thread.snooze", "thread.unsnooze"],
+    "off": "the engine accepts both; no client in the monorepo reads the flag"
+  },
+  "threadForceStop": { "methods": ["orchestration.forceStopThread"] },
+  "environmentThemes": {
+    "behaviour": "environmentThemesUpdated on subscribeServerConfig, the theme assets and the theme tools (conn_files::themes)"
+  },
+  "usageLimitSources": { "undecided": "where a provider's usage limits come from" },
+  "providerWorkspaceSnapshotsOnDemand": { "undecided": "honors workspaceSnapshotsOnDemand" },
+  "modelCatalogRefresh": { "methods": ["server.refreshProviders"] },
+  "usagePriceOverrides": { "methods": ["server.getUsageSummary"] },
+  "usageModelAliases": { "methods": ["server.getUsageSummary"] },
+  "threadPinning": {
+    "commands": ["thread.pin", "thread.unpin"],
+    "off": "the engine accepts both; no client in the monorepo reads the flag"
+  },
+  "threadPinReorder": {
+    "commands": ["thread.pin.reorder"],
+    "off": "the engine accepts it; no client in the monorepo reads the flag"
+  },
+  "threadActiveReorder": {
+    "commands": ["thread.active.reorder"],
+    "off": "the engine accepts it; no client in the monorepo reads the flag"
+  },
+  "threadAutoSettleOptOut": {
+    "commands": ["thread.auto-settle.set"],
+    "off": "the engine accepts it, and web and mobile hide the control without the flag; nobody proved that the server's auto-settle honors the opt-out"
+  },
+  "threadProjectFromScratch": { "undecided": "a thread that starts a project from an empty folder" },
+  "threadTitleRegeneration": { "undecided": "the server writes a thread's title again on request" },
+  "threadVisitedTracking": {
+    "commands": ["thread.visit"],
+    "off": "the engine accepts it; no client in the monorepo reads the flag"
+  },
+  "threadPullRequestLinking": {
+    "commands": ["thread.pull-request.link", "thread.pull-request.unlink"],
+    "off": "the engine accepts both; no client in the monorepo reads the flag"
+  },
+  "serverResolvedCommandContext": { "undecided": "the server fills a command's context itself" },
+  "threadStop": {
+    "commands": ["thread.stop"],
+    "off": "the engine accepts it; the client falls back to run.interrupt, and nobody compared the two stops with the T3 server's"
+  },
+  "localServerStop": { "methods": ["preview.stopLocalServer"] },
+  "threadPullRequests": { "undecided": "a thread's pull requests in its shell row" },
+  "threadPullRequestWatch": { "commands": ["thread.pull-request.watch"] },
+  "pullRequestStackActions": { "undecided": "actions on a stack of pull requests" },
+  "serverSelfUpdate": { "methods": ["server.updateServer"] },
+  "npmReleaseLookup": { "methods": ["server.getNpmRelease"] },
+  "serverInstallation": { "methods": ["server.updateServer"] },
+  "serverSelfUpdateProgress": { "methods": ["server.updateServerWithProgress"] },
+  "serverUpdateStaging": { "methods": ["server.updateServerWithProgress"] },
+  "serverUpdateThreadContinuation": { "methods": ["server.updateServer"] },
+  "agentActivityPublishing": { "undecided": "Live Activity pushes; only an explicit false skips seeding" },
+  "projectCloneTracking": { "methods": ["projectClone.start", "subscribeProjectClones"] },
+  "projectOrganization": { "undecided": "project.update keeps pinned and archived" },
+  "ignoredFileListing": { "methods": ["projects.listIgnoredFiles"] },
+  "ignoredFileSearch": { "methods": ["projects.listIgnoredFiles"] },
+  "environmentIcon": { "undecided": "an icon for the environment" },
+  "desktopAppUpdate": { "methods": ["server.commitDesktopUpdate"] },
+  "serverRestart": {
+    "methods": ["server.restart"],
+    "when": "only under a supervisor that starts the server again"
+  },
+  "desktopAppChannelSwitch": { "methods": ["server.commitDesktopUpdate"] },
+  "commandOutputStreaming": { "methods": ["orchestration.subscribeCommandOutput"] },
+  "serverBrowser": { "methods": ["preview.open", "subscribePreviewEvents"] },
+  "peerLinks": { "methods": ["peerLinks.list", "peerLinks.link", "peerLinks.unlink"] },
+  "mcpModeLimitHeader": { "behaviour": "/mcp narrows an OAuth client by T3-Mode-Limit (conn-mcp, peers.rs)" },
+  "linkFence": { "behaviour": "linkOrigin keeps a linked environment's work within its link (conn-mcp)" },
+  "mcpApprovalCodes": { "undecided": "pairing codes that approve one agent sign-in at a set level (AUTO-…)" },
+  "peerLinkPairingCodes": { "behaviour": "a peer link is paired by a code (crates/conn-server/src/peers.rs)" },
+  "mcpHostedApproval": { "undecided": "agent sign-ins approved on the hosted app, without a code" },
+  "triage": { "methods": ["server.prepareTriage"] },
+  "oneTimeSchedules": { "methods": ["scheduledTasks.upsert"] },
+  "freshContext": { "behaviour": "freshContext on message.dispatch (conn-engine)" },
+  "scheduledTaskThreadModes": { "methods": ["scheduledTasks.upsert"] },
+  "voiceTranscription": { "undecided": "transcribes 16 kHz mono PCM audio on this machine" },
+  "cloudVoiceTranscription": { "undecided": "transcription through the cloud" },
+  "shellThreadFamilies": { "methods": ["orchestration.getThreadFamily"] },
+  "shellOlderSettled": { "methods": ["orchestration.getOlderSettledThreads"] },
+  "linkedThreadRefreshes": { "methods": ["pullRequests.subscribeLinkedThreadRefreshes"] },
+  "issueLinkedThreads": { "methods": ["issues.linkedThreads"] }
+}

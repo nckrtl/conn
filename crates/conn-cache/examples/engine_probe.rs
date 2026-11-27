@@ -37,6 +37,15 @@ async fn main() {
     )
     .await
     .unwrap();
+    // PROBE_DISPATCH='<command json>': dispatch it first (for a rollback).
+    if let Ok(command) = std::env::var("PROBE_DISPATCH") {
+        let command: serde_json::Value = serde_json::from_str(&command).unwrap();
+        let answer = connection
+            .call_json("orchestration.dispatchCommand", command)
+            .await;
+        eprintln!("dispatch: {answer:?}");
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    }
     let stored = engine.stored(thread);
     if let Some(pending) = engine.open_thread(thread) {
         let window = pending.await.ok().flatten();
@@ -62,6 +71,38 @@ async fn main() {
         }
     }
     let caught_up_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    // PROBE_OLDER=subagent: page older rows (device first, then server) until a subagent card
+    // shows, and report whether its record came with it.
+    let mut card = serde_json::Value::Null;
+    if std::env::var("PROBE_OLDER").as_deref() == Ok("subagent") {
+        let mut pages = 0;
+        loop {
+            let found = engine.thread(thread).and_then(|state| {
+                state.entries.iter().find_map(|entry| match entry {
+                    conn_state::TimelineEntry::Subagent { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+            });
+            if let Some(id) = found {
+                let state = engine.thread(thread).unwrap();
+                let record = state
+                    .subagent_of_entry
+                    .get(&id)
+                    .and_then(|sub| state.subagents.get(sub));
+                card = serde_json::json!({"pages": pages, "entry": id,
+                    "rows_above_newest": state.entries.len() - 1
+                        - state.entries.iter().position(|e| e.id() == id).unwrap_or(0),
+                    "record": record.is_some(),
+                    "status": record.map(|r| format!("{:?}", r.status))});
+                break;
+            }
+            let Some(pending) = engine.older(thread) else { break };
+            let window = pending.await.ok().flatten();
+            engine.finish_older(thread, window);
+            pages += 1;
+        }
+    }
 
     // A fresh window, as a client without a device copy gets it.
     let (fresh_conn, mut fresh_events) = Connection::start(config, &rt);
@@ -110,7 +151,7 @@ async fn main() {
             "catch_up_items": items, "got_snapshot": snapshot,
             "drawn": ours.entries.len(), "fresh_rows": fresh.entries.len(),
             "missing": missing, "older_on_device": older_on_device, "differ": differ.len(), "differ_ids": differ.iter().take(5).collect::<Vec<_>>(),
-            "working": ours.working, "fresh_working": fresh.working,
+            "subagent_card": card, "working": ours.working, "fresh_working": fresh.working,
         })
     );
     connection.close();

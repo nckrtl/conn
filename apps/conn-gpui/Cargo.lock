@@ -1762,7 +1762,6 @@ dependencies = [
  "conn-client",
  "conn-contract",
  "conn-state",
- "serde",
  "serde_json",
  "sqlx",
  "tokio",

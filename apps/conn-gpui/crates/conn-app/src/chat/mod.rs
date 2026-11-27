@@ -112,13 +112,10 @@ const TIMELINE_END_GAP_PX: f32 = 20.0;
 const ASSISTANT_TEXT_PAD_PX: f32 = 2.0;
 const ASSISTANT_ROW_PAD_BEFORE_WORK_PX: f32 = 16.0;
 const ASSISTANT_ROW_PAD_PX: f32 = 20.0;
-/// The hover-only actions row under a finished message keeps its place in the layout.
-const ASSISTANT_META_HEIGHT_PX: f32 = 6.0 + card_face::CARD_ACTION_BOX_PX;
-/// A user row's `pb` when it ends a group, and the hover-only actions row under its bubble
-/// (`pt-0.5` and the copy button), which keeps its place in the layout.
+/// A user row's `pb` when it ends a group, and the `pt-0.5` above the actions row under its
+/// bubble.
 const USER_ROW_PAD_PX: f32 = 16.0;
 const USER_ACTIONS_PAD_TOP_PX: f32 = 2.0;
-const USER_ACTIONS_HEIGHT_PX: f32 = USER_ACTIONS_PAD_TOP_PX + card_face::CARD_ACTION_BOX_PX;
 /// A work group's `pb` when its fold is open or live, and when it is a settled fold.
 const WORK_GROUP_OPEN_PAD_PX: f32 = 8.0;
 const WORK_GROUP_FOLD_PAD_PX: f32 = 12.0;
@@ -2221,8 +2218,9 @@ impl ChatView {
         }
         if idx + 1 == items.len() {
             // The row's own trailing space counts toward the end gap, so every last row sits the
-            // same distance above the composer. A row with more trailing space than the gap (a
-            // message with its hover actions) reaches under the composer, which covers it.
+            // same distance above the composer. The actions row under a message is content, not
+            // trailing space: it shows on hover, so it ends the gap and never reaches under the
+            // composer, and hovering moves nothing.
             let end_pad = TIMELINE_END_GAP_PX - self.trailing_pad_px(&items[idx])
                 + self.composer_height_applied;
             outer = outer.pb(px(end_pad.max(0.0)));
@@ -2231,25 +2229,20 @@ impl ChatView {
     }
 
     /// The space a row keeps under its content in its own layout, which the end gap includes when
-    /// the row is last. An unlisted row counts as the "Working" row's 4px, so it keeps its place.
+    /// the row is last. A message's actions row (copy, fork, time) is content: it shows on hover,
+    /// so it keeps the full gap to the composer. An unlisted row counts as the "Working" row's
+    /// 4px, so it keeps its place.
     fn trailing_pad_px(&self, item: &VirtualItem) -> f32 {
         match item {
             VirtualItem::Assistant {
-                followed_by_work,
-                show_meta,
-                ..
+                followed_by_work, ..
             } => {
                 let row_pad = if *followed_by_work {
                     ASSISTANT_ROW_PAD_BEFORE_WORK_PX
                 } else {
                     ASSISTANT_ROW_PAD_PX
                 };
-                let meta = if *show_meta {
-                    ASSISTANT_META_HEIGHT_PX
-                } else {
-                    0.0
-                };
-                ASSISTANT_TEXT_PAD_PX + meta + row_pad
+                ASSISTANT_TEXT_PAD_PX + row_pad
             }
             VirtualItem::User {
                 grouped_with_next, ..
@@ -2257,7 +2250,7 @@ impl ChatView {
                 if *grouped_with_next {
                     4.0
                 } else {
-                    USER_ROW_PAD_PX + USER_ACTIONS_HEIGHT_PX
+                    USER_ROW_PAD_PX
                 }
             }
             VirtualItem::WorkGroup { id, has_active, .. } => {

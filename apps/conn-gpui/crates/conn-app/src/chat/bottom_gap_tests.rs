@@ -2,13 +2,13 @@
 
 use conn_state::{EntryTiming, ItemStatus, ThreadState, TimelineEntry};
 use conn_theme::Tokens;
-use gpui_kit::test::TestQueryExt as _;
+use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
 use gpui_kit::{
     AnyWindowHandle, AppContext as _, Bounds, Entity, HeadlessAppContext, Point, WindowBounds,
     WindowOptions, px, size,
 };
 
-use super::card_shots::settle;
+use super::card_shots::{hover, settle};
 use crate::app::{ConnApp, register_keybindings};
 
 const WIDTH_PX: f32 = 1100.0;
@@ -186,6 +186,35 @@ fn gap_below(ctx: &mut HeadlessAppContext, window: AnyWindowHandle, content: &st
     f32::from(card.top()) - f32::from(content.bottom())
 }
 
+/// The middle of the element `id`, where a pointer hovers it.
+fn center_of(
+    ctx: &mut HeadlessAppContext,
+    window: AnyWindowHandle,
+    id: &str,
+) -> Point<gpui_kit::Pixels> {
+    bounds_by_id(ctx, window, id).center()
+}
+
+/// Scrolls the timeline by `dy` pixels, as a trackpad does; a negative `dy` scrolls toward the end.
+fn scroll_timeline(ctx: &mut HeadlessAppContext, window: AnyWindowHandle, dy: f32) {
+    let at = Point::new(px(WIDTH_PX / 2.0 + 120.0), px(HEIGHT_PX / 3.0));
+    ctx.update_window(window, |_, w, c| {
+        w.render_frame(c);
+        w.dispatch_event(
+            gpui_kit::InputEvent::to_platform_input(gpui_kit::ScrollEvent {
+                position: at,
+                delta: gpui_kit::ScrollDelta::Pixels(Point::new(px(0.0), px(dy))),
+                modifiers: w.modifiers(),
+                touch_phase: gpui_kit::TouchPhase::Moved,
+                ..Default::default()
+            }),
+            c,
+        );
+    })
+    .unwrap_or_else(|error| panic!("no scroll: {error}"));
+    settle(ctx, window);
+}
+
 fn headless() -> HeadlessAppContext {
     HeadlessAppContext::with_platform(
         std::sync::Arc::new(gpui_apple::AppleTextSystem::new()),
@@ -218,8 +247,8 @@ fn idle_message_gap_matches_the_running_gap() {
     for theme in ["dark-ocean", "t3-code-light"] {
         let running = running_gap(&mut ctx, theme);
         let (window, _app) = open(&mut ctx, theme, idle_thread());
-        let idle = gap_below(&mut ctx, window, "assistant-body-answer-1");
-        assert_gap(idle, running, &format!("{theme}: idle message"));
+        let idle = gap_below(&mut ctx, window, "assistant-actions-answer-1");
+        assert_gap(idle, running, &format!("{theme}: idle message actions"));
     }
 }
 
@@ -234,7 +263,7 @@ fn gap_holds_when_a_running_turn_ends() {
     let running = gap_below(&mut ctx, window, "timeline-thinking");
     assert_gap(running, 28.0, "live gap");
     set_thread(&mut ctx, window, &app, idle_thread());
-    let idle = gap_below(&mut ctx, window, "assistant-body-answer-1");
+    let idle = gap_below(&mut ctx, window, "assistant-actions-answer-1");
     assert_gap(idle, running, "gap after the turn ends");
     // And back: a new turn starts under the same thread.
     let mut next = idle_thread();
@@ -259,7 +288,7 @@ fn every_last_row_sits_at_the_running_gap() {
         .entries
         .push(user("u-9", "Is anyone there?", "run-9"));
     let (window, _app) = open(&mut ctx, "dark-ocean", thread);
-    let gap = gap_below(&mut ctx, window, "chat-user-u-9");
+    let gap = gap_below(&mut ctx, window, "user-actions-u-9");
     assert_gap(gap, running, "last user message");
 
     // A settled "Worked for" fold is last.
@@ -296,7 +325,10 @@ fn render_bottom_gap_screenshots() {
         let content = if state == "running" {
             "timeline-thinking"
         } else {
-            "assistant-body-answer-1"
+            // Hover the last message, as Nick's pointer does, so its actions row shows.
+            let at = center_of(&mut ctx, window, "assistant-body-answer-1");
+            hover(&mut ctx, window, at);
+            "assistant-actions-answer-1"
         };
         eprintln!(
             "{prefix} {state}: gap {}px",
@@ -309,4 +341,54 @@ fn render_bottom_gap_screenshots() {
             .save(dir.join(format!("{prefix}-{state}-dark.png")))
             .unwrap_or_else(|error| panic!("no PNG saved: {error}"));
     }
+}
+
+/// The last message's actions row (copy, fork, time) is content: hovered or not, it ends the
+/// running gap above the composer, and it never overlaps the message or the composer.
+#[test]
+fn last_message_actions_row_sits_at_the_running_gap() {
+    let mut ctx = headless();
+    let running = running_gap(&mut ctx, "dark-ocean");
+    let (window, _app) = open(&mut ctx, "dark-ocean", idle_thread());
+    let before = gap_below(&mut ctx, window, "assistant-actions-answer-1");
+    assert_gap(before, running, "actions row, not hovered");
+
+    let at = center_of(&mut ctx, window, "assistant-body-answer-1");
+    hover(&mut ctx, window, at);
+    let body = bounds_by_id(&mut ctx, window, "assistant-body-answer-1");
+    let actions = bounds_by_id(&mut ctx, window, "assistant-actions-answer-1");
+    let card = bounds_by_id(&mut ctx, window, "chat-composer-card");
+    assert!(
+        actions.top() >= body.bottom(),
+        "the actions row overlaps the message: {actions:?} vs {body:?}"
+    );
+    assert!(
+        actions.bottom() < card.top(),
+        "the actions row reaches the composer: {actions:?} vs {card:?}"
+    );
+    let hovered = gap_below(&mut ctx, window, "assistant-actions-answer-1");
+    assert_gap(hovered, running, "actions row, hovered");
+    assert!(
+        (hovered - before).abs() <= 0.5,
+        "hovering moved the row: {before}px, then {hovered}px"
+    );
+}
+
+/// Scrolled away and back to the end, the whole last row shows, actions row included.
+#[test]
+fn scrolled_to_the_end_shows_the_whole_last_row() {
+    let mut ctx = headless();
+    let running = running_gap(&mut ctx, "dark-ocean");
+    let (window, _app) = open(&mut ctx, "dark-ocean", idle_thread());
+    scroll_timeline(&mut ctx, window, 200.0);
+    let away = gap_below(&mut ctx, window, "assistant-actions-answer-1");
+    assert!(
+        away < -100.0,
+        "the timeline did not scroll up: gap {away}px"
+    );
+    for _ in 0..4 {
+        scroll_timeline(&mut ctx, window, -2_000.0);
+    }
+    let gap = gap_below(&mut ctx, window, "assistant-actions-answer-1");
+    assert_gap(gap, running, "actions row at the scroll end");
 }

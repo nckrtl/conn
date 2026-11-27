@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import { useId, useRef, useState, type CSSProperties } from "react";
 import snapshots from "./taskInsights.json";
 import { Tool } from "./Icon";
 import "./TaskInsights.css";
@@ -82,8 +82,9 @@ function Trend({ metric, expanded = false }: { metric: Metric; expanded?: boolea
       >
         <defs>
           <linearGradient id={gradient} x1="0" y1="0" x2="0" y2="1">
-            <stop stopColor="currentColor" stopOpacity=".22" />
-            <stop offset="100%" stopColor="currentColor" stopOpacity="0" />
+            {/* Both charts fade the same neutral muted colour (`SERIES_AREA_OPACITY`). */}
+            <stop stopColor="var(--native-mutedForeground)" stopOpacity=".22" />
+            <stop offset="100%" stopColor="var(--native-mutedForeground)" stopOpacity="0" />
           </linearGradient>
         </defs>
         {expanded &&
@@ -157,7 +158,13 @@ export function TaskInsights({ period, hidden }: { period: Period; hidden: reado
       <div className="board-insights-scroll" inert={!!selected}>
         <div
           className="board-insights-grid"
-          style={{ gridTemplateColumns: `repeat(${columns}, minmax(130px,1fr))` }}
+          style={
+            {
+              gridTemplateColumns: `repeat(${columns}, minmax(130px,1fr))`,
+              // A lone row stretches to 210px, so its sparklines take 42px more.
+              "--spark-height": cards.length <= 2 ? "70px" : "53.75px",
+            } as CSSProperties
+          }
         >
           {cards.map((card, i) => (
             <button

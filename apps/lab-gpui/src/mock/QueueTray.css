@@ -1,0 +1,195 @@
+/* GPUI `chat/queue_tray.rs`. The fills are GPUI's opaque sRGB mixes of the composer's fill
+   (`composer_fill`: `shell_field` dark, `card` light). */
+.desktop {
+  --composer-fill: var(--raised);
+  /* Dark: 86% of the composer, 14% of the page background. */
+  --queue-tray: color-mix(in srgb, var(--composer-fill) 86%, var(--native-canvas));
+  /* A hovered row: 60% (dark) of the way from the tray to the composer. */
+  --queue-row-hover: color-mix(in srgb, var(--queue-tray) 40%, var(--composer-fill));
+  /* A hovered button: the composer, lifted 2% toward the foreground in dark. */
+  --queue-button-hover: color-mix(in srgb, var(--composer-fill) 98%, var(--ink));
+}
+.desktop[data-theme="light"] {
+  /* Light surfaces sit within a few percent of white: 75% of the way to the opaque border. */
+  --queue-tray: color-mix(in srgb, var(--composer-fill) 25%, var(--native-border));
+  --queue-row-hover: color-mix(in srgb, var(--queue-tray) 60%, var(--composer-fill));
+  --queue-button-hover: var(--composer-fill);
+}
+.composer-wrap > .composer {
+  z-index: 1;
+}
+.queue-anchor {
+  position: relative;
+}
+/* Inset 20px from the composer's sides; its bottom 16px runs behind the composer card. */
+.queue-tray {
+  margin: 0 20px -16px;
+  padding-bottom: 15px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-bottom: 0;
+  border-radius: 16px 16px 0 0;
+  background: var(--queue-tray);
+}
+.queue-rows {
+  /* 4.5 rows of 30px and their hairlines, then it scrolls. */
+  max-height: calc(31px * 4.5);
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.queue-band {
+  display: flex;
+  flex-direction: column;
+}
+/* A full-width 1px line of its own between two rows. A row's fill covers the lines beside it. */
+.queue-divider {
+  flex: none;
+  height: 1px;
+  background: var(--line);
+}
+.queue-band:has(> .queue-row:is(:hover, [data-hovered], [data-editing])) > .queue-divider,
+.queue-band:has(> .queue-row:is(:hover, [data-hovered], [data-editing]))
+  + .queue-band
+  > .queue-divider {
+  background: none;
+}
+.queue-row {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  height: 30px;
+  padding: 0 6px 0 12px;
+}
+.queue-band:first-child > .queue-row {
+  border-radius: 15px 15px 0 0;
+}
+.queue-row:is(:hover, [data-hovered]) {
+  background: var(--queue-row-hover);
+}
+.queue-row[data-editing] {
+  background: color-mix(in srgb, var(--native-messageAction) 12%, transparent);
+}
+.queue-row > .icon {
+  width: 14px;
+  height: 14px;
+  color: color-mix(in srgb, var(--native-mutedForeground) 80%, transparent);
+}
+/* The glyphs sit low in their line box: the text is raised 1.5px so it centres in the band. */
+.queue-text {
+  flex: 1;
+  min-width: 0;
+  position: relative;
+  top: -1.5px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 13px;
+  line-height: 18px;
+  color: color-mix(in srgb, var(--ink) 70%, transparent);
+}
+.queue-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--native-mutedForeground);
+}
+/* 24px, radius 12: concentric with the tray (16 less the 1px border and 3px above the button). */
+.queue-button {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 12px;
+  color: var(--native-mutedForeground);
+}
+.queue-button .icon {
+  width: 14px;
+  height: 14px;
+}
+.queue-button:is(:hover, :active, [data-hovered]) {
+  background: var(--queue-button-hover);
+  color: var(--ink);
+}
+.queue-editing {
+  position: relative;
+  top: -1.5px;
+  padding: 0 4px;
+  color: var(--ink);
+}
+.queue-cancel {
+  height: 24px;
+  padding: 0 8px;
+  border-radius: 6px;
+  color: var(--native-mutedForeground);
+}
+.queue-cancel:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+.queue-pending {
+  padding-right: 12px;
+}
+.queue-arc {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  color: color-mix(in srgb, var(--native-mutedForeground) 80%, transparent);
+}
+.turning-arc {
+  width: 12px;
+  height: 12px;
+  animation: turning-arc 0.9s linear infinite;
+}
+@keyframes turning-arc {
+  to {
+    transform: rotate(1turn);
+  }
+}
+.queue-status {
+  flex: none;
+  position: relative;
+  top: -1.5px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--native-mutedForeground);
+}
+/* The ⋯ menu (`thread_menu::menu_surface`): popover fill, 8% foreground border, radius 12. */
+.menu.queue-menu {
+  z-index: 5;
+  width: max-content;
+  display: flex;
+  flex-direction: column;
+  min-width: 180px;
+  padding: 4px;
+  border: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
+  border-radius: 12px;
+  background: var(--native-surfaceOverlay);
+  box-shadow: 0 18px 44px -18px rgb(0 0 0 / 0.8);
+}
+.desktop[data-theme="light"] .menu.queue-menu {
+  box-shadow: 0 16px 40px -18px rgb(0 0 0 / 0.55);
+}
+.menu.queue-menu button {
+  justify-content: flex-start;
+  min-height: 28px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--ink);
+}
+/* Native menus paint the row in the primary colour with its foreground. */
+.menu.queue-menu button:hover:not(:disabled) {
+  background: var(--native-messageAction);
+  color: var(--native-messageActionForeground);
+}
+.menu.queue-menu button:disabled {
+  opacity: 0.64;
+}

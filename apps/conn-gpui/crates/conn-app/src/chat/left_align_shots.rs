@@ -336,6 +336,25 @@ fn render_queue_tray_screenshots() {
     }
 }
 
+/// Renders one, two and three queued messages, to check the hairlines between the rows.
+///
+/// `CONN_THREAD_SHOTS_DIR=<dir> cargo test -p conn-app render_queue_tray_divider_screenshots -- --ignored`
+#[test]
+#[ignore = "writes PNGs; set CONN_THREAD_SHOTS_DIR"]
+fn render_queue_tray_divider_screenshots() {
+    let Some(dir) = std::env::var_os("CONN_THREAD_SHOTS_DIR") else {
+        return;
+    };
+    for count in 1..=3 {
+        render_pngs(
+            Path::new(&dir),
+            &format!("queue-divider-{count}"),
+            &|| queued_thread(count, 3),
+            &|_, _| {},
+        );
+    }
+}
+
 /// Renders two queued messages above the composer, to check the tray's fill against the
 /// composer's.
 ///

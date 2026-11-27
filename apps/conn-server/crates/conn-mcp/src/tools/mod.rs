@@ -10,13 +10,13 @@ use conn_support::{
 };
 
 use conn_contract::{Command, ThreadId, from_json};
-use conn_engine::EngineError;
+use conn_engine::{BoxFuture, EngineError};
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::{Caller, ClientCaller, McpConfig, McpService};
 
-mod annotations;
+pub mod annotations;
 pub(crate) mod attachments;
 mod background;
 mod create_threads;
@@ -25,12 +25,12 @@ mod html;
 mod issues;
 mod manage;
 mod message;
-mod panels;
+pub mod panels;
 mod preview;
 mod projects;
 mod pull_request_forge;
 mod pull_requests;
-mod scheduled;
+pub mod scheduled;
 mod script_completion;
 mod secrets;
 pub(crate) mod tasks;
@@ -91,7 +91,27 @@ pub(crate) fn fail(code: &'static str, message: impl Into<String>) -> ToolError 
     }
 }
 
-/// Every name in `tools.implemented` has an arm here; a test checks both ways.
+/// One feature's tools: their names, and the one handler that serves them. A family's file
+/// holds all of it, so the dispatch and the server's module list name no tool of it.
+#[derive(Debug)]
+pub struct Family {
+    pub names: &'static [&'static str],
+    call: for<'a> fn(&'a Cx<'a>, &'a str, &'a Args) -> BoxFuture<'a, ToolResult>,
+}
+
+/// The tool families. Every other tool has an arm in [`call_in`].
+const FAMILIES: &[&Family] = &[&annotations::FAMILY, &panels::FAMILY, &scheduled::FAMILY];
+
+/// Every tool a family serves.
+#[cfg(test)]
+pub(crate) fn family_tools() -> impl Iterator<Item = &'static str> {
+    FAMILIES
+        .iter()
+        .flat_map(|family| family.names.iter().copied())
+}
+
+/// The tools with an arm in [`call_in`]. Every name in `tools.implemented` is here or in one
+/// family; a test checks both ways.
 #[cfg(test)]
 pub(crate) const HANDLED: &[&str] = &[
     "tool_search",
@@ -117,8 +137,6 @@ pub(crate) const HANDLED: &[&str] = &[
     "preview_cdp_endpoint",
     "conn_preview_close",
     "conn_preview_list",
-    "mcp_call",
-    "mcp_connect",
     "create_threads",
     "conn_attachment_prepare_upload",
     "conn_attachment_discard",
@@ -127,16 +145,12 @@ pub(crate) const HANDLED: &[&str] = &[
     "conn_worktree_list",
     "conn_worktree_status",
     "files_definition",
-    "files_selection",
-    "files_reveal",
-    "panel_open",
     "request_secret",
     "save_test_login",
     "request_credentials",
     "fill_credential",
     "conn_theme_read",
     "conn_theme_set",
-    "database_query",
     "conn_background_wait",
     "link_pull_request",
     "link_pull_requests",
@@ -164,14 +178,6 @@ pub(crate) const HANDLED: &[&str] = &[
     "link_issue",
     "unlink_issue",
     "list_thread_issues",
-    "annotations_list",
-    "annotations_claim",
-    "annotations_complete",
-    "annotations_release",
-    "schedule_task",
-    "list_scheduled_tasks",
-    "delete_scheduled_task",
-    "run_scheduled_task_now",
     "conn_queue",
     "conn_thread_configure",
     "conn_thread_organize",
@@ -261,23 +267,8 @@ pub(crate) async fn call(
 
 async fn call_in(cx: &Cx<'_>, name: &str, args: Args) -> ToolResult {
     let service = cx.service;
-    // Fenced work never changes this environment's scheduled tasks (`McpToolAccess.writes`,
-    // `startsThreads` refused).
-    let fenced = match name {
-        "schedule_task" if !args.contains_key("scheduledTaskId") => {
-            Some("schedule tasks in this environment")
-        }
-        "schedule_task" | "delete_scheduled_task" => {
-            Some("change this environment's scheduled tasks")
-        }
-        "run_scheduled_task_now" => Some("change projects or environment settings"),
-        _ => None,
-    };
-    if let Some(what) = fenced
-        && cx.fencing_link().await?.is_some()
-    {
-        cx.writing_caller().await?;
-        cx.assert_not_linked(what).await?;
+    if let Some(family) = FAMILIES.iter().find(|family| family.names.contains(&name)) {
+        return (family.call)(cx, name, &args).await;
     }
     match name {
         "conn_workflow_stop" => workflows::stop(cx, &args).await,
@@ -339,30 +330,18 @@ async fn call_in(cx: &Cx<'_>, name: &str, args: Args) -> ToolResult {
         "conn_thread_configure" => manage::configure(cx, &args).await,
         "conn_thread_organize" => manage::organize(cx, &args).await,
         "conn_thread_transfer" => manage::transfer(cx, &args).await,
-        "mcp_call" | "mcp_connect" => panels::invoke(cx, name, &args).await,
         "files_definition" => panels::definition(cx, &args).await,
-        "files_selection" | "files_reveal" => panels::files(cx, name, &args).await,
-        "panel_open" => panels::open(cx, &args).await,
         "request_secret" => secrets::request(cx, &args).await,
         "save_test_login" => test_logins::save(cx, &args).await,
         "request_credentials" => test_logins::request(cx, &args).await,
         "fill_credential" => test_logins::fill(cx, &args).await,
         "conn_theme_read" => themes::read(cx, &args).await,
         "conn_theme_set" => themes::set(cx, &args).await,
-        "database_query" => panels::database_query(cx, &args).await,
         "send_to_user" => message::send_to_user(cx, &args).await,
         "conn_background_wait" => background::wait(cx, &args).await,
         "delegate_task" => tasks::delegate(cx, &args).await,
         "task_status" => tasks::status(cx, &args).await,
         "task_cancel" => tasks::cancel(cx, &args).await,
-        "schedule_task" => scheduled::schedule(cx, &args).await,
-        "annotations_list" => annotations::list(cx, &args).await,
-        "annotations_claim" => annotations::claim(cx, &args).await,
-        "annotations_complete" => annotations::complete(cx, &args).await,
-        "annotations_release" => annotations::release(cx, &args).await,
-        "list_scheduled_tasks" => scheduled::list(cx, &args).await,
-        "delete_scheduled_task" => scheduled::delete(cx, &args).await,
-        "run_scheduled_task_now" => scheduled::run_now(cx, &args).await,
         "list_issues" => issues::list(cx, &args).await,
         "read_issue" => issues::read(cx, &args).await,
         "create_issue" => issues::create(cx, &args).await,
@@ -389,11 +368,16 @@ async fn call_in(cx: &Cx<'_>, name: &str, args: Args) -> ToolResult {
         "pull_request_merge" => pull_request_forge::merge(cx, &args).await,
         "ci_logs" => pull_request_forge::ci_logs(cx, &args).await,
         "ci_rerun" => pull_request_forge::ci_rerun(cx, &args).await,
-        other => Err(fail(
-            "capability_denied",
-            format!("conn-server does not serve `{other}` yet."),
-        )),
+        other => Err(unserved(other)),
     }
+}
+
+/// The answer for a catalog tool that no handler serves.
+fn unserved(name: &str) -> ToolError {
+    fail(
+        "capability_denied",
+        format!("conn-server does not serve `{name}` yet."),
+    )
 }
 
 /// One call's context.

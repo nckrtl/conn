@@ -31,12 +31,7 @@ pub(crate) const MODULE: Module = Module {
     start,
     methods: register,
     routes: crate::routes::hooks::router,
-    tools: &[
-        "schedule_task",
-        "list_scheduled_tasks",
-        "delete_scheduled_task",
-        "run_scheduled_task_now",
-    ],
+    tools: conn_mcp::tools::scheduled::FAMILY.names,
     // One-time and fresh-session schedules, which mobile gates on.
     capabilities: |capabilities| {
         capabilities.one_time_schedules = Some(true);

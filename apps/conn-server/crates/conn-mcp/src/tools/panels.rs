@@ -1,11 +1,34 @@
 //! Thread-scoped panel display on connected desktops; browser tab automation needs preview.
 
-use super::{Args, Cx, ToolError, ToolResult, bool_arg, fail, str_arg};
+use super::{Args, Cx, Family, ToolError, ToolResult, bool_arg, fail, str_arg, unserved};
 use conn_contract::{AgentPanelKind, AgentPanelRequest, from_json};
 use serde_json::{Value, json};
 use std::time::Duration;
 
-pub(super) async fn open(cx: &Cx<'_>, args: &Args) -> ToolResult {
+/// The tools a connected desktop answers through the panel request bridge.
+pub const FAMILY: Family = Family {
+    names: &[
+        "panel_open",
+        "mcp_connect",
+        "mcp_call",
+        "database_query",
+        "files_selection",
+        "files_reveal",
+    ],
+    call: |cx, name, args| {
+        Box::pin(async move {
+            match name {
+                "panel_open" => open(cx, args).await,
+                "mcp_connect" | "mcp_call" => invoke(cx, name, args).await,
+                "database_query" => database_query(cx, args).await,
+                "files_selection" | "files_reveal" => files(cx, name, args).await,
+                other => Err(unserved(other)),
+            }
+        })
+    },
+};
+
+async fn open(cx: &Cx<'_>, args: &Args) -> ToolResult {
     let mut decoded = args.clone();
     super::trim_non_blank(&mut decoded, &["url", "tabId", "profileId"])?;
     let args = &decoded;
@@ -72,7 +95,7 @@ pub(super) async fn open(cx: &Cx<'_>, args: &Args) -> ToolResult {
     Ok(json!({"panel":panel,"shownOn":shown.device_name.unwrap_or_else(|| "Conn desktop".into())}))
 }
 
-pub(super) async fn database_query(cx: &Cx<'_>, args: &Args) -> ToolResult {
+async fn database_query(cx: &Cx<'_>, args: &Args) -> ToolResult {
     let caller = cx.require_thread("This tool")?;
     cx.writing_caller().await?;
     let broker = cx
@@ -109,7 +132,7 @@ pub(super) async fn database_query(cx: &Cx<'_>, args: &Args) -> ToolResult {
 
 const PANEL_ACTION_TIMEOUT: Duration = Duration::from_secs(90);
 
-pub(super) async fn invoke(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
+async fn invoke(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
     let caller = cx.require_thread(name)?;
     cx.writing_caller().await?;
     let mut request = json!({"requestId":"pending","threadId":caller.thread_id,"panel":"mcp","focusWindow":args.get("focusWindow").cloned().unwrap_or(Value::Bool(true))});
@@ -162,7 +185,7 @@ pub(super) async fn invoke(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
     Ok(result)
 }
 
-pub(super) async fn files(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
+async fn files(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
     use conn_contract::source::{FilesAction, SourceLines, workspace_relative};
     let caller = cx.require_thread(name)?;
     cx.writing_caller().await?;

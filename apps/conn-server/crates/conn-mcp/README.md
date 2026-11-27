@@ -303,9 +303,11 @@ failure or timeout `orchestration_error` (`failed`). Clearing that matches nothi
 | `conn_queue` | `list`, `read` always; writes while live, other threads within its modes | any thread | `list`, `read` |
 | `conn_thread_configure` | read always; set while live, other threads within its modes | any thread | read |
 
-To serve one: add its name to `tools.implemented`, run `gen-tools.mjs`, add a handler in
-`src/tools/` and its name to `HANDLED`; the tests check both lists agree. Strike it from
-`NAMED_NOT_SERVED` in `src/tests.rs` if a text names it.
+To serve one: add its name to `tools.implemented`, run `gen-tools.mjs` and add a handler in
+`src/tools/`. A feature's tools are a `Family` in the feature's own file: add the name and its
+arm there. A new feature adds its file and one entry in `FAMILIES`. A tool of no family gets an
+arm in `call_in` and its name in `HANDLED`. The tests check that the catalog and the handlers
+agree. Strike the name from `NAMED_NOT_SERVED` in `src/tests.rs` if a text names it.
 
 ## What Orbit needs
 

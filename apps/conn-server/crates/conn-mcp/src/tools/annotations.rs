@@ -6,7 +6,28 @@
 use conn_features::annotations::{AnnotationError, Annotations, is_annotation_id};
 use serde_json::{Value, json};
 
-use super::{Args, Cx, ToolError, ToolResult, bool_arg, str_arg};
+use super::{Args, Cx, Family, ToolError, ToolResult, bool_arg, str_arg, unserved};
+
+/// The annotation tools.
+pub const FAMILY: Family = Family {
+    names: &[
+        "annotations_list",
+        "annotations_claim",
+        "annotations_complete",
+        "annotations_release",
+    ],
+    call: |cx, name, args| {
+        Box::pin(async move {
+            match name {
+                "annotations_list" => list(cx, args).await,
+                "annotations_claim" => claim(cx, args).await,
+                "annotations_complete" => complete(cx, args).await,
+                "annotations_release" => release(cx, args).await,
+                other => Err(unserved(other)),
+            }
+        })
+    },
+};
 
 fn store<'a>(cx: &'a Cx<'_>) -> Result<&'a Annotations, ToolError> {
     cx.config()
@@ -57,7 +78,7 @@ async fn acting_caller(cx: &Cx<'_>) -> Result<(), ToolError> {
 }
 
 /// `annotations_list` (`readsAsCaller`): todo and in progress, or all with `all`.
-pub(super) async fn list(cx: &Cx<'_>, args: &Args) -> ToolResult {
+async fn list(cx: &Cx<'_>, args: &Args) -> ToolResult {
     cx.require_thread("This tool").map_err(plain)?;
     let project = caller_project(cx).await?;
     let mut list = store(cx)?.list(&project).await.map_err(tagged)?;
@@ -70,7 +91,7 @@ pub(super) async fn list(cx: &Cx<'_>, args: &Args) -> ToolResult {
 }
 
 /// `annotations_claim`: the oldest waiting one, or one by id, with its screenshot's path.
-pub(super) async fn claim(cx: &Cx<'_>, args: &Args) -> ToolResult {
+async fn claim(cx: &Cx<'_>, args: &Args) -> ToolResult {
     let id = checked_id(args)?;
     acting_caller(cx).await?;
     let project = caller_project(cx).await?;
@@ -89,7 +110,7 @@ pub(super) async fn claim(cx: &Cx<'_>, args: &Args) -> ToolResult {
     Ok(json!({ "annotation": claimed }))
 }
 
-pub(super) async fn complete(cx: &Cx<'_>, args: &Args) -> ToolResult {
+async fn complete(cx: &Cx<'_>, args: &Args) -> ToolResult {
     let id = checked_id(args)?.unwrap_or_default();
     acting_caller(cx).await?;
     let project = caller_project(cx).await?;
@@ -101,7 +122,7 @@ pub(super) async fn complete(cx: &Cx<'_>, args: &Args) -> ToolResult {
     Ok(json!({ "annotation": annotation }))
 }
 
-pub(super) async fn release(cx: &Cx<'_>, args: &Args) -> ToolResult {
+async fn release(cx: &Cx<'_>, args: &Args) -> ToolResult {
     let id = checked_id(args)?.unwrap_or_default();
     acting_caller(cx).await?;
     let project = caller_project(cx).await?;

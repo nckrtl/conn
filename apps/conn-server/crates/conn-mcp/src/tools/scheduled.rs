@@ -10,9 +10,49 @@ use conn_features::scheduled::{self, Failure as TaskFailure, ScheduledTasks, Ups
 use serde_json::{Value, json};
 
 use super::{
-    Args, Cx, Limits, ToolError, ToolResult, bool_arg, fail, internal, str_arg,
+    Args, Cx, Family, Limits, ToolError, ToolResult, bool_arg, fail, internal, str_arg,
     threads::{resolve_interaction_mode, resolve_runtime_mode},
+    unserved,
 };
+
+/// The scheduled task tools.
+pub const FAMILY: Family = Family {
+    names: &[
+        "schedule_task",
+        "list_scheduled_tasks",
+        "delete_scheduled_task",
+        "run_scheduled_task_now",
+    ],
+    call: |cx, name, args| Box::pin(call(cx, name, args)),
+};
+
+async fn call(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
+    // Fenced work never changes this environment's scheduled tasks (`McpToolAccess.writes`,
+    // `startsThreads` refused).
+    let fenced = match name {
+        "schedule_task" if !args.contains_key("scheduledTaskId") => {
+            Some("schedule tasks in this environment")
+        }
+        "schedule_task" | "delete_scheduled_task" => {
+            Some("change this environment's scheduled tasks")
+        }
+        "run_scheduled_task_now" => Some("change projects or environment settings"),
+        _ => None,
+    };
+    if let Some(what) = fenced
+        && cx.fencing_link().await?.is_some()
+    {
+        cx.writing_caller().await?;
+        cx.assert_not_linked(what).await?;
+    }
+    match name {
+        "schedule_task" => schedule(cx, args).await,
+        "list_scheduled_tasks" => list(cx, args).await,
+        "delete_scheduled_task" => delete(cx, args).await,
+        "run_scheduled_task_now" => run_now(cx, args).await,
+        other => Err(unserved(other)),
+    }
+}
 
 /// `fullAccessRequired` in `McpToolAccess.ts`.
 const FULL_ACCESS_REQUIRED: &str = "Changing projects or environment settings needs a live full-access/default calling thread or a full-access client.";
@@ -112,7 +152,7 @@ async fn save(
 
 /// `schedule_task`: creates a task (`startsThreads`, refused to linked callers), or with
 /// `scheduledTaskId` updates one (`writes`).
-pub(super) async fn schedule(cx: &Cx<'_>, args: &Args) -> ToolResult {
+async fn schedule(cx: &Cx<'_>, args: &Args) -> ToolResult {
     // Arguments decode before any access rule, as the TS tool decodes its parameters.
     let mut args = args.clone();
     if let Some(schedule) = args.get("schedule") {
@@ -371,7 +411,7 @@ async fn update(cx: &Cx<'_>, args: &Args, id: &str) -> ToolResult {
 }
 
 /// `list_scheduled_tasks` (`reads`): the caller's project by default, all outside a thread.
-pub(super) async fn list(cx: &Cx<'_>, args: &Args) -> ToolResult {
+async fn list(cx: &Cx<'_>, args: &Args) -> ToolResult {
     let service = service(cx)?;
     let parent = parent(cx).await?;
     let project = str_arg(args, "projectId").map(str::to_owned).or_else(|| {
@@ -392,7 +432,7 @@ pub(super) async fn list(cx: &Cx<'_>, args: &Args) -> ToolResult {
 }
 
 /// `delete_scheduled_task` (`writes`).
-pub(super) async fn delete(cx: &Cx<'_>, args: &Args) -> ToolResult {
+async fn delete(cx: &Cx<'_>, args: &Args) -> ToolResult {
     let limits = cx.writing_caller().await?;
     let service = service(cx)?;
     let id = str_arg(args, "scheduledTaskId").unwrap_or_default();
@@ -408,7 +448,7 @@ pub(super) async fn delete(cx: &Cx<'_>, args: &Args) -> ToolResult {
 
 /// `run_scheduled_task_now` (`writesEnvironment`): a live caller at full access and default
 /// interaction. Success means started, not finished.
-pub(super) async fn run_now(cx: &Cx<'_>, args: &Args) -> ToolResult {
+async fn run_now(cx: &Cx<'_>, args: &Args) -> ToolResult {
     let limits = cx.writing_caller().await?;
     if !(limits.runtime_mode == "full-access" && limits.interaction_mode == "default") {
         return Err(fail("capability_denied", FULL_ACCESS_REQUIRED));

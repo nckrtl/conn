@@ -32,7 +32,7 @@ mod remote_tasks;
 mod sessions;
 pub mod snapshot;
 mod time;
-mod tools;
+pub mod tools;
 mod transport;
 mod view;
 mod worktrees;

@@ -371,6 +371,7 @@ fn forwarded_results_must_match_their_tool() {
 fn every_catalog_tool_has_a_handler_and_back() {
     let mut listed: Vec<&str> = catalog::names().collect();
     let mut handled = tools::HANDLED.to_vec();
+    handled.extend(tools::family_tools());
     listed.sort_unstable();
     handled.sort_unstable();
     assert_eq!(listed, handled);

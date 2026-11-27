@@ -69,9 +69,15 @@ pub(super) const ICON_BUTTON_RADIUS_PX: f32 =
 /// its glyphs (cap height down to the descenders) sit low in it: without this, the space below
 /// the text is 3px smaller than the space above it. The icons centre on their own.
 pub(super) const TEXT_RAISE_PX: f32 = 1.5;
-/// How far from the tray's fill toward the composer's the icon buttons' hover fill sits: lighter
-/// than the row it sits on, darker than the composer.
-const BUTTON_HOVER_MIX: f32 = 0.5;
+/// How far from the tray's fill toward the composer's a hovered row's fill sits: a subtle lift,
+/// clearly below the composer, leaving room for the button hover above it. The dark tray sits
+/// only a few levels below its composer, so dark takes a bigger share to stay visible.
+const LIGHT_ROW_HOVER_MIX: f32 = 0.4;
+const DARK_ROW_HOVER_MIX: f32 = 0.6;
+/// How far past the composer's fill toward the foreground the dark button hover sits. Dark has so
+/// little room between the tray and the composer that a button hover of exactly the composer's
+/// fill reads only faintly above the row; this small lift keeps it about the composer's fill.
+const DARK_BUTTON_HOVER_LIFT: f32 = 0.02;
 /// An optimistic order the server has not confirmed is dropped after this long.
 const ORDER_OVERRIDE_TTL: Duration = Duration::from_secs(5);
 
@@ -378,25 +384,42 @@ pub(super) fn tray_fill(tokens: &Tokens) -> conn_theme::Rgba {
         // opaque for this to darken, so the mix ignores any alpha on either colour.
         conn_theme::Appearance::Dark => (tokens.background, 1.0 - DARK_FILL_COMPOSER_SHARE),
     };
+    mix(composer, toward, amount)
+}
+
+/// `from` moved `amount` of the way to `to`, opaque.
+fn mix(from: conn_theme::Rgba, to: conn_theme::Rgba, amount: f32) -> conn_theme::Rgba {
     conn_theme::Rgba {
-        r: composer.r + (toward.r - composer.r) * amount,
-        g: composer.g + (toward.g - composer.g) * amount,
-        b: composer.b + (toward.b - composer.b) * amount,
+        r: from.r + (to.r - from.r) * amount,
+        g: from.g + (to.g - from.g) * amount,
+        b: from.b + (to.b - from.b) * amount,
         a: 1.0,
     }
 }
 
-/// The icon buttons' hover, pressed and menu-open fill: halfway from the tray's fill to the
-/// composer's, so it lifts the button off its row without matching the composer below.
+/// A hovered row's fill: part way from the tray's fill to the composer's. From darkest to
+/// lightest the tray reads `tray < row hover < button hover ≈ composer`, in dark and light.
+#[must_use]
+pub(super) fn row_hover_fill(tokens: &Tokens) -> conn_theme::Rgba {
+    let amount = match tokens.appearance {
+        conn_theme::Appearance::Light => LIGHT_ROW_HOVER_MIX,
+        conn_theme::Appearance::Dark => DARK_ROW_HOVER_MIX,
+    };
+    mix(
+        tray_fill(tokens),
+        super::composer::composer_fill(tokens),
+        amount,
+    )
+}
+
+/// The icon buttons' hover, pressed and menu-open fill: about the composer's fill, a clear step
+/// above the hovered row they sit in. Light uses the composer's fill; dark lifts it a touch.
 #[must_use]
 pub(super) fn button_hover_fill(tokens: &Tokens) -> conn_theme::Rgba {
-    let tray = tray_fill(tokens);
     let composer = super::composer::composer_fill(tokens);
-    conn_theme::Rgba {
-        r: tray.r + (composer.r - tray.r) * BUTTON_HOVER_MIX,
-        g: tray.g + (composer.g - tray.g) * BUTTON_HOVER_MIX,
-        b: tray.b + (composer.b - tray.b) * BUTTON_HOVER_MIX,
-        a: 1.0,
+    match tokens.appearance {
+        conn_theme::Appearance::Light => composer.with_alpha(1.0),
+        conn_theme::Appearance::Dark => mix(composer, tokens.foreground, DARK_BUTTON_HOVER_LIFT),
     }
 }
 
@@ -988,6 +1011,7 @@ impl ChatView {
         let fg = hsla(tokens.foreground);
         let muted = hsla(tokens.muted_foreground);
         let hover_bg = hsla(tokens.shell_highlight);
+        let row_hover = hsla(row_hover_fill(tokens));
         let button_hover = hsla(button_hover_fill(tokens));
         let primary = hsla(tokens.primary);
         let (tray_fill, tray_border) = tray_surface_colors(tokens);
@@ -1162,7 +1186,7 @@ impl ChatView {
                 el.rounded_t(px(TRAY_RADIUS_PX - LINE_PX))
             })
             .when(is_editing, |el| el.bg(hsla_alpha(tokens.primary, 0.12)))
-            .when(!is_editing && is_hovered, |el| el.bg(hover_bg))
+            .when(!is_editing && is_hovered, |el| el.bg(row_hover))
             .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
                 view.note_queue_row_hover(&id, *hovered, cx);
             }))
@@ -1266,7 +1290,7 @@ mod tests {
     use super::{
         ICON_BUTTON_PX, ICON_BUTTON_RADIUS_PX, LINE_PX, QueueMenuAction, ROW_HEIGHT_PX,
         ROW_PAD_RIGHT_PX, TRAY_RADIUS_PX, button_hover_fill, menu_actions, moved_order,
-        preview_text, reorder_target, step_cursor, step_slot, tray_fill,
+        preview_text, reorder_target, row_hover_fill, step_cursor, step_slot, tray_fill,
     };
     use crate::chat::composer::composer_fill;
     use conn_theme::{Appearance, Rgba, Tokens};
@@ -1350,36 +1374,45 @@ mod tests {
     }
 
     #[test]
-    fn the_button_hover_sits_between_the_tray_and_the_composer_in_dark_and_light() {
+    fn the_tray_row_hover_and_button_hover_step_up_toward_the_composer_in_dark_and_light() {
         for theme_id in ["dark-ocean", "t3-code-light"] {
             let tokens = tokens_for(theme_id);
-            let (tray, hover, composer) = (
+            let (tray, row, button, composer) = (
                 luma(tray_fill(&tokens)),
+                luma(row_hover_fill(&tokens)),
                 luma(button_hover_fill(&tokens)),
                 luma(composer_fill(&tokens)),
             );
+            // Each step is visible: more than a level of 255 apart in the tokens (the rendered
+            // pixels sit further apart; `a_hovered_button_is_lighter_than_its_hovered_row`).
+            let step = 1.0 / 255.0;
             assert!(
-                tray < hover && hover < composer,
-                "{theme_id}: hover {hover} is not strictly between the tray {tray} and the \
-                 composer {composer}"
+                tray + step < row && row + step < button,
+                "{theme_id}: tray {tray}, row hover {row}, button hover {button}"
             );
-            // About halfway: dimmer than the composer by as much as it lifts off the tray.
-            let share = (hover - tray) / (composer - tray);
+            // The row hover is clearly below the composer; the button hover is about it.
             assert!(
-                (0.35..=0.65).contains(&share),
-                "{theme_id}: hover sits {share} of the way to the composer"
+                row + step < composer,
+                "{theme_id}: row hover {row} reaches the composer {composer}"
+            );
+            assert!(
+                (button - composer).abs() <= 0.02,
+                "{theme_id}: button hover {button} is not about the composer {composer}"
             );
         }
+        // Every built-in theme keeps the order.
         for theme in conn_theme::builtin_themes() {
             let tokens = Tokens::derive(&theme);
-            let (tray, hover, composer) = (
+            let (tray, row, button, composer) = (
                 luma(tray_fill(&tokens)),
+                luma(row_hover_fill(&tokens)),
                 luma(button_hover_fill(&tokens)),
                 luma(composer_fill(&tokens)),
             );
+            let lighter = |a: f32, b: f32| (b - a) * (composer - tray).signum() >= 0.0;
             assert!(
-                (tray.min(composer)..=tray.max(composer)).contains(&hover),
-                "{}: the hover is outside the tray and composer fills",
+                lighter(tray, row) && lighter(row, composer) && lighter(row, button),
+                "{}: tray {tray}, row hover {row}, button hover {button}, composer {composer}",
                 theme.id
             );
         }

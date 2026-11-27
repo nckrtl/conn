@@ -137,10 +137,14 @@ pub(crate) fn server_config_from_env() -> Option<ServerConfig> {
     })
 }
 
-/// The theme to start with: `CONN_GPUI_THEME`, else Dark Mono.
-pub(crate) fn initial_theme() -> ThemeDefinition {
-    let id = std::env::var("CONN_GPUI_THEME").unwrap_or_else(|_| "dark-mono".to_owned());
-    conn_theme::theme_by_id(&id)
+/// `CONN_GPUI_THEME`: a built-in theme id that overrides the saved choice at launch.
+pub(crate) fn theme_from_env() -> Option<String> {
+    std::env::var("CONN_GPUI_THEME").ok()
+}
+
+/// The built-in theme for a first run with nothing saved: Dark Mono.
+pub(crate) fn default_theme() -> ThemeDefinition {
+    conn_theme::theme_by_id("dark-mono")
         .or_else(|| conn_theme::builtin_themes().into_iter().next())
         .unwrap_or_else(|| ThemeDefinition {
             id: "empty".into(),

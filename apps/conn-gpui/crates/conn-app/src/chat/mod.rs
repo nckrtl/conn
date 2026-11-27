@@ -66,12 +66,11 @@ mod thumb_cache;
 
 /// A sent image thumbnail: attachment id and decode size.
 type ThumbKey = (String, thumb_cache::TargetPx);
-#[cfg(test)]
-mod fold_gap_tests;
 mod timeline_cards;
-mod toc;
+mod timeline_spacing;
 #[cfg(test)]
-mod user_gap_tests;
+mod timeline_spacing_tests;
+mod toc;
 mod worktree_setup;
 
 use std::collections::{HashMap, HashSet};
@@ -93,7 +92,7 @@ use gpui_kit::{
     relative,
 };
 
-use self::cache::{CachedRow, Neighbour, RowCache, VirtualItem, is_user_bubble};
+use self::cache::{CachedRow, RowCache, VirtualItem};
 pub(crate) use self::cache::{ThreadOutline, TocEntry};
 use self::color::{hsla, hsla_alpha, muted_icon, prose_foreground};
 pub(crate) use self::composer::{BranchAction, BranchContext, SendDispatch};
@@ -105,49 +104,22 @@ use crate::a11y::ConnA11yExt as _;
 const CHAT_CONTENT_MAX_WIDTH_PX: f32 = 736.0;
 /// Horizontal lane padding matching `.chat-composer-lane` / `.messages-timeline-scroll` (`3rem`).
 const CHAT_LANE_PADDING_X_PX: f32 = 48.0;
-/// The painted space above and below a user bubble, whatever its neighbour (Nick, 2026-11-27):
-/// the space it had below it, next to an agent paragraph.
-const USER_MESSAGE_GAP_PX: f32 = 48.0;
-/// Where a body text line paints inside its line box: the cap top under the box top, and the
-/// box bottom under the baseline.
-const BODY_INK_TOP_PX: f32 = 6.0;
-const BODY_INK_BOTTOM_PX: f32 = 5.5;
 /// Left and right inset of timeline content from the divider lines. Zero: the header text,
 /// divider, paragraphs, inline code and work-log row icons share one left edge and end at the
 /// dividers' right end, as in the iOS timeline. A row that needs hover room extends its
 /// background with a negative margin instead of indenting its content.
 const TIMELINE_INSET_PX: f32 = 0.0;
-/// Space between the bottom of the last row's content and the composer lane's padding, the same
-/// in every state (Nick, 2026-11-27). The running "Thinking" row set it: its own 4px trailing
-/// padding plus 16px. Each last row gives up its own trailing space (see
-/// `ChatView::trailing_pad_px`), so a message, a user bubble or a work group sits as far from the
-/// composer as the "Thinking" row does.
-const TIMELINE_END_GAP_PX: f32 = 20.0;
-/// An assistant row's own space under its text: the text block's `py-0.5`, and the row's `pb`
-/// before work and otherwise.
-const ASSISTANT_TEXT_PAD_PX: f32 = 2.0;
-const ASSISTANT_ROW_PAD_BEFORE_WORK_PX: f32 = 16.0;
-const ASSISTANT_ROW_PAD_PX: f32 = 20.0;
-/// The hover-only actions row under a finished message, which keeps its place in the layout.
-const ASSISTANT_META_HEIGHT_PX: f32 = 6.0 + card_face::CARD_ACTION_BOX_PX;
-/// A user row's `pb` when it ends a group, and the `pt-0.5` above the actions row under its
-/// bubble.
-const USER_ROW_PAD_PX: f32 = 16.0;
+/// The hover-only actions row under a turn's last paragraph, which keeps its place in the layout:
+/// its top margin and its button row.
+const ASSISTANT_META_GAP_PX: f32 = 4.0;
+const ASSISTANT_META_HEIGHT_PX: f32 = ASSISTANT_META_GAP_PX + card_face::CARD_ACTION_BOX_PX;
+/// The `pt-0.5` above the actions row under a user bubble, and that row's height.
 const USER_ACTIONS_PAD_TOP_PX: f32 = 2.0;
 const USER_ACTIONS_HEIGHT_PX: f32 = USER_ACTIONS_PAD_TOP_PX + card_face::CARD_ACTION_BOX_PX;
-/// A work group's `pb` when its fold is open or live, and when it is a settled fold.
-const WORK_GROUP_OPEN_PAD_PX: f32 = 8.0;
-const WORK_GROUP_FOLD_PAD_PX: f32 = 12.0;
-/// The painted space on each side of a settled fold's divider (Nick, 2026-11-27): above it, the
-/// header's `pb-2` plus the space under the "Worked for" baseline. What follows the divider sits
-/// as far below it, except a user message, which keeps [`USER_MESSAGE_GAP_PX`].
-const FOLD_DIVIDER_GAP_PX: f32 = 8.0 + BODY_INK_BOTTOM_PX;
-/// Where a work-log row first paints under its top: its icon, centred in the 24px row, and the
-/// label's cap top both land about 6px down.
-const WORK_ROW_INK_TOP_PX: f32 = 6.0;
-/// The `pb` of a notice row, and of the "Working" row.
-const NOTICE_ROW_PAD_PX: f32 = 8.0;
-const WORKING_ROW_PAD_PX: f32 = 4.0;
+/// The composer card's top, under the timeline's bottom edge: the composer lane's own padding.
+const COMPOSER_CARD_INSET_PX: f32 = 8.0;
+/// The "Thinking" row's own space under its 24px line.
+const THINKING_ROW_PAD_PX: f32 = 4.0;
 /// Work-log row: minimum height, icon size and icon-to-label gap (`min-h-6`, `size-4`). The
 /// icon box is exactly the icon wide, so the icon sits on the row's left edge.
 const WORK_ROW_MIN_HEIGHT_PX: f32 = 24.0;
@@ -216,9 +188,6 @@ struct UserBubble<'a> {
     created_at: Option<&'a str>,
     grouped_with_previous: bool,
     grouped_with_next: bool,
-    /// The row's space above the bubble and under its actions row.
-    pad_top: f32,
-    pad_bottom: f32,
 }
 
 pub(crate) const OFFLINE_PROMPT_NOTICE: &str = "Connect to load this message";
@@ -940,7 +909,12 @@ impl ChatView {
         }
         self.composer
             .update(cx, |c, cx| c.set_tokens(tokens.clone(), cx));
+        let appearance_changed = self.tokens.appearance != tokens.appearance;
         self.tokens = tokens;
+        if appearance_changed {
+            // Some blocks paint closer to their edges in one theme (see `timeline_spacing`).
+            self.list_state.remeasure_items(0..self.cache.items().len());
+        }
         cx.notify();
     }
 
@@ -2100,7 +2074,6 @@ impl ChatView {
                     if *created_by_agent {
                         self.render_agent_message_card(id, text, sender.as_ref(), cx)
                     } else {
-                        let (pad_top, pad_bottom) = self.user_bubble_pads(idx);
                         self.render_user_bubble(
                             UserBubble {
                                 id,
@@ -2112,8 +2085,6 @@ impl ChatView {
                                 created_at: created_at.as_deref(),
                                 grouped_with_previous: *grouped_with_previous,
                                 grouped_with_next: *grouped_with_next,
-                                pad_top,
-                                pad_bottom,
                             },
                             window,
                             cx,
@@ -2124,9 +2095,7 @@ impl ChatView {
                 }
             }
             VirtualItem::Assistant {
-                row_idx,
-                followed_by_work,
-                show_meta,
+                row_idx, show_meta, ..
             } => {
                 let row = &rows[*row_idx];
                 if let TimelineEntry::Assistant {
@@ -2173,7 +2142,6 @@ impl ChatView {
                         .w_full()
                         .min_w_0()
                         .px(px(TIMELINE_INSET_PX))
-                        .py(px(ASSISTANT_TEXT_PAD_PX))
                         .child(body);
                     if *show_meta {
                         inner = inner.child(self.render_assistant_meta(
@@ -2188,20 +2156,7 @@ impl ChatView {
                     }
                     #[cfg(test)]
                     let inner = gpui_kit::TestSupportExt::test_support(inner);
-                    // Conn `AssistantTimelineRow`: `px-1 py-0.5`. Row spacing is wider than T3's
-                    // `pb-2`/`pb-4` (Nick, 2026-11-26): 16px before work, 20px otherwise, so
-                    // consecutive agent messages and the work after them read as separate. A
-                    // user bubble next keeps the whole space between them itself.
-                    let row_pad = if items
-                        .get(idx + 1)
-                        .is_some_and(|next| is_user_bubble(next, rows))
-                    {
-                        0.0
-                    } else if *followed_by_work {
-                        ASSISTANT_ROW_PAD_BEFORE_WORK_PX
-                    } else {
-                        ASSISTANT_ROW_PAD_PX
-                    };
+                    // The space around the row comes from `timeline_spacing`.
                     let row = div()
                         .id(SharedString::from(format!("chat-assistant-{id}")))
                         .a11y(
@@ -2212,7 +2167,6 @@ impl ChatView {
                         .group(group)
                         .w_full()
                         .min_w_0()
-                        .pb(px(row_pad))
                         .child(inner);
                     #[cfg(test)]
                     let row = gpui_kit::TestSupportExt::test_support(row);
@@ -2232,7 +2186,6 @@ impl ChatView {
                 &rows[*row_start..*row_end],
                 *has_active,
                 *continues_steer,
-                self.fold_pad_px(idx),
                 cx,
             ),
             VirtualItem::Card { row_idx } => self.render_card(&rows[*row_idx].entry, cx),
@@ -2271,135 +2224,115 @@ impl ChatView {
                     .child(body),
             );
         if idx == 0 {
-            outer = outer.pt(px(16.0));
+            outer = outer.pt(px(timeline_spacing::START_GAP_PX));
         }
-        if idx + 1 == items.len() {
-            // The row's own trailing space counts toward the end gap, so every last row sits the
-            // same distance above the composer. The actions row under a message is content, not
-            // trailing space: it shows on hover, so it ends the gap and never reaches under the
-            // composer, and hovering moves nothing.
-            let end_pad = TIMELINE_END_GAP_PX - self.trailing_pad_px(&items[idx])
-                + self.composer_height_applied;
-            outer = outer.pb(px(end_pad.max(0.0)));
-        }
+        // One rule sets the space under every block (see `timeline_spacing`). The last block
+        // keeps the end gap to the composer instead, from its layout bottom: a message's hover
+        // actions row is part of the block, so hovering moves nothing.
+        let space_below = match timeline_spacing::next_lead(items, idx, rows, self.is_light()) {
+            Some(next) => self
+                .block_tail(item)
+                .map_or(0.0, |tail| timeline_spacing::space_between(tail, next)),
+            None => {
+                timeline_spacing::END_GAP_PX - COMPOSER_CARD_INSET_PX + self.composer_height_applied
+            }
+        };
+        outer = outer.pb(px(space_below.max(0.0)));
+        #[cfg(test)]
+        let outer = gpui_kit::TestSupportExt::test_support(outer);
         outer.into_any_element()
     }
 
-    /// A closed, settled fold's `pb`: what follows its divider paints [`FOLD_DIVIDER_GAP_PX`]
-    /// under it, as the "Worked for" text paints above it. A user message keeps its own 48px
-    /// gap (see `Self::user_bubble_pads`), and the last row keeps the end gap; both count on
-    /// [`WORK_GROUP_FOLD_PAD_PX`].
-    fn fold_pad_px(&self, idx: usize) -> f32 {
-        let rows = self.cache.rows();
-        match self
-            .cache
-            .items()
-            .get(idx + 1)
-            .and_then(|next| Neighbour::of(next, rows))
-        {
-            None | Some(Neighbour::User) => WORK_GROUP_FOLD_PAD_PX,
-            Some(next) => (FOLD_DIVIDER_GAP_PX - neighbour_space_above(next)).max(0.0),
-        }
-    }
-
-    /// The space a user bubble's row keeps above its bubble and under its actions row, so the
-    /// painted space to each neighbour is [`USER_MESSAGE_GAP_PX`]. Grouped bubbles stay 4px apart.
-    /// The first row adds nothing above; the last keeps its 16px, which the end gap counts.
-    fn user_bubble_pads(&self, idx: usize) -> (f32, f32) {
-        let items = self.cache.items();
-        let rows = self.cache.rows();
-        let previous = idx
-            .checked_sub(1)
-            .and_then(|previous| Some((&items[previous], Neighbour::of(&items[previous], rows)?)));
-        let next = items
-            .get(idx + 1)
-            .and_then(|next| Some((next, Neighbour::of(next, rows)?)));
-        let top = match previous {
-            None | Some((_, Neighbour::User)) => 0.0,
-            Some((item, neighbour)) => {
-                USER_MESSAGE_GAP_PX - self.neighbour_space_below(item, neighbour)
-            }
+    /// What `item` shows the block below it (see `timeline_spacing`). `None` for a row that
+    /// draws nothing.
+    fn block_tail(&self, item: &VirtualItem) -> Option<timeline_spacing::Tail> {
+        use self::timeline_spacing::{
+            ALERT_ROW_INK_PX, BODY_INK_BOTTOM_PX, Role, Tail, WORK_ROW_INK_BOTTOM_PX,
         };
-        let bottom = match next {
-            None => USER_ROW_PAD_PX,
-            Some((_, Neighbour::User)) => 4.0,
-            Some((_, neighbour)) => {
-                USER_MESSAGE_GAP_PX - USER_ACTIONS_HEIGHT_PX - neighbour_space_above(neighbour)
-            }
-        };
-        (top.max(0.0), bottom.max(0.0))
-    }
-
-    /// The space a row before a user bubble keeps under its last painted pixel.
-    fn neighbour_space_below(&self, item: &VirtualItem, neighbour: Neighbour) -> f32 {
-        match neighbour {
-            // Its row pad gives way to the bubble's (see `render_virtual_item`).
-            Neighbour::Assistant { meta } => {
-                ASSISTANT_TEXT_PAD_PX
-                    + if meta { ASSISTANT_META_HEIGHT_PX } else { 0.0 }
-                    + BODY_INK_BOTTOM_PX
-            }
-            // A closed fold ends on its divider. An open one ends on a work row, which paints
-            // as far above its bottom as the open group's pad falls short of the closed one's.
-            Neighbour::WorkGroup { .. } => WORK_GROUP_FOLD_PAD_PX,
-            // The pill's `py-2`.
-            Neighbour::Divider => NOTICE_ROW_PAD_PX + 8.0,
-            // A one-line row: `py-0.5` on the label and its own 4px.
-            Neighbour::Warning => WORKING_ROW_PAD_PX + 4.5,
-            Neighbour::Error => NOTICE_ROW_PAD_PX + 2.0 + 5.0,
-            Neighbour::User | Neighbour::Working | Neighbour::Other => self.trailing_pad_px(item),
-        }
-    }
-
-    /// The space a row keeps under its content in its own layout, which the end gap includes when
-    /// the row is last. A message's actions row (copy, fork, time) is content: it shows on hover,
-    /// so it keeps the full gap to the composer. An unlisted row counts as the "Working" row's
-    /// 4px, so it keeps its place.
-    fn trailing_pad_px(&self, item: &VirtualItem) -> f32 {
-        match item {
-            VirtualItem::Assistant {
-                followed_by_work, ..
-            } => {
-                let row_pad = if *followed_by_work {
-                    ASSISTANT_ROW_PAD_BEFORE_WORK_PX
-                } else {
-                    ASSISTANT_ROW_PAD_PX
-                };
-                ASSISTANT_TEXT_PAD_PX + row_pad
-            }
+        let rows = self.cache.rows();
+        Some(match item {
+            VirtualItem::Approval { .. } => return None,
+            // The control's `py-1.5` and the space under its 12px label.
+            VirtualItem::LoadEarlier { .. } => Tail::block(6.0 + 4.0),
             VirtualItem::User {
-                grouped_with_next, ..
-            } => {
-                if *grouped_with_next {
-                    4.0
-                } else {
-                    USER_ROW_PAD_PX
-                }
-            }
+                row_idx,
+                grouped_with_next,
+                ..
+            } => match &rows[*row_idx].entry {
+                TimelineEntry::User {
+                    created_by_agent: true,
+                    ..
+                } => Tail::block(0.0),
+                // A grouped bubble floats its actions beside it; the last keeps its row below.
+                _ => Tail {
+                    role: Role::User,
+                    bottom: if *grouped_with_next {
+                        0.0
+                    } else {
+                        USER_ACTIONS_HEIGHT_PX
+                    },
+                    divider: false,
+                },
+            },
+            VirtualItem::Assistant { show_meta, .. } => Tail::block(
+                BODY_INK_BOTTOM_PX
+                    + if *show_meta {
+                        ASSISTANT_META_HEIGHT_PX
+                    } else {
+                        0.0
+                    },
+            ),
+            // A settled fold ends on its divider; an open or live group on a work row.
             VirtualItem::WorkGroup { id, has_active, .. } => {
                 if *has_active || self.expanded_ids.contains(id.as_str()) {
-                    WORK_GROUP_OPEN_PAD_PX
+                    Tail::block(WORK_ROW_INK_BOTTOM_PX)
                 } else {
-                    WORK_GROUP_FOLD_PAD_PX
+                    Tail::divider()
                 }
+            }
+            VirtualItem::Card { row_idx } => {
+                Tail::block(timeline_spacing::card_ink(&rows[*row_idx].entry, self.is_light()).1)
             }
             VirtualItem::Notice { row_idx } => {
-                // A warning is a one-line row whose container keeps the 4px.
-                let warning = matches!(
-                    self.cache.rows().get(*row_idx).map(|row| &row.entry),
-                    Some(TimelineEntry::Notice {
-                        level: NoticeLevel::Warning,
-                        ..
-                    })
-                );
-                if warning {
-                    WORKING_ROW_PAD_PX
-                } else {
-                    NOTICE_ROW_PAD_PX
+                match timeline_spacing::notice_level(&rows[*row_idx].entry) {
+                    NoticeLevel::Warning => Tail {
+                        role: Role::Warning,
+                        bottom: ALERT_ROW_INK_PX,
+                        divider: false,
+                    },
+                    level if level.is_error() => Tail::block(ALERT_ROW_INK_PX),
+                    // The divider pill ends on its border.
+                    _ => Tail::block(0.0),
                 }
             }
-            _ => WORKING_ROW_PAD_PX,
-        }
+            VirtualItem::ChangedFiles { .. } | VirtualItem::WorktreeSetup { .. } => {
+                Tail::block(0.0)
+            }
+            // Over the live group, the "Working for" row ends on its divider; alone, on its
+            // "Thinking" row.
+            VirtualItem::Working => {
+                if self.has_live_work_group() {
+                    Tail::divider()
+                } else {
+                    Tail::block(THINKING_ROW_PAD_PX + WORK_ROW_INK_BOTTOM_PX)
+                }
+            }
+        })
+    }
+
+    fn is_light(&self) -> bool {
+        self.tokens.appearance == conn_theme::Appearance::Light
+    }
+
+    /// Whether the live work group shows under the "Working for" row.
+    fn has_live_work_group(&self) -> bool {
+        matches!(
+            self.cache.items().last(),
+            Some(VirtualItem::WorkGroup {
+                has_active: true,
+                ..
+            })
+        )
     }
 
     /// Renders Conn's quiet top-of-timeline history pagination control (`TimelineHistoryControl`).
@@ -2817,8 +2750,6 @@ impl ChatView {
             created_at,
             grouped_with_previous,
             grouped_with_next,
-            pad_top,
-            pad_bottom,
         } = bubble;
         // A message that carries review comments shows each as a card, so the inline links and
         // legacy blocks that mark where they sat are dropped from the words shown.
@@ -2895,14 +2826,7 @@ impl ChatView {
         let bubble = gpui_kit::TestSupportExt::test_support(bubble);
         let group = SharedString::from(format!("user-row-{id}"));
         let actions = self.render_user_actions(id, &copy_text, created_at, &group, cx);
-        let mut row = div()
-            .group(group)
-            .flex()
-            .flex_col()
-            .items_end()
-            .w_full()
-            .pt(px(pad_top))
-            .pb(px(pad_bottom));
+        let mut row = div().group(group).flex().flex_col().items_end().w_full();
         if is_steer {
             row = row.child(self.render_steer_marker(id));
         }
@@ -2946,7 +2870,6 @@ impl ChatView {
         rows: &[CachedRow],
         has_active: bool,
         continues_steer: bool,
-        fold_pad: f32,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let manually_expanded = self.expanded_ids.contains(group_id);
@@ -3004,21 +2927,12 @@ impl ChatView {
 
             // Collapsed or expanded, a divider separates the "Worked for" header from what
             // follows (Nick, 2026-11-26: the collapsed header reads better with its line).
-            let fold_divider = hsla(self.tokens.shell_divider);
             #[cfg(test)]
             let fold_btn = gpui_kit::TestSupportExt::test_support(fold_btn);
-            let header = div()
-                .id(SharedString::from(format!("work-header-{group_id}")))
-                .w_full()
-                .min_w_0()
-                .pt(px(4.0))
-                .pb(px(8.0))
-                .border_b_1()
-                .border_color(fold_divider)
-                .child(div().flex().flex_row().items_center().child(fold_btn));
-
-            #[cfg(test)]
-            let header = gpui_kit::TestSupportExt::test_support(header);
+            let header = self.divider_header(
+                SharedString::from(format!("work-header-{group_id}")),
+                div().flex().flex_row().items_center().child(fold_btn),
+            );
             container = container.child(header);
         } else {
             // Active group explicitly expanded by clicking the live summary: offer a quiet collapse toggle.
@@ -3054,26 +2968,40 @@ impl ChatView {
         }
 
         if manually_expanded {
-            // Under a settled header's divider, the first row paints as far below it as the
-            // "Worked for" text sits above it. The live group has no divider: it keeps `pt-1`.
+            // Under a settled header's divider, the first row paints the divider gap below it.
+            // The live group has no divider: its rows keep their `pt-1` under the toggle.
             let list_pad = if has_active {
                 4.0
             } else {
-                FOLD_DIVIDER_GAP_PX - WORK_ROW_INK_TOP_PX
+                timeline_spacing::DIVIDER_GAP_PX - timeline_spacing::WORK_ROW_INK_TOP_PX
             };
             let mut list = div().flex().flex_col().w_full().min_w_0().pt(px(list_pad));
             for row in rows {
                 list = list.child(self.render_work_entry(row, cx));
             }
-            container = container.pb(px(WORK_GROUP_OPEN_PAD_PX)).child(list);
-        } else {
-            // A settled fold's divider has the same painted space below as above it (see
-            // `ChatView::fold_pad_px`). An active group has no divider, so it keeps Conn's
-            // `pb-1.5` (6px).
-            container = container.pb(px(if has_active { 6.0 } else { fold_pad }));
+            container = container.child(list);
         }
 
         container.into_any_element()
+    }
+
+    /// A "Worked for" or "Working for" header: its label over a full-width divider, with the
+    /// divider gap from the label's baseline to the line (see `timeline_spacing`). What follows
+    /// the line keeps the same gap.
+    fn divider_header(&self, id: SharedString, label: impl IntoElement) -> AnyElement {
+        let header = div()
+            .id(id)
+            .w_full()
+            .min_w_0()
+            .pb(px(
+                timeline_spacing::DIVIDER_GAP_PX - timeline_spacing::BODY_INK_BOTTOM_PX
+            ))
+            .border_b_1()
+            .border_color(hsla(self.tokens.shell_divider))
+            .child(label);
+        #[cfg(test)]
+        let header = gpui_kit::TestSupportExt::test_support(header);
+        header.into_any_element()
     }
 
     /// Renders Conn's `LiveWorkEntryTimelineRow`: 1:1 port of `MessagesTimeline.logic.ts:1540-1575`
@@ -3129,8 +3057,6 @@ impl ChatView {
             .gap(px(4.0))
             .w_full()
             .min_w_0()
-            .pt(px(4.0))
-            .pb(px(WORK_GROUP_OPEN_PAD_PX))
             .rounded(px(6.0))
             .cursor_pointer()
             .on_click(cx.listener(move |view, _, _, cx| {
@@ -3607,7 +3533,6 @@ impl ChatView {
                 )
                 .w_full()
                 .min_w_0()
-                .pb(px(NOTICE_ROW_PAD_PX))
                 .child(
                     div()
                         .flex()
@@ -3616,7 +3541,6 @@ impl ChatView {
                         .gap(px(WORK_ICON_GAP_PX))
                         .min_h(px(WORK_ROW_MIN_HEIGHT_PX))
                         .px(px(TIMELINE_INSET_PX))
-                        .py(px(2.0))
                         .child(work_icon_box(
                             SharedString::from(format!("notice-icon-{id}")),
                             icons::icon(icons::ERROR_CIRCLE, 16.0, hsla(self.tokens.destructive)),
@@ -3644,13 +3568,11 @@ impl ChatView {
             .a11y_group(ax_id, format!("Notice: {}", ax_snippet(text)))
             .w_full()
             .min_w_0()
-            .pb(px(NOTICE_ROW_PAD_PX))
             .child(
                 div()
                     .flex()
                     .flex_row()
                     .items_center()
-                    .py(px(8.0))
                     .text_size(px(12.0))
                     .line_height(px(16.0))
                     .text_color(hsla(self.tokens.muted_foreground))
@@ -3758,13 +3680,7 @@ impl ChatView {
             );
         #[cfg(test)]
         let row = gpui_kit::TestSupportExt::test_support(row);
-        let mut container = div()
-            .flex()
-            .flex_col()
-            .w_full()
-            .min_w_0()
-            .pb(px(4.0))
-            .child(row);
+        let mut container = div().flex().flex_col().w_full().min_w_0().child(row);
         if expanded {
             // Conn `WorkLogDetails kind="text"`: under the label, the whole message, wrapped.
             let detail = div()
@@ -3796,48 +3712,27 @@ impl ChatView {
                 format_working_elapsed(elapsed_ms)
             })
             .unwrap_or_else(|| "Working...".to_owned());
-        let has_live_work_group = matches!(
-            self.cache.items().last(),
-            Some(VirtualItem::WorkGroup {
-                has_active: true,
-                ..
-            })
-        );
+        let has_live_work_group = self.has_live_work_group();
         let muted = hsla(self.tokens.muted_foreground);
         let icon_muted = muted_icon(&self.tokens);
         let bright_fg = hsla(self.tokens.foreground);
 
-        let mut col = div()
+        let working_label = div()
+            .id("timeline-working")
+            .a11y_group("timeline.working", label.clone())
             .flex()
-            .flex_col()
-            .w_full()
-            .min_w_0()
-            .pb(px(WORKING_ROW_PAD_PX))
-            .child(
-                div()
-                    .w_full()
-                    .pt(px(4.0))
-                    .pb(px(8.0))
-                    .border_b_1()
-                    .border_color(hsla(self.tokens.shell_divider))
-                    .child({
-                        let working_label = div()
-                            .id("timeline-working")
-                            .a11y_group("timeline.working", label.clone())
-                            .flex()
-                            .flex_row()
-                            .items_center()
-                            .h(px(24.0))
-                            .px(px(TIMELINE_INSET_PX))
-                            .text_size(px(BODY_FONT_PX))
-                            .line_height(px(BODY_LINE_HEIGHT_PX))
-                            .text_color(muted)
-                            .child(label);
-                        #[cfg(test)]
-                        let working_label = gpui_kit::TestSupportExt::test_support(working_label);
-                        working_label
-                    }),
-            );
+            .flex_row()
+            .items_center()
+            .px(px(TIMELINE_INSET_PX))
+            .text_size(px(BODY_FONT_PX))
+            .line_height(px(BODY_LINE_HEIGHT_PX))
+            .text_color(muted)
+            .child(label);
+        #[cfg(test)]
+        let working_label = gpui_kit::TestSupportExt::test_support(working_label);
+        let mut col = div().flex().flex_col().w_full().min_w_0().child(
+            self.divider_header(SharedString::from("timeline-working-header"), working_label),
+        );
 
         if !has_live_work_group {
             let thinking = div()
@@ -3849,8 +3744,11 @@ impl ChatView {
                 .w_full()
                 .min_w_0()
                 .min_h(px(WORK_ROW_MIN_HEIGHT_PX))
-                .pt(px(4.0))
-                .pb(px(4.0))
+                // The divider gap under the "Working for" line, as above it.
+                .pt(px(
+                    timeline_spacing::DIVIDER_GAP_PX - timeline_spacing::WORK_ROW_INK_TOP_PX
+                ))
+                .pb(px(THINKING_ROW_PAD_PX))
                 .px(px(TIMELINE_INSET_PX))
                 .child(work_icon_box(
                     SharedString::from("working-thinking-icon"),
@@ -4201,25 +4099,6 @@ fn tool_ax_label(kind: &str, title: &str, status: ItemStatus) -> String {
 
 /// Formats Conn's live `WorkingTimelineRow` header (`Working for 44s` / `Working for 1m 12s`).
 #[must_use]
-/// The space a row after a user bubble keeps above its first painted pixel.
-fn neighbour_space_above(neighbour: Neighbour) -> f32 {
-    match neighbour {
-        Neighbour::Assistant { .. } => ASSISTANT_TEXT_PAD_PX + BODY_INK_TOP_PX,
-        // The "Worked for" header's `pt-1`.
-        Neighbour::WorkGroup { live: false } => 4.0 + BODY_INK_TOP_PX,
-        // `pt-1` over a 24px row, which centres its line.
-        Neighbour::WorkGroup { live: true } | Neighbour::Working => {
-            4.0 + (WORK_ROW_MIN_HEIGHT_PX - BODY_LINE_HEIGHT_PX) / 2.0 + BODY_INK_TOP_PX
-        }
-        // The pill's `py-2`.
-        Neighbour::Divider => 8.0,
-        Neighbour::Warning => 5.0,
-        // The row's `py-0.5`.
-        Neighbour::Error => 2.0 + 5.0,
-        Neighbour::User | Neighbour::Other => 0.0,
-    }
-}
-
 fn format_working_elapsed(elapsed_ms: u64) -> String {
     let secs = elapsed_ms / 1000;
     if secs < 60 {

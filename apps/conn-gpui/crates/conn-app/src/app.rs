@@ -425,6 +425,10 @@ pub(crate) struct ConnApp {
     sidebar_filter_menu_open: bool,
     /// When true, replaces translucent shell fills with opaque `sidebar`/`shell_card`.
     reduce_transparency: bool,
+    /// The theme choice saved for the next launch's first frame (`theme_boot.rs`).
+    boot_theme: crate::theme_boot::BootTheme,
+    /// Theme changes applied since launch (tests check that an identical sync changes nothing).
+    theme_changes: u64,
     persist_composer_context_strip: bool,
     server_url: Option<String>,
     server_label: Option<String>,
@@ -477,12 +481,30 @@ impl std::fmt::Debug for ConnApp {
 }
 
 impl ConnApp {
-    /// Creates the root shell. With a server config it connects and streams the live shell;
-    /// without one it shows the built-in demo fixture (or awaits Orbit auto-connect).
+    /// [`Self::new_with_boot_theme`] with the saved theme record (none under `cfg(test)`).
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn new(
         theme_id: String,
         tokens: Tokens,
+        server: Option<crate::live::StartupServer>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
+        let boot_theme = crate::theme_boot::BootTheme::load();
+        Self::new_with_boot_theme(theme_id, tokens, boot_theme, server, window, cx)
+    }
+
+    /// Creates the root shell. With a server config it connects and streams the live shell;
+    /// without one it shows the built-in demo fixture (or awaits Orbit auto-connect).
+    ///
+    /// `boot_theme` is the saved theme record `main` read before it opened the window; `tokens`
+    /// already carry its reduce-transparency choice.
+    #[must_use]
+    pub(crate) fn new_with_boot_theme(
+        theme_id: String,
+        tokens: Tokens,
+        boot_theme: crate::theme_boot::BootTheme,
         server: Option<crate::live::StartupServer>,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
@@ -874,7 +896,9 @@ impl ConnApp {
             regions,
             sidebar_jump_hints_shown: false,
             sidebar_filter_menu_open: false,
-            reduce_transparency: false,
+            reduce_transparency: boot_theme.reduce_transparency,
+            boot_theme,
+            theme_changes: 0,
             persist_composer_context_strip: false,
             server_url,
             server_label,
@@ -5059,6 +5083,16 @@ impl ConnApp {
         &self.theme_id
     }
 
+    #[cfg(test)]
+    pub(crate) fn tokens_for_test(&self) -> &Tokens {
+        &self.tokens
+    }
+
+    #[cfg(test)]
+    pub(crate) fn theme_changes_for_test(&self) -> u64 {
+        self.theme_changes
+    }
+
     /// Scopes the thread sidebar to one workspace (`Some(project_id)`) or all
     /// projects (`None`).
     pub(crate) fn select_workspace(
@@ -6752,38 +6786,89 @@ impl ConnApp {
             .orbit
             .custom_themes
             .iter()
-            .find(|t| t.id == theme_id)?
-            .clone();
+            .find(|t| t.id == theme_id)
+            .cloned()
+            // A custom theme saved for this launch before the Orbit profile has arrived.
+            .or_else(|| {
+                self.boot_theme
+                    .resolve(None)
+                    .filter(|saved| saved.id == theme_id)
+            })?;
         let tokens = Tokens::derive(&custom);
         Some((custom, tokens))
     }
 
     /// Switches to a built-in or Orbit-synced custom theme by id and syncs the choice to Orbit.
     pub(crate) fn set_theme(&mut self, theme_id: &str, cx: &mut Context<'_, Self>) -> bool {
-        self.apply_theme_choice(theme_id, true, cx)
+        self.apply_theme_choice(theme_id, ThemeSource::User, cx)
     }
 
     /// Switches to a theme locally without pushing to Orbit (used by automation captures).
     #[cfg(feature = "automation")]
     pub(crate) fn set_theme_local(&mut self, theme_id: &str, cx: &mut Context<'_, Self>) -> bool {
-        self.apply_theme_choice(theme_id, false, cx)
+        self.apply_theme_choice(theme_id, ThemeSource::Automation, cx)
+    }
+
+    /// Applies a theme synced from the Orbit profile (a fetch or a backup restore).
+    /// Returns whether the theme is known; the same theme as now changes nothing.
+    pub(crate) fn adopt_synced_theme(
+        &mut self,
+        theme_id: &str,
+        follow_system: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        self.apply_theme_choice(theme_id, ThemeSource::Synced { follow_system }, cx)
     }
 
     fn apply_theme_choice(
         &mut self,
         theme_id: &str,
-        push_to_orbit: bool,
+        source: ThemeSource,
         cx: &mut Context<'_, Self>,
     ) -> bool {
         let Some((theme, tokens)) = self.resolve_theme(theme_id) else {
             return false;
         };
-        self.theme_id = theme.id.clone();
-        self.set_tokens(tokens, cx);
-        if push_to_orbit {
-            self.push_orbit_appearance(&theme, cx);
+        let mut shown = tokens.clone();
+        if self.reduce_transparency {
+            crate::theme::reduce_transparency(&mut shown);
+        }
+        if theme.id != self.theme_id || shown != self.tokens {
+            self.theme_id = theme.id.clone();
+            self.theme_changes += 1;
+            self.set_tokens(tokens, cx);
+        }
+        match source {
+            ThemeSource::User => {
+                self.save_boot_theme(&theme, false);
+                self.push_orbit_appearance(&theme, cx);
+            }
+            ThemeSource::Synced { follow_system } => self.save_boot_theme(&theme, follow_system),
+            // Automation captures switch themes for a moment; the saved choice stays.
+            ThemeSource::Automation => {}
         }
         true
+    }
+
+    /// Saves `theme` as the next launch's first-frame theme, with both Orbit slot themes when
+    /// the choice follows the macOS appearance. Writes only when the record changed.
+    fn save_boot_theme(&mut self, theme: &conn_theme::ThemeDefinition, follow_system: bool) {
+        let slots = if follow_system {
+            let light_id = self.orbit.light_theme_id.clone();
+            let dark_id = self.orbit.dark_theme_id.clone();
+            self.resolve_theme(&light_id)
+                .zip(self.resolve_theme(&dark_id))
+                .map(|((light, _), (dark, _))| (light, dark))
+        } else {
+            None
+        };
+        let mut next = self.boot_theme.clone();
+        next.record(theme, slots.as_ref().map(|(l, d)| (l, d)));
+        next.reduce_transparency = self.reduce_transparency;
+        if next != self.boot_theme {
+            next.save();
+            self.boot_theme = next;
+        }
     }
 
     /// Display name advertised to `conn-server` on the `panels.requests` stream.
@@ -7373,10 +7458,8 @@ impl ConnApp {
                 if let Some(reduce) = effects.reduce_transparency {
                     self.apply_reduce_transparency_choice(reduce, false, cx);
                 }
-                if let Some(theme_id) = effects.theme_id
-                    && theme_id != self.theme_id
-                {
-                    let _ = self.apply_theme_choice(&theme_id, false, cx);
+                if let Some(theme_id) = effects.theme_id {
+                    let _ = self.adopt_synced_theme(&theme_id, effects.follow_system, cx);
                 }
                 // Auto-connect to the local (or previously active) Orbit Node when launched
                 // without an explicit server or demo mode flag.
@@ -7878,7 +7961,7 @@ impl ConnApp {
             self.apply_reduce_transparency_choice(reduce, false, cx);
         }
         if let Some(theme_id) = effects.theme_id {
-            let _ = self.apply_theme_choice(&theme_id, false, cx);
+            let _ = self.adopt_synced_theme(&theme_id, effects.follow_system, cx);
         }
         self.orbit.notice = Some("Previous settings restored.".to_owned());
         self.refresh_settings_orbit_info(cx);
@@ -8074,6 +8157,10 @@ impl ConnApp {
             return;
         }
         self.reduce_transparency = enabled;
+        if self.boot_theme.reduce_transparency != enabled {
+            self.boot_theme.reduce_transparency = enabled;
+            self.boot_theme.save();
+        }
         let theme_id = self.theme_id.clone();
         if let Some((_, tokens)) = self.resolve_theme(&theme_id) {
             self.set_tokens(tokens, cx);
@@ -8088,8 +8175,7 @@ impl ConnApp {
     /// Replaces the active theme tokens and updates `gpui-kit`'s global theme.
     pub(crate) fn set_tokens(&mut self, mut tokens: Tokens, cx: &mut Context<'_, Self>) {
         if self.reduce_transparency {
-            tokens.shell_fill = tokens.sidebar;
-            tokens.shell_inner_fill = tokens.shell_card;
+            crate::theme::reduce_transparency(&mut tokens);
         }
         apply_kit_theme(&tokens, cx);
         crate::vibrancy::sync_appearance(tokens.appearance);
@@ -8113,6 +8199,21 @@ impl ConnApp {
         self.tokens = tokens;
         cx.notify();
     }
+}
+
+/// Where a theme switch came from: it decides whether it is saved and pushed to Orbit.
+#[derive(Clone, Copy, Debug)]
+enum ThemeSource {
+    /// Picked in Settings or the command palette: saved locally and pushed to Orbit.
+    User,
+    /// Adopted from the Orbit profile: saved locally, not pushed back.
+    Synced { follow_system: bool },
+    /// An automation capture: neither saved nor pushed.
+    #[cfg_attr(
+        not(feature = "automation"),
+        expect(dead_code, reason = "only automation captures switch themes this way")
+    )]
+    Automation,
 }
 
 impl Focusable for ConnApp {

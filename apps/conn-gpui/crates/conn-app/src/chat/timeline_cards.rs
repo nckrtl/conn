@@ -207,12 +207,7 @@ impl ChatView {
             .child(inner);
         #[cfg(test)]
         let card = gpui_kit::TestSupportExt::test_support(card);
-        div()
-            .w_full()
-            .min_w_0()
-            .pb(px(12.0))
-            .child(card)
-            .into_any_element()
+        card.into_any_element()
     }
 
     /// The task an Orbit task-create call made: its project, id and subtasks above the title, the
@@ -245,12 +240,7 @@ impl ChatView {
                         .text_color(fg)
                         .child(title),
                 );
-            return div()
-                .w_full()
-                .min_w_0()
-                .pb(px(12.0))
-                .child(card)
-                .into_any_element();
+            return card.into_any_element();
         };
 
         let state = task_dot(&task);
@@ -365,12 +355,7 @@ impl ChatView {
                     .group_hover(group, move |s| s.bg(hover))
                     .child(title),
             );
-        div()
-            .w_full()
-            .min_w_0()
-            .pb(px(12.0))
-            .child(card)
-            .into_any_element()
+        card.into_any_element()
     }
 }
 

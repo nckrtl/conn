@@ -6,6 +6,12 @@
 use conn_theme::{Appearance, Rgba as ThemeRgba, Tokens};
 use gpui_kit::{App, Hsla, Rgba as GpuiRgba, px};
 
+/// Reduce transparency: the shell paints opaque panel colors instead of its translucent fills.
+pub(crate) fn reduce_transparency(tokens: &mut Tokens) {
+    tokens.shell_fill = tokens.sidebar;
+    tokens.shell_inner_fill = tokens.shell_card;
+}
+
 /// Converts a `conn_theme::Rgba` into a GPUI `Rgba`.
 #[must_use]
 pub(crate) fn gpui_rgba(color: ThemeRgba) -> GpuiRgba {

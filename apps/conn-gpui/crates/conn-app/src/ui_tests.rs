@@ -51,6 +51,7 @@ mod render_redraws;
 #[cfg(target_os = "macos")]
 mod selection_perf;
 mod terminal_environment;
+mod theme_boot;
 
 const TEST_WINDOW_WIDTH: f32 = 1440.0;
 const TEST_WINDOW_HEIGHT: f32 = 900.0;

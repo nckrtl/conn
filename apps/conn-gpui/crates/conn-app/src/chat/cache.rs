@@ -70,64 +70,6 @@ impl CachedRow {
     }
 }
 
-/// Whether `item` is a message the user wrote, drawn as a bubble.
-pub(super) fn is_user_bubble(item: &VirtualItem, rows: &[CachedRow]) -> bool {
-    matches!(
-        item,
-        VirtualItem::User { row_idx, .. } if matches!(
-            rows[*row_idx].entry,
-            TimelineEntry::User { created_by_agent: false, .. }
-        )
-    )
-}
-
-/// What sits next to a user bubble. Each kind keeps its own space between its painted edge and
-/// its layout edge, which the bubble's own space makes up to one gap.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Neighbour {
-    /// Another user bubble, which groups with it.
-    User,
-    /// An assistant paragraph, with its hover actions row when `meta`.
-    Assistant {
-        meta: bool,
-    },
-    /// A work group: a "Worked for" fold, open or closed, or the live group when `live`.
-    WorkGroup {
-        live: bool,
-    },
-    /// The "Working" row.
-    Working,
-    /// The info divider pill.
-    Divider,
-    Warning,
-    Error,
-    /// A card or any other row, measured by its layout edge.
-    Other,
-}
-
-impl Neighbour {
-    /// `None` for the "Load earlier" control, which starts the timeline.
-    pub(super) fn of(item: &VirtualItem, rows: &[CachedRow]) -> Option<Self> {
-        Some(match item {
-            VirtualItem::LoadEarlier { .. } => return None,
-            VirtualItem::User { .. } if is_user_bubble(item, rows) => Self::User,
-            VirtualItem::Assistant { show_meta, .. } => Self::Assistant { meta: *show_meta },
-            VirtualItem::WorkGroup { has_active, .. } => Self::WorkGroup { live: *has_active },
-            VirtualItem::Working => Self::Working,
-            VirtualItem::Notice { row_idx } => match &rows[*row_idx].entry {
-                TimelineEntry::Notice { level, .. }
-                    if *level == conn_state::NoticeLevel::Warning =>
-                {
-                    Self::Warning
-                }
-                TimelineEntry::Notice { level, .. } if level.is_error() => Self::Error,
-                _ => Self::Divider,
-            },
-            _ => Self::Other,
-        })
-    }
-}
-
 /// One flat row in GPUI's virtualized `ListState`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum VirtualItem {
@@ -992,42 +934,15 @@ impl RowCache {
             items.push(VirtualItem::WorktreeSetup { fingerprint });
         }
 
-        // A user bubble's space depends on its neighbours, and so does the space under an
-        // assistant row before one or under a settled fold, so their keys change with them and
-        // the list measures again.
+        // A block's space below depends on the block after it (see `timeline_spacing`), so its
+        // key changes with that block's lead, and the list measures it again.
         let item_keys = items
             .iter()
             .enumerate()
             .map(|(index, item)| {
-                let mut key = item.stable_key(rows);
-                if is_user_bubble(item, rows) {
-                    let previous = index
-                        .checked_sub(1)
-                        .and_then(|previous| Neighbour::of(&items[previous], rows));
-                    let next = items
-                        .get(index + 1)
-                        .and_then(|next| Neighbour::of(next, rows));
-                    key.push_str(&format!(":{previous:?}:{next:?}"));
-                } else if matches!(item, VirtualItem::Assistant { .. })
-                    && items
-                        .get(index + 1)
-                        .is_some_and(|next| is_user_bubble(next, rows))
-                {
-                    key.push_str(":before-user");
-                } else if matches!(
-                    item,
-                    VirtualItem::WorkGroup {
-                        has_active: false,
-                        ..
-                    }
-                ) {
-                    // A settled fold's space under its divider depends on what follows it.
-                    let next = items
-                        .get(index + 1)
-                        .and_then(|next| Neighbour::of(next, rows));
-                    key.push_str(&format!(":{next:?}"));
-                }
-                key
+                // The theme's insets do not change the key: a theme change measures every row.
+                let next = super::timeline_spacing::next_lead(&items, index, rows, false);
+                format!("{}:{next:?}", item.stable_key(rows))
             })
             .collect();
         self.prompt_positions.clear();
@@ -1520,11 +1435,9 @@ mod tests {
             true,
             false,
         );
-        // The first old prompt gets a reply above it, which changes its space, so it is measured
-        // again with the new rows. The anchor still moves by the two prepended rows.
         assert_eq!(s3.splice_start, 0);
-        assert_eq!(s3.splice_old_end, 2);
-        assert_eq!(s3.splice_new_end, 4);
+        assert_eq!(s3.splice_old_end, 1);
+        assert_eq!(s3.splice_new_end, 3);
         assert_eq!(s3.prepended_delta, 2);
         assert_eq!(cache.items().len(), 5);
 
@@ -1563,8 +1476,8 @@ mod tests {
             false,
         );
         assert_eq!(s4.splice_start, 0);
-        assert_eq!(s4.splice_old_end, 2);
-        assert_eq!(s4.splice_new_end, 3);
+        assert_eq!(s4.splice_old_end, 1);
+        assert_eq!(s4.splice_new_end, 2);
         assert_eq!(s4.prepended_delta, 1);
         assert_eq!(cache.items().len(), 6);
         assert_eq!(cache.toc()[0].item_index, 0);

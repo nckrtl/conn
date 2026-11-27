@@ -178,6 +178,108 @@ fn render_queue_tray_button_screenshots() {
     }
 }
 
+/// Renders the hovered first of two rows in dark and light: the pointer on its text, on Steer, on
+/// trash and on ⋯, then with the ⋯ menu open (pointer on ⋯, then away).
+///
+/// `CONN_QUEUE_SHOTS_DIR=<dir> CONN_QUEUE_SHOTS_PREFIX=after cargo test -p conn-app
+/// render_queue_tray_hover_screenshots -- --ignored`
+#[test]
+#[ignore = "writes PNGs; set CONN_QUEUE_SHOTS_DIR"]
+fn render_queue_tray_hover_screenshots() {
+    let Some(dir) = std::env::var_os("CONN_QUEUE_SHOTS_DIR") else {
+        return;
+    };
+    let dir = Path::new(&dir);
+    std::fs::create_dir_all(dir).unwrap_or_else(|error| panic!("no output folder: {error}"));
+    let prefix = std::env::var("CONN_QUEUE_SHOTS_PREFIX").unwrap_or_else(|_| "after".to_owned());
+    let mut ctx = headless_context();
+    for (theme_id, theme) in THEMES {
+        let (window, _) =
+            open_thread_scene(&mut ctx, theme_id, WIDTH_PX, HEIGHT_PX, queued_thread(2, 0));
+        let row = row_bounds(&mut ctx, window)[0];
+        let steer = all_bounds(&mut ctx, window, STEER_LABEL)[0];
+        let remove = all_bounds(&mut ctx, window, REMOVE_LABEL)[0];
+        let more = first_more_button(&mut ctx, window);
+        let text = point(row.left() + px(60.0), row.center().y);
+        for (state, at) in [
+            ("text", text),
+            ("steer", steer.center()),
+            ("trash", remove.center()),
+            ("more", more.center()),
+        ] {
+            hover(&mut ctx, window, at);
+            save_tray(
+                &mut ctx,
+                window,
+                dir,
+                &format!("{prefix}-{theme}-hover-{state}"),
+            );
+        }
+        ctx.update_window(window, |_, w, cx| {
+            w.pointer_down(more.center(), MouseButton::Left, cx);
+            w.pointer_up(more.center(), MouseButton::Left, cx);
+        })
+        .unwrap_or_else(|error| panic!("no window: {error}"));
+        settle(&mut ctx, window);
+        save_tray(
+            &mut ctx,
+            window,
+            dir,
+            &format!("{prefix}-{theme}-menu-open-on-more"),
+        );
+        hover(&mut ctx, window, point(px(WIDTH_PX / 2.0), px(120.0)));
+        save_tray(
+            &mut ctx,
+            window,
+            dir,
+            &format!("{prefix}-{theme}-menu-open-away"),
+        );
+    }
+}
+
+/// The relative luminance of a pixel.
+fn luma(p: image::Rgba<u8>) -> f32 {
+    0.2126 * f32::from(p[0]) + 0.7152 * f32::from(p[1]) + 0.0722 * f32::from(p[2])
+}
+
+/// In dark and light, with the pointer on a hovered row's Steer, trash or ⋯ button, the tray at
+/// rest is darkest, the hovered row's band is lighter but clearly below the composer, and the
+/// button under the pointer lighter still, about the composer's fill.
+#[test]
+fn a_hovered_button_is_lighter_than_its_hovered_row() {
+    let mut ctx = headless_context();
+    for (theme_id, theme) in THEMES {
+        let (window, _) =
+            open_thread_scene(&mut ctx, theme_id, WIDTH_PX, HEIGHT_PX, queued_thread(2, 0));
+        let rows = row_bounds(&mut ctx, window);
+        let composer = bounds_of(&mut ctx, window, "Message input card");
+        for label in [STEER_LABEL, REMOVE_LABEL, MORE_LABEL] {
+            let button = all_bounds(&mut ctx, window, label)[0];
+            hover(&mut ctx, window, button.center());
+            let image = ctx
+                .capture_screenshot(window)
+                .unwrap_or_else(|error| panic!("no screenshot: {error}"));
+            let scale = image.width() as f32 / WIDTH_PX;
+            let at = |x: Pixels, y: Pixels| {
+                luma(*image.get_pixel(
+                    (f32::from(x) * scale).round() as u32,
+                    (f32::from(y) * scale).round() as u32,
+                ))
+            };
+            // Plain fill: between the ↳ icon and the text, and inside the button's round box,
+            // left of its icon.
+            let tray = at(rows[1].left() + px(30.0), rows[1].center().y);
+            let band = at(rows[0].left() + px(30.0), rows[0].center().y);
+            let fill = at(button.left() + px(3.0), button.center().y);
+            let card = at(composer.left() + px(6.0), composer.center().y);
+            assert!(
+                tray + 2.0 < band && band + 2.0 < fill && band + 2.0 < card && fill <= card + 4.0,
+                "{theme}, {label}: tray {tray}, row {band}, button {fill}, composer {card}"
+            );
+        }
+    }
+}
+
 /// In every row, with one to four rows, in dark and light, the visible ink of the text and of each
 /// icon sits as far below the band's top as above its bottom, to within a point. The last band
 /// ends at the composer's top edge, which hides the tray's tucked bottom.

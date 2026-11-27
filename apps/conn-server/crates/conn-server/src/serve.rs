@@ -525,9 +525,6 @@ pub async fn serve_with_instances(
         }
     }
 
-    let conn_mcp::Features {
-        preview, devices, ..
-    } = state.deps.features.clone();
     let mcp = state.deps.mcp.clone();
     let app = router(state).into_make_service_with_connect_info::<SocketAddr>();
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
@@ -558,6 +555,36 @@ pub async fn serve_with_instances(
             let _ = tokio::time::timeout(Duration::from_secs(2), &mut server).await;
         }
     }
+    stop_in_order(
+        managed_server,
+        settlement,
+        worktree_cleanup,
+        &host,
+        &terminals,
+        mcp.as_deref(),
+        engine.as_ref(),
+    )
+    .await;
+    let _ = tokio::task::spawn_blocking(move || runtime.clear(&state_dir)).await;
+    if restart.requested() {
+        // A failure exit also restarts units with Restart=on-failure.
+        std::process::exit(1);
+    }
+}
+
+/// Stops a running server's parts, one after the other. The order is the point: each step
+/// says why it sits where it does, and a new part's stop gets its own line at the place its
+/// needs give it. On a signal the caller has already marked the shutdown on the engine and
+/// told the listener to stop.
+async fn stop_in_order(
+    managed_server: Option<tokio::task::JoinHandle<()>>,
+    settlement: Option<tokio::task::JoinHandle<()>>,
+    worktree_cleanup: Option<crate::worktree_cleanup::Running>,
+    host: &Host,
+    terminals: &conn_terminal::TerminalManager,
+    mcp: Option<&conn_mcp::McpService>,
+    engine: &dyn Engine,
+) {
     if let Some(managed) = managed_server {
         managed.abort();
     }
@@ -580,22 +607,19 @@ pub async fn serve_with_instances(
     // Remote task followers stop before the engine closes, so none settles a task or wakes a
     // parent during shutdown. Unbounded: a follower stops at its next await, and a write the
     // engine already took must commit before the engine closes.
-    if let Some(mcp) = &mcp {
+    if let Some(mcp) = mcp {
         mcp.stop_remote_tasks().await;
     }
     engine.shutdown().await;
-    if let Some(preview) = preview {
+    // The feature services with something to stop, after the engine's sessions that used them.
+    let features = host.features.get();
+    if let Some(preview) = features.and_then(|f| f.preview.as_ref()) {
         preview.shutdown().await;
     }
     // Device hubs and agent daemons stop, here and on SSH hosts, as T3's finalizers do;
     // bounded, so an unreachable host cannot hold the stop.
-    if let Some(devices) = devices {
+    if let Some(devices) = features.and_then(|f| f.devices.as_ref()) {
         let _ = tokio::time::timeout(Duration::from_secs(10), devices.stop_all()).await;
-    }
-    let _ = tokio::task::spawn_blocking(move || runtime.clear(&state_dir)).await;
-    if restart.requested() {
-        // A failure exit also restarts units with Restart=on-failure.
-        std::process::exit(1);
     }
 }
 

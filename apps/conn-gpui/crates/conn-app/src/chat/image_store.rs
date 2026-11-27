@@ -4,9 +4,14 @@
 //!
 //! The cache opens on first use, off the UI thread. Every read and write runs on the background
 //! executor.
+//!
+//! A picture the user just sent is seeded here ([`ImageStore::seed`]) with the bytes that went up,
+//! under the id the server gave it, so nothing downloads it again. Until its disk write lands it
+//! is served from memory.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use conn_client::{ClientError, Connection, FetchDeadlines};
 use conn_image_cache::ImageCache;
@@ -23,6 +28,8 @@ struct Inner {
     dir: Option<PathBuf>,
     cap: u64,
     cache: OnceLock<Option<ImageCache>>,
+    /// Seeded bytes whose disk write has not landed yet, by environment and id.
+    fresh: Mutex<HashMap<(String, String), Arc<[u8]>>>,
 }
 
 impl ImageStore {
@@ -58,6 +65,7 @@ impl ImageStore {
             dir,
             cap,
             cache: OnceLock::new(),
+            fresh: Mutex::default(),
         }))
     }
 
@@ -83,15 +91,66 @@ impl ImageStore {
         self.0.dir.is_some()
     }
 
-    /// The bytes of `id` on `environment`, when they are on disk. Blocking.
+    /// The bytes of `id` on `environment`, when they are seeded or on disk. Blocking.
     pub(crate) fn get(&self, environment: &str, id: &str) -> Option<Vec<u8>> {
+        if let Some(bytes) = self.fresh(environment, id) {
+            return Some(bytes.to_vec());
+        }
         self.cache()?.get(environment, id)
     }
 
-    /// Whether `id` of `environment` is on disk. Blocking (the first call opens the cache).
+    /// Seeded bytes of `id` on `environment` that are not on disk yet.
+    fn fresh(&self, environment: &str, id: &str) -> Option<Arc<[u8]>> {
+        self.0
+            .fresh
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&(environment.to_owned(), id.to_owned()))
+            .cloned()
+    }
+
+    /// Keeps `bytes` as `id` of `environment` without a download: the bytes of a picture this
+    /// app uploaded, under the id the server serves it by. Reads see them at once; the disk
+    /// write runs on `background`.
+    pub(crate) fn seed(
+        &self,
+        background: &BackgroundExecutor,
+        environment: &str,
+        id: &str,
+        bytes: Arc<[u8]>,
+    ) {
+        if !self.enabled() {
+            return;
+        }
+        let key = (environment.to_owned(), id.to_owned());
+        self.0
+            .fresh
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key.clone(), bytes.clone());
+        let store = self.clone();
+        background
+            .spawn(async move {
+                store.put(&key.0, &key.1, &bytes);
+                let mut fresh = store.0.fresh.lock().unwrap_or_else(PoisonError::into_inner);
+                // A newer seed of the same id keeps its own entry until its write lands.
+                if fresh
+                    .get(&key)
+                    .is_some_and(|kept| Arc::ptr_eq(kept, &bytes))
+                {
+                    fresh.remove(&key);
+                }
+            })
+            .detach();
+    }
+
+    /// Whether `id` of `environment` is seeded or on disk. Blocking (the first call opens the
+    /// cache).
     pub(crate) fn contains(&self, environment: &str, id: &str) -> bool {
-        self.cache()
-            .is_some_and(|cache| cache.contains(environment, id))
+        self.fresh(environment, id).is_some()
+            || self
+                .cache()
+                .is_some_and(|cache| cache.contains(environment, id))
     }
 
     /// Keeps `bytes` as `id` of `environment`. Blocking; a failed write only logs.

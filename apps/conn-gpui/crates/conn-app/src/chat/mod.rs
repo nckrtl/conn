@@ -63,6 +63,7 @@ pub(crate) mod selection;
 mod selection_menu_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod selection_shots;
+mod sent_images;
 mod spinner;
 pub(crate) mod thread_links;
 mod thumb_cache;
@@ -393,6 +394,8 @@ pub(crate) struct ChatView {
         std::cell::RefCell<thumb_cache::ByteLru<ThumbKey, attachment_thumb::SentImage>>,
     /// Where attachment bytes are kept on disk, so a picture downloads once.
     image_store: image_store::ImageStore,
+    /// Pictures this chat sent, until the server's copy of their message shows.
+    sent_images: std::cell::RefCell<sent_images::SentImages>,
     /// Attachments a hover is downloading to disk now, by environment and id.
     warming: HashSet<(String, String)>,
     /// Gallery tiles that painted a picture in the last render (tests read it).
@@ -522,7 +525,9 @@ impl ChatView {
                     attachments,
                     dispatch,
                     held_draft,
+                    uploaded,
                 } => {
+                    this.stage_uploaded(uploaded);
                     this.scroll_to_latest(cx);
                     cx.emit(ChatEvent::Send {
                         text: text.clone(),
@@ -652,6 +657,7 @@ impl ChatView {
                 thumb_cache::THUMB_BUDGET_BYTES,
             )),
             image_store: image_store::ImageStore::shared(),
+            sent_images: std::cell::RefCell::default(),
             warming: HashSet::new(),
             #[cfg(test)]
             ready_tiles: std::cell::Cell::new(0),
@@ -705,6 +711,12 @@ impl ChatView {
         for image in self.attachment_thumbs.get_mut().clear() {
             image.release(cx);
         }
+    }
+
+    /// Test helper: the environment the chat keys attachments by.
+    #[cfg(test)]
+    pub(crate) fn environment_key_for_test(&self) -> Option<String> {
+        self.environment_key.clone()
     }
 
     /// Test helper: gallery tiles that painted a picture in the last render.
@@ -2758,6 +2770,11 @@ impl ChatView {
                     ));
                 }
                 bubble = bubble.child(self.render_review_comment(attachment_key, idx, comment));
+            }
+            // A user message's turn item is `turn-item:<messageId>` (conn-engine `commands.rs`).
+            if let Some(item_id) = attachment_key.strip_prefix("user-") {
+                let message_id = item_id.strip_prefix("turn-item:").unwrap_or(item_id);
+                self.adopt_sent_images(message_id, attachments, cx);
             }
             for block in self.render_message_attachments(attachment_key, attachments, cx) {
                 bubble = bubble.child(block);

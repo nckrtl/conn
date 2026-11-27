@@ -3162,6 +3162,12 @@ impl ConnApp {
             strategy,
         );
         payload["workspaceStrategy"] = draft_workspace_strategy(&draft);
+        if let Some(message_id) = payload["initialMessage"]["messageId"].as_str() {
+            let message_id = message_id.to_owned();
+            self.chat.update(cx, |chat, cx| {
+                chat.note_sent_message(&message_id, &attachments, cx);
+            });
+        }
 
         if let Some(active_draft) = &mut self.draft {
             active_draft.launching = true;
@@ -3354,7 +3360,11 @@ impl ConnApp {
                 return;
             }
         };
-        self.chat.update(cx, |chat, cx| chat.set_error(None, cx));
+        self.chat.update(cx, |chat, cx| {
+            chat.set_error(None, cx);
+            // Its pictures paint from what went up, not a download, once the server echoes it.
+            chat.note_sent_message(&ids.message_id, &attachments, cx);
+        });
         self.run_send(
             send_pending::Outgoing {
                 connection,

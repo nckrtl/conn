@@ -685,8 +685,9 @@ mod tests {
         let tag = std::env::var("CONN_TASKS_SHOTS_TAG").unwrap_or_else(|_| "after".to_owned());
         let dir = std::path::Path::new(&dir);
         std::fs::create_dir_all(dir).expect("an output folder");
+        // `current_platform(true)` needs the main thread, which libtest does not give a test.
         let mut ctx = gpui_kit::HeadlessAppContext::with_platform(
-            gpui_kit::platform::current_platform(true).text_system(),
+            std::sync::Arc::new(gpui_apple::AppleTextSystem::new()),
             std::sync::Arc::new(crate::superhero::AppAssets),
             gpui_kit::platform::current_headless_renderer,
         );

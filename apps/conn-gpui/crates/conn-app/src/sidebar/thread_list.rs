@@ -2843,10 +2843,12 @@ pub(crate) fn sidebar_lists<'a>(
         .into_iter()
         .filter(kept)
         .collect();
-    let mut listed_settled: Vec<&ThreadShell> = shell
-        .top_level_settled_threads()
-        .into_iter()
-        .filter(kept)
+    // The listed rows are the held ones at or above the frontier, in the same order: no second
+    // sort of every settled thread (`top_level_settled_threads`).
+    let mut listed_settled: Vec<&ThreadShell> = settled
+        .iter()
+        .copied()
+        .filter(|thread| shell.is_listed_settled(thread))
         .collect();
     if let Some((drop, thread)) = pending {
         match drop.section {

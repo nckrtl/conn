@@ -283,8 +283,35 @@ fn rolled_up_requests(threads: &[ThreadShell]) -> HashMap<String, PendingSubagen
         .collect()
 }
 
+/// Where a merge lists a thread of another environment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Place {
+    Active,
+    Archived,
+    /// One of the older settled pages that environment read.
+    Loaded,
+}
+
+/// What one environment added to a merged shell: the ids of its projects and of its active or
+/// archived threads that no earlier environment listed.
+#[derive(Debug, Default)]
+pub(crate) struct Added<'a> {
+    pub(crate) projects: Vec<&'a str>,
+    pub(crate) threads: Vec<&'a str>,
+}
+
+/// The Settled paging a merge keeps of `other`, before its threads are counted.
+fn foreign_paging(other: &ShellState) -> ForeignOlder {
+    ForeignOlder {
+        cut: other.older.cut.clone(),
+        frontier: other.older.frontier.clone(),
+        status: other.older.status,
+        ..ForeignOlder::default()
+    }
+}
+
 /// A thread whose change can move another thread's row or request.
-fn moves_others(thread: &ThreadShell) -> bool {
+pub(crate) fn moves_others(thread: &ThreadShell) -> bool {
     !is_listed_lineage(&thread.lineage)
         || thread.delegated_from.is_some()
         || thread.pending_runtime_request.is_some()
@@ -542,61 +569,192 @@ impl ShellState {
     /// copy, so the primary environment always wins a collision. Threads sort again by activity.
     /// The older-settled paging state stays this environment's own.
     pub fn extend_with_environment(&mut self, other: &ShellState) {
-        for project in &other.projects {
-            if !self.projects.iter().any(|p| p.id == project.id) {
-                self.projects.push(project.clone());
-            }
-        }
-        let mut seen: HashSet<String> = self
-            .threads
-            .iter()
-            .chain(self.archived_threads.iter())
-            .map(|t| t.id.clone())
-            .collect();
-        let index = self.foreign.len();
-        let mut foreign = ForeignOlder {
-            cut: other.older.cut.clone(),
-            frontier: other.older.frontier.clone(),
-            status: other.older.status,
-            ..ForeignOlder::default()
-        };
-        for thread in &other.threads {
-            if seen.insert(thread.id.clone()) {
-                self.threads.push(thread.clone());
-                self.foreign_of.insert(thread.id.clone(), index);
-            }
-        }
-        for thread in &other.archived_threads {
-            if seen.insert(thread.id.clone()) {
-                self.archived_threads.push(thread.clone());
-                self.foreign_of.insert(thread.id.clone(), index);
-            }
-        }
-        for thread in &other.older.threads {
-            if seen.insert(thread.id.clone()) {
-                foreign.loaded.push(thread.clone());
-                self.foreign_of.insert(thread.id.clone(), index);
-            }
-        }
-        if let Some(cut) = &foreign.cut {
-            for thread in other
+        self.extend_with_environments(std::iter::once(other));
+    }
+
+    /// [`Self::extend_with_environment`] for several environments, in order, with one sort and
+    /// one refresh of derived state for all of them. Returns, per environment, the ids of the
+    /// projects and of the active or archived threads it added.
+    pub(crate) fn extend_with_environments<'a>(
+        &mut self,
+        others: impl IntoIterator<Item = &'a ShellState>,
+    ) -> Vec<Added<'a>> {
+        let others: Vec<&'a ShellState> = others.into_iter().collect();
+        // Decide with borrowed ids first, then clone each added row once.
+        let mut added: Vec<Added<'a>> = Vec::with_capacity(others.len());
+        let mut rows: Vec<(usize, Place, &'a ThreadShell)> = Vec::new();
+        let mut projects: Vec<&'a ProjectShell> = Vec::new();
+        {
+            let mut project_ids: HashSet<&str> =
+                self.projects.iter().map(|p| p.id.as_str()).collect();
+            let mut seen: HashSet<&str> = self
                 .threads
                 .iter()
-                .chain(&other.archived_threads)
-                .chain(&other.older.threads)
-            {
-                if is_older_settled(thread, cut.before_ms) {
-                    *foreign
-                        .held_by_project
-                        .entry(sidebar_project_key(thread).into_owned())
-                        .or_default() += 1;
+                .chain(&self.archived_threads)
+                .map(|t| t.id.as_str())
+                .collect();
+            for (index, other) in others.iter().enumerate() {
+                let mut ids = Added::default();
+                for project in &other.projects {
+                    if project_ids.insert(project.id.as_str()) {
+                        projects.push(project);
+                        ids.projects.push(project.id.as_str());
+                    }
                 }
+                for (place, list) in [
+                    (Place::Active, &other.threads),
+                    (Place::Archived, &other.archived_threads),
+                ] {
+                    for thread in list {
+                        if seen.insert(thread.id.as_str()) {
+                            rows.push((index, place, thread));
+                            ids.threads.push(thread.id.as_str());
+                        }
+                    }
+                }
+                // Older pages skip what any environment lists, and repeats within this one.
+                let mut loaded: HashSet<&str> = HashSet::new();
+                for thread in &other.older.threads {
+                    if !seen.contains(thread.id.as_str()) && loaded.insert(thread.id.as_str()) {
+                        rows.push((index, Place::Loaded, thread));
+                    }
+                }
+                added.push(ids);
             }
         }
-        self.foreign.push(foreign);
+        self.projects.extend(projects.into_iter().cloned());
+        let base = self.foreign.len();
+        self.foreign
+            .extend(others.iter().map(|other| foreign_paging(other)));
+        for (index, place, thread) in rows {
+            self.place_foreign(base + index, place, thread.clone());
+        }
+        for (index, other) in others.iter().enumerate() {
+            self.recount_foreign_held(base + index, other);
+        }
         sort_threads(&mut self.threads);
         sort_threads(&mut self.archived_threads);
         self.refresh_derived();
+        added
+    }
+
+    /// Puts a thread of the environment merged in at `index` where `place` says.
+    fn place_foreign(&mut self, index: usize, place: Place, thread: ThreadShell) {
+        self.foreign_of.insert(thread.id.clone(), index);
+        match place {
+            Place::Active => self.threads.push(thread),
+            Place::Archived => self.archived_threads.push(thread),
+            Place::Loaded => self.foreign[index].loaded.push(thread),
+        }
+    }
+
+    /// Counts again the threads `other` (merged in at `index`) holds below its own cut.
+    pub(crate) fn recount_foreign_held(&mut self, index: usize, other: &ShellState) {
+        let Some(foreign) = self.foreign.get_mut(index) else {
+            return;
+        };
+        foreign.held_by_project.clear();
+        let Some(cut) = &foreign.cut else {
+            return;
+        };
+        for thread in other
+            .threads
+            .iter()
+            .chain(&other.archived_threads)
+            .chain(&other.older.threads)
+        {
+            if is_older_settled(thread, cut.before_ms) {
+                *foreign
+                    .held_by_project
+                    .entry(sidebar_project_key(thread).into_owned())
+                    .or_default() += 1;
+            }
+        }
+    }
+
+    /// How many environments are merged in.
+    pub(crate) fn foreign_count(&self) -> usize {
+        self.foreign.len()
+    }
+
+    /// Whether the Settled paging kept for the environment merged in at `index` is still what
+    /// `other` holds: its cut, frontier and status.
+    pub(crate) fn foreign_paging_matches(&self, index: usize, other: &ShellState) -> bool {
+        self.foreign.get(index).is_some_and(|foreign| {
+            foreign.cut == other.older.cut
+                && foreign.frontier == other.older.frontier
+                && foreign.status == other.older.status
+        })
+    }
+
+    /// The environment merged in that `thread_id` belongs to, by index.
+    pub(crate) fn foreign_index(&self, thread_id: &str) -> Option<usize> {
+        self.foreign_of.get(thread_id).copied()
+    }
+
+    /// Whether the older pages kept for the environment merged in at `index` hold `thread_id`.
+    pub(crate) fn foreign_loaded_holds(&self, index: usize, thread_id: &str) -> bool {
+        self.foreign
+            .get(index)
+            .is_some_and(|foreign| foreign.loaded.iter().any(|t| t.id == thread_id))
+    }
+
+    /// Whether the older pages this shell read itself hold `thread_id`.
+    pub(crate) fn own_older_holds(&self, thread_id: &str) -> bool {
+        self.older.threads.iter().any(|t| t.id == thread_id)
+    }
+
+    /// Whether the active or archived list holds `thread_id`.
+    pub(crate) fn lists(&self, thread_id: &str) -> bool {
+        self.threads
+            .iter()
+            .chain(&self.archived_threads)
+            .any(|t| t.id == thread_id)
+    }
+
+    /// Where this shell holds `thread_id`, in the order a merge looks: active, archived, then the
+    /// older pages it read.
+    pub(crate) fn locate(&self, thread_id: &str) -> Option<(Place, &ThreadShell)> {
+        let find = |list: &'_ [ThreadShell]| list.iter().position(|t| t.id == thread_id);
+        if let Some(at) = find(&self.threads) {
+            return Some((Place::Active, &self.threads[at]));
+        }
+        if let Some(at) = find(&self.archived_threads) {
+            return Some((Place::Archived, &self.archived_threads[at]));
+        }
+        find(&self.older.threads).map(|at| (Place::Loaded, &self.older.threads[at]))
+    }
+
+    /// Takes the copy of `thread_id` that the environment merged in at `index` put here, wherever
+    /// it is listed.
+    pub(crate) fn take_foreign(&mut self, index: usize, thread_id: &str) -> Option<ThreadShell> {
+        if self.foreign_of.get(thread_id) != Some(&index) {
+            return None;
+        }
+        self.foreign_of.remove(thread_id);
+        let take = |list: &mut Vec<ThreadShell>| {
+            list.iter()
+                .position(|t| t.id == thread_id)
+                .map(|at| list.remove(at))
+        };
+        take(&mut self.threads)
+            .or_else(|| take(&mut self.archived_threads))
+            .or_else(|| take(&mut self.foreign[index].loaded))
+    }
+
+    /// Lists `thread` again for the environment merged in at `index`.
+    pub(crate) fn put_foreign(&mut self, index: usize, place: Place, thread: ThreadShell) {
+        self.place_foreign(index, place, thread);
+    }
+
+    /// Restores the order and the derived state after [`Self::take_foreign`] and
+    /// [`Self::put_foreign`].
+    pub(crate) fn finish_foreign_update(&mut self, refresh: bool) {
+        sort_threads(&mut self.threads);
+        sort_threads(&mut self.archived_threads);
+        if refresh {
+            self.refresh_derived();
+        }
     }
 
     /// Forgets the Settled paging of the environments merged in, before they are merged again.
@@ -624,12 +782,17 @@ impl ShellState {
     /// Finds any thread by id across both active and archived thread lists.
     #[must_use]
     pub fn find_thread(&self, thread_id: &str) -> Option<&ThreadShell> {
+        self.every_thread().find(|t| t.id == thread_id)
+    }
+
+    /// Every thread [`Self::find_thread`] can find: active, archived, and the older settled pages
+    /// read here or by the environments merged in.
+    pub fn every_thread(&self) -> impl Iterator<Item = &ThreadShell> {
         self.threads
             .iter()
             .chain(self.archived_threads.iter())
             .chain(self.older.threads.iter())
             .chain(self.foreign.iter().flat_map(|f| f.loaded.iter()))
-            .find(|t| t.id == thread_id)
     }
 
     /// Returns `true` when `thread` is a delegated subagent child rather than a top-level thread.
@@ -676,6 +839,13 @@ impl ShellState {
     #[must_use]
     pub fn is_listed(&self, thread: &ThreadShell) -> bool {
         is_listed_lineage(&thread.lineage) && thread.delegated_from.is_none()
+    }
+
+    /// Whether `thread` lives under another thread rather than in the list: a subagent, a side
+    /// chat, or a task shown under the thread that delegated it.
+    #[must_use]
+    pub fn is_child(thread: &ThreadShell) -> bool {
+        !is_listed_lineage(&thread.lineage) || thread.delegated_from.is_some()
     }
 
     /// What `thread_id`'s subagents, side chats and delegated tasks ask of the user
@@ -763,6 +933,17 @@ impl ShellState {
                 .is_some_and(|s| !s.trim().is_empty())
     }
 
+    /// Whether `thread` runs, is queued, or waits on the user: the sidebar shows it working or
+    /// needing attention (`resolveSidebarThreadStatus`). A thread that is not live changes only
+    /// when something starts it again, which the shell reports.
+    #[must_use]
+    pub fn is_live(thread: &ThreadShell) -> bool {
+        matches!(
+            thread_activity(thread),
+            ThreadActivity::Working | ThreadActivity::NeedsAttention
+        )
+    }
+
     /// Top-level active (unsettled, non-archived, non-deleted, listed) threads, newest first.
     pub fn top_level_active_threads(&self) -> impl Iterator<Item = &ThreadShell> {
         self.threads
@@ -792,7 +973,12 @@ impl ShellState {
                     .filter(|t| t.deleted_at.is_none() && self.is_listed(t)),
             )
             .collect();
-        out.sort_by(|left, right| compare_settled(left, right));
+        // Each row's time is read once, not once per comparison: thousands of rows sort here on
+        // every sidebar render.
+        out.sort_by_cached_key(|thread| {
+            let thread: &ThreadShell = thread;
+            (std::cmp::Reverse(settle_time(thread)), thread.id.as_str())
+        });
         out
     }
 
@@ -1131,20 +1317,15 @@ fn sort_threads(threads: &mut [ThreadShell]) {
     threads.sort_by(compare_threads);
 }
 
-/// `sortSettledThreads`: settle time, else the thread's activity, newest first; ties by id in
-/// plain order, as the server pages them.
-fn compare_settled(left: &ThreadShell, right: &ThreadShell) -> Ordering {
-    let time = |thread: &ThreadShell| {
-        thread
-            .settled_at
-            .as_deref()
-            .and_then(parse_iso8601_epoch_ms)
-            .or_else(|| parse_iso8601_epoch_ms(activity_timestamp(thread)))
-            .unwrap_or(0)
-    };
-    time(right)
-        .cmp(&time(left))
-        .then_with(|| left.id.cmp(&right.id))
+/// What `sortSettledThreads` orders by: settle time, else the thread's activity, newest first.
+/// Ties go by id in plain order, as the server pages them.
+fn settle_time(thread: &ThreadShell) -> i64 {
+    thread
+        .settled_at
+        .as_deref()
+        .and_then(parse_iso8601_epoch_ms)
+        .or_else(|| parse_iso8601_epoch_ms(activity_timestamp(thread)))
+        .unwrap_or(0)
 }
 
 fn compare_threads(left: &ThreadShell, right: &ThreadShell) -> Ordering {

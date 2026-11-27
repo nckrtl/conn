@@ -5,6 +5,8 @@
 // queued-message.promote-to-steer by changing the projection and pushing a new snapshot.
 // GET /commands lists every dispatched command and GET /reset starts over. An edit whose text
 // contains "[fail]" is refused.
+// The details sheet: "qdetails" has four linked PRs and child threads (two running, nine
+// finished), its folder a Git repo with changes; "qplain" is in a plain folder until `vcs.init`.
 import { readFileSync } from "node:fs";
 
 const root = process.argv[2];
@@ -17,6 +19,12 @@ const projects = ["conn", "orbit", "mealou"].map((name) => ({
   id: "project-" + name, title: name, workspaceRoot: "/tmp/" + name, scripts: [],
   createdAt: "2026-11-01T00:00:00Z", updatedAt: "2026-11-01T00:00:00Z",
 }));
+projects.push(
+  { id: "project-apps", title: "apps", workspaceRoot: "/Users/nick/apps/conn", scripts: [],
+    createdAt: "2026-11-01T00:00:00Z", updatedAt: "2026-11-01T00:00:00Z" },
+  { id: "project-notes", title: "notes", workspaceRoot: "/Users/nick/notes", scripts: [],
+    createdAt: "2026-11-01T00:00:00Z", updatedAt: "2026-11-01T00:00:00Z" },
+);
 const now = Date.now();
 const iso = (ms) => new Date(ms).toISOString();
 const threadDefs = [
@@ -33,6 +41,64 @@ const threads = threadDefs.map((def, i) => {
     status: def.running ? "running" : "idle",
   };
 });
+
+// The details sheet's thread, its PRs and children.
+const prLink = (number, title, state, isDraft, minutes) => ({
+  host: "github.com", repository: "nckrtl/conn", number, url: "https://github.com/nckrtl/conn/pull/" + number,
+  source: "agent", linkedAt: iso(now - minutes * 60_000), stack: null,
+  snapshot: { state, title, headBranch: "feat/" + number, baseBranch: "main", isDraft,
+    updatedAt: iso(now - minutes * 60_000), syncedAt: iso(now) },
+});
+const detailsThreads = [
+  { id: "qdetails", projectId: "project-apps", title: "Map Stalled Orbit Threads and PRs", branch: "main",
+    pullRequests: [
+      prLink(1929, "Keep the thread header fixed while scrolling", "merged", false, 40),
+      prLink(1934, "Restore the last open thread on launch", "open", true, 30),
+      prLink(1936, "merge: integrate/ios-lab into main", "merged", false, 20),
+      prLink(1931, "Attach images in the composer", "open", false, 10),
+    ] },
+  { id: "qplain", projectId: "project-notes", title: "Sort the meeting notes", branch: null, pullRequests: [] },
+];
+const claude = (model, effort) => ({ instanceId: "claudeAgent", model, options: [{ id: "effort", value: effort }] });
+const codex = (model, effort) => ({ instanceId: "codex", model, options: [{ id: "reasoningEffort", value: effort }] });
+const childDefs = [
+  ["Check stalled Orbit task PRs", "claudeAgent", claude("claude-opus-5-5", "high"), "running", 252],
+  ["List threads idle for a day", "codex", codex("gpt-6.2-astra", "medium"), "running", 160],
+  ["Read CI logs for #1931", "claudeAgent", claude("claude-sonnet-5-5", "high"), "completed", 68],
+  ["Find threads waiting on a question", "claudeAgent", claude("claude-opus-5-5", "high"), "completed", 231],
+  ["Map PRs to their Orbit tasks", "codex", codex("gpt-6.2-astra", "high"), "completed", 302],
+  ["Rebase #4812 onto main", "claudeAgent", claude("claude-opus-5-5", "medium"), "failed", 48],
+  ["Check review state on hauzer#140", "claudeAgent", claude("claude-sonnet-5-5", "high"), "completed", 94],
+  ["Summarise the ingress thread", "codex", codex("gpt-6.2-sol", "low"), "completed", 39],
+  ["Look for duplicate dependency PRs", "claudeAgent", claude("claude-haiku-5-5", "medium"), "interrupted", 12],
+  ["Check which branches are behind main", "codex", codex("gpt-6.2-astra", "medium"), "completed", 137],
+  ["Draft the list of what needs Nick", "claudeAgent", claude("claude-opus-5-5", "high"), "completed", 363],
+];
+const children = childDefs.map(([title, provider, modelSelection, status, seconds], i) => {
+  const running = status === "running";
+  const end = now - (i + 1) * 5 * 60_000;
+  const start = running ? now - seconds * 1000 : end - seconds * 1000;
+  return {
+    ...base, id: "qchild" + i, title, projectId: "project-apps", providerInstanceId: provider, modelSelection,
+    lineage: { parentThreadId: "qdetails", relationshipToParent: "subagent", rootThreadId: "qdetails" },
+    createdAt: iso(start), updatedAt: iso(running ? now : end), settledAt: null, status,
+    activityRunStatus: running ? "running" : null, activityRunStartedAt: running ? iso(start) : null,
+    latestRunStartedAt: iso(start), latestRunCompletedAt: running ? null : iso(end),
+  };
+});
+const gitInitialized = new Set();
+
+for (const [i, def] of detailsThreads.entries()) {
+  const at = iso(now + (2 - i) * 60_000);
+  threads.push({
+    ...base, id: def.id, title: def.title, projectId: def.projectId, branch: def.branch,
+    pullRequests: def.pullRequests,
+    lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: def.id },
+    createdAt: at, updatedAt: at, latestRunCompletedAt: at, settledAt: null, status: "idle",
+  });
+  threadDefs.push({ id: def.id, title: def.title, running: false, queued: 0 });
+}
+threads.push(...children);
 
 const queuedTexts = [
   "Check dark mode on Polar.",
@@ -189,6 +255,7 @@ const server = Bun.serve({
     if (path === "/ws" && server.upgrade(req)) return;
     if (path === "/commands") return Response.json(commands);
     if (path === "/reset") {
+      gitInitialized.clear();
       projections.clear();
       sequences.clear();
       commands.length = 0;
@@ -218,6 +285,20 @@ const server = Bun.serve({
           list.push({ ws, requestId: frame.id });
           subscribers.set(id, list);
           chunk(snapshot(id));
+        } else if (frame.tag === "vcs.refreshStatus") {
+          const cwd = frame.payload.cwd;
+          const isRepo = !cwd.endsWith("/notes") || gitInitialized.has(cwd);
+          const changes = cwd.endsWith("/notes") ? [0, 0] : [764, 137];
+          exit({ _tag: "Success", value: {
+            isRepo, hasPrimaryRemote: isRepo, isDefaultRef: true, refName: isRepo ? "main" : null,
+            hasWorkingTreeChanges: changes[0] > 0,
+            workingTree: { files: [], insertions: changes[0], deletions: changes[1] },
+            hasUpstream: false, aheadCount: 0, behindCount: 0, pr: null,
+          } });
+        } else if (frame.tag === "vcs.init") {
+          commands.push({ type: "vcs.init", cwd: frame.payload.cwd });
+          gitInitialized.add(frame.payload.cwd);
+          exit({ _tag: "Success", value: {} });
         } else if (frame.tag === "orchestration.dispatchCommand") {
           const cmd = frame.payload;
           commands.push(cmd);

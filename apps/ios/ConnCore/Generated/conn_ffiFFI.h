@@ -602,6 +602,11 @@ uint64_t uniffi_conn_ffi_fn_method_conncore_edit_queued_message(uint64_t ptr, Ru
 uint64_t uniffi_conn_ffi_fn_method_conncore_ensure_scratch_project(uint64_t ptr
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_INIT_GIT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_INIT_GIT
+uint64_t uniffi_conn_ffi_fn_method_conncore_init_git(uint64_t ptr, RustBuffer cwd
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_LAUNCH_GENERAL_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_LAUNCH_GENERAL_THREAD
 uint64_t uniffi_conn_ffi_fn_method_conncore_launch_general_thread(uint64_t ptr, RustBuffer text
@@ -717,9 +722,19 @@ uint64_t uniffi_conn_ffi_fn_method_conncore_stop_thread(uint64_t ptr, RustBuffer
 uint64_t uniffi_conn_ffi_fn_method_conncore_submit_composer(uint64_t ptr, RustBuffer target, RustBuffer key, RustBuffer text, RustBuffer files
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_THREAD_DETAILS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_THREAD_DETAILS
+uint64_t uniffi_conn_ffi_fn_method_conncore_thread_details(uint64_t ptr, RustBuffer thread_id
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_TURN_PATCH
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_TURN_PATCH
 uint64_t uniffi_conn_ffi_fn_method_conncore_turn_patch(uint64_t ptr, RustBuffer thread_id, int64_t turn
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_VCS_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_VCS_STATUS
+uint64_t uniffi_conn_ffi_fn_method_conncore_vcs_status(uint64_t ptr, RustBuffer cwd
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_WORKTREE_SETUP
@@ -1252,6 +1267,11 @@ void uniffi_conn_ffi_fn_method_sessionlistener_on_thread_deleted(uint64_t ptr, u
 RustBuffer uniffi_conn_ffi_fn_func_composer_restore_draft(RustBuffer current, RustBuffer sent, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_THREAD_LINK
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_THREAD_LINK
+RustBuffer uniffi_conn_ffi_fn_func_thread_link(RustBuffer environment_id, RustBuffer thread_id, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_CHANGED_FILE_ROWS
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_CHANGED_FILE_ROWS
 RustBuffer uniffi_conn_ffi_fn_func_changed_file_rows(RustBuffer files, RustBuffer overrides, int8_t expanded, RustCallStatus *_Nonnull out_status
@@ -1604,6 +1624,12 @@ uint16_t uniffi_conn_ffi_checksum_func_composer_restore_draft(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_THREAD_LINK
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_THREAD_LINK
+uint16_t uniffi_conn_ffi_checksum_func_thread_link(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_CHANGED_FILE_ROWS
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_CHANGED_FILE_ROWS
 uint16_t uniffi_conn_ffi_checksum_func_changed_file_rows(void
@@ -1814,6 +1840,12 @@ uint16_t uniffi_conn_ffi_checksum_method_conncore_ensure_scratch_project(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_INIT_GIT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_INIT_GIT
+uint16_t uniffi_conn_ffi_checksum_method_conncore_init_git(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_LAUNCH_GENERAL_THREAD
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_LAUNCH_GENERAL_THREAD
 uint16_t uniffi_conn_ffi_checksum_method_conncore_launch_general_thread(void
@@ -1952,9 +1984,21 @@ uint16_t uniffi_conn_ffi_checksum_method_conncore_submit_composer(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_THREAD_DETAILS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_THREAD_DETAILS
+uint16_t uniffi_conn_ffi_checksum_method_conncore_thread_details(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_TURN_PATCH
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_TURN_PATCH
 uint16_t uniffi_conn_ffi_checksum_method_conncore_turn_patch(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_VCS_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_VCS_STATUS
+uint16_t uniffi_conn_ffi_checksum_method_conncore_vcs_status(void
     
 );
 #endif

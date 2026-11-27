@@ -758,6 +758,15 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
     func ensureScratchProject() async throws  -> String
     
     /**
+     * `Initialize Git` for a plain folder (`vcs.init`), as desktop's details card does.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func initGit(cwd: String) async throws 
+    
+    /**
      * Launches a General (project-unbound) thread on this server by ensuring the scratch project
      * (`projects.ensureScratch`) and calling [`Self::launch_thread`].
      *
@@ -946,7 +955,22 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
      */
     func submitComposer(target: FfiComposerTarget, key: String, text: String, files: [FfiComposerFile]) async throws  -> String
     
+    /**
+     * What the thread details sheet lists for `thread_id`; `None` while the shell does not list
+     * the thread.
+     */
+    func threadDetails(threadId: String) async  -> FfiThreadDetails?
+    
     func turnPatch(threadId: String, turn: Int64) async throws  -> [FfiFilePatch]
+    
+    /**
+     * The Git facts of `cwd` for the details sheet (`vcs.refreshStatus`, local only).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func vcsStatus(cwd: String) async throws  -> FfiVcsSummary
     
     func worktreeSetup(threadId: String) throws  -> WorktreeSetupFeed
     
@@ -1277,6 +1301,29 @@ open func ensureScratchProject()async throws  -> String  {
             completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterString.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * `Initialize Git` for a plain folder (`vcs.init`), as desktop's details card does.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func initGit(cwd: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_init_git(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(cwd)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
             errorHandler: FfiConverterTypeFfiError_lift
         )
 }
@@ -1764,6 +1811,27 @@ open func submitComposer(target: FfiComposerTarget, key: String, text: String, f
         )
 }
     
+    /**
+     * What the thread details sheet lists for `thread_id`; `None` while the shell does not list
+     * the thread.
+     */
+open func threadDetails(threadId: String)async  -> FfiThreadDetails?  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_thread_details(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeFfiThreadDetails.lift,
+            errorHandler: nil
+            
+        )
+}
+    
 open func turnPatch(threadId: String, turn: Int64)async throws  -> [FfiFilePatch]  {
     return
         try  await uniffiRustCallAsync(
@@ -1776,6 +1844,29 @@ open func turnPatch(threadId: String, turn: Int64)async throws  -> [FfiFilePatch
             completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
             freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
             liftFunc: FfiConverterSequenceTypeFfiFilePatch.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * The Git facts of `cwd` for the details sheet (`vcs.refreshStatus`, local only).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func vcsStatus(cwd: String)async throws  -> FfiVcsSummary  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_vcs_status(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(cwd)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiVcsSummary_lift,
             errorHandler: FfiConverterTypeFfiError_lift
         )
 }
@@ -11662,6 +11753,347 @@ public func FfiConverterTypeFfiThemeTokens_lower(_ value: FfiThemeTokens) -> Rus
 
 
 /**
+ * What the thread details sheet lists.
+ */
+public struct FfiThreadDetails: Equatable, Hashable {
+    public var threadId: String
+    public var projectTitle: String?
+    /**
+     * The folder the thread works in: its worktree, else the project root.
+     */
+    public var folder: String?
+    /**
+     * `folder` with the home folder written as `~`.
+     */
+    public var folderLabel: String?
+    public var branch: String?
+    /**
+     * Latest first.
+     */
+    public var pullRequests: [FfiThreadPullRequest]
+    public var running: [FfiThreadDetailsAgent]
+    public var previous: [FfiThreadDetailsAgent]
+    /**
+     * `Subagents · 2 running`, or `Subagents`.
+     */
+    public var subagentsTitle: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(threadId: String, projectTitle: String?, 
+        /**
+         * The folder the thread works in: its worktree, else the project root.
+         */folder: String?, 
+        /**
+         * `folder` with the home folder written as `~`.
+         */folderLabel: String?, branch: String?, 
+        /**
+         * Latest first.
+         */pullRequests: [FfiThreadPullRequest], running: [FfiThreadDetailsAgent], previous: [FfiThreadDetailsAgent], 
+        /**
+         * `Subagents · 2 running`, or `Subagents`.
+         */subagentsTitle: String) {
+        self.threadId = threadId
+        self.projectTitle = projectTitle
+        self.folder = folder
+        self.folderLabel = folderLabel
+        self.branch = branch
+        self.pullRequests = pullRequests
+        self.running = running
+        self.previous = previous
+        self.subagentsTitle = subagentsTitle
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiThreadDetails: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiThreadDetails: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiThreadDetails {
+        return
+            try FfiThreadDetails(
+                threadId: FfiConverterString.read(from: &buf), 
+                projectTitle: FfiConverterOptionString.read(from: &buf), 
+                folder: FfiConverterOptionString.read(from: &buf), 
+                folderLabel: FfiConverterOptionString.read(from: &buf), 
+                branch: FfiConverterOptionString.read(from: &buf), 
+                pullRequests: FfiConverterSequenceTypeFfiThreadPullRequest.read(from: &buf), 
+                running: FfiConverterSequenceTypeFfiThreadDetailsAgent.read(from: &buf), 
+                previous: FfiConverterSequenceTypeFfiThreadDetailsAgent.read(from: &buf), 
+                subagentsTitle: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiThreadDetails, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.threadId, into: &buf)
+        FfiConverterOptionString.write(value.projectTitle, into: &buf)
+        FfiConverterOptionString.write(value.folder, into: &buf)
+        FfiConverterOptionString.write(value.folderLabel, into: &buf)
+        FfiConverterOptionString.write(value.branch, into: &buf)
+        FfiConverterSequenceTypeFfiThreadPullRequest.write(value.pullRequests, into: &buf)
+        FfiConverterSequenceTypeFfiThreadDetailsAgent.write(value.running, into: &buf)
+        FfiConverterSequenceTypeFfiThreadDetailsAgent.write(value.previous, into: &buf)
+        FfiConverterString.write(value.subagentsTitle, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiThreadDetails_lift(_ buf: RustBuffer) throws -> FfiThreadDetails {
+    return try FfiConverterTypeFfiThreadDetails.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiThreadDetails_lower(_ value: FfiThreadDetails) -> RustBuffer {
+    return FfiConverterTypeFfiThreadDetails.lower(value)
+}
+
+
+/**
+ * One child agent of the thread.
+ */
+public struct FfiThreadDetailsAgent: Equatable, Hashable {
+    public var key: String
+    /**
+     * The thread to open; `None` while the child has none.
+     */
+    public var threadId: String?
+    /**
+     * The linked environment it runs on; `None` is the thread's own.
+     */
+    public var environmentId: String?
+    public var title: String
+    /**
+     * Provider driver or instance id, for the provider mark.
+     */
+    public var provider: String
+    /**
+     * `Opus 5.5 · high` (`SubagentModel::label`).
+     */
+    public var model: String?
+    public var state: FfiThreadAgentState
+    public var live: Bool
+    /**
+     * `on nick · Opus 5.5 · high · Done · 1m 8s`: where, model, the state once settled, and how
+     * long it ran.
+     */
+    public var meta: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(key: String, 
+        /**
+         * The thread to open; `None` while the child has none.
+         */threadId: String?, 
+        /**
+         * The linked environment it runs on; `None` is the thread's own.
+         */environmentId: String?, title: String, 
+        /**
+         * Provider driver or instance id, for the provider mark.
+         */provider: String, 
+        /**
+         * `Opus 5.5 · high` (`SubagentModel::label`).
+         */model: String?, state: FfiThreadAgentState, live: Bool, 
+        /**
+         * `on nick · Opus 5.5 · high · Done · 1m 8s`: where, model, the state once settled, and how
+         * long it ran.
+         */meta: String) {
+        self.key = key
+        self.threadId = threadId
+        self.environmentId = environmentId
+        self.title = title
+        self.provider = provider
+        self.model = model
+        self.state = state
+        self.live = live
+        self.meta = meta
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiThreadDetailsAgent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiThreadDetailsAgent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiThreadDetailsAgent {
+        return
+            try FfiThreadDetailsAgent(
+                key: FfiConverterString.read(from: &buf), 
+                threadId: FfiConverterOptionString.read(from: &buf), 
+                environmentId: FfiConverterOptionString.read(from: &buf), 
+                title: FfiConverterString.read(from: &buf), 
+                provider: FfiConverterString.read(from: &buf), 
+                model: FfiConverterOptionString.read(from: &buf), 
+                state: FfiConverterTypeFfiThreadAgentState.read(from: &buf), 
+                live: FfiConverterBool.read(from: &buf), 
+                meta: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiThreadDetailsAgent, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.key, into: &buf)
+        FfiConverterOptionString.write(value.threadId, into: &buf)
+        FfiConverterOptionString.write(value.environmentId, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterString.write(value.provider, into: &buf)
+        FfiConverterOptionString.write(value.model, into: &buf)
+        FfiConverterTypeFfiThreadAgentState.write(value.state, into: &buf)
+        FfiConverterBool.write(value.live, into: &buf)
+        FfiConverterString.write(value.meta, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiThreadDetailsAgent_lift(_ buf: RustBuffer) throws -> FfiThreadDetailsAgent {
+    return try FfiConverterTypeFfiThreadDetailsAgent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiThreadDetailsAgent_lower(_ value: FfiThreadDetailsAgent) -> RustBuffer {
+    return FfiConverterTypeFfiThreadDetailsAgent.lower(value)
+}
+
+
+/**
+ * A pull request linked to the thread, with what opening its record needs.
+ */
+public struct FfiThreadPullRequest: Equatable, Hashable {
+    public var projectId: String
+    /**
+     * `None` for a branch PR the server has not linked yet: it opens in the browser.
+     */
+    public var host: String?
+    public var repository: String
+    public var number: Int64
+    public var url: String
+    /**
+     * The title, else `#number` until it has synced.
+     */
+    public var title: String
+    public var state: FfiThreadPullRequestState?
+    /**
+     * `#1931 · Open`.
+     */
+    public var meta: String
+    public var headBranch: String
+    public var baseBranch: String
+    public var author: String?
+    public var updatedAt: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(projectId: String, 
+        /**
+         * `None` for a branch PR the server has not linked yet: it opens in the browser.
+         */host: String?, repository: String, number: Int64, url: String, 
+        /**
+         * The title, else `#number` until it has synced.
+         */title: String, state: FfiThreadPullRequestState?, 
+        /**
+         * `#1931 · Open`.
+         */meta: String, headBranch: String, baseBranch: String, author: String?, updatedAt: String?) {
+        self.projectId = projectId
+        self.host = host
+        self.repository = repository
+        self.number = number
+        self.url = url
+        self.title = title
+        self.state = state
+        self.meta = meta
+        self.headBranch = headBranch
+        self.baseBranch = baseBranch
+        self.author = author
+        self.updatedAt = updatedAt
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiThreadPullRequest: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiThreadPullRequest: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiThreadPullRequest {
+        return
+            try FfiThreadPullRequest(
+                projectId: FfiConverterString.read(from: &buf), 
+                host: FfiConverterOptionString.read(from: &buf), 
+                repository: FfiConverterString.read(from: &buf), 
+                number: FfiConverterInt64.read(from: &buf), 
+                url: FfiConverterString.read(from: &buf), 
+                title: FfiConverterString.read(from: &buf), 
+                state: FfiConverterOptionTypeFfiThreadPullRequestState.read(from: &buf), 
+                meta: FfiConverterString.read(from: &buf), 
+                headBranch: FfiConverterString.read(from: &buf), 
+                baseBranch: FfiConverterString.read(from: &buf), 
+                author: FfiConverterOptionString.read(from: &buf), 
+                updatedAt: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiThreadPullRequest, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.projectId, into: &buf)
+        FfiConverterOptionString.write(value.host, into: &buf)
+        FfiConverterString.write(value.repository, into: &buf)
+        FfiConverterInt64.write(value.number, into: &buf)
+        FfiConverterString.write(value.url, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterOptionTypeFfiThreadPullRequestState.write(value.state, into: &buf)
+        FfiConverterString.write(value.meta, into: &buf)
+        FfiConverterString.write(value.headBranch, into: &buf)
+        FfiConverterString.write(value.baseBranch, into: &buf)
+        FfiConverterOptionString.write(value.author, into: &buf)
+        FfiConverterOptionString.write(value.updatedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiThreadPullRequest_lift(_ buf: RustBuffer) throws -> FfiThreadPullRequest {
+    return try FfiConverterTypeFfiThreadPullRequest.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiThreadPullRequest_lower(_ value: FfiThreadPullRequest) -> RustBuffer {
+    return FfiConverterTypeFfiThreadPullRequest.lower(value)
+}
+
+
+/**
  * Point-in-time snapshot of one subscribed thread emitted to [`crate::CoreListener::on_thread`].
  */
 public struct FfiThreadSnapshot: Equatable, Hashable {
@@ -12535,6 +12967,83 @@ public func FfiConverterTypeFfiUserInputSubmission_lift(_ buf: RustBuffer) throw
 #endif
 public func FfiConverterTypeFfiUserInputSubmission_lower(_ value: FfiUserInputSubmission) -> RustBuffer {
     return FfiConverterTypeFfiUserInputSubmission.lower(value)
+}
+
+
+/**
+ * The Git rows' facts for a folder (`vcs.refreshStatus`, local only).
+ */
+public struct FfiVcsSummary: Equatable, Hashable {
+    public var isRepo: Bool
+    /**
+     * The checkout's current ref.
+     */
+    public var refName: String?
+    /**
+     * Uncommitted changes.
+     */
+    public var insertions: Int64
+    public var deletions: Int64
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(isRepo: Bool, 
+        /**
+         * The checkout's current ref.
+         */refName: String?, 
+        /**
+         * Uncommitted changes.
+         */insertions: Int64, deletions: Int64) {
+        self.isRepo = isRepo
+        self.refName = refName
+        self.insertions = insertions
+        self.deletions = deletions
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiVcsSummary: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiVcsSummary: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiVcsSummary {
+        return
+            try FfiVcsSummary(
+                isRepo: FfiConverterBool.read(from: &buf), 
+                refName: FfiConverterOptionString.read(from: &buf), 
+                insertions: FfiConverterInt64.read(from: &buf), 
+                deletions: FfiConverterInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiVcsSummary, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.isRepo, into: &buf)
+        FfiConverterOptionString.write(value.refName, into: &buf)
+        FfiConverterInt64.write(value.insertions, into: &buf)
+        FfiConverterInt64.write(value.deletions, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiVcsSummary_lift(_ buf: RustBuffer) throws -> FfiVcsSummary {
+    return try FfiConverterTypeFfiVcsSummary.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiVcsSummary_lower(_ value: FfiVcsSummary) -> RustBuffer {
+    return FfiConverterTypeFfiVcsSummary.lower(value)
 }
 
 
@@ -16774,6 +17283,186 @@ public func FfiConverterTypeFfiThreadActivity_lower(_ value: FfiThreadActivity) 
 
 
 /**
+ * Where a child agent is in its run.
+ */
+
+public enum FfiThreadAgentState: Equatable, Hashable {
+    
+    case running
+    case waiting
+    case done
+    case failed
+    case stopped
+    case idle
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiThreadAgentState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiThreadAgentState: FfiConverterRustBuffer {
+    typealias SwiftType = FfiThreadAgentState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiThreadAgentState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .running
+        
+        case 2: return .waiting
+        
+        case 3: return .done
+        
+        case 4: return .failed
+        
+        case 5: return .stopped
+        
+        case 6: return .idle
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiThreadAgentState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .running:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .waiting:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .done:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .failed:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .stopped:
+            writeInt(&buf, Int32(5))
+        
+        
+        case .idle:
+            writeInt(&buf, Int32(6))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiThreadAgentState_lift(_ buf: RustBuffer) throws -> FfiThreadAgentState {
+    return try FfiConverterTypeFfiThreadAgentState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiThreadAgentState_lower(_ value: FfiThreadAgentState) -> RustBuffer {
+    return FfiConverterTypeFfiThreadAgentState.lower(value)
+}
+
+
+
+/**
+ * A pull request's state as the sheet shows it.
+ */
+
+public enum FfiThreadPullRequestState: Equatable, Hashable {
+    
+    case `open`
+    case draft
+    case merged
+    case closed
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiThreadPullRequestState: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiThreadPullRequestState: FfiConverterRustBuffer {
+    typealias SwiftType = FfiThreadPullRequestState
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiThreadPullRequestState {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .`open`
+        
+        case 2: return .draft
+        
+        case 3: return .merged
+        
+        case 4: return .closed
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiThreadPullRequestState, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .`open`:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .draft:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .merged:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .closed:
+            writeInt(&buf, Int32(4))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiThreadPullRequestState_lift(_ buf: RustBuffer) throws -> FfiThreadPullRequestState {
+    return try FfiConverterTypeFfiThreadPullRequestState.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiThreadPullRequestState_lower(_ value: FfiThreadPullRequestState) -> RustBuffer {
+    return FfiConverterTypeFfiThreadPullRequestState.lower(value)
+}
+
+
+
+/**
  * One flattened timeline row emitted in [`FfiThreadSnapshot`].
  */
 
@@ -18043,6 +18732,30 @@ fileprivate struct FfiConverterOptionTypeFfiThemeTokens: FfiConverterRustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeFfiThreadDetails: FfiConverterRustBuffer {
+    typealias SwiftType = FfiThreadDetails?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiThreadDetails.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiThreadDetails.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeFfiTurnAgents: FfiConverterRustBuffer {
     typealias SwiftType = FfiTurnAgents?
 
@@ -18275,6 +18988,30 @@ fileprivate struct FfiConverterOptionTypeFfiTaskLabelTone: FfiConverterRustBuffe
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeFfiTaskLabelTone.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiThreadPullRequestState: FfiConverterRustBuffer {
+    typealias SwiftType = FfiThreadPullRequestState?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiThreadPullRequestState.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiThreadPullRequestState.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -19230,6 +19967,56 @@ fileprivate struct FfiConverterSequenceTypeFfiThemeSummary: FfiConverterRustBuff
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeFfiThreadDetailsAgent: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiThreadDetailsAgent]
+
+    public static func write(_ value: [FfiThreadDetailsAgent], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiThreadDetailsAgent.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiThreadDetailsAgent] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiThreadDetailsAgent]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiThreadDetailsAgent.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiThreadPullRequest: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiThreadPullRequest]
+
+    public static func write(_ value: [FfiThreadPullRequest], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiThreadPullRequest.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiThreadPullRequest] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiThreadPullRequest]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiThreadPullRequest.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFfiThreadSummary: FfiConverterRustBuffer {
     typealias SwiftType = [FfiThreadSummary]
 
@@ -19692,6 +20479,18 @@ public func composerRestoreDraft(current: String, sent: String) -> String  {
     )
 })
 }
+/**
+ * The `conn://thread/<environmentId>/<threadId>` link "Copy thread link" writes.
+ */
+public func threadLink(environmentId: String, threadId: String) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_func_thread_link(
+        FfiConverterString.lower(environmentId),
+        FfiConverterString.lower(threadId),uniffiCallStatus
+    )
+})
+}
 public func changedFileRows(files: [FfiTurnCheckpointFile], overrides: [String: Bool], expanded: Bool) -> [FfiChangedFileRow]  {
     return try!  FfiConverterSequenceTypeFfiChangedFileRow.lift(try! rustCall() {
         uniffiCallStatus in
@@ -19917,6 +20716,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_func_composer_restore_draft() != 10150) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_func_thread_link() != 25484) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_func_changed_file_rows() != 50125) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -20022,6 +20824,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_conncore_ensure_scratch_project() != 24904) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_conncore_init_git() != 43788) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_conncore_launch_general_thread() != 58633) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -20091,7 +20896,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_conncore_submit_composer() != 29646) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_conncore_thread_details() != 25788) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_conncore_turn_patch() != 19061) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_vcs_status() != 59543) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_worktree_setup() != 57665) {

@@ -1540,6 +1540,13 @@ impl ConnSession {
         self.step(Machine::foreground);
     }
 
+    /// The app went to the background: save the thread list now, for the next launch.
+    pub fn background(&self) {
+        if let Some(core) = self.core() {
+            core.save_shell();
+        }
+    }
+
     /// Where a link for `environment_id` opens: here only when it is this session's already
     /// known server (trying again if its last attempt failed); otherwise in that environment's
     /// own scope.

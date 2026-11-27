@@ -1862,6 +1862,11 @@ public func FfiConverterTypeConnCore_lower(_ value: ConnCore) -> UInt64 {
 public protocol ConnSessionProtocol: AnyObject, Sendable {
     
     /**
+     * The app went to the background: save the thread list now, for the next launch.
+     */
+    func background() 
+    
+    /**
      * The user left this thread: unsubscribe it.
      */
     func closeThread(threadId: String) 
@@ -2003,6 +2008,17 @@ public convenience init(gatewayUrl: String?, cacheDirectory: String?, listener: 
 
     
 
+    
+    /**
+     * The app went to the background: save the thread list now, for the next launch.
+     */
+open func background()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_connsession_background(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
     
     /**
      * The user left this thread: unsubscribe it.
@@ -20105,6 +20121,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_ffitextfits_fits() != 56087) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_connsession_background() != 57913) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_close_thread() != 18448) {

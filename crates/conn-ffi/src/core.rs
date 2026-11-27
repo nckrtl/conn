@@ -121,6 +121,8 @@ enum PumpControl {
     },
     CloseThread(String),
     LoadEarlier(String),
+    /// Saves the thread list for the next launch now (the app goes to the background).
+    SaveShell,
     /// The window [`conn_cache::Engine::older`] read.
     FinishEarlier {
         thread_id: String,
@@ -324,6 +326,11 @@ impl ConnCore {
 
     pub(crate) fn published_shell(&self) -> Option<FfiShellSnapshot> {
         self.shell_watch.borrow().clone()
+    }
+
+    /// Saves the thread list for the next launch now.
+    pub(crate) fn save_shell(&self) {
+        let _ = self.ctrl_tx.send(PumpControl::SaveShell);
     }
 
     /// Starts a connection. `orbit_server_id` marks an Orbit session: its bearers are reported
@@ -1428,6 +1435,8 @@ struct PumpState {
     connection: Connection,
     listener: Arc<dyn CoreListener>,
     shell: ShellState,
+    /// The thread list saved on the device, published until the server's shell is.
+    saved_shell: Option<FfiShellSnapshot>,
     server_config: ServerConfigState,
     /// Workspace scan history by `(instance_id, cwd)`.
     workspace_scans: HashMap<(String, String), WorkspaceScanState>,
@@ -1478,6 +1487,7 @@ impl PumpState {
             connection,
             listener,
             shell: ShellState::default(),
+            saved_shell: None,
             server_config: ServerConfigState::new(),
             workspace_scans: HashMap::new(),
             open_threads: HashSet::new(),
@@ -1697,12 +1707,17 @@ impl PumpState {
                 }
                 if self.shell.synchronized {
                     self.emit_or_buffer_shell(build_shell_snapshot(&self.shell));
+                    self.save_shell(false);
                 }
                 true
             }
-            PumpControl::EnableEngine(engine, reader) => {
+            PumpControl::EnableEngine(mut engine, reader) => {
+                let saved = engine.take_saved_shell();
                 self.engine = Some(*engine);
                 self.reader = Some(reader);
+                if let Some(saved) = saved.filter(|_| !self.shell.synchronized) {
+                    self.publish_saved_shell(build_shell_snapshot(&saved));
+                }
                 self.kept_once = false;
                 self.schedule_kept();
                 let open: Vec<String> = self.open_threads.iter().cloned().collect();
@@ -1751,6 +1766,10 @@ impl PumpState {
                 if let Some(engine) = &mut self.engine {
                     engine.close_thread(&thread_id);
                 }
+                true
+            }
+            PumpControl::SaveShell => {
+                self.save_shell(true);
                 true
             }
             PumpControl::LoadEarlier(thread_id) => {
@@ -1953,6 +1972,7 @@ impl PumpState {
                     self.sync_shell_run_meta();
                     self.emit_or_buffer_shell(build_shell_snapshot(&self.shell));
                     self.schedule_kept();
+                    self.save_shell(false);
                 }
                 if !change.threads_changed.is_empty() {
                     self.resubscribe_ended_threads();
@@ -2184,10 +2204,28 @@ impl PumpState {
     fn invalidate_shell(&mut self) {
         self.shell.synchronized = false;
         self.coalescer.reset_shell();
-        self.shell_watch.send_replace(None);
+        self.shell_watch.send_replace(self.saved_shell.clone());
+    }
+
+    /// Draws the thread list saved on the device until the server's shell arrives.
+    fn publish_saved_shell(&mut self, snapshot: FfiShellSnapshot) {
+        self.saved_shell = Some(snapshot.clone());
+        self.shell_watch.send_replace(Some(snapshot.clone()));
+        self.listener.on_shell(snapshot);
+        conn_client::perf::shell_cached();
+    }
+
+    /// Saves a synchronized thread list for the next launch: throttled, unless `now`.
+    fn save_shell(&mut self, now: bool) {
+        if self.shell.synchronized
+            && let Some(engine) = &mut self.engine
+        {
+            engine.save_shell(&self.shell, now);
+        }
     }
 
     fn publish_shell(&mut self, snapshot: FfiShellSnapshot) {
+        self.saved_shell = None;
         self.shell_watch.send_replace(Some(snapshot.clone()));
         self.listener.on_shell(snapshot);
         if std::mem::take(&mut self.perf_shell_pending) {

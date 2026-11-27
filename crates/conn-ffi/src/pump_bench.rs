@@ -475,6 +475,59 @@ fn a_kept_thread_opens_from_the_device_before_the_server_answers() {
         again.entries, first.entries,
         "a restart opens the same rows"
     );
+    assert!(!again.synchronized);
+
+    restarted.handle_event(thread(LONG, json!({"kind": "synchronized"})));
+    restarted.flush_due_at(Instant::now() + Duration::from_secs(2));
+    let current = restarted.published.get(LONG).expect("published");
+    assert!(current.synchronized, "caught up once the stream says so");
+    assert_eq!(current.entries, first.entries);
+}
+
+/// The thread list saved on one launch is published on the next as soon as the device database
+/// opens, before the server's shell, and the server's replaces it.
+#[test]
+fn a_saved_thread_list_is_published_before_the_server_shell() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _rt = rt.enter();
+    let dir = tempfile::tempdir().expect("dir");
+    let shell_snapshot = |sequence: i64, minute: u32| {
+        shell(json!({"kind": "snapshot", "snapshot": {
+            "schemaVersion": 1, "snapshotSequence": sequence, "projects": [],
+            "threads": [thread_shell(LONG, minute)], "archivedThreads": []
+        }}))
+    };
+    let (mut first, _, mut ctrl) = bare_pump(&rt, dir.path());
+    first.handle_event(shell_snapshot(1, 0));
+    first.handle_event(shell(json!({"kind": "synchronized"})));
+    // A device read is answered after the save before it.
+    open(&rt, &mut first, &mut ctrl, OTHER);
+    drop(first);
+
+    let (mut second, _, _ctrl) = bare_pump(&rt, dir.path());
+    let engine = second.engine.take().expect("engine");
+    let reader = second.reader.take().expect("reader");
+    let _ = second.handle_control(PumpControl::EnableEngine(Box::new(engine), reader));
+    let saved = second
+        .shell_watch
+        .borrow()
+        .clone()
+        .expect("saved list published");
+    assert!(!saved.synchronized, "drawn, not current");
+    assert_eq!(saved.threads.len(), 1);
+
+    second.handle_event(ClientEvent::Status(
+        conn_client::ConnectionStatus::Connected,
+    ));
+    assert!(
+        second.shell_watch.borrow().is_some(),
+        "a status change keeps the saved list until the server's arrives"
+    );
+    second.handle_event(shell_snapshot(2, 1));
+    second.handle_event(shell(json!({"kind": "synchronized"})));
+    second.flush_due_at(Instant::now() + Duration::from_secs(1));
+    let current = second.shell_watch.borrow().clone().expect("server shell");
+    assert!(current.synchronized, "the server's shell replaces it");
 }
 
 /// The threads left last stay in memory: switching back publishes without a device read.

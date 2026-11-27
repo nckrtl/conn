@@ -734,6 +734,7 @@ final class CoreStore {
     func handleScenePhase(_ phase: ScenePhase) {
         switch phase {
         case .active: session?.foreground()
+        case .background: session?.background()
         default: return
         }
         for child in linked.values { child.handleScenePhase(phase) }

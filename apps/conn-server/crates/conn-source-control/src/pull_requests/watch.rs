@@ -6,8 +6,12 @@
 //! Watches, details and remarks stay JSON: the watch's optional fields mean different things
 //! when absent and when `null`, as in T3.
 
+use conn_source_control_core::wake::WATCHING_CLOSING;
 use conn_support::time::{iso_from_millis, millis_from_iso};
 use serde_json::{Map, Value, json};
+
+// The wake and how several become one live below the engine, which rebuilds a queued one.
+pub use conn_source_control_core::wake::{Wake, combine};
 
 /// `PULL_REQUEST_WATCH_WAKE_LIMIT`: consecutive comment-only wakes before the watch stops.
 pub const WAKE_LIMIT: i64 = 10;
@@ -910,23 +914,6 @@ fn change_lines(change: &Change, base_branch: &str, commit: &str) -> Vec<String>
     }
 }
 
-const WATCHING_CLOSING: &str = "Look into each item and act on it as your task requires. This PR stays linked and watched, so do not link, watch, or list it again. End your turn when you are done, and Conn wakes you on the next change. When you hand the work back to the user, call unwatch_pull_request first so the thread returns to their inbox.";
-const WATCHING_CLOSING_PLURAL: &str = "Look into each item and act on it as your task requires. Each PR Conn still watches stays linked and watched, so do not link, watch, or list them again. End your turn when you are done, and Conn wakes you on the next change. When you hand the work back to the user, call unwatch_pull_request for each first so the thread returns to their inbox.";
-
-/// `PullRequestWatchWake`: the text and the notification (`{source, outcome, summary}`).
-#[derive(Clone, Debug, PartialEq)]
-pub struct Wake {
-    pub text: String,
-    pub outcome: &'static str,
-    pub summary: String,
-}
-
-impl Wake {
-    pub fn notification(&self) -> Value {
-        json!({"source": {"kind": "monitor"}, "outcome": self.outcome, "summary": self.summary})
-    }
-}
-
 /// `pullRequestWatchEndMessage`: the wake for a watched pull request that merged or closed.
 /// `detail` is its detail, or its link's snapshot when the host could not be read.
 pub fn end_message(number: u64, url: &str, detail: &Value) -> Wake {
@@ -1014,41 +1001,6 @@ pub fn message(
             "updated"
         },
         summary: format!("#{number}: {}", summary.join(", ")),
-    }
-}
-
-/// `combinePullRequestWatchWakes`: one wake for several pull requests, closing said once.
-pub fn combine(wakes: &[Wake]) -> Option<Wake> {
-    match wakes {
-        [] => None,
-        [one] => Some(one.clone()),
-        _ => {
-            let closing = format!("\n\n{WATCHING_CLOSING}");
-            let watching = wakes.iter().any(|w| w.text.ends_with(&closing));
-            let mut texts: Vec<&str> = wakes
-                .iter()
-                .map(|w| w.text.strip_suffix(closing.as_str()).unwrap_or(&w.text))
-                .collect();
-            if watching {
-                texts.push(WATCHING_CLOSING_PLURAL);
-            }
-            let outcome = if wakes.iter().any(|w| w.outcome == "failed") {
-                "failed"
-            } else if wakes.iter().all(|w| w.outcome == "completed") {
-                "completed"
-            } else {
-                "updated"
-            };
-            Some(Wake {
-                text: texts.join("\n\n"),
-                outcome,
-                summary: wakes
-                    .iter()
-                    .map(|w| w.summary.as_str())
-                    .collect::<Vec<_>>()
-                    .join("; "),
-            })
-        }
     }
 }
 

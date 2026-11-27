@@ -141,6 +141,13 @@ apps/server/src/review
 apps/server/src/sourceControl
 apps/server/src/worktreesDirectory.ts
 
+[crates/conn-source-control-core]
+packages/source-control-core/src/shared
+packages/source-control-github/src/shared
+packages/shared/src/cloneUrl.ts
+packages/shared/src/git.ts
+apps/server/src/orchestration-v2/pullRequestWatch.ts
+
 [crates/conn-source-control]
 apps/server/src/sourceControl
 apps/server/src/pullRequest

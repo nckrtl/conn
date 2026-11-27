@@ -1,4 +1,5 @@
-//! The URL text rules JavaScript applies: `decodeURIComponent` and `URLSearchParams`.
+//! The URL text rules JavaScript applies: `encodeURIComponent`, `decodeURIComponent` and
+//! `URLSearchParams`.
 
 fn hex_value(byte: u8) -> Option<u8> {
     match byte {
@@ -7,6 +8,19 @@ fn hex_value(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
+}
+
+/// `encodeURIComponent`.
+pub fn encode_uri_component(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&byte) {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
 }
 
 /// `decodeURIComponent`, or `None` where it throws: a `%` without two hex digits, or bytes
@@ -72,6 +86,12 @@ pub fn search_params(text: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn encodes_as_javascript_does() {
+        assert_eq!(encode_uri_component("a b/€?"), "a%20b%2F%E2%82%AC%3F");
+        assert_eq!(encode_uri_component("Az09-_.!~*'()"), "Az09-_.!~*'()");
+    }
 
     #[test]
     fn decodes_as_javascript_does() {

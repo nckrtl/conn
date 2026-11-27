@@ -56,9 +56,28 @@ const ROW_TEXT_ALPHA: f32 = 0.7;
 /// A row's content starts this far in from the tray's inner left edge.
 const ROW_PAD_LEFT_PX: f32 = 12.0;
 /// A row's buttons end this far in from the tray's inner right edge.
-const ROW_PAD_RIGHT_PX: f32 = 6.0;
+pub(super) const ROW_PAD_RIGHT_PX: f32 = 6.0;
+/// Steer, trash and `…` are square buttons of this size, centred in the row's band.
+pub(super) const ICON_BUTTON_PX: f32 = 24.0;
+/// The icon buttons' hover box is concentric with the tray's corner: the tray's radius less the
+/// button's inset from the tray's outer edge on the tighter axis (the border and the space above
+/// the button in its band), as in the model picker's rail tiles. The `…` button of the first row
+/// sits in the tray's top-right corner, so its box follows that curve.
+pub(super) const ICON_BUTTON_RADIUS_PX: f32 =
+    TRAY_RADIUS_PX - (LINE_PX + min_f32(ROW_PAD_RIGHT_PX, (ROW_HEIGHT_PX - ICON_BUTTON_PX) / 2.0));
+/// How far a row's text sits above its line box's centre. The line box centres in the band, but
+/// its glyphs (cap height down to the descenders) sit low in it: without this, the space below
+/// the text is 3px smaller than the space above it. The icons centre on their own.
+pub(super) const TEXT_RAISE_PX: f32 = 1.5;
+/// How far from the tray's fill toward the composer's the icon buttons' hover fill sits: lighter
+/// than the row it sits on, darker than the composer.
+const BUTTON_HOVER_MIX: f32 = 0.5;
 /// An optimistic order the server has not confirmed is dropped after this long.
 const ORDER_OVERRIDE_TTL: Duration = Duration::from_secs(5);
+
+const fn min_f32(a: f32, b: f32) -> f32 {
+    if a < b { a } else { b }
+}
 
 /// The tallest the rows area gets before it scrolls.
 pub(super) const fn rows_max_height_px() -> f32 {
@@ -363,6 +382,20 @@ pub(super) fn tray_fill(tokens: &Tokens) -> conn_theme::Rgba {
         r: composer.r + (toward.r - composer.r) * amount,
         g: composer.g + (toward.g - composer.g) * amount,
         b: composer.b + (toward.b - composer.b) * amount,
+        a: 1.0,
+    }
+}
+
+/// The icon buttons' hover, pressed and menu-open fill: halfway from the tray's fill to the
+/// composer's, so it lifts the button off its row without matching the composer below.
+#[must_use]
+pub(super) fn button_hover_fill(tokens: &Tokens) -> conn_theme::Rgba {
+    let tray = tray_fill(tokens);
+    let composer = super::composer::composer_fill(tokens);
+    conn_theme::Rgba {
+        r: tray.r + (composer.r - tray.r) * BUTTON_HOVER_MIX,
+        g: tray.g + (composer.g - tray.g) * BUTTON_HOVER_MIX,
+        b: tray.b + (composer.b - tray.b) * BUTTON_HOVER_MIX,
         a: 1.0,
     }
 }
@@ -924,6 +957,8 @@ impl ChatView {
                     .text_size(px(13.0))
                     .line_height(px(18.0))
                     .text_color(hsla_alpha(tokens.foreground, ROW_TEXT_ALPHA))
+                    .relative()
+                    .top(px(-TEXT_RAISE_PX))
                     .child(SharedString::from(row.preview.clone())),
             )
             .child(
@@ -932,6 +967,8 @@ impl ChatView {
                     .text_size(px(12.0))
                     .line_height(px(16.0))
                     .text_color(muted)
+                    .relative()
+                    .top(px(-TEXT_RAISE_PX))
                     .child(status),
             );
         #[cfg(test)]
@@ -951,6 +988,7 @@ impl ChatView {
         let fg = hsla(tokens.foreground);
         let muted = hsla(tokens.muted_foreground);
         let hover_bg = hsla(tokens.shell_highlight);
+        let button_hover = hsla(button_hover_fill(tokens));
         let primary = hsla(tokens.primary);
         let (tray_fill, tray_border) = tray_surface_colors(tokens);
 
@@ -979,8 +1017,8 @@ impl ChatView {
                 .flex()
                 .items_center()
                 .justify_center()
-                .size(px(24.0))
-                .rounded(px(6.0))
+                .size(px(ICON_BUTTON_PX))
+                .rounded(px(ICON_BUTTON_RADIUS_PX))
                 .text_color(muted)
         };
 
@@ -1018,6 +1056,8 @@ impl ChatView {
                     div()
                         .px(px(4.0))
                         .text_color(fg)
+                        .relative()
+                        .top(px(-TEXT_RAISE_PX))
                         .child("Editing in the composer"),
                 )
                 .child(cancel);
@@ -1037,7 +1077,8 @@ impl ChatView {
             )
             .when(has_run_id, |el| {
                 el.cursor_pointer()
-                    .hover(move |s| s.bg(hover_bg).text_color(fg))
+                    .hover(move |s| s.bg(button_hover).text_color(fg))
+                    .active(move |s| s.bg(button_hover).text_color(fg))
                     .on_click(cx.listener(move |view, _, _, cx| {
                         view.steer_queued_run(&run_for_steer, cx);
                     }))
@@ -1055,7 +1096,8 @@ impl ChatView {
             )
             .when(has_run_id, |el| {
                 el.cursor_pointer()
-                    .hover(move |s| s.bg(hover_bg).text_color(fg))
+                    .hover(move |s| s.bg(button_hover).text_color(fg))
+                    .active(move |s| s.bg(button_hover).text_color(fg))
                     .on_click(cx.listener(move |view, _, window, cx| {
                         view.remove_queued_run(&run_for_remove, window, cx);
                     }))
@@ -1071,10 +1113,11 @@ impl ChatView {
                 format!("chat.queue.more.{id}"),
                 "More actions for queued message",
             )
-            .when(menu_open, |el| el.bg(hover_bg).text_color(fg))
+            .when(menu_open, |el| el.bg(button_hover).text_color(fg))
             .when(has_run_id, |el| {
                 el.cursor_pointer()
-                    .hover(move |s| s.bg(hover_bg).text_color(fg))
+                    .hover(move |s| s.bg(button_hover).text_color(fg))
+                    .active(move |s| s.bg(button_hover).text_color(fg))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |view, event: &MouseDownEvent, window, cx| {
@@ -1137,6 +1180,8 @@ impl ChatView {
                     .text_size(px(13.0))
                     .line_height(px(18.0))
                     .text_color(hsla_alpha(tokens.foreground, ROW_TEXT_ALPHA))
+                    .relative()
+                    .top(px(-TEXT_RAISE_PX))
                     .child(label.clone()),
             )
             .child(actions)
@@ -1219,8 +1264,9 @@ fn drop_line(color: Hsla, top: bool) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::{
-        QueueMenuAction, menu_actions, moved_order, preview_text, reorder_target, step_cursor,
-        step_slot, tray_fill,
+        ICON_BUTTON_PX, ICON_BUTTON_RADIUS_PX, LINE_PX, QueueMenuAction, ROW_HEIGHT_PX,
+        ROW_PAD_RIGHT_PX, TRAY_RADIUS_PX, button_hover_fill, menu_actions, moved_order,
+        preview_text, reorder_target, step_cursor, step_slot, tray_fill,
     };
     use crate::chat::composer::composer_fill;
     use conn_theme::{Appearance, Rgba, Tokens};
@@ -1301,6 +1347,53 @@ mod tests {
                 theme.id
             );
         }
+    }
+
+    #[test]
+    fn the_button_hover_sits_between_the_tray_and_the_composer_in_dark_and_light() {
+        for theme_id in ["dark-ocean", "t3-code-light"] {
+            let tokens = tokens_for(theme_id);
+            let (tray, hover, composer) = (
+                luma(tray_fill(&tokens)),
+                luma(button_hover_fill(&tokens)),
+                luma(composer_fill(&tokens)),
+            );
+            assert!(
+                tray < hover && hover < composer,
+                "{theme_id}: hover {hover} is not strictly between the tray {tray} and the \
+                 composer {composer}"
+            );
+            // About halfway: dimmer than the composer by as much as it lifts off the tray.
+            let share = (hover - tray) / (composer - tray);
+            assert!(
+                (0.35..=0.65).contains(&share),
+                "{theme_id}: hover sits {share} of the way to the composer"
+            );
+        }
+        for theme in conn_theme::builtin_themes() {
+            let tokens = Tokens::derive(&theme);
+            let (tray, hover, composer) = (
+                luma(tray_fill(&tokens)),
+                luma(button_hover_fill(&tokens)),
+                luma(composer_fill(&tokens)),
+            );
+            assert!(
+                (tray.min(composer)..=tray.max(composer)).contains(&hover),
+                "{}: the hover is outside the tray and composer fills",
+                theme.id
+            );
+        }
+    }
+
+    #[test]
+    fn the_icon_button_radius_is_concentric_with_the_tray() {
+        // The `…` button of the first row: 1px of border, then the space above it in its 30px
+        // band, which is tighter than the row's right padding.
+        let above = (ROW_HEIGHT_PX - ICON_BUTTON_PX) / 2.0;
+        let inset = LINE_PX + above.min(ROW_PAD_RIGHT_PX);
+        assert!((inset - 4.0).abs() < f32::EPSILON);
+        assert!((ICON_BUTTON_RADIUS_PX - (TRAY_RADIUS_PX - inset)).abs() < f32::EPSILON);
+        const { assert!(ICON_BUTTON_RADIUS_PX <= ICON_BUTTON_PX / 2.0) };
     }
 
     #[test]

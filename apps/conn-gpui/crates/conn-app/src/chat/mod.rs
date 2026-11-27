@@ -49,6 +49,8 @@ mod provider_banner;
 mod question_logic;
 mod question_panel;
 mod queue_tray;
+#[cfg(all(test, target_os = "macos"))]
+mod queue_tray_shots;
 pub(crate) use self::queue_tray::PendingSendRow;
 mod request_stack;
 pub(crate) mod selection;

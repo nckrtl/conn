@@ -68,7 +68,7 @@
   },
   "threadAutoSettleOptOut": {
     "commands": ["thread.auto-settle.set"],
-    "off": "the engine accepts it, and web and mobile hide the control without the flag; nobody proved that the server's auto-settle honors the opt-out"
+    "proof": "settlement::tests::an_opted_out_thread_stays_until_it_follows_the_settings_again (conn-server, real engine, moved clock): the cases of T3's ProjectionSettlement.test.ts (auto-settle-disabled), ThreadSettlementService.test.ts (the opted-out delegate) and Orchestrator.control-reads.test.ts (enabled false, then true). Not run side by side against the T3 server"
   },
   "threadProjectFromScratch": { "undecided": "a thread that starts a project from an empty folder" },
   "threadTitleRegeneration": { "undecided": "the server writes a thread's title again on request" },

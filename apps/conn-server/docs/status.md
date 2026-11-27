@@ -285,6 +285,15 @@ because a silent dead socket would otherwise hold its session forever. Proof: se
 - **Proof:** T3's settlement and compaction cases as unit tests; the sweep, its loop and the
   compaction on a real engine with a moved clock, including user activity between the decision
   and its command; the host's turn end starting the compaction (`host.rs`).
+- **The opt-out is advertised (2026-11-27):** `threadAutoSettleOptOut` is on, so web and mobile
+  show "Auto-settle behavior". Proof:
+  `an_opted_out_thread_stays_until_it_follows_the_settings_again` (`settlement/tests.rs`) on a
+  real engine with a moved clock: a thread set to never settle stays past the threshold, a
+  delegate set so stays behind its settled parent, and each settles at the next sweep once it
+  follows the settings again. These are the cases of T3's
+  `ProjectionSettlement.test.ts`, `ThreadSettlementService.test.ts` and
+  `Orchestrator.control-reads.test.ts`. **Not proven:** a run side by side against the T3
+  server. The day count starts at 1, so only the delegate case can run live.
 ## Provider switch handoff (2026-11-22)
 
 **Forks on another provider (2026-11-23):** as T3's `decideForkExecution`, a fork's first

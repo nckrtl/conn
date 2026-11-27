@@ -364,6 +364,9 @@ pub fn capabilities(server_restart: bool) -> ExecutionEnvironmentCapabilities {
     capabilities.pull_request_checks = Some(true);
     capabilities.linked_thread_refreshes = Some(true);
     capabilities.thread_force_stop = Some(true);
+    // `thread.auto-settle.set`: the sweep leaves an opted-out thread alone
+    // (`settlement::tests::an_opted_out_thread_stays_until_it_follows_the_settings_again`).
+    capabilities.thread_auto_settle_opt_out = Some(true);
     // `server.refreshProviders` honours `modelCatalogOnly` (`crate::model_manifest`).
     capabilities.model_catalog_refresh = Some(true);
     capabilities.shell_thread_families = Some(true);
@@ -484,6 +487,7 @@ mod tests {
                 "serverBrowser",
                 "shellOlderSettled",
                 "shellThreadFamilies",
+                "threadAutoSettleOptOut",
                 "threadForceStop",
                 "threadPullRequestWatch"
             ]

@@ -9,6 +9,8 @@
 //                       the server serves it, and must advertise it. One missing: it must not.
 //     + off             registered, and still not advertised: the reason. Shrinks only.
 //     + when            advertised on some hosts or starts only: the reason.
+//     + proof           optional, for a flag that promises more than its registration shows:
+//                       the test or check that shows the rest. The gate does not read it.
 //   behaviour           no method proves it: where the behaviour lives. Advertised.
 //   undecided           nobody has looked: what the flag promises. Not advertised.
 //

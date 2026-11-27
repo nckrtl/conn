@@ -138,10 +138,10 @@ async fn run(state: PathBuf, input: Value) -> Result<Value, Error> {
     let service = McpService::new(McpConfig {
         // No agent calls `/mcp` over HTTP here: the cases call the service in-process.
         listen_address: std::net::SocketAddr::from(([127, 0, 0, 1], 9)),
-        preview: Some(preview.clone()),
-        devices: None,
-
-        test_logins: None,
+        features: conn_mcp::Features {
+            preview: Some(preview.clone()),
+            ..conn_mcp::Features::default()
+        },
         refresh_provider: None,
         worktrees: None,
         engine,
@@ -155,10 +155,6 @@ async fn run(state: PathBuf, input: Value) -> Result<Value, Error> {
             ]
         }),
         hosted_app_url: conn_mcp::DEFAULT_HOSTED_APP_URL.into(),
-        scheduled_tasks: None,
-        annotations: None,
-        secrets: None,
-        panels: None,
         peers: None,
         settings: None,
         pull_requests: None,

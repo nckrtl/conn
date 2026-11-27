@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 pub(super) fn register(table: &mut MethodTable, deps: &Deps) {
-    let Some(preview) = deps.preview.clone() else {
+    let Some(preview) = deps.features.preview.clone() else {
         return;
     };
     let browser = preview.clone();

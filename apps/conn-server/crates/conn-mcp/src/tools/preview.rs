@@ -19,7 +19,7 @@ pub(super) async fn call(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
         cx.writing_caller().await?;
     }
     cx.require_preview()?;
-    let preview = cx.config().preview.as_ref().ok_or_else(|| {
+    let preview = cx.config().features.preview.as_ref().ok_or_else(|| {
         ToolError::Message("Preview automation is unavailable for this thread.".into())
     })?;
     if name == "conn_preview_close" {
@@ -155,6 +155,7 @@ pub(super) async fn call(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
     let hosted = preview.desktop_tabs(environment, &caller.thread_id);
     let tab_host = cx
         .config()
+        .features
         .panels
         .as_ref()
         .is_some_and(|p| p.has_tab_host());
@@ -486,7 +487,13 @@ async fn open_desktop_tab(cx: &Cx<'_>, preview: &Preview, environment: &str, thr
     if !preview.desktop_tabs(environment, thread).is_empty() {
         return;
     }
-    let Some(panels) = cx.config().panels.as_ref().filter(|p| p.has_tab_host()) else {
+    let Some(panels) = cx
+        .config()
+        .features
+        .panels
+        .as_ref()
+        .filter(|p| p.has_tab_host())
+    else {
         return;
     };
     let request = AgentPanelRequest {

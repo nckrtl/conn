@@ -56,7 +56,7 @@ fn upstream_search(raw_query: &str) -> String {
 }
 
 async fn handle(State(state): State<AppState>, request: Request<Body>) -> Response {
-    let Some(devices) = state.deps.devices.clone() else {
+    let Some(devices) = state.deps.features.devices.clone() else {
         return text(StatusCode::NOT_FOUND, "Not Found");
     };
     let path = request.uri().path().to_owned();

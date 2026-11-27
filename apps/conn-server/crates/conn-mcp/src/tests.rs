@@ -128,8 +128,6 @@ fn build_fixture(
     let engine = Arc::new(SqliteEngine::open(config).unwrap());
     let service = McpService::new(McpConfig {
         listen_address: "0.0.0.0:4711".parse().unwrap(),
-        preview: Some(conn_preview::tabs::Preview::new(dir.clone())),
-        devices: None,
         refresh_provider,
         files: Some(files),
         worktrees: Some(crate::WorktreeConfig {
@@ -141,17 +139,21 @@ fn build_fixture(
             terminals: None,
             hub: conn_vcs::VcsHub::default(),
         }),
-        panels: Some(conn_features::panels::PanelBroker::default()),
         peers,
         settings: None,
         pull_requests: None,
         clone_repository: None,
-        test_logins: Some(conn_features::test_logins::TestLogins::new(&dir)),
-        secrets: Some(conn_features::secrets::SecretRequests::new(
-            &dir,
-            engine.clone(),
-            Arc::new(conn_features::clock::SystemClock),
-        )),
+        features: crate::Features {
+            preview: Some(conn_preview::tabs::Preview::new(dir.clone())),
+            panels: Some(conn_features::panels::PanelBroker::default()),
+            test_logins: Some(conn_features::test_logins::TestLogins::new(&dir)),
+            secrets: Some(conn_features::secrets::SecretRequests::new(
+                &dir,
+                engine.clone(),
+                Arc::new(conn_features::clock::SystemClock),
+            )),
+            ..crate::Features::default()
+        },
         engine,
         environment_id: "env-test".into(),
         label: "Test".into(),
@@ -159,8 +161,6 @@ fn build_fixture(
         platform: json!({"os": "linux", "arch": "x64"}),
         providers: listed,
         hosted_app_url: crate::DEFAULT_HOSTED_APP_URL.into(),
-        scheduled_tasks: None,
-        annotations: None,
     });
     Fixture {
         service,
@@ -1999,24 +1999,19 @@ async fn fixture_with_tasks(name: &str) -> Fixture {
         clock: Arc::new(conn_features::clock::SystemClock),
         zone: jiff::tz::TimeZone::UTC,
         runner: Arc::new(conn_features::scheduled::EngineRunner::new(engine.clone())),
-        secret_requests: base.service.config.secrets.clone(),
+        secret_requests: base.service.config.features.secrets.clone(),
         start_timer: false,
     })
     .await;
     let config = &base.service.config;
     let service = McpService::new(McpConfig {
         listen_address: "0.0.0.0:4711".parse().unwrap(),
-        preview: None,
-        devices: None,
         refresh_provider: None,
         worktrees: None,
-        panels: Some(conn_features::panels::PanelBroker::default()),
         peers: None,
         settings: None,
         pull_requests: None,
         clone_repository: None,
-        secrets: config.secrets.clone(),
-        test_logins: base.service.config.test_logins.clone(),
         engine,
         environment_id: config.environment_id.clone(),
         label: config.label.clone(),
@@ -2024,15 +2019,19 @@ async fn fixture_with_tasks(name: &str) -> Fixture {
         platform: config.platform.clone(),
         providers: config.providers.clone(),
         hosted_app_url: config.hosted_app_url.clone(),
-        scheduled_tasks: Some(tasks),
         files: config.files.clone(),
-        annotations: Some(conn_features::annotations::Annotations::new(
-            &base.dir,
-            Arc::new(conn_features::clock::SystemClock),
-            Arc::new(conn_features::annotations::EngineProjects(
-                config.engine.clone(),
+        features: crate::Features {
+            scheduled_tasks: Some(tasks),
+            annotations: Some(conn_features::annotations::Annotations::new(
+                &base.dir,
+                Arc::new(conn_features::clock::SystemClock),
+                Arc::new(conn_features::annotations::EngineProjects(
+                    config.engine.clone(),
+                )),
             )),
-        )),
+            panels: Some(conn_features::panels::PanelBroker::default()),
+            ..config.features.clone()
+        },
     });
     let dir = base.dir.clone();
     std::mem::forget(base);
@@ -2371,7 +2370,7 @@ async fn plain_failure(c: &mut Client<'_>, tool: &str, args: Value) -> String {
 #[tokio::test(flavor = "current_thread")]
 async fn annotation_tools_claim_complete_and_release_the_callers_annotations() {
     let f = fixture_with_tasks("annotations-flow").await;
-    let store = f.service.config.annotations.clone().unwrap();
+    let store = f.service.config.features.annotations.clone().unwrap();
     let mut first = annotation("first", "Make the button bigger");
     first.screenshot = Some(format!(
         "data:image/jpeg;base64,{}",
@@ -2445,7 +2444,7 @@ async fn annotation_tools_claim_complete_and_release_the_callers_annotations() {
 #[tokio::test(flavor = "current_thread")]
 async fn annotation_tools_report_a_conflict_and_refuse_callers_outside_a_thread() {
     let f = fixture_with_tasks("annotations-refuse").await;
-    let store = f.service.config.annotations.clone().unwrap();
+    let store = f.service.config.features.annotations.clone().unwrap();
     store
         .create(&project_id(), annotation("only", "Fix the header"))
         .await
@@ -2804,7 +2803,7 @@ async fn secret_answers_are_one_use_project_scoped_persistent_and_absent_from_ev
     assert_eq!(row["pendingRuntimeRequest"]["userOnly"], true);
     assert_eq!(row["pendingRuntimeRequest"]["id"], card["id"]);
     let answer = json!({"threadId":thread,"turnItemId":card["id"],"answer":{"type":"save","secret":"test-answer"}});
-    let secrets = f.service.config.secrets.as_ref().unwrap();
+    let secrets = f.service.config.features.secrets.as_ref().unwrap();
     secrets
         .answer(from_json(answer.clone()).unwrap())
         .await
@@ -2882,7 +2881,7 @@ async fn secret_file_delivery_and_pasted_values_retry_without_replacing_the_firs
     let f = fixture("secret-file");
     let mut swamp = Client::open(&f.service, client(true)).await;
     let thread = launch_as_swamp(&mut swamp, "Secrets", "hang", "full-access", "default").await;
-    let secrets = f.service.config.secrets.as_ref().unwrap();
+    let secrets = f.service.config.features.secrets.as_ref().unwrap();
     let ask = ask_secret(
         &f,
         &thread,
@@ -2969,7 +2968,7 @@ async fn secret_decline_timeout_stop_and_aborted_call_close_the_card() {
     let f = fixture("secret-closed");
     let mut swamp = Client::open(&f.service, client(true)).await;
     let thread = launch_as_swamp(&mut swamp, "Secrets", "hang", "full-access", "default").await;
-    let secrets = f.service.config.secrets.as_ref().unwrap();
+    let secrets = f.service.config.features.secrets.as_ref().unwrap();
     let ask = ask_secret(&f, &thread, json!({"label":"Declined","reason":"Fixture"}));
     let card = await_secret_card(&f, &thread, "Declined").await;
     secrets
@@ -3041,7 +3040,7 @@ async fn panel_open_delivers_each_panel_to_the_callers_desktop_and_stays_hidden(
     let mut swamp = Client::open(&f.service, client(true)).await;
     not_offered(&mut swamp, "panel_open", json!({"panel":"files"})).await;
     let thread = launch_as_swamp(&mut swamp, "Panels", "hang", "full-access", "default").await;
-    let broker = f.service.config.panels.as_ref().unwrap();
+    let broker = f.service.config.features.panels.as_ref().unwrap();
     let mut desktop = broker.subscribe().unwrap();
     let mut agent = Client::open(&f.service, agent_of(&f, &thread)).await;
 
@@ -3154,10 +3153,10 @@ async fn saved_secret_refs_sign_webhooks_with_project_scope_one_use_and_safe_rep
         json!({"label":"Signing key","reason":"Test webhook","clientRequestId":"sign-key"}),
     );
     let card = await_secret_card(&f, &thread, "Signing key").await;
-    f.service.config.secrets.as_ref().unwrap().answer(from_json(json!({"threadId":thread,"turnItemId":card["id"],"answer":{"type":"save","secret":"test-sign-key"}})).unwrap()).await.unwrap();
+    f.service.config.features.secrets.as_ref().unwrap().answer(from_json(json!({"threadId":thread,"turnItemId":card["id"],"answer":{"type":"save","secret":"test-sign-key"}})).unwrap()).await.unwrap();
     let saved = ask.await.unwrap();
     let signature = json!({"header":"x-signature","encoding":"hex","prefix":"sha256=","secretRef":saved["secretRef"],"secret":"must-not-replace-the-ref"});
-    let tasks = f.service.config.scheduled_tasks.as_ref().unwrap();
+    let tasks = f.service.config.features.scheduled_tasks.as_ref().unwrap();
     let wrong = tasks.upsert(from_json(json!({"title":"Wrong project","prompt":"Hello","enabled":true,"projectId":"other-project","schedule":{"type":"webhook","signature":signature},"workspaceStrategy":{"type":"root"},"modelSelection":{"instanceId":"claudeAgent","model":"claude-haiku-5-5"},"runtimeMode":"full-access","interactionMode":"default"})).unwrap()).await.unwrap_err();
     assert!(
         wrong.to_string().contains("already used or does not exist"),
@@ -3348,7 +3347,14 @@ async fn html_preview_validates_before_launch_and_reads_without_a_live_turn() {
             .unwrap()
             .contains("viewport height unit (100vh)")
     );
-    let preview = f.service.config.preview.as_ref().unwrap().html_preview();
+    let preview = f
+        .service
+        .config
+        .features
+        .preview
+        .as_ref()
+        .unwrap()
+        .html_preview();
     let _first = preview.reserve().unwrap();
     let _second = preview.reserve().unwrap();
     let reply = agent
@@ -3602,7 +3608,7 @@ async fn mcp_panel_tools_relay_to_the_mac_and_keep_caller_guards() {
             .await;
         assert_eq!(response["error"]["code"], -32602, "{name}: {response}");
     }
-    let broker = f.service.config.panels.as_ref().unwrap();
+    let broker = f.service.config.features.panels.as_ref().unwrap();
     let mut desktop = broker.subscribe().unwrap();
     let mut obsolete = broker.subscribe().unwrap();
     let connect = agent.ok("mcp_connect",json!({"name":"stub","url":"http://127.0.0.1/mcp","headers":{"X-Test":"stub"},"focusWindow":false}));
@@ -3663,7 +3669,7 @@ async fn database_query_forwards_to_the_desktop_and_returns_its_result() {
             .await
             .contains("No Conn desktop app")
     );
-    let broker = f.service.config.panels.as_ref().unwrap();
+    let broker = f.service.config.features.panels.as_ref().unwrap();
     let mut desktop = broker.subscribe().unwrap();
     let database = json!({"connection":"Development","columns":["id"],"rowCount":30.0,"rows":[{"id":1}],"truncated":true});
     let (result, ()) = tokio::join!(
@@ -3751,6 +3757,7 @@ async fn test_logins_require_preview_capability() {
     assert!(
         f.service
             .config
+            .features
             .test_logins
             .as_ref()
             .unwrap()
@@ -3799,7 +3806,7 @@ async fn mcp_panel_actions_use_the_ninety_second_action_timeout() {
     )
     .await;
     let mut agent = Client::open(&f.service, agent_of(&f, &thread)).await;
-    let broker = f.service.config.panels.as_ref().unwrap();
+    let broker = f.service.config.features.panels.as_ref().unwrap();
     let mut desktop = broker.subscribe().unwrap();
     for (name, args, key, result) in [
         (
@@ -6380,18 +6387,14 @@ async fn thread_send_refuses_an_archive_between_its_read_and_dispatch() {
     let config = &f.service.config;
     let racing = McpService::new(McpConfig {
         listen_address: "0.0.0.0:4711".parse().unwrap(),
-        preview: None,
-        devices: None,
         refresh_provider: None,
         files: None,
+        features: crate::Features::default(),
         worktrees: None,
-        panels: None,
         peers: None,
         settings: None,
         pull_requests: None,
         clone_repository: None,
-        secrets: None,
-        test_logins: None,
         engine: Arc::new(ArchiveBeforeDispatch {
             inner: config.engine.clone(),
             thread: thread.clone(),
@@ -6402,8 +6405,6 @@ async fn thread_send_refuses_an_archive_between_its_read_and_dispatch() {
         platform: config.platform.clone(),
         providers: config.providers.clone(),
         hosted_app_url: config.hosted_app_url.clone(),
-        scheduled_tasks: None,
-        annotations: None,
     });
     let before = projection_of(&f, &thread).await;
     let started = sessions.load(std::sync::atomic::Ordering::SeqCst);
@@ -6495,9 +6496,9 @@ async fn browser_calls_default_to_the_desktop_and_leave_it_only_for_a_named_serv
     let launched=client.ok("conn_thread_launch",json!({"projectId":project_id(),"message":"hang","title":"Desktop default","runtimeMode":"full-access"})).await;
     let thread = launched["threadId"].as_str().unwrap().to_owned();
     let mut agent = Client::open(&f.service, agent_of(&f, &thread)).await;
-    let preview = f.service.config.preview.clone().unwrap();
+    let preview = f.service.config.features.preview.clone().unwrap();
     let environment = f.service.config.environment_id.clone();
-    let broker = f.service.config.panels.as_ref().unwrap();
+    let broker = f.service.config.features.panels.as_ref().unwrap();
     let log = Arc::new(std::sync::Mutex::new(Vec::new()));
     let tag = |reply: &Value| {
         reply["result"]["structuredContent"]["error"]["_tag"]
@@ -6683,9 +6684,9 @@ async fn desktop_rig(name: &str) -> DesktopRig {
     let launched=client.ok("conn_thread_launch",json!({"projectId":project_id(),"message":"hang","title":"Desktop rig","runtimeMode":"full-access"})).await;
     let thread = launched["threadId"].as_str().unwrap().to_owned();
     drop(client);
-    let preview = f.service.config.preview.clone().unwrap();
+    let preview = f.service.config.features.preview.clone().unwrap();
     let environment = f.service.config.environment_id.clone();
-    let broker = f.service.config.panels.clone().unwrap();
+    let broker = f.service.config.features.panels.clone().unwrap();
     DesktopRig {
         preview,
         environment,

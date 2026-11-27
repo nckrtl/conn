@@ -61,7 +61,7 @@ fn list_scope(ctx: &CallContext, input: &Value) -> Result<(), Failure> {
 }
 
 pub(crate) fn register(table: &mut MethodTable, deps: &Deps) {
-    let Some(devices) = deps.devices.clone() else {
+    let Some(devices) = deps.features.devices.clone() else {
         return;
     };
 

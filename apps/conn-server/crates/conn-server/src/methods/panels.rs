@@ -11,6 +11,7 @@ use conn_contract::{
 };
 use conn_engine::BoxFuture;
 use conn_features::panels::PanelBroker;
+use conn_mcp::Features;
 use tokio::sync::mpsc;
 
 /// The panel bridge module: the broker that carries a request to a connected desktop,
@@ -25,13 +26,13 @@ pub(crate) const MODULE: Module = Module {
     capabilities: |_| {},
 };
 
-fn start<'a>(_: &'a Boot<'a>, deps: &'a mut Deps) -> BoxFuture<'a, ()> {
-    deps.panels = Some(PanelBroker::default());
+fn start<'a>(_: &'a Boot<'a>, features: &'a mut Features) -> BoxFuture<'a, ()> {
+    features.panels = Some(PanelBroker::default());
     Box::pin(std::future::ready(()))
 }
 
 fn register(table: &mut MethodTable, deps: &Deps) {
-    let Some(panels) = deps.panels.clone() else {
+    let Some(panels) = deps.features.panels.clone() else {
         return;
     };
     let broker = panels.clone();
@@ -73,7 +74,10 @@ mod tests {
         register(
             &mut table,
             &Deps {
-                panels: Some(broker.clone()),
+                features: conn_mcp::Features {
+                    panels: Some(broker.clone()),
+                    ..Default::default()
+                },
                 ..Deps::default()
             },
         );
@@ -149,7 +153,10 @@ mod tests {
         register(
             &mut table,
             &Deps {
-                panels: Some(conn_features::panels::PanelBroker::default()),
+                features: conn_mcp::Features {
+                    panels: Some(conn_features::panels::PanelBroker::default()),
+                    ..Default::default()
+                },
                 ..Deps::default()
             },
         );
@@ -183,7 +190,10 @@ mod tests {
         register(
             &mut table,
             &Deps {
-                panels: Some(broker.clone()),
+                features: conn_mcp::Features {
+                    panels: Some(broker.clone()),
+                    ..Default::default()
+                },
                 ..Deps::default()
             },
         );
@@ -216,7 +226,10 @@ mod tests {
         register(
             &mut table,
             &Deps {
-                panels: Some(broker.clone()),
+                features: conn_mcp::Features {
+                    panels: Some(broker.clone()),
+                    ..Default::default()
+                },
                 ..Deps::default()
             },
         );

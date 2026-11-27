@@ -17,6 +17,7 @@ use std::{
 use axum::Router;
 use conn_contract::ExecutionEnvironmentCapabilities;
 use conn_engine::{BoxFuture, Engine};
+use conn_mcp::Features;
 
 use crate::{AppState, host::Host, methods::Deps, table::MethodTable};
 
@@ -27,9 +28,9 @@ pub const VAR: &str = "CONN_SERVER_MODULES";
 pub(crate) struct Module {
     /// Its name in [`VAR`].
     pub name: &'static str,
-    /// Builds its service into `deps`, starts its jobs and adds its cleanup for a deleted
-    /// thread (`Host::on_thread_deleted`).
-    pub start: for<'a> fn(&'a Boot<'a>, &'a mut Deps) -> BoxFuture<'a, ()>,
+    /// Builds its service into `features`, starts its jobs and adds its cleanup for a
+    /// deleted thread (`Host::on_thread_deleted`).
+    pub start: for<'a> fn(&'a Boot<'a>, &'a mut Features) -> BoxFuture<'a, ()>,
     /// Registers its RPC methods on the service `start` built.
     pub methods: fn(&mut MethodTable, &Deps),
     /// Its HTTP routes.
@@ -108,9 +109,9 @@ pub(crate) fn started() -> impl Iterator<Item = &'static Module> {
 }
 
 /// Starts every enabled module.
-pub(crate) async fn start(boot: &Boot<'_>, deps: &mut Deps) {
+pub(crate) async fn start(boot: &Boot<'_>, features: &mut Features) {
     for module in started() {
-        (module.start)(boot, deps).await;
+        (module.start)(boot, features).await;
     }
 }
 

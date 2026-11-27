@@ -36,6 +36,7 @@ async fn open(cx: &Cx<'_>, args: &Args) -> ToolResult {
     cx.writing_caller().await?;
     let broker = cx
         .config()
+        .features
         .panels
         .as_ref()
         .ok_or_else(|| fail("capability_denied", "Panel requests are not supported."))?;
@@ -100,6 +101,7 @@ async fn database_query(cx: &Cx<'_>, args: &Args) -> ToolResult {
     cx.writing_caller().await?;
     let broker = cx
         .config()
+        .features
         .panels
         .as_ref()
         .ok_or_else(|| fail("capability_denied", "Panel requests are not supported."))?;
@@ -166,6 +168,7 @@ async fn invoke(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
     };
     let broker = cx
         .config()
+        .features
         .panels
         .as_ref()
         .ok_or_else(|| fail("capability_denied", "Panel requests are not supported."))?;
@@ -191,6 +194,7 @@ async fn files(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
     cx.writing_caller().await?;
     let broker = cx
         .config()
+        .features
         .panels
         .as_ref()
         .ok_or_else(|| fail("capability_denied", "No desktop panel service."))?;

@@ -3,7 +3,7 @@
 
 use std::{
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
     time::Duration,
 };
@@ -281,11 +281,10 @@ pub async fn serve_with_instances(
         terminals: terminals.clone(),
         environment: environment.clone(),
         thread_deleted: std::sync::Mutex::default(),
-        devices: OnceLock::new(),
+        features: OnceLock::new(),
         settlement_wake: Arc::default(),
         idle_compaction: OnceLock::new(),
         worktree_cleanup: OnceLock::new(),
-        previews: OnceLock::new(),
         settle_cleanups: Arc::default(),
     });
 
@@ -394,21 +393,11 @@ pub async fn serve_with_instances(
         "cannot open the engine",
     ));
     let engine: Arc<dyn Engine> = sqlite_engine.clone();
-    let secrets = conn_features::secrets::SecretRequests::new(
-        &state_dir,
-        engine.clone(),
-        Arc::new(conn_features::clock::SystemClock),
-    );
-    // Off, no browser state exists and no sweep runs; Chrome starts with the first use anyway.
-    let preview = crate::modules::on(crate::modules::BROWSER)
-        .then(|| conn_preview::tabs::Preview::new(state_dir.clone()));
-    if let Some(preview) = &preview {
-        let _ = host.previews.set(preview.clone());
-    }
+    let features = feature_services(&state_dir, &environment, &engine, &host).await;
+    // The host is older than the engine, so it gets them here: before any effect runs.
+    let _ = host.features.set(features.clone());
     let mut deps = Deps {
-        preview: preview.clone(),
-        secrets: Some(secrets),
-        test_logins: Some(conn_features::test_logins::TestLogins::new(&state_dir)),
+        features,
         engine: Some(engine.clone()),
         providers,
         instances,
@@ -423,9 +412,6 @@ pub async fn serve_with_instances(
         ))),
         // An inert copy holds the original's peer links: it must not use them.
         peers: (!inert).then(|| crate::peers::PeerLinks::new(environment.clone(), engine.clone())),
-        // Off, no device service exists and nothing follows the device hosts.
-        devices: crate::modules::on(crate::modules::DEVICES)
-            .then(|| crate::methods::devices::start(environment.clone())),
         provider_status: crate::methods::provider::ProviderStatus::with_notifier(status_notifier),
         model_manifest: Some(crate::model_manifest::ModelManifest::new(
             state_dir.clone(),
@@ -434,15 +420,6 @@ pub async fn serve_with_instances(
         )),
         ..Deps::default()
     };
-    if let Some(devices) = &deps.devices {
-        let _ = host.devices.set(devices.clone());
-    }
-    let boot = crate::modules::Boot {
-        state_dir: &state_dir,
-        engine: &engine,
-        host: &host,
-    };
-    crate::modules::start(&boot, &mut deps).await;
     start_agent_tools(&mut deps, &host, &sqlite_engine, addr);
     // After the MCP service, which settled threads' cleanup uses: the first sweep may settle.
     // An inert rehearsal copy settles and compacts nothing: its threads belong to the original.
@@ -548,7 +525,9 @@ pub async fn serve_with_instances(
         }
     }
 
-    let devices = state.deps.devices.clone();
+    let conn_mcp::Features {
+        preview, devices, ..
+    } = state.deps.features.clone();
     let mcp = state.deps.mcp.clone();
     let app = router(state).into_make_service_with_connect_info::<SocketAddr>();
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
@@ -618,6 +597,40 @@ pub async fn serve_with_instances(
         // A failure exit also restarts units with Restart=on-failure.
         std::process::exit(1);
     }
+}
+
+/// Builds the feature services, in the order they need each other: the secret requests
+/// before the scheduled tasks, which ask through them. Called once, after the engine opens:
+/// the secret requests, the annotations and the scheduled tasks are built on it. `Deps`, the
+/// engine host and `/mcp` hold the one result.
+async fn feature_services(
+    state_dir: &Path,
+    environment: &Arc<Environment>,
+    engine: &Arc<dyn Engine>,
+    host: &Host,
+) -> conn_mcp::Features {
+    use crate::modules::{BROWSER, Boot, DEVICES, on};
+    let mut features = conn_mcp::Features {
+        secrets: Some(conn_features::secrets::SecretRequests::new(
+            state_dir,
+            engine.clone(),
+            Arc::new(conn_features::clock::SystemClock),
+        )),
+        // Off, no browser state exists and no sweep runs; Chrome starts with the first use anyway.
+        preview: on(BROWSER).then(|| conn_preview::tabs::Preview::new(state_dir.to_owned())),
+        test_logins: Some(conn_features::test_logins::TestLogins::new(state_dir)),
+        // Off, no device service exists and nothing follows the device hosts.
+        devices: on(DEVICES).then(|| crate::methods::devices::start(environment.clone())),
+        ..conn_mcp::Features::default()
+    };
+    // The modules with an entry add theirs: annotations, scheduled tasks, the panel bridge.
+    let boot = Boot {
+        state_dir,
+        engine,
+        host,
+    };
+    crate::modules::start(&boot, &mut features).await;
+    features
 }
 
 /// Gives the engine's agents `/mcp` at `listen`, and only then starts the effects the engine

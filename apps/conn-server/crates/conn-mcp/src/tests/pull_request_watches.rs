@@ -50,17 +50,12 @@ fn with_host(base: Fixture, state: &'static str) -> Fixture {
     let config = &base.service.config;
     let service = McpService::new(McpConfig {
         listen_address: "0.0.0.0:4711".parse().unwrap(),
-        preview: None,
-        devices: None,
         refresh_provider: None,
         worktrees: None,
-        panels: None,
         peers: None,
         settings: None,
         pull_requests: Some(host(state)),
         clone_repository: None,
-        secrets: None,
-        test_logins: None,
         engine: config.engine.clone(),
         environment_id: config.environment_id.clone(),
         label: config.label.clone(),
@@ -68,9 +63,8 @@ fn with_host(base: Fixture, state: &'static str) -> Fixture {
         platform: config.platform.clone(),
         providers: config.providers.clone(),
         hosted_app_url: config.hosted_app_url.clone(),
-        scheduled_tasks: None,
         files: None,
-        annotations: None,
+        features: crate::Features::default(),
     });
     let dir = base.dir.clone();
     std::mem::forget(base);

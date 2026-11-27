@@ -8,6 +8,7 @@ use std::sync::Arc;
 use conn_contract::{AnnotationCreateInput, AnnotationProjectInput, AnnotationRemoveInput};
 use conn_engine::BoxFuture;
 use conn_features::annotations::{AnnotationError, Annotations, EngineProjects, is_annotation_id};
+use conn_mcp::Features;
 use serde_json::json;
 use tokio::sync::mpsc;
 
@@ -27,8 +28,8 @@ pub(crate) const MODULE: Module = Module {
     capabilities: |_| {},
 };
 
-fn start<'a>(boot: &'a Boot<'a>, deps: &'a mut Deps) -> BoxFuture<'a, ()> {
-    deps.annotations = Some(Annotations::new(
+fn start<'a>(boot: &'a Boot<'a>, features: &'a mut Features) -> BoxFuture<'a, ()> {
+    features.annotations = Some(Annotations::new(
         boot.state_dir,
         Arc::new(conn_features::clock::SystemClock),
         Arc::new(EngineProjects(boot.engine.clone())),
@@ -51,7 +52,7 @@ fn require_ids<'a>(mut ids: impl Iterator<Item = &'a String>) -> Result<(), Fail
 }
 
 fn register(table: &mut MethodTable, deps: &Deps) {
-    let Some(store) = deps.annotations.clone() else {
+    let Some(store) = deps.features.annotations.clone() else {
         return;
     };
 

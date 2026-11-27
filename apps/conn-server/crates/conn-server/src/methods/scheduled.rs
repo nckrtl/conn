@@ -14,6 +14,7 @@ use conn_engine::BoxFuture;
 use conn_features::scheduled::{
     Config, EngineRunner, Failure as TaskFailure, ScheduledTasks, TaskError, UpsertInput,
 };
+use conn_mcp::Features;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -39,14 +40,14 @@ pub(crate) const MODULE: Module = Module {
     },
 };
 
-fn start<'a>(boot: &'a Boot<'a>, deps: &'a mut Deps) -> BoxFuture<'a, ()> {
+fn start<'a>(boot: &'a Boot<'a>, features: &'a mut Features) -> BoxFuture<'a, ()> {
     Box::pin(async move {
         let tasks = ScheduledTasks::start(Config {
             state_dir: boot.state_dir.to_owned(),
             clock: Arc::new(conn_features::clock::SystemClock),
             zone: jiff::tz::TimeZone::system(),
             runner: Arc::new(EngineRunner::new(boot.engine.clone())),
-            secret_requests: deps.secrets.clone(),
+            secret_requests: features.secrets.clone(),
             // A rehearsal copy holds the original's tasks: it must run none of them.
             start_timer: !crate::serve::inert(),
         })
@@ -60,7 +61,7 @@ fn start<'a>(boot: &'a Boot<'a>, deps: &'a mut Deps) -> BoxFuture<'a, ()> {
                 deleted.map_err(|e| format!("deleting the thread's scheduled tasks: {e}"))
             })
         });
-        deps.scheduled_tasks = Some(tasks);
+        features.scheduled_tasks = Some(tasks);
     })
 }
 
@@ -75,7 +76,7 @@ fn task_failure(error: &TaskError) -> Failure {
 }
 
 fn register(table: &mut MethodTable, deps: &Deps) {
-    let Some(service) = deps.scheduled_tasks.clone() else {
+    let Some(service) = deps.features.scheduled_tasks.clone() else {
         return;
     };
 

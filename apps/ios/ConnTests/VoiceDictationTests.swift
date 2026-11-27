@@ -147,19 +147,28 @@ final class VoiceDictationTests: XCTestCase {
             ComposerInputMetrics.topInset(expanded: false, natural: natural) + natural
                 + ComposerInputMetrics.bottomInset(expanded: false, natural: natural), 44, accuracy: 0.001
         )
-        // A 22pt line box with 10 above and 2 below, as the lab's `padding: 10px 12px 2px`.
+        // The line box with 14 above and 2 below, as the lab's `padding: 14px 12px 2px 15px`.
         XCTAssertEqual(
             ComposerInputMetrics.topInset(expanded: true, natural: natural) + natural
-                + ComposerInputMetrics.bottomInset(expanded: true, natural: natural), 10 + line + 2, accuracy: 0.001
+                + ComposerInputMetrics.bottomInset(expanded: true, natural: natural), 14 + line + 2, accuracy: 0.001
         )
         // Each extra line adds exactly one 22pt line pitch.
         XCTAssertEqual(natural + ComposerInputMetrics.lineSpacing(natural: natural), line, accuracy: 0.001)
     }
 
-    func testCollapsedTextStartsTwoPointsAfterThePlusOnly() {
+    func testCollapsedTextStartsTwoPointsAfterThePlusAndExpandedTextUnderThePlusGlyph() {
         XCTAssertEqual(ComposerInputMetrics.leadingInset(expanded: false, hasLeadingControl: true), 2)
         XCTAssertEqual(ComposerInputMetrics.leadingInset(expanded: false, hasLeadingControl: false), 12)
-        XCTAssertEqual(ComposerInputMetrics.leadingInset(expanded: true, hasLeadingControl: true), 12)
+        XCTAssertEqual(ComposerInputMetrics.leadingInset(expanded: true, hasLeadingControl: true), 15)
+    }
+
+    func testTextWrapsOnlyWhenItWouldReachTheControls() {
+        XCTAssertFalse(ComposerInputMetrics.wraps("Ask anything", in: 240))
+        XCTAssertFalse(ComposerInputMetrics.wraps("Fix the build", in: 240))
+        XCTAssertTrue(ComposerInputMetrics.wraps("Please look at the failing deploy check and fix it", in: 240))
+        XCTAssertTrue(ComposerInputMetrics.wraps("Two\nlines", in: 240))
+        // Before the geometry is known, one row.
+        XCTAssertFalse(ComposerInputMetrics.wraps("Please look at the failing deploy check and fix it", in: 0))
     }
 
     func testSheetSurfaceRunsTwentyEightPointsBehindTheKeyboard() {

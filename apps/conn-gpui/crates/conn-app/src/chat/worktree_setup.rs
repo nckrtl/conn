@@ -475,12 +475,7 @@ impl ChatView {
             )
             .child(header)
             .child(body);
-        div()
-            .w_full()
-            .min_w_0()
-            .pb(px(12.0))
-            .child(card)
-            .into_any_element()
+        card.into_any_element()
     }
 
     /// One stage: its glyph, its name, a note, and how long it took.

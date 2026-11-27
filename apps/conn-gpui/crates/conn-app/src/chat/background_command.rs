@@ -192,14 +192,7 @@ impl ChatView {
 
         #[cfg(test)]
         let line = gpui_kit::TestSupportExt::test_support(line);
-        let mut container = div()
-            .flex()
-            .flex_col()
-            .w_full()
-            .min_w_0()
-            // The air a work group leaves below its last row.
-            .pb(px(8.0))
-            .child(line);
+        let mut container = div().flex().flex_col().w_full().min_w_0().child(line);
         if expanded && let Some(body) = body {
             // Same panel as a command row's output: indented under the label, monospace.
             let panel = div()

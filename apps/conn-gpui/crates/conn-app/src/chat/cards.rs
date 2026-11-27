@@ -899,7 +899,7 @@ impl ChatView {
         let mut meta = div()
             .id(SharedString::from(format!("assistant-actions-{id}")))
             .a11y_group(format!("chat.assistant.{id}.actions"), "Message actions")
-            .mt(px(6.0))
+            .mt(px(super::ASSISTANT_META_GAP_PX))
             .flex()
             .flex_row()
             .items_center()
@@ -1364,13 +1364,7 @@ impl ChatView {
                 d.on_click(cx.listener(move |view, _, _, cx| view.toggle_expanded(&toggle, cx)))
             });
         line = line.text_color(muted);
-        let mut col = div()
-            .flex()
-            .flex_col()
-            .w_full()
-            .min_w_0()
-            .pb(px(8.0))
-            .child(line);
+        let mut col = div().flex().flex_col().w_full().min_w_0().child(line);
         if expanded {
             let mut list = div()
                 .ml(px(28.0))
@@ -1541,7 +1535,6 @@ impl ChatView {
         div()
             .w_full()
             .min_w_0()
-            .pb(px(8.0))
             .child(
                 self.work_log_line(
                     &format!("secret-{id}"),
@@ -1842,12 +1835,7 @@ impl ChatView {
             )
             .child(header)
             .child(body);
-        div()
-            .w_full()
-            .min_w_0()
-            .pb(px(16.0))
-            .child(card)
-            .into_any_element()
+        card.into_any_element()
     }
 
     /// A 24px header button that saves `contents` to a file the user names.
@@ -2169,12 +2157,7 @@ impl ChatView {
             use gpui_kit::TestSupportExt as _;
             card.test_support()
         };
-        div()
-            .w_full()
-            .min_w_0()
-            .pb(px(8.0))
-            .child(card)
-            .into_any_element()
+        card.into_any_element()
     }
 
     // -----------------------------------------------------------------------------------------
@@ -2489,11 +2472,7 @@ impl ChatView {
             );
         }
 
-        div()
-            .pt(px(16.0))
-            .pb(px(4.0))
-            .child(card)
-            .into_any_element()
+        card.into_any_element()
     }
 
     // -----------------------------------------------------------------------------------------

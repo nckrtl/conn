@@ -187,14 +187,7 @@ impl ChatView {
         #[cfg(test)]
         let header = gpui_kit::TestSupportExt::test_support(header);
 
-        let mut container = div()
-            .flex()
-            .flex_col()
-            .w_full()
-            .min_w_0()
-            // The air a work group leaves below its last row, as on the one-command card.
-            .pb(px(8.0))
-            .child(header);
+        let mut container = div().flex().flex_col().w_full().min_w_0().child(header);
 
         for (index, item) in items.iter().enumerate() {
             let shown = row_label(item);

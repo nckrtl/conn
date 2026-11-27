@@ -10,6 +10,8 @@ rust-version.workspace = true
 [dependencies]
 conn-contract.workspace = true
 conn-vcs.workspace = true
+# The registry, the remote text and a watch's wake: the part the engine needs too.
+conn-source-control-core.workspace = true
 conn-support = { workspace = true, features = ["tls"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -24,8 +26,8 @@ http-body-util = "0.1"
 # same set Node bundles and the T3 server trusts. No C TLS library (deny.toml bans openssl-sys).
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
-# The WHATWG URL parser, as `new URL` reads the URLs the host definitions take apart
-# (registry/mod.rs). README, "Dependencies", has its measured cost.
+# The WHATWG URL parser, as `new URL` reads a host's URLs (detect.rs, hosts/, and the
+# registry in conn-source-control-core). README, "Dependencies", has its measured cost.
 url = { version = "2.5", default-features = false, features = ["std"] }
 # Already in the binary (conn-server, conn-mcp): check logs and jobs are read four at a time.
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
@@ -33,6 +35,8 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc"]
 regex-automata.workspace = true
 
 [dev-dependencies]
+# examples/pr_link_sync_cases.rs applies a sync's commands with the engine's deciders.
+conn-engine.workspace = true
 conn-support = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["rt", "macros", "test-util", "net"] }
 

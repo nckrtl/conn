@@ -5,7 +5,7 @@
 //! Unlinking a stack member leaves a `stack-dismissed` tombstone, and
 //! linking it again by hand lifts it.
 
-use conn_source_control::registry::thread_keys::{
+use conn_source_control_core::registry::thread_keys::{
     KeySource, ThreadPullRequestKey, legacy_thread_pull_request_key,
     normalize_thread_pull_request_key,
 };
@@ -603,7 +603,7 @@ pub(crate) fn stale_wake(thread: &Value, messages: &[Value], message: &Value) ->
 /// `currentPullRequestWatchWake`: a queued wake for several pull requests, rebuilt from the
 /// ones still current, or `None` when it needs no change.
 pub(crate) fn current_wake(thread: &Value, messages: &[Value], message: &Value) -> Option<Value> {
-    use conn_source_control::pull_requests::watch::{Wake, combine};
+    use conn_source_control_core::wake::{Wake, combine};
     let stamps = monitor_stamps(&message["notification"]);
     if stamps.len() < 2 {
         return None;

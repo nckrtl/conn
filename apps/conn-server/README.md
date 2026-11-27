@@ -182,7 +182,8 @@ Release, which Orbit downloads.
 | `conn-vcs`              | Git status, refs, review diffs, worktrees and their setup             |
 | `conn-files`            | Project files, search, asset URLs, attachments                        |
 | `conn-terminal`         | Shells on PTYs: sessions, scrollback, viewers (`terminal.*`)          |
-| `conn-source-control`   | GitHub source control: discovery, sign-in, stars, repositories, the host definition registry, provider detection, GitHub's GraphQL operations; later pull requests |
+| `conn-source-control`   | GitHub source control: discovery, sign-in, stars, repositories, provider detection, GitHub's GraphQL operations; later pull requests |
+| `conn-source-control-core` | The source control rules the engine needs too: the host definition registry, remote text, a watch's wake; see its README |
 | `conn-server`           | Binary: HTTP, `/ws` session, pairing, method table, handlers          |
 | `conn-support`          | Helpers several crates share: time, hex, base64, SHA-256 and HMAC, atomic writes, v4 ids, the T3 secret store, URL text |
 | `conn-features`         | Scheduled tasks (webhook tasks too) and the Conn-only areas beside the engine; see its README |
@@ -190,7 +191,8 @@ Release, which Orbit downloads.
 
 Dependencies point one way: `conn-server` → `conn-engine` → `conn-provider` → `conn-contract`;
 `conn-provider-claude` → `conn-provider`; `conn-server` → `conn-wire`. `conn-wire` and
-`conn-contract` depend on nothing of ours.
+`conn-contract` depend on nothing of ours. The engine depends on no feature crate: what it
+needs of source control is in `conn-source-control-core`, below both.
 
 The method table lives in `conn-server` (`src/table.rs`), not its own crate: every handler
 module lives in `conn-server/src/methods/` anyway, one file per area.

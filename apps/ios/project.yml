@@ -11,7 +11,7 @@ settings:
     CODE_SIGN_STYLE: Automatic
     SWIFT_VERSION: "6.0"
     MARKETING_VERSION: "0.1.0"
-    CURRENT_PROJECT_VERSION: "5"
+    CURRENT_PROJECT_VERSION: "123"
     TARGETED_DEVICE_FAMILY: "1"
     # ConnCore.xcframework ships arm64 slices only (device + Apple silicon simulator).
     EXCLUDED_ARCHS[sdk=iphonesimulator*]: x86_64
@@ -48,6 +48,8 @@ targets:
           UIApplicationSupportsMultipleScenes: false
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         NSLocalNetworkUsageDescription: Conn connects to your conn-server on the local network.
+        NSMicrophoneUsageDescription: Conn records your voice to dictate messages.
+        NSSpeechRecognitionUsageDescription: Conn uses speech recognition on this device to turn your dictation into text.
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
           NSAllowsLocalNetworking: true
@@ -59,6 +61,18 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.nckrtl.conn.ios
         ASSETCATALOG_COMPILER_APPICON_NAME: ConnIcon
+  ConnTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [ConnTests]
+    dependencies:
+      - target: Conn
+      - framework: build/ConnCore.xcframework
+        link: false
+        embed: false
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
   ConnUITests:
     type: bundle.ui-testing
     platform: iOS
@@ -77,4 +91,4 @@ schemes:
       targets:
         Conn: all
     test:
-      targets: [ConnUITests]
+      targets: [ConnTests, ConnUITests]

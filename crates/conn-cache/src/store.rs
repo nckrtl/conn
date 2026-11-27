@@ -10,6 +10,14 @@ use sqlx::{Executor as _, SqlitePool};
 pub struct MessageCache(SqlitePool);
 
 impl MessageCache {
+    pub fn invalidate(&self) {
+        drop(self.0.close());
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.0.is_closed()
+    }
+
     /// Opens the local cache and creates its tables on first use.
     ///
     /// # Errors
@@ -41,7 +49,13 @@ impl MessageCache {
                 PRIMARY KEY(environment, thread)) WITHOUT ROWID;
             CREATE TABLE IF NOT EXISTS thread_outlines (
                 environment TEXT NOT NULL, thread TEXT NOT NULL, markers TEXT NOT NULL,
-                PRIMARY KEY(environment, thread)) WITHOUT ROWID",
+                PRIMARY KEY(environment, thread)) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS thread_views (
+                environment TEXT NOT NULL, thread TEXT NOT NULL, view TEXT NOT NULL,
+                PRIMARY KEY(environment, thread)) WITHOUT ROWID;
+            CREATE TABLE IF NOT EXISTS attachment_images (
+                position INTEGER PRIMARY KEY, environment TEXT NOT NULL, thread TEXT NOT NULL,
+                version TEXT NOT NULL, bytes BLOB NOT NULL, UNIQUE(environment,thread,version))",
         )
         .await?;
         Ok(Self(pool))
@@ -222,6 +236,32 @@ impl MessageCache {
         Ok(())
     }
 
+    /// The thread's last rendered state, as the client saved it.
+    ///
+    /// # Errors
+    /// Returns the database read error.
+    pub async fn view(&self, env: &str, thread: &str) -> Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar("SELECT view FROM thread_views WHERE environment=? AND thread=?")
+            .bind(env)
+            .bind(thread)
+            .fetch_optional(&self.0)
+            .await
+    }
+
+    /// Replaces the thread's last rendered state.
+    ///
+    /// # Errors
+    /// Returns the database write error.
+    pub async fn save_view(&self, env: &str, thread: &str, view: &str) -> Result<(), sqlx::Error> {
+        sqlx::query("INSERT OR REPLACE INTO thread_views(environment,thread,view) VALUES(?,?,?)")
+            .bind(env)
+            .bind(thread)
+            .bind(view)
+            .execute(&self.0)
+            .await?;
+        Ok(())
+    }
+
     /// # Errors
     /// Returns the database read or decoding error.
     pub async fn task_links(
@@ -396,18 +436,75 @@ impl MessageCache {
         Ok(())
     }
 
+    pub async fn image(
+        &self,
+        env: &str,
+        thread: &str,
+        version: &str,
+    ) -> Result<Option<Vec<u8>>, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT bytes FROM attachment_images WHERE environment=? AND thread=? AND version=?",
+        )
+        .bind(env)
+        .bind(thread)
+        .bind(version)
+        .fetch_optional(&self.0)
+        .await
+    }
+
+    pub async fn save_image(
+        &self,
+        env: &str,
+        thread: &str,
+        version: &str,
+        bytes: &[u8],
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = self.0.begin().await?;
+        sqlx::query("INSERT OR REPLACE INTO attachment_images(environment,thread,version,bytes) VALUES(?,?,?,?)")
+            .bind(env).bind(thread).bind(version).bind(bytes).execute(&mut *tx).await?;
+        sqlx::query("DELETE FROM attachment_images WHERE position IN (SELECT position FROM (
+            SELECT position, SUM(length(bytes)) OVER (ORDER BY position DESC) AS total FROM attachment_images
+            ) WHERE total > 134217728)").execute(&mut *tx).await?;
+        tx.commit().await
+    }
+
+    pub async fn forget_image(
+        &self,
+        env: &str,
+        thread: &str,
+        version: &str,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("DELETE FROM attachment_images WHERE environment=? AND thread=? AND version=?")
+            .bind(env)
+            .bind(thread)
+            .bind(version)
+            .execute(&self.0)
+            .await?;
+        Ok(())
+    }
+
     /// Deletes the stored transcript of a settled or deleted thread.
     ///
     /// # Errors
     /// Returns the database write error.
     pub async fn remove(&self, env: &str, thread: &str) -> Result<(), sqlx::Error> {
         let mut tx = self.0.begin().await?;
+        sqlx::query("DELETE FROM attachment_images WHERE environment=? AND thread=?")
+            .bind(env)
+            .bind(thread)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM thread_task_links WHERE environment=? AND thread=?")
             .bind(env)
             .bind(thread)
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM thread_outlines WHERE environment=? AND thread=?")
+            .bind(env)
+            .bind(thread)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM thread_views WHERE environment=? AND thread=?")
             .bind(env)
             .bind(thread)
             .execute(&mut *tx)

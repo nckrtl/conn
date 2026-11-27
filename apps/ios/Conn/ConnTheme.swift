@@ -21,6 +21,8 @@ struct ConnTheme: Sendable, Equatable {
     var card: Color { Color(ffi: tokens.card) }
     var cardForeground: Color { Color(ffi: tokens.cardForeground) }
     var secondary: Color { Color(ffi: tokens.secondary) }
+    var secondaryForeground: Color { Color(ffi: tokens.secondaryForeground) }
+    var placeholder: Color { Color(ffi: tokens.placeholder) }
     var muted: Color { Color(ffi: tokens.muted) }
     var mutedForeground: Color { Color(ffi: tokens.mutedForeground) }
     var accent: Color { Color(ffi: tokens.accent) }
@@ -35,6 +37,8 @@ struct ConnTheme: Sendable, Equatable {
     var codeBackground: Color { Color(ffi: tokens.codeBackground) }
     var codeForeground: Color { Color(ffi: tokens.codeForeground) }
     var messageSurface: Color { Color(ffi: tokens.messageSurface) }
+    /// Desktop's `shell_raised`: the queued message bubble's fill.
+    var shellRaised: Color { Color(ffi: tokens.shellRaised) }
     var messageForeground: Color { Color(ffi: tokens.messageForeground) }
     var diffAdded: Color { Color(ffi: tokens.diffAdded) }
     var diffRemoved: Color { Color(ffi: tokens.diffRemoved) }

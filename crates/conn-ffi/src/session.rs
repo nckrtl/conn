@@ -17,8 +17,8 @@ use crate::orbit::{
     orbit_connect_failure,
 };
 use crate::types::{
-    FfiConnectionStatus, FfiCredential, FfiError, FfiSavedSession, FfiShellSnapshot,
-    FfiThreadSnapshot,
+    FfiConnectionStatus, FfiCredential, FfiError, FfiOrbitErrorReason, FfiSavedSession,
+    FfiShellSnapshot, FfiThreadSnapshot,
 };
 
 /// The cache directory's record of which server (identity) its contents belong to.
@@ -28,6 +28,8 @@ const IDENTITY_FILE: &str = "identity";
 const LINK_TRIES: u32 = 12;
 const LINK_RETRY_DELAY: Duration = Duration::from_secs(5);
 
+/// The headline of a rejected sign-in: a definitive outcome, shown even while connecting.
+const AUTH_REJECTED: &str = "The server rejected this iPhone's sign-in.";
 const IDENTITY_CHANGED: &str =
     "This server's identity changed. Reconnect manually to replace its saved connection.";
 
@@ -55,17 +57,24 @@ pub enum FfiLinkRoute {
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum FfiSessionPhase {
     /// No attempt: the pairing form, with the last manual failure if any.
-    Idle { message: Option<String> },
+    Idle {
+        message: Option<String>,
+    },
     /// Finding the server; no connection yet.
-    Connecting { target: FfiSessionTarget },
+    Connecting {
+        target: FfiSessionTarget,
+    },
     /// A connection exists: the workspace, with its status.
-    Live { status: FfiConnectionStatus },
+    Live {
+        status: FfiConnectionStatus,
+    },
     /// The attempt ended. `retry` is what Try again repeats.
     Failed {
         message: String,
         detail: Option<String>,
         retry: FfiSessionTarget,
     },
+    Suspended,
 }
 
 /// The one observable state. `revision` grows with every change, so an older state that
@@ -88,6 +97,11 @@ pub struct FfiSessionState {
     /// Grows when this scope connects to a different server than before (an Orbit primary
     /// switch, say): the previous environment's threads are gone.
     pub identity_epoch: u64,
+    /// Diagnostics for the app's log; nothing renders them. Connection tries that failed since
+    /// the last handshake, start retries used, and whether the grace window is open.
+    pub failed_tries: u32,
+    pub start_retries: u32,
+    pub in_grace: bool,
 }
 
 /// Implemented in Swift. Every method is called with no internal locks held.
@@ -96,7 +110,7 @@ pub trait SessionListener: Send + Sync {
     fn on_state(&self, state: FfiSessionState);
     /// Store this session (or clear it with `None`) exactly as given.
     fn on_save(&self, session: Option<FfiSavedSession>);
-    fn on_shell(&self, connection_id: u64, snapshot: FfiShellSnapshot);
+    fn on_shell_changed(&self, connection_id: u64);
     fn on_thread(&self, connection_id: u64, snapshot: FfiThreadSnapshot);
     fn on_error(&self, message: String);
     fn on_providers_changed(&self);
@@ -164,7 +178,31 @@ pub(crate) enum Effect<C> {
         core: C,
         thread_id: String,
     },
+    /// After `after`, start attempt `id` again if it is still the current one.
+    RetryStart {
+        id: u64,
+        after: Duration,
+    },
+    /// After `after`, end grace window `id` if it is still the current one.
+    EndGrace {
+        id: u64,
+        after: Duration,
+    },
 }
+
+/// A fresh first connection (launch, restore, foreground, retry) may show no offline state for
+/// this long, or until it first connects. WireGuard and the network can stay down for several
+/// seconds on a cold start, longer than the retries below.
+const GRACE_WINDOW: Duration = Duration::from_secs(10);
+
+/// Failed tries in a row before a reconnect counts as offline. Backoff waits 250, 500, then
+/// 1000 ms, so three failures span about 1.75 s: long enough for a waking network to come up.
+const OFFLINE_AFTER_FAILED_TRIES: u32 = 3;
+
+/// A start that fails for a reason that may pass is tried again this many times, 500 ms, 1 s
+/// and 2 s apart, before the attempt fails. The network is often still waking at launch.
+const START_RETRIES: u32 = 3;
+const START_RETRY_DELAY: Duration = Duration::from_millis(500);
 
 struct Attempt<C> {
     id: u64,
@@ -175,6 +213,10 @@ struct Attempt<C> {
     early_failure: Option<String>,
     /// The connection completed a handshake at least once.
     connected_once: bool,
+    /// Connection tries that failed since the last handshake, fresh try or foreground.
+    failed_tries: u32,
+    /// Starts that failed transiently and were scheduled again, since this attempt began.
+    start_retries: u32,
     /// A rejected bearer may re-pair through Orbit. False for a re-pair attempt until it
     /// connects, so a fresh pairing that is rejected too can't loop.
     may_recover: bool,
@@ -200,6 +242,13 @@ pub(crate) struct Machine<C> {
     /// The server identity this scope last connected to, and how often it changed.
     last_identity: Option<String>,
     identity_epoch: u64,
+    /// The open grace window, by its own id (not an attempt id: start retries replace those).
+    /// While it is open, transient trouble does not show as offline.
+    grace: Option<u64>,
+    next_grace: u64,
+    /// `rest` is a `Failed` or `Idle` that may pass (the network was down), not a definitive
+    /// outcome such as a rejection, an identity change or a manual target's error.
+    rest_transient: bool,
 }
 
 impl<C> fmt::Debug for Machine<C> {
@@ -227,7 +276,65 @@ impl<C: SessionCore> Machine<C> {
             has_connected: false,
             last_identity: None,
             identity_epoch: 0,
+            grace: None,
+            next_grace: 1,
+            rest_transient: false,
         }
+    }
+
+    /// The offline pill. Connecting never shows it; trouble that may pass waits for three failed
+    /// tries and for the grace window to close.
+    fn shows_offline(&self, phase: &FfiSessionPhase) -> bool {
+        // Connecting is never offline. While the launch or foreground grace window is open, the
+        // tunnel, discovery and the first tries may all still fail or find nothing; only a failure
+        // that outlasts the window is a connection error (Nick asked: no pill while connecting).
+        // A changed server identity or a rejected sign-in won't pass by waiting: those show at once.
+        if self.grace.is_some() {
+            return matches!(
+                phase,
+                FfiSessionPhase::Failed { message, .. }
+                    if message == IDENTITY_CHANGED || message == AUTH_REJECTED
+            );
+        }
+        match phase {
+            FfiSessionPhase::Suspended
+            | FfiSessionPhase::Live {
+                status: FfiConnectionStatus::Failed { .. },
+            } => true,
+            FfiSessionPhase::Failed { .. } | FfiSessionPhase::Idle { message: Some(_) } => true,
+            // A drop, or a reconnect still in its first tries, is connecting, not offline.
+            FfiSessionPhase::Live {
+                status: FfiConnectionStatus::Reconnecting { .. },
+            } => self
+                .attempt
+                .as_ref()
+                .is_some_and(|a| a.failed_tries >= OFFLINE_AFTER_FAILED_TRIES),
+            _ => false,
+        }
+    }
+
+    /// Opens a fresh grace window, replacing any open one.
+    fn begin_grace(&mut self, fx: &mut Effects<C>) {
+        let id = self.next_grace;
+        self.next_grace += 1;
+        self.grace = Some(id);
+        fx.push(Effect::EndGrace {
+            id,
+            after: GRACE_WINDOW,
+        });
+    }
+
+    fn is_grace(&self, id: u64) -> bool {
+        self.grace == Some(id)
+    }
+
+    /// The grace window is over. A stale `id` does nothing.
+    pub(crate) fn end_grace(&mut self, id: u64) -> Effects<C> {
+        if self.is_grace(id) {
+            self.grace = None;
+            self.bump();
+        }
+        Vec::new()
     }
 
     pub(crate) fn state(&self) -> FfiSessionState {
@@ -243,21 +350,16 @@ impl<C: SessionCore> Machine<C> {
         FfiSessionState {
             revision: self.revision,
             connection_id: self.attempt.as_ref().map_or(0, |a| a.id),
-            shows_offline: matches!(
-                &phase,
-                FfiSessionPhase::Failed { .. }
-                    | FfiSessionPhase::Idle { message: Some(_) }
-                    | FfiSessionPhase::Live {
-                        status: FfiConnectionStatus::Reconnecting { .. }
-                            | FfiConnectionStatus::Failed { .. }
-                    }
-            ),
+            shows_offline: self.shows_offline(&phase),
             phase,
             server_url: self.server_url.clone(),
             environment_id: self.environment_id.clone(),
             offline_ready: self.attempt.as_ref().is_some_and(|a| a.offline_ready),
             has_connected: self.has_connected,
             identity_epoch: self.identity_epoch,
+            failed_tries: self.attempt.as_ref().map_or(0, |a| a.failed_tries),
+            start_retries: self.attempt.as_ref().map_or(0, |a| a.start_retries),
+            in_grace: self.grace.is_some(),
         }
     }
 
@@ -309,6 +411,8 @@ impl<C: SessionCore> Machine<C> {
             status: FfiConnectionStatus::Connecting,
             early_failure: None,
             connected_once: false,
+            failed_tries: 0,
+            start_retries: 0,
             may_recover: may_recover == Recover::Allowed,
             identity: None,
             offline_ready: false,
@@ -334,6 +438,7 @@ impl<C: SessionCore> Machine<C> {
                 }
                 _ => None,
             })
+            .or_else(|| self.environment_id.clone())
             .or_else(|| match &self.rest {
                 // A failed environment scope is still that environment.
                 FfiSessionPhase::Failed {
@@ -354,7 +459,7 @@ impl<C: SessionCore> Machine<C> {
     /// At launch: a manual session reconnects; anything else goes through Orbit.
     pub(crate) fn launch(&mut self, saved: Option<FfiSavedSession>) -> Effects<C> {
         self.saved = saved.clone();
-        match saved {
+        let mut fx = match saved {
             Some(s) if s.orbit_server_id.is_none() => self.begin(
                 FfiSessionTarget::Manual {
                     server_url: s.server_url,
@@ -363,13 +468,15 @@ impl<C: SessionCore> Machine<C> {
                 Recover::Allowed,
             ),
             _ => self.begin(FfiSessionTarget::PrimaryAgent, None, Recover::Allowed),
-        }
+        };
+        self.begin_grace(&mut fx);
+        fx
     }
 
     /// A linked environment's session at launch: its saved environment or manual server.
     pub(crate) fn restore(&mut self, saved: Option<FfiSavedSession>) -> Effects<C> {
         self.saved = saved.clone();
-        match saved {
+        let mut fx = match saved {
             Some(FfiSavedSession {
                 orbit_server_id: Some(environment_id),
                 ..
@@ -381,8 +488,10 @@ impl<C: SessionCore> Machine<C> {
                 None,
                 Recover::Allowed,
             ),
-            None => Vec::new(),
-        }
+            None => return Vec::new(),
+        };
+        self.begin_grace(&mut fx);
+        fx
     }
 
     pub(crate) fn connect_primary_agent(&mut self) -> Effects<C> {
@@ -413,6 +522,9 @@ impl<C: SessionCore> Machine<C> {
     }
 
     pub(crate) fn pair_manual(&mut self, server_url: String, pairing_code: String) -> Effects<C> {
+        self.identity_epoch += 1;
+        self.open_thread = None;
+        self.has_connected = false;
         self.saved = None;
         let mut fx = vec![Effect::Save(None), Effect::WipeCache];
         fx.extend(self.begin(
@@ -421,6 +533,17 @@ impl<C: SessionCore> Machine<C> {
             Recover::Allowed,
         ));
         fx
+    }
+
+    /// Discovery has no live target for this scope. Keep its identity, credential and open thread.
+    fn suspend(&mut self) -> Effects<C> {
+        self.rest = FfiSessionPhase::Suspended;
+        self.attempt
+            .take()
+            .and_then(|a| a.core)
+            .map(Effect::Disconnect)
+            .into_iter()
+            .collect()
     }
 
     /// "Connect manually": stop any attempt and show the pairing form.
@@ -434,6 +557,7 @@ impl<C: SessionCore> Machine<C> {
     }
 
     pub(crate) fn sign_out(&mut self) -> Effects<C> {
+        self.identity_epoch += 1;
         let mut fx = self.connect_manually();
         self.saved = None;
         self.open_thread = None;
@@ -444,13 +568,21 @@ impl<C: SessionCore> Machine<C> {
 
     /// Try again: repeat a failed attempt's target, or nudge a live connection.
     pub(crate) fn retry(&mut self) -> Effects<C> {
-        match &self.attempt {
-            Some(a) => a.core.clone().map(Effect::Reconnect).into_iter().collect(),
+        let mut fx = match &mut self.attempt {
+            Some(a) => {
+                // The nudge is a fresh try: connecting again until it fails too.
+                a.failed_tries = 0;
+                a.start_retries = 0;
+                a.core.clone().map(Effect::Reconnect).into_iter().collect()
+            }
             None => match self.rest.clone() {
                 FfiSessionPhase::Failed { retry, .. } => self.begin(retry, None, Recover::Allowed),
-                _ => Vec::new(),
+                _ => return Vec::new(),
             },
-        }
+        };
+        // A fresh first connection: the network may still be waking.
+        self.begin_grace(&mut fx);
+        fx
     }
 
     /// The app came back to the foreground.
@@ -552,18 +684,91 @@ impl<C: SessionCore> Machine<C> {
         fx
     }
 
-    /// The attempt could not produce a connection.
+    /// The attempt could not produce a connection, for a reason that may pass: the network is
+    /// waking, the Gateway didn't answer. An Orbit target stays connecting and starts again after
+    /// a pause, a few times; then it fails like [`Self::start_failed`].
+    pub(crate) fn start_failed_transient(
+        &mut self,
+        id: u64,
+        message: String,
+        detail: Option<String>,
+    ) -> Effects<C> {
+        match self.start_again_later(id) {
+            Some(fx) => fx,
+            None => self.fail_start(id, message, detail, true),
+        }
+    }
+
+    /// Takes the attempt back to connecting under a new id, so nothing a dropped connection or
+    /// an older timer reports counts. `None` for a manual target or when the tries are used up.
+    fn start_again_later(&mut self, id: u64) -> Option<Effects<C>> {
+        let next_id = self.next_id;
+        let attempt = self.attempt.as_mut().filter(|a| a.id == id)?;
+        if matches!(attempt.target, FfiSessionTarget::Manual { .. })
+            || attempt.start_retries >= START_RETRIES
+        {
+            return None;
+        }
+        let after = START_RETRY_DELAY * 2u32.pow(attempt.start_retries);
+        attempt.start_retries += 1;
+        attempt.id = next_id;
+        attempt.status = FfiConnectionStatus::Connecting;
+        attempt.early_failure = None;
+        attempt.failed_tries = 0;
+        attempt.offline_ready = false;
+        let mut fx: Effects<C> = attempt
+            .core
+            .take()
+            .map(Effect::Disconnect)
+            .into_iter()
+            .collect();
+        self.next_id += 1;
+        fx.push(Effect::RetryStart { id: next_id, after });
+        Some(fx)
+    }
+
+    /// The pause before a start retry is over.
+    pub(crate) fn restart(&mut self, id: u64) -> Effects<C> {
+        let Some(attempt) = self
+            .attempt
+            .as_ref()
+            .filter(|a| a.id == id && a.core.is_none())
+        else {
+            return Vec::new();
+        };
+        vec![Effect::Start {
+            id,
+            target: attempt.target.clone(),
+            saved: self.saved.clone(),
+            credential: None,
+        }]
+    }
+
+    /// The attempt could not produce a connection, for good.
     pub(crate) fn start_failed(
         &mut self,
         id: u64,
         message: String,
         detail: Option<String>,
     ) -> Effects<C> {
+        self.fail_start(id, message, detail, false)
+    }
+
+    /// Ends the attempt as failed. `transient`: the cause may pass, so an open grace window
+    /// still hides the offline state. A manual target's error is never transient.
+    fn fail_start(
+        &mut self,
+        id: u64,
+        message: String,
+        detail: Option<String>,
+        transient: bool,
+    ) -> Effects<C> {
         if !self.is_current(id) {
             return Vec::new();
         }
         let mut fx = Vec::new();
         let target = self.attempt.as_ref().map(|a| a.target.clone());
+        self.rest_transient = transient && !matches!(target, Some(FfiSessionTarget::Manual { .. }));
         self.cancel(&mut fx);
         self.rest = match target {
             Some(FfiSessionTarget::Manual { .. }) | None => FfiSessionPhase::Idle {
@@ -592,10 +797,25 @@ impl<C: SessionCore> Machine<C> {
             }
             return self.failed(id, message);
         }
+        match status {
+            FfiConnectionStatus::Connected | FfiConnectionStatus::Connecting => {
+                attempt.failed_tries = 0;
+            }
+            // Straight from Connected it is a drop; otherwise the try before it failed.
+            FfiConnectionStatus::Reconnecting { .. }
+                if attempt.status != FfiConnectionStatus::Connected =>
+            {
+                attempt.failed_tries = attempt.failed_tries.saturating_add(1);
+            }
+            _ => {}
+        }
         if status == FfiConnectionStatus::Connected {
             attempt.connected_once = true;
+            attempt.start_retries = 0;
             attempt.may_recover = true;
             self.has_connected = true;
+            // The first connection worked: from here on, the tries rule decides.
+            self.grace = None;
         }
         attempt.status = status;
         Vec::new()
@@ -623,15 +843,25 @@ impl<C: SessionCore> Machine<C> {
             .as_ref()
             .is_some_and(SessionCore::reused_bearer);
         let orbit = !matches!(target, FfiSessionTarget::Manual { .. });
-        if orbit && rejected && attempt.may_recover && (attempt.connected_once || reused) {
+        let never_connected = !attempt.connected_once;
+        let recover = attempt.may_recover && (attempt.connected_once || reused);
+        if orbit && rejected && recover {
             // The bearer is dead: forget it and pair again through Orbit, once.
             self.saved = None;
             let mut fx = vec![Effect::Save(None)];
             fx.extend(self.begin(target, None, Recover::AfterConnecting));
             return fx;
         }
+        // The first connection of an attempt may fail for a reason that passes (a pairing the
+        // server wasn't ready for). A rejection or a changed identity never does.
+        if !rejected
+            && never_connected
+            && let Some(fx) = self.start_again_later(id)
+        {
+            return fx;
+        }
         let headline = if rejected {
-            "The server rejected this iPhone's sign-in."
+            AUTH_REJECTED
         } else {
             "The connection to the server failed."
         };
@@ -640,7 +870,7 @@ impl<C: SessionCore> Machine<C> {
         } else {
             (message, None)
         };
-        self.start_failed(id, message, detail)
+        self.fail_start(id, message, detail, orbit && !rejected)
     }
 
     pub(crate) fn bearer(&mut self, id: u64, mut session: FfiSavedSession) -> Effects<C> {
@@ -689,6 +919,7 @@ impl<C: SessionCore> Machine<C> {
         let mut fx = Vec::new();
         let target = self.attempt.as_ref().map(|a| a.target.clone());
         self.cancel(&mut fx);
+        self.rest_transient = false;
         if let Some(retry) = target {
             self.rest = FfiSessionPhase::Failed {
                 message: IDENTITY_CHANGED.to_owned(),
@@ -754,6 +985,7 @@ enum Recover {
 pub struct FfiLinkedDiscovery {
     pub targets: Vec<crate::orbit::FfiOrbitEnvironment>,
     pub unresolved_endpoints: Vec<String>,
+    pub unresolved_server_ids: Vec<String>,
 }
 
 /// UniFFI handle to the app's connection: one state machine plus the Orbit client it uses.
@@ -764,6 +996,8 @@ pub struct ConnSession {
     machine: Mutex<Machine<Arc<ConnCore>>>,
     /// Where this session keeps its offline thread cache, if anywhere.
     cache_dir: Option<PathBuf>,
+    /// The app is in the background: connections keep no warm threads.
+    in_background: std::sync::atomic::AtomicBool,
     /// The current attempt's offline reader.
     offline: Mutex<Option<(u64, Arc<OfflineReader>)>>,
     this: Weak<ConnSession>,
@@ -786,9 +1020,27 @@ impl ConnSession {
             listener,
             machine: Mutex::new(Machine::new()),
             cache_dir,
+            in_background: std::sync::atomic::AtomicBool::new(false),
             offline: Mutex::new(None),
             this: this.clone(),
         })
+    }
+
+    /// Hands an attempt's new connection to the machine, in the app's current phase.
+    fn attach_core(
+        &self,
+        id: u64,
+        core: Arc<ConnCore>,
+        server_url: String,
+        environment_id: Option<String>,
+    ) {
+        if self
+            .in_background
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            core.set_foreground(false);
+        }
+        self.step(|m| m.attached(id, core, server_url, environment_id));
     }
 
     /// Runs one machine step, carries out its effects, then publishes the new state.
@@ -810,6 +1062,13 @@ impl ConnSession {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_current(id)
+    }
+
+    fn is_grace(&self, id: u64) -> bool {
+        self.machine
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_grace(id)
     }
 
     fn apply(&self, effect: Effect<Arc<ConnCore>>) {
@@ -843,11 +1102,35 @@ impl ConnSession {
                 let (Some(this), Some(dir)) = (self.this.upgrade(), self.cache_dir.clone()) else {
                     return;
                 };
-                if !self.claim_cache(id, &dir, &identity) {
+                let Some(dir) = self.claim_cache(id, &dir, &identity) else {
                     return;
-                }
+                };
                 self.orbit.handle().spawn(async move {
                     this.open_offline(id, &core, dir, identity).await;
+                });
+            }
+            Effect::RetryStart { id, after } => {
+                let Some(this) = self.this.upgrade() else {
+                    return;
+                };
+                self.orbit.handle().spawn(async move {
+                    tokio::time::sleep(after).await;
+                    // A newer attempt, a cancel or a manual connect replaced this one meanwhile.
+                    if this.is_current(id) {
+                        this.step(|m| m.restart(id));
+                    }
+                });
+            }
+            Effect::EndGrace { id, after } => {
+                let Some(this) = self.this.upgrade() else {
+                    return;
+                };
+                self.orbit.handle().spawn(async move {
+                    tokio::time::sleep(after).await;
+                    // A later window or the first connection ended this one already.
+                    if this.is_grace(id) {
+                        this.step(|m| m.end_grace(id));
+                    }
                 });
             }
             Effect::OpenThread { core, thread_id } => core.open_thread(thread_id),
@@ -857,7 +1140,14 @@ impl ConnSession {
                 environment_id,
             } => core.expect_environment(environment_id),
             Effect::WipeCache => {
-                *self.offline.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                if let Some((_, reader)) = self
+                    .offline
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take()
+                {
+                    reader.db.invalidate();
+                }
                 if let Some(dir) = &self.cache_dir {
                     let _ = std::fs::remove_dir_all(dir);
                 }
@@ -867,12 +1157,12 @@ impl ConnSession {
 
     /// Makes the cache directory this attempt's server's, emptying it when it held another
     /// server's. Runs under the machine lock, so only the current attempt writes it.
-    fn claim_cache(&self, id: u64, dir: &std::path::Path, identity: &str) -> bool {
+    fn claim_cache(&self, id: u64, dir: &std::path::Path, identity: &str) -> Option<PathBuf> {
         let machine = self.machine.lock().unwrap_or_else(|e| e.into_inner());
         if !machine.is_current(id) {
-            return false;
+            return None;
         }
-        claim_cache_dir(dir, identity).is_ok()
+        claim_cache_dir(dir, identity).ok()
     }
 
     async fn open_offline(&self, id: u64, core: &ConnCore, dir: PathBuf, identity: String) {
@@ -924,7 +1214,14 @@ impl ConnSession {
                         server_id,
                         server_url,
                         ..
-                    } => self.step(|m| m.attached(id, core, server_url, Some(server_id))),
+                    } => self.attach_core(id, core, server_url, Some(server_id)),
+                    FfiOrbitConnectOutcome::Failed {
+                        reason: FfiOrbitConnectFailure::GatewayUnreachable,
+                        message,
+                        detail,
+                    } => {
+                        self.step(|m| m.start_failed_transient(id, message, detail));
+                    }
                     FfiOrbitConnectOutcome::Failed {
                         message, detail, ..
                     } => self.step(|m| m.start_failed(id, message, detail)),
@@ -948,9 +1245,18 @@ impl ConnSession {
                     {
                         Ok(core) => {
                             let url = core.server_url();
-                            self.step(|m| m.attached(id, core, url, Some(environment_id)));
+                            self.attach_core(id, core, url, Some(environment_id));
                         }
-                        Err(err) => self.step(|m| m.start_failed(id, err.to_string(), None)),
+                        Err(err) => {
+                            let message = err.to_string();
+                            self.step(|m| {
+                                if is_transient(&err) {
+                                    m.start_failed_transient(id, message, None)
+                                } else {
+                                    m.start_failed(id, message, None)
+                                }
+                            });
+                        }
                     }
                 }
             }
@@ -971,7 +1277,7 @@ impl ConnSession {
                 match ConnCore::start_checked(server_url, credential, listener, None, expected) {
                     Ok(core) => {
                         let url = core.server_url();
-                        self.step(|m| m.attached(id, core, url, None));
+                        self.attach_core(id, core, url, None);
                     }
                     Err(err) => self.step(|m| m.start_failed(id, err.to_string(), None)),
                 }
@@ -1003,7 +1309,13 @@ impl ConnSession {
             Ok(fleet) => fleet,
             Err(err) => {
                 let (message, detail) = fail(&err);
-                self.step(|m| m.start_failed(id, message, detail));
+                self.step(|m| {
+                    if is_transient(&err) {
+                        m.start_failed_transient(id, message, detail)
+                    } else {
+                        m.start_failed(id, message, detail)
+                    }
+                });
                 return;
             }
         };
@@ -1022,7 +1334,13 @@ impl ConnSession {
             && let Err(err) = self.orbit.wake_instance(instance_id).await
         {
             let (message, detail) = fail(&err);
-            self.step(|m| m.start_failed(id, message, detail));
+            self.step(|m| {
+                if is_transient(&err) {
+                    m.start_failed_transient(id, message, detail)
+                } else {
+                    m.start_failed(id, message, detail)
+                }
+            });
             return;
         }
         let mut last = None;
@@ -1038,7 +1356,7 @@ impl ConnSession {
                 Ok(core) => {
                     let url = core.server_url();
                     let env = environment_id.clone();
-                    self.step(|m| m.attached(id, core, url, Some(env)));
+                    self.attach_core(id, core, url, Some(env));
                     return;
                 }
                 Err(err) => {
@@ -1091,11 +1409,9 @@ impl ConnSession {
         self.step(|m| m.restore(saved));
     }
 
-    /// Opens existing history for the primary saved identity while gateway discovery is pending.
-    pub async fn saved_offline_reader(&self) -> Option<Arc<OfflineReader>> {
+    /// Reads only the completed inbox file. Message database opening and backfill run separately.
+    pub async fn cached_shell(&self, identity: String) -> Option<FfiShellSnapshot> {
         let dir = self.cache_dir.clone()?;
-        let saved = self.machine.lock().ok()?.saved.clone()?;
-        let identity = saved.environment_id.or(saved.orbit_server_id)?;
         self.orbit
             .handle()
             .spawn(async move {
@@ -1103,8 +1419,31 @@ impl ConnSession {
                     .await
                     .ok()?
                     != identity
-                    || !dir.join("messages.sqlite3").is_file()
                 {
+                    return None;
+                }
+                crate::offline::read_saved_shell(&cache_files(&dir).ok()?, &identity).await
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Opens a saved environment's matching cache while its connection or discovery is pending.
+    pub async fn saved_offline_reader(&self, identity: String) -> Option<Arc<OfflineReader>> {
+        let dir = self.cache_dir.clone()?;
+        self.orbit
+            .handle()
+            .spawn(async move {
+                if tokio::fs::read_to_string(dir.join(IDENTITY_FILE))
+                    .await
+                    .ok()?
+                    != identity
+                {
+                    return None;
+                }
+                let dir = cache_files(&dir).ok()?;
+                if !dir.join("messages.sqlite3").is_file() {
                     return None;
                 }
                 OfflineReader::open(dir, identity, None).await.ok()
@@ -1150,12 +1489,14 @@ impl ConnSession {
                     });
                 }
                 let targets: Vec<_> = fleet.nodes.into_iter().chain(fleet.instances).collect();
+                let saved = saved.into_iter().collect();
+                let disabled = disabled.into_iter().collect();
                 let plan = plan_linked_environments(&LinkedPlanInput {
                     targets: &targets,
                     primary_id: Some(&primary_id),
-                    saved: &saved.into_iter().collect(),
+                    saved: &saved,
                     held: &HashSet::new(),
-                    disabled: &disabled.into_iter().collect(),
+                    disabled: &disabled,
                     instance_opt_in: &HashSet::new(),
                     pair_attempted_at_ms: &Default::default(),
                     now_ms: 0,
@@ -1171,8 +1512,20 @@ impl ConnSession {
                         .or_default()
                         .push(target);
                 }
-                let mut linked = Vec::new();
+                // A saved, registered sleeping instance still owns its offline inventory.
+                let mut linked: Vec<_> = targets
+                    .iter()
+                    .filter(|t| {
+                        !t.is_awake()
+                            && t.server_id != primary_id
+                            && t.status == conn_orbit::fleet::OrbitTargetStatus::Registered
+                            && saved.contains(&t.server_id)
+                            && !disabled.contains(&t.server_id)
+                    })
+                    .map(|t| crate::orbit::map_orbit_environment(t, false))
+                    .collect();
                 let mut unresolved_endpoints = Vec::new();
+                let mut unresolved_server_ids = Vec::new();
                 let mut included = HashSet::new();
                 for (url, registrations) in endpoints {
                     if !registrations.iter().any(|t| wanted.contains(&t.server_id)) {
@@ -1184,7 +1537,8 @@ impl ConnSession {
                     } else {
                         let actual = fetch_environment_id(&url).await;
                         registrations
-                            .into_iter()
+                            .iter()
+                            .copied()
                             .find(|t| Some(t.server_id.as_str()) == actual.as_deref())
                     };
                     match target {
@@ -1194,13 +1548,22 @@ impl ConnSession {
                         {
                             linked.push(crate::orbit::map_orbit_environment(t, false))
                         }
-                        None => unresolved_endpoints.push(url),
+                        None => {
+                            unresolved_endpoints.push(url);
+                            unresolved_server_ids.extend(
+                                registrations
+                                    .iter()
+                                    .filter(|t| wanted.contains(&t.server_id))
+                                    .map(|t| t.server_id.clone()),
+                            );
+                        }
                         _ => {}
                     }
                 }
                 Ok(FfiLinkedDiscovery {
                     targets: linked,
                     unresolved_endpoints,
+                    unresolved_server_ids,
                 })
             })
             .await
@@ -1226,8 +1589,26 @@ impl ConnSession {
         self.step(Machine::retry);
     }
 
+    pub fn suspend(&self) {
+        self.step(Machine::suspend);
+    }
+
     pub fn foreground(&self) {
+        self.in_background
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Some(core) = self.core() {
+            core.set_foreground(true);
+        }
         self.step(Machine::foreground);
+    }
+
+    /// The app went to the background: stop the warm thread streams until [`Self::foreground`].
+    pub fn background(&self) {
+        self.in_background
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(core) = self.core() {
+            core.set_foreground(false);
+        }
     }
 
     /// Where a link for `environment_id` opens: here only when it is this session's already
@@ -1257,6 +1638,14 @@ impl ConnSession {
     /// The user left this thread: unsubscribe it.
     pub fn close_thread(&self, thread_id: String) {
         self.step(|m| m.close_thread(thread_id));
+    }
+
+    /// Read at presentation time: a callback queued before a socket retry carries no stale rows.
+    #[must_use]
+    pub fn published_shell(&self, connection_id: u64) -> Option<FfiShellSnapshot> {
+        let machine = self.machine.lock().ok()?;
+        let attempt = machine.attempt.as_ref().filter(|a| a.id == connection_id)?;
+        attempt.core.as_ref()?.published_shell()
     }
 
     /// The live connection, for thread and command calls.
@@ -1305,9 +1694,9 @@ impl CoreListener for AttemptListener {
         }
     }
 
-    fn on_shell(&self, snapshot: FfiShellSnapshot) {
+    fn on_shell(&self, _: FfiShellSnapshot) {
         if let Some(s) = self.current() {
-            s.listener.on_shell(self.id, snapshot);
+            s.listener.on_shell_changed(self.id);
         }
     }
 
@@ -1336,14 +1725,57 @@ impl CoreListener for AttemptListener {
     }
 }
 
+/// A start error that may pass with time: no route yet, a timeout, a proxy that answers nonsense
+/// while a host wakes. Everything else (auth, a missing environment, a bad URL) will not.
+fn is_transient(err: &FfiError) -> bool {
+    matches!(
+        err,
+        FfiError::Connection { .. }
+            | FfiError::Orbit {
+                reason: FfiOrbitErrorReason::Unreachable | FfiOrbitErrorReason::InvalidResponse,
+                ..
+            }
+    )
+}
+
 /// Empties `dir` unless it already belongs to `identity`, then marks it as `identity`'s.
-fn claim_cache_dir(dir: &std::path::Path, identity: &str) -> std::io::Result<()> {
+fn claim_cache_dir(dir: &std::path::Path, identity: &str) -> std::io::Result<PathBuf> {
     let marker = dir.join(IDENTITY_FILE);
-    if std::fs::read_to_string(&marker).ok().as_deref() != Some(identity) && dir.exists() {
+    if std::fs::read_to_string(&marker).ok().as_deref() == Some(identity) {
+        return cache_files(dir);
+    }
+    if dir.exists() {
         std::fs::remove_dir_all(dir)?;
     }
     std::fs::create_dir_all(dir)?;
-    std::fs::write(marker, identity)
+    let files = tempfile::Builder::new()
+        .prefix("pairing-")
+        .tempdir_in(dir)?
+        .keep();
+    std::fs::write(
+        dir.join("generation"),
+        files
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or(std::io::ErrorKind::InvalidData)?,
+    )?;
+    std::fs::write(marker, identity)?;
+    Ok(files)
+}
+
+fn cache_files(dir: &std::path::Path) -> std::io::Result<PathBuf> {
+    match std::fs::read_to_string(dir.join("generation")) {
+        Ok(name)
+            if name.strip_prefix("pairing-").is_some_and(|id| {
+                !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            }) =>
+        {
+            Ok(dir.join(name))
+        }
+        Ok(_) => Err(std::io::ErrorKind::InvalidData.into()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(dir.to_owned()),
+        Err(error) => Err(error),
+    }
 }
 
 /// Reads a server's Conn environment id (`/.well-known/t3/environment`).
@@ -1371,6 +1803,37 @@ mod tests {
     use crate::orbit::tests::{MockGateway, spawn_mock_conn_server, spawn_rejecting_server};
 
     const AUTH: &str = "The server rejected this device's sign-in.";
+
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test uses assert! for diffs while propagating setup errors with ?"
+    )]
+    async fn image_cache_reset_isolates_pairings_with_the_same_environment()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let parent = tempfile::tempdir()?;
+        let root = parent.path().join("cache");
+        let original = claim_cache_dir(&root, "env")?;
+        let reader = OfflineReader::open(original.clone(), "env".into(), None).await?;
+        reader
+            .db
+            .save_image("env", "thread", "version", b"old")
+            .await?;
+        assert_eq!(claim_cache_dir(&root, "env")?, original);
+        reader.db.invalidate();
+        std::fs::remove_dir_all(&root)?;
+        let replacement = claim_cache_dir(&root, "env")?;
+        assert_ne!(original, replacement);
+        assert!(reader.db.image("env", "thread", "version").await.is_err());
+        assert!(
+            OfflineReader::open(original, "env".into(), None)
+                .await
+                .is_err()
+        );
+        let fresh = OfflineReader::open(replacement, "env".into(), None).await?;
+        assert!(fresh.db.image("env", "thread", "version").await?.is_none());
+        Ok(())
+    }
 
     #[derive(Clone, Debug, Default)]
     struct FakeCore {
@@ -1569,12 +2032,507 @@ mod tests {
         assert!(!m.state().shows_offline);
         let _ = m.attached(1, FakeCore::default(), "http://node/".into(), None);
         assert!(!m.state().shows_offline);
-        let _ = m.status(1, FfiConnectionStatus::Reconnecting { attempt: 1 });
+        let reconnecting = |attempt| FfiConnectionStatus::Reconnecting { attempt };
+        // Cold launch: the first try fails while the network wakes, the second connects.
+        let _ = m.status(1, FfiConnectionStatus::Connecting);
+        let _ = m.status(1, reconnecting(1));
+        assert!(
+            !m.state().shows_offline,
+            "one failed try is still connecting"
+        );
+        let _ = m.status(1, FfiConnectionStatus::Connected);
+        assert!(!m.state().shows_offline);
+        // A drop (back from the background, say) reconnects without showing offline.
+        let _ = m.status(1, reconnecting(1));
+        assert!(!m.state().shows_offline, "a drop is not offline");
+        let _ = m.status(1, reconnecting(2));
+        assert!(
+            !m.state().shows_offline,
+            "one failed retry is still connecting"
+        );
+        let _ = m.status(1, reconnecting(3));
+        assert!(
+            !m.state().shows_offline,
+            "two failed retries are still connecting"
+        );
+        let _ = m.status(1, reconnecting(4));
+        assert!(
+            m.state().shows_offline,
+            "three failed retries confirm offline"
+        );
+        // Foreground nudges a fresh try: connecting again until it fails three more times and
+        // its grace window has closed.
+        let (window, _) = grace_window(&m.foreground()).expect("foreground opens a window");
+        assert!(!m.state().shows_offline, "a foreground retry is connecting");
+        let _ = m.status(1, reconnecting(1));
+        let _ = m.status(1, reconnecting(2));
+        assert!(!m.state().shows_offline);
+        let _ = m.status(1, reconnecting(3));
+        assert!(
+            !m.state().shows_offline,
+            "the window hides three failed tries"
+        );
+        let _ = m.end_grace(window);
         assert!(m.state().shows_offline);
         let _ = m.status(1, FfiConnectionStatus::Connected);
         assert!(!m.state().shows_offline);
         let _ = m.status(1, failed("Lost connection"));
         assert!(m.state().shows_offline);
+    }
+
+    /// The `(id, delay)` of the grace window `fx` opens, if it opens one.
+    fn grace_window(fx: &[Effect<FakeCore>]) -> Option<(u64, Duration)> {
+        fx.iter().find_map(|e| match e {
+            Effect::EndGrace { id, after } => Some((*id, *after)),
+            _ => None,
+        })
+    }
+
+    fn reconnecting(attempt: u32) -> FfiConnectionStatus {
+        FfiConnectionStatus::Reconnecting { attempt }
+    }
+
+    #[test]
+    fn a_cold_launch_shows_offline_only_after_the_grace_window_ends() {
+        let mut m = Machine::<FakeCore>::new();
+        let fx = m.launch(Some(saved("http://node/", None, Some("node"))));
+        let (window, after) = grace_window(&fx).expect("a launch opens a window");
+        assert_eq!(after, GRACE_WINDOW);
+        let _ = m.attached(1, FakeCore::default(), "http://node/".into(), None);
+        for attempt in 1..=OFFLINE_AFTER_FAILED_TRIES {
+            let _ = m.status(1, reconnecting(attempt));
+            assert!(
+                !m.state().shows_offline,
+                "failed try {attempt} at a cold launch is still the first connection"
+            );
+        }
+        let revision = m.state().revision;
+        let _ = m.end_grace(window);
+        assert!(m.state().revision > revision, "the UI re-reads the state");
+        assert!(
+            m.state().shows_offline,
+            "three failed tries confirm offline once the window is over"
+        );
+    }
+
+    #[test]
+    fn a_window_that_ends_before_three_failed_tries_still_waits_for_them() {
+        let mut m = Machine::<FakeCore>::new();
+        let (window, _) = grace_window(&m.launch(None)).expect("window");
+        let _ = m.attached(1, FakeCore::default(), "http://agent/".into(), None);
+        let _ = m.status(1, reconnecting(1));
+        let _ = m.status(1, reconnecting(2));
+        let _ = m.end_grace(window);
+        assert!(!m.state().shows_offline, "two failed tries are connecting");
+        let _ = m.status(1, reconnecting(3));
+        assert!(m.state().shows_offline);
+    }
+
+    #[test]
+    fn a_start_that_exhausts_its_retries_inside_the_window_shows_offline_after_it_ends() {
+        let mut m = Machine::<FakeCore>::new();
+        let (window, _) = grace_window(&m.launch(None)).expect("window");
+        let mut id = 1;
+        for _ in 0..START_RETRIES {
+            let fx = m.start_failed_transient(id, "Can't reach the Orbit Gateway.".into(), None);
+            id = retry_start(&fx).expect("retry").0;
+        }
+        let fx = m.start_failed_transient(id, "Can't reach the Orbit Gateway.".into(), None);
+        assert!(retry_start(&fx).is_none(), "the tries are used up");
+        assert!(matches!(m.state().phase, FfiSessionPhase::Failed { .. }));
+        assert!(
+            !m.state().shows_offline,
+            "the network may still be waking: the window holds the pill back"
+        );
+        let _ = m.end_grace(window);
+        assert!(m.state().shows_offline);
+    }
+
+    #[test]
+    fn restore_and_foreground_start_a_new_window() {
+        let mut m = Machine::<FakeCore>::new();
+        assert!(
+            grace_window(&m.restore(None)).is_none(),
+            "nothing to connect, nothing to wait for"
+        );
+        let fx = m.restore(Some(saved("http://inst/", Some("inst-7"), Some("inst-7"))));
+        let (restored, _) = grace_window(&fx).expect("a restore opens a window");
+
+        let (first, _) = grace_window(&m.launch(None)).expect("window");
+        let _ = m.attached(2, FakeCore::default(), "http://agent/".into(), None);
+        let _ = m.status(2, FfiConnectionStatus::Connected);
+        for attempt in 1..=OFFLINE_AFTER_FAILED_TRIES + 1 {
+            let _ = m.status(2, reconnecting(attempt));
+        }
+        assert!(m.state().shows_offline, "the window ended at Connected");
+
+        let (second, after) = grace_window(&m.foreground()).expect("foreground opens a window");
+        assert_eq!(after, GRACE_WINDOW);
+        assert!(second != first && second != restored, "a window of its own");
+        assert!(!m.state().shows_offline);
+        for attempt in 1..=OFFLINE_AFTER_FAILED_TRIES {
+            let _ = m.status(2, reconnecting(attempt));
+        }
+        assert!(!m.state().shows_offline, "the new window holds");
+        let _ = m.end_grace(second);
+        assert!(m.state().shows_offline);
+    }
+
+    #[test]
+    fn connecting_ends_the_window_and_a_later_drop_follows_the_tries_rule() {
+        let mut m = Machine::<FakeCore>::new();
+        let (window, _) = grace_window(&m.launch(None)).expect("window");
+        let _ = m.attached(1, FakeCore::default(), "http://agent/".into(), None);
+        let _ = m.status(1, reconnecting(1));
+        let _ = m.status(1, FfiConnectionStatus::Connected);
+        let revision = m.state().revision;
+        assert!(
+            m.end_grace(window).is_empty() && m.state().revision == revision,
+            "Connected already ended it: the timer finds nothing to do"
+        );
+        // The network drops: the first try after a drop is the drop itself.
+        for attempt in 1..=OFFLINE_AFTER_FAILED_TRIES {
+            let fx = m.status(1, reconnecting(attempt));
+            assert!(grace_window(&fx).is_none(), "a drop opens no new window");
+            assert!(
+                !m.state().shows_offline,
+                "try {attempt} is still connecting"
+            );
+        }
+        let _ = m.status(1, reconnecting(OFFLINE_AFTER_FAILED_TRIES + 1));
+        assert!(
+            m.state().shows_offline,
+            "three failed tries confirm offline"
+        );
+    }
+
+    #[test]
+    fn only_identity_and_sign_in_outcomes_show_inside_the_window() {
+        // An identity change.
+        let mut m = Machine::<FakeCore>::new();
+        let fx = m.launch(None);
+        assert!(grace_window(&fx).is_some());
+        let changed = FakeCore {
+            mismatch: true,
+            ..FakeCore::default()
+        };
+        let _ = m.status(1, failed("Another server answers"));
+        let _ = m.attached(1, changed, "http://agent/".into(), Some("a".into()));
+        assert!(matches!(
+            m.state().phase,
+            FfiSessionPhase::Failed { message, .. } if message == IDENTITY_CHANGED
+        ));
+        assert!(m.state().shows_offline, "identity change");
+
+        // A rejected sign-in.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(None);
+        let _ = m.status(1, failed(AUTH));
+        let _ = m.attached(1, rejected(), "http://agent/".into(), Some("a".into()));
+        assert!(m.state().shows_offline, "auth rejected");
+
+        // A rejection after the connection was handed over.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(None);
+        let _ = m.attached(1, rejected(), "http://agent/".into(), Some("a".into()));
+        let _ = m.status(1, failed(AUTH));
+        assert!(m.state().shows_offline, "auth rejected after the handover");
+
+        // A definitive start error, such as a machine Orbit doesn't list.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.restore(Some(saved("http://inst/", Some("inst-7"), Some("inst-7"))));
+        let _ = m.start_failed(
+            1,
+            "Orbit doesn't list the environment of that thread.".into(),
+            None,
+        );
+        assert!(
+            !m.state().shows_offline,
+            "not listed yet may be discovery catching up at launch: wait for the window"
+        );
+
+        // A manual target's error, even one that would be transient for Orbit.
+        let mut m = Machine::<FakeCore>::new();
+        let fx = m.launch(Some(saved("http://mac:3773/", None, Some("env-a"))));
+        assert!(grace_window(&fx).is_some());
+        let _ = m.start_failed_transient(1, "Couldn't reach it.".into(), None);
+        assert!(matches!(
+            m.state().phase,
+            FfiSessionPhase::Idle { message: Some(_) }
+        ));
+        assert!(
+            !m.state().shows_offline,
+            "an unreachable target at launch may be the tunnel coming up: wait for the window"
+        );
+    }
+
+    #[test]
+    fn a_stale_end_grace_does_nothing() {
+        let mut m = Machine::<FakeCore>::new();
+        let (first, _) = grace_window(&m.launch(None)).expect("window");
+        let _ = m.attached(1, FakeCore::default(), "http://agent/".into(), None);
+        for attempt in 1..=OFFLINE_AFTER_FAILED_TRIES {
+            let _ = m.status(1, reconnecting(attempt));
+        }
+        let (second, _) = grace_window(&m.foreground()).expect("window");
+        assert_ne!(first, second);
+        let revision = m.state().revision;
+        assert!(m.end_grace(first).is_empty(), "the older window's timer");
+        assert!(m.end_grace(second + 100).is_empty(), "an unknown id");
+        assert_eq!(m.state().revision, revision, "nothing changed");
+        for attempt in 1..=OFFLINE_AFTER_FAILED_TRIES {
+            let _ = m.status(1, reconnecting(attempt));
+        }
+        assert!(!m.state().shows_offline, "the current window still holds");
+        let _ = m.end_grace(second);
+        assert!(m.state().shows_offline);
+        let revision = m.state().revision;
+        let _ = m.end_grace(second);
+        assert_eq!(m.state().revision, revision, "a window ends once");
+    }
+
+    #[test]
+    fn suspending_inside_a_window_waits_for_the_window() {
+        let mut m = Machine::<FakeCore>::new();
+        let (window, _) = grace_window(&m.launch(None)).expect("window");
+        let fx = m.suspend();
+        assert!(grace_window(&fx).is_none(), "suspend opens no window");
+        assert!(matches!(m.state().phase, FfiSessionPhase::Suspended));
+        assert!(
+            !m.state().shows_offline,
+            "discovery may find nothing while the app starts"
+        );
+        let _ = m.end_grace(window);
+        assert!(
+            m.state().shows_offline,
+            "still suspended once the window ends"
+        );
+    }
+
+    /// The `(id, delay)` of the start retry in `fx`, if it holds one.
+    fn retry_start(fx: &[Effect<FakeCore>]) -> Option<(u64, Duration)> {
+        fx.iter().find_map(|e| match e {
+            Effect::RetryStart { id, after } => Some((*id, *after)),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn a_cold_launch_whose_discovery_fails_twice_then_connects_never_shows_offline() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(None);
+        let mut id = 1;
+        for expected in [500, 1000] {
+            let fx = m.start_failed_transient(id, "Can't reach the Orbit Gateway.".into(), None);
+            let (next, after) = retry_start(&fx).expect("a transient failure schedules a retry");
+            assert_eq!(after, Duration::from_millis(expected));
+            assert!(!m.state().shows_offline, "waiting to retry is connecting");
+            assert!(
+                matches!(m.state().phase, FfiSessionPhase::Connecting { .. }),
+                "{:?}",
+                m.state().phase
+            );
+            assert_eq!(m.state().connection_id, next);
+            assert_eq!(
+                starts(&m.restart(next)),
+                vec![(next, FfiSessionTarget::PrimaryAgent)],
+                "the timer starts the attempt again"
+            );
+            assert!(!m.state().shows_offline);
+            id = next;
+        }
+        let _ = m.attached(id, FakeCore::default(), "http://agent/".into(), None);
+        let _ = m.status(id, FfiConnectionStatus::Connected);
+        assert!(!m.state().shows_offline);
+        assert!(m.state().has_connected);
+    }
+
+    #[test]
+    fn three_start_failures_in_a_row_are_retried_and_the_fourth_shows_offline() {
+        let mut m = Machine::<FakeCore>::new();
+        let (window, _) = grace_window(&m.launch(None)).expect("window");
+        let mut id = 1;
+        let mut delays = Vec::new();
+        for _ in 0..START_RETRIES {
+            let fx = m.start_failed_transient(id, "Can't reach the Orbit Gateway.".into(), None);
+            let (next, after) = retry_start(&fx).expect("retry");
+            delays.push(after);
+            assert!(!m.state().shows_offline);
+            id = next;
+        }
+        assert_eq!(
+            delays,
+            [500, 1000, 2000].map(Duration::from_millis),
+            "the pause doubles"
+        );
+        let fx = m.start_failed_transient(id, "Can't reach the Orbit Gateway.".into(), None);
+        assert!(retry_start(&fx).is_none(), "the tries are used up");
+        // The launch window is still open; a later test covers what it hides.
+        let _ = m.end_grace(window);
+        assert!(m.state().shows_offline);
+        assert!(matches!(
+            m.state().phase,
+            FfiSessionPhase::Failed {
+                retry: FfiSessionTarget::PrimaryAgent,
+                ..
+            }
+        ));
+        // Try again starts over with a full set of retries.
+        assert_eq!(
+            starts(&m.retry()),
+            vec![(id + 1, FfiSessionTarget::PrimaryAgent)]
+        );
+        let fx = m.start_failed_transient(id + 1, "Can't reach the Orbit Gateway.".into(), None);
+        assert_eq!(
+            retry_start(&fx).map(|(_, after)| after),
+            Some(START_RETRY_DELAY)
+        );
+        assert!(!m.state().shows_offline);
+    }
+
+    #[test]
+    fn a_definitive_failure_shows_at_once_without_retries() {
+        // An identity change after the handover, before any connection.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.connect_environment("inst-7".to_owned());
+        let changed = FakeCore {
+            mismatch: true,
+            ..FakeCore::default()
+        };
+        let _ = m.status(1, failed("Another server answers"));
+        let fx = m.attached(
+            1,
+            changed,
+            "http://inst/".to_owned(),
+            Some("inst-7".to_owned()),
+        );
+        assert!(retry_start(&fx).is_none());
+        assert!(m.state().shows_offline);
+        assert!(matches!(
+            m.state().phase,
+            FfiSessionPhase::Failed { message, .. } if message == IDENTITY_CHANGED
+        ));
+
+        // A rejected sign-in.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.connect_primary_agent();
+        let _ = m.status(1, failed(AUTH));
+        let fx = m.attached(1, rejected(), "http://agent/".into(), Some("a".into()));
+        assert!(retry_start(&fx).is_none());
+        assert!(m.state().shows_offline);
+
+        // A definitive start error (the executor calls `start_failed`).
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.connect_primary_agent();
+        let fx = m.start_failed(1, "Orbit couldn't pair this iPhone.".into(), None);
+        assert!(fx.is_empty());
+        assert!(m.state().shows_offline);
+
+        // A manual target never retries on its own, even for a transient failure.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(Some(saved("http://mac:3773/", None, Some("env-a"))));
+        let fx = m.start_failed_transient(1, "Couldn't reach it.".into(), None);
+        assert!(retry_start(&fx).is_none());
+        assert!(matches!(
+            m.state().phase,
+            FfiSessionPhase::Idle { message: Some(_) }
+        ));
+    }
+
+    #[test]
+    fn a_first_connection_failure_that_is_not_a_rejection_is_retried() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.connect_primary_agent();
+        let _ = m.status(1, failed("The server closed the pairing."));
+        let fx = m.attached(
+            1,
+            FakeCore::default(),
+            "http://agent/".into(),
+            Some("a".into()),
+        );
+        let (next, after) = retry_start(&fx).expect("retry");
+        assert_eq!(after, START_RETRY_DELAY);
+        assert!(fx.iter().any(|e| matches!(e, Effect::Disconnect(_))));
+        assert!(!m.state().shows_offline);
+        assert_eq!(m.state().connection_id, next);
+        assert!(matches!(
+            m.state().phase,
+            FfiSessionPhase::Connecting { .. }
+        ));
+
+        // A connection that worked once and then ended for good is not a start failure.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.connect_primary_agent();
+        let _ = m.attached(
+            1,
+            FakeCore::default(),
+            "http://agent/".into(),
+            Some("a".into()),
+        );
+        let _ = m.status(1, FfiConnectionStatus::Connected);
+        let fx = m.status(1, failed("Lost connection"));
+        assert!(retry_start(&fx).is_none());
+        assert!(m.state().shows_offline);
+    }
+
+    #[test]
+    fn a_retry_timer_for_a_replaced_or_cancelled_attempt_does_nothing() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(None);
+        let fx = m.start_failed_transient(1, "Can't reach the Orbit Gateway.".into(), None);
+        let (pending, _) = retry_start(&fx).expect("retry");
+
+        // The user connects manually while the timer runs.
+        let _ = m.connect_manually();
+        let revision = m.state().revision;
+        assert!(m.restart(pending).is_empty(), "cancelled");
+        assert!(!m.is_current(pending));
+        assert_eq!(m.state().revision, revision);
+
+        // A foreground starts a new attempt while an older timer is pending.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(None);
+        let fx = m.start_failed_transient(1, "Can't reach the Orbit Gateway.".into(), None);
+        let (pending, _) = retry_start(&fx).expect("retry");
+        let _ = m.pair_manual("http://mac:3773".into(), "code".into());
+        assert!(m.restart(pending).is_empty(), "replaced");
+        assert!(matches!(
+            m.state().phase,
+            FfiSessionPhase::Connecting {
+                target: FfiSessionTarget::Manual { .. }
+            }
+        ));
+
+        // A late failure of a start the retry replaced is dropped too.
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(None);
+        let fx = m.start_failed_transient(1, "Can't reach the Orbit Gateway.".into(), None);
+        assert!(retry_start(&fx).is_some());
+        assert!(
+            m.start_failed_transient(1, "late".into(), None).is_empty(),
+            "id 1 is no longer current"
+        );
+    }
+
+    #[test]
+    fn a_successful_connect_resets_the_start_retries() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(None);
+        let mut id = 1;
+        for _ in 0..START_RETRIES {
+            let fx = m.start_failed_transient(id, "x".into(), None);
+            id = retry_start(&fx).expect("retry").0;
+        }
+        let _ = m.attached(
+            id,
+            FakeCore::default(),
+            "http://agent/".into(),
+            Some("a".into()),
+        );
+        let _ = m.status(id, FfiConnectionStatus::Connected);
+        // A later start failure of the same attempt has the full set of retries again.
+        let fx = m.start_failed_transient(id, "x".into(), None);
+        assert_eq!(retry_start(&fx).map(|(_, a)| a), Some(START_RETRY_DELAY));
     }
 
     #[test]
@@ -1583,9 +2541,21 @@ mod tests {
         let gateway = MockGateway::new(|req| {
             let data = match req.path.as_str() {
                 "/me" => json!({"id":1,"name":"phone","wireguard_ip":"10.0.0.2"}),
-                "/environments" => json!(["primary","desktop","disabled"].map(|id|
-                    json!({"environment_id":id,"label":id,"url":format!("http://{id}/"),"status":"registered","roles":[],"instance_id":null,"cleanup_pending":false})
-                )),
+                "/environments" => {
+                    let ids = [
+                        "primary", "desktop", "sleeping", "unsaved", "disabled", "expired",
+                        "cleanup",
+                    ];
+                    json!(ids.map(|id| {
+                        let sleeping = !matches!(id, "primary" | "desktop");
+                        json!({
+                            "environment_id": id, "label": id, "url": format!("http://{id}/"),
+                            "status": if id == "expired" { "session_expired" } else { "registered" },
+                            "instance_id": sleeping.then_some(19), "power_state": "stopped",
+                            "cleanup_pending": id == "cleanup",
+                        })
+                    }))
+                }
                 other => panic!("Unexpected discovery request: {other}"),
             };
             Ok(GatewayResponse {
@@ -1599,19 +2569,25 @@ mod tests {
             Arc::new(Recorder::default()),
         );
         let discover = |id: &str| {
-            futures::executor::block_on(session.linked_nodes(
-                id.to_owned(),
-                vec!["desktop".into()],
-                vec!["disabled".into()],
-            ))
+            futures::executor::block_on(
+                session.linked_nodes(
+                    id.to_owned(),
+                    [
+                        "desktop", "sleeping", "disabled", "expired", "cleanup", "removed",
+                    ]
+                    .map(String::from)
+                    .to_vec(),
+                    vec!["disabled".into()],
+                ),
+            )
         };
         let targets = discover("primary").unwrap().targets;
         assert_eq!(
             targets
                 .iter()
-                .map(|t| t.server_id.as_str())
-                .collect::<Vec<_>>(),
-            ["desktop"]
+                .map(|t| (t.server_id.as_str(), t.is_awake))
+                .collect::<std::collections::BTreeSet<_>>(),
+            std::collections::BTreeSet::from([("desktop", true), ("sleeping", false)])
         );
         assert!(discover("other").is_err());
     }
@@ -1627,9 +2603,17 @@ mod tests {
         let gateway = MockGateway::new(move |req| {
             let data = match req.path.as_str() {
                 "/me" => json!({"id":1,"name":"phone","wireguard_ip":"10.0.0.2"}),
-                "/environments" => json!(["primary","stale","current"].map(|id|
-                    json!({"environment_id":id,"label":id,"url":if id == "primary" {"http://primary/".to_owned()} else if id == "stale" {url.trim_end_matches('/').to_owned()} else {url.clone()},"status":"registered","roles":[],"instance_id":null,"cleanup_pending":false})
-                )),
+                "/environments" => {
+                    json!(["primary", "stale", "current", "ambiguous-a", "ambiguous-b"].map(|id| {
+                    let endpoint = match id {
+                        "primary" => "http://primary/",
+                        "current" => &url,
+                        "stale" => url.trim_end_matches('/'),
+                        _ => "http://127.0.0.1:0/",
+                    };
+                    json!({"environment_id":id,"label":id,"url":endpoint,"status":"registered"})
+                }))
+                }
                 other => panic!("Discovery must not mint pairings: {other}"),
             };
             Ok(GatewayResponse {
@@ -1644,7 +2628,7 @@ mod tests {
         );
         let plan = futures::executor::block_on(session.linked_nodes(
             "primary".into(),
-            vec!["stale".into()],
+            vec!["stale".into(), "removed".into(), "ambiguous-a".into()],
             vec![],
         ))
         .unwrap();
@@ -1655,8 +2639,45 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["current"]
         );
-        assert!(plan.unresolved_endpoints.is_empty());
+        assert_eq!(plan.unresolved_endpoints, ["http://127.0.0.1:0"]);
+        assert_eq!(plan.unresolved_server_ids, ["ambiguous-a", "ambiguous-b"]);
         assert!(!saw_bearer.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[test]
+    fn a_suspended_environment_stops_its_driver_and_reopens_its_cached_thread_on_wake() {
+        let mut machine = Machine::<FakeCore>::new();
+        let credential = saved("http://inst/", Some("inst-7"), Some("inst-7"));
+        let _ = machine.restore(Some(credential.clone()));
+        let _ = machine.attached(
+            1,
+            FakeCore::default(),
+            "http://inst/".into(),
+            Some("inst-7".into()),
+        );
+        let _ = machine.status(1, FfiConnectionStatus::Reconnecting { attempt: 1 });
+        assert!(matches!(
+            machine.suspend().as_slice(),
+            [Effect::Disconnect(_)]
+        ));
+        assert_eq!(machine.state().environment_id.as_deref(), Some("inst-7"));
+        assert_eq!(machine.saved, Some(credential));
+        assert_eq!(machine.route_link("inst-7"), FfiLinkRoute::Here);
+        assert!(machine.foreground().is_empty());
+        assert!(machine.open_thread("cached".into()).is_empty());
+        assert!(machine.status(1, failed("late failure")).is_empty());
+        assert!(matches!(machine.state().phase, FfiSessionPhase::Suspended));
+        assert!(machine.suspend().is_empty());
+        assert_eq!(starts(&machine.follow_environment("inst-7".into()))[0].0, 2);
+        assert_eq!(
+            opens(&machine.attached(
+                2,
+                FakeCore::default(),
+                "http://inst/".into(),
+                Some("inst-7".into())
+            )),
+            ["cached"]
+        );
     }
 
     #[test]
@@ -1786,7 +2807,7 @@ mod tests {
     }
 
     #[test]
-    fn an_open_thread_survives_a_re_pair_and_closes_on_the_new_connection() {
+    fn manual_pairing_drops_the_previous_thread_and_accepts_a_new_one() {
         let mut m = Machine::<FakeCore>::new();
         let _ = m.launch(Some(saved("http://mac:3773/", None, Some("env-a"))));
         let _ = m.open_thread("t1".to_owned());
@@ -1794,19 +2815,16 @@ mod tests {
         assert_eq!(opens(&fx), vec!["t1"], "the open thread is subscribed");
         let _ = m.pair_manual("http://mac:3773/".to_owned(), "code".to_owned());
         let fx = m.attached(2, rejected(), "http://mac:3773/".to_owned(), None);
-        assert_eq!(
-            opens(&fx),
-            vec!["t1"],
-            "the re-paired connection subscribes it again"
-        );
+        assert!(opens(&fx).is_empty(), "a fresh pairing must not reopen t1");
+        assert_eq!(opens(&m.open_thread("t2".to_owned())), vec!["t2"]);
         assert_eq!(
             m.state().connection_id,
             2,
             "snapshots now come from the new connection"
         );
         assert_eq!(
-            closes(&m.close_thread("t1".to_owned())),
-            vec!["t1"],
+            closes(&m.close_thread("t2".to_owned())),
+            vec!["t2"],
             "closing it unsubscribes it there"
         );
     }
@@ -1939,7 +2957,7 @@ mod tests {
     #[derive(Default)]
     struct Recorder {
         states: Mutex<Vec<FfiSessionState>>,
-        shells: Mutex<Vec<FfiShellSnapshot>>,
+        shell_connection: Mutex<u64>,
         deleted: Mutex<Vec<(u64, String)>>,
         saves: Mutex<Vec<Option<FfiSavedSession>>>,
         notify: Condvar,
@@ -1969,8 +2987,8 @@ mod tests {
         fn on_save(&self, session: Option<FfiSavedSession>) {
             self.saves.lock().expect("saves").push(session);
         }
-        fn on_shell(&self, _: u64, snapshot: FfiShellSnapshot) {
-            self.shells.lock().unwrap().push(snapshot);
+        fn on_shell_changed(&self, id: u64) {
+            *self.shell_connection.lock().unwrap() = id;
             self.notify.notify_all();
         }
         fn on_thread(&self, _connection_id: u64, _snapshot: FfiThreadSnapshot) {}
@@ -1999,25 +3017,30 @@ mod tests {
             .unwrap();
             (session, recorder)
         };
-        fn read(rec: &Recorder) -> FfiShellSnapshot {
-            let (shells, _) = rec
+        fn read(
+            session: &ConnSession,
+            rec: &Recorder,
+            more_than: Option<usize>,
+        ) -> FfiShellSnapshot {
+            assert!(rec.wait_for(|state| matches!(state.phase, FfiSessionPhase::Live { .. })));
+            let (id, result) = rec
                 .notify
                 .wait_timeout_while(
-                    rec.shells.lock().unwrap(),
+                    rec.shell_connection.lock().unwrap(),
                     Duration::from_secs(90),
-                    |shells| !shells.iter().any(|s| s.synchronized),
+                    |id| {
+                        session
+                            .published_shell(*id)
+                            .is_none_or(|s| more_than.is_some_and(|n| s.threads.len() <= n))
+                    },
                 )
                 .unwrap();
-            shells
-                .iter()
-                .rev()
-                .find(|s| s.synchronized)
-                .expect("authorized synchronized shell")
-                .clone()
+            assert!(!result.timed_out(), "expected published shell");
+            session.published_shell(*id).unwrap()
         }
         let (primary, events) = start("primary");
         primary.launch(None);
-        let shell = read(&events);
+        let shell = read(&primary, &events, None);
         let credential = events
             .saves
             .lock()
@@ -2037,7 +3060,7 @@ mod tests {
         drop(primary);
         let (restored, events) = start("primary");
         restored.launch(Some(credential.clone()));
-        read(&events);
+        read(&restored, &events, None);
         let targets =
             futures::executor::block_on(restored.linked_nodes(primary_id, vec![], vec![])).unwrap();
         assert!(targets.targets.iter().any(|t| t.server_id == desktop_id));
@@ -2048,7 +3071,7 @@ mod tests {
         );
         let (desktop, child) = start("desktop");
         desktop.follow_environment(desktop_id.clone(), None);
-        let shell = read(&child);
+        let shell = read(&desktop, &child, None);
         let child_credential = child
             .saves
             .lock()
@@ -2063,11 +3086,7 @@ mod tests {
             child_credential.environment_id.as_deref(),
             Some(desktop_id.as_str())
         );
-        let active = shell
-            .threads
-            .iter()
-            .filter(|t| !t.settled && !t.is_subagent)
-            .count();
+        let active = shell.threads.iter().filter(|t| !t.settled).count();
         assert!(active > 0);
         eprintln!(
             "desktop {desktop_id}: {} projects, {active} active, {} loaded settled, {} older",
@@ -2077,20 +3096,17 @@ mod tests {
         );
         if shell.older_settled_count > 0 {
             futures::executor::block_on(desktop.core().unwrap().load_older_settled()).unwrap();
-            let (_snapshots, timed) = child
-                .notify
-                .wait_timeout_while(
-                    child.shells.lock().unwrap(),
-                    Duration::from_secs(30),
-                    |shells| !shells.iter().any(|s| s.threads.len() > shell.threads.len()),
-                )
-                .unwrap();
-            assert!(!timed.timed_out(), "older page added threads");
+            read(&desktop, &child, Some(shell.threads.len()));
         }
         drop(desktop);
         let (resumed, events) = start("desktop");
         resumed.follow_environment(desktop_id, Some(child_credential));
-        assert!(read(&events).threads.iter().any(|t| !t.settled));
+        assert!(
+            read(&resumed, &events, None)
+                .threads
+                .iter()
+                .any(|t| !t.settled)
+        );
     }
 
     #[test]
@@ -2270,7 +3286,11 @@ mod tests {
             "node-new",
             "the cache now belongs to the new Node"
         );
-        match std::fs::read(dir.join("shell.json")) {
+        match std::fs::read(
+            cache_files(&dir)
+                .expect("cache generation")
+                .join("shell.json"),
+        ) {
             Ok(bytes) => {
                 let shell = conn_state::environments::LinkedShellSnapshot::from_json(&bytes)
                     .expect("any shell already written must be a valid replacement snapshot");
@@ -2280,11 +3300,12 @@ mod tests {
             Err(err) => panic!("cannot inspect the new Node's shell: {err}"),
         }
         let cold = ConnSession::with_orbit(session.orbit.clone(), Some(dir), recorder);
-        let url = session.state().server_url.expect("connected server URL");
         for (identity, allowed) in [("node-old", false), ("node-new", true)] {
-            cold.machine.lock().expect("machine").saved =
-                Some(saved(&url, Some(identity), Some(identity)));
-            assert_eq!(rt.block_on(cold.saved_offline_reader()).is_some(), allowed);
+            assert_eq!(
+                rt.block_on(cold.saved_offline_reader(identity.to_owned()))
+                    .is_some(),
+                allowed
+            );
         }
         if let Some(core) = session.core() {
             core.disconnect();

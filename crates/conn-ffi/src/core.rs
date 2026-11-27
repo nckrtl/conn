@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tracing::warn;
 
 use crate::coalesce::SnapshotCoalescer;
+use crate::composer::{FfiComposerFile, FfiComposerLimits, FfiComposerTarget};
 use crate::model_picker::{
     FfiModelPicker, FfiModelSave, PickerInput, PickerThread, SaveDecision, build_model_picker,
     model_to_save,
@@ -38,6 +39,11 @@ const TAG_SUBSCRIBE_THREAD: &str = "orchestration.subscribeThread";
 const TAG_LAUNCH_THREAD: &str = "orchestration.launchThread";
 const TAG_ENSURE_SCRATCH: &str = "projects.ensureScratch";
 const TAG_REFRESH_PROVIDERS: &str = "server.refreshProviders";
+/// How long a live thread's changes wait before its rendered state is saved for a cold start.
+const VIEW_SAVE_DEBOUNCE: Duration = Duration::from_millis(1000);
+/// Events the pump handles before it looks at controls again, so an `OpenThread` or a send never
+/// waits for a whole backlog to drain.
+const MAX_EVENTS_PER_DRAIN: usize = 64;
 /// Maximum time `Drop` waits for worker threads to wind down when dropped off-runtime.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -105,6 +111,25 @@ enum PumpControl {
     EnableOffline(Arc<crate::OfflineReader>),
     OpenThread(String),
     CloseThread(String),
+    /// A reply leaves: its pending row shows until the server's row for it arrives.
+    QueueSend {
+        thread_id: String,
+        send: crate::outbox::PendingSend,
+    },
+    /// The server accepted (`true`) or refused the reply with this key.
+    SendSettled {
+        thread_id: String,
+        key: String,
+        accepted: bool,
+    },
+    /// The app came to the foreground (`true`) or went to the background (`false`).
+    SetForeground(bool),
+    /// A queued run's files as the thread knows them; `None` once it left the queue.
+    QueuedAttachments {
+        thread_id: String,
+        run_id: String,
+        reply: oneshot::Sender<Option<Vec<conn_contract::ChatAttachment>>>,
+    },
     ResolveLaunchDefaults {
         project_id: String,
         reply: oneshot::Sender<LaunchDefaults>,
@@ -129,6 +154,8 @@ enum PumpControl {
         changes: std::collections::HashMap<String, String>,
         reply: oneshot::Sender<SaveDecision>,
     },
+    #[cfg(test)]
+    Stats(oneshot::Sender<PumpStats>),
     PlanWorkspaceScan {
         thread_id: String,
         now_ms: i64,
@@ -159,6 +186,9 @@ pub struct ConnCore {
     thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
     shell_watch: watch::Receiver<Option<FfiShellSnapshot>>,
     status_watch: watch::Receiver<FfiConnectionStatus>,
+    limits: watch::Receiver<FfiComposerLimits>,
+    pub(crate) uploads: conn_client::uploads::Uploads,
+    image_reader: RwLock<std::sync::Weak<crate::OfflineReader>>,
     disconnected: AtomicBool,
     started_with_bearer: bool,
 }
@@ -187,6 +217,102 @@ impl Drop for ConnCore {
 }
 
 impl ConnCore {
+    async fn launch_with_files(
+        &self,
+        project_id: String,
+        text: String,
+        key: &str,
+        attachments: &[conn_contract::ChatAttachment],
+    ) -> Result<String, FfiError> {
+        self.ensure_connected()?;
+
+        let (defaults_tx, defaults_rx) = oneshot::channel();
+        self.ctrl_tx
+            .send(PumpControl::ResolveLaunchDefaults {
+                project_id: project_id.clone(),
+                reply: defaults_tx,
+            })
+            .map_err(|_| FfiError::Closed)?;
+        let defaults = defaults_rx.await.map_err(|_| FfiError::Closed)?;
+
+        let thread_id = format!("thread-{key}");
+        let mut payload = conn_client::commands::launch_thread_payload(
+            &thread_id,
+            &project_id,
+            &text,
+            attachments,
+            defaults.model_selection,
+            &defaults.runtime_mode,
+            &defaults.interaction_mode,
+            WorkspaceStrategyChoice::Local,
+        );
+
+        payload["commandId"] = key.into();
+        payload["initialMessage"]["messageId"] = format!("message-{key}").into();
+        let value = self.call_json(TAG_LAUNCH_THREAD, payload).await?;
+        let parsed = conn_contract::from_json::<OrchestrationV2ThreadLaunchResult>(value.clone());
+        let (final_thread_id, projection, sequence) = match parsed {
+            Ok(res) => (res.thread_id, Some(res.projection), res.sequence),
+            Err(_) => {
+                let fallback_id = value
+                    .get("threadId")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or(&thread_id)
+                    .to_owned();
+                (fallback_id, None, None)
+            }
+        };
+
+        let (apply_tx, apply_rx) = oneshot::channel();
+        self.ctrl_tx
+            .send(PumpControl::ApplyLaunchedThread {
+                thread_id: final_thread_id.clone(),
+                projection: Box::new(projection),
+                sequence,
+                reply: apply_tx,
+            })
+            .map_err(|_| FfiError::Closed)?;
+        let _ = apply_rx.await;
+
+        Ok(final_thread_id)
+    }
+
+    async fn send_with_files(
+        &self,
+        thread_id: String,
+        text: String,
+        mode: FfiSendMode,
+        key: Option<&str>,
+        attachments: &[conn_contract::ChatAttachment],
+    ) -> Result<(), FfiError> {
+        self.ensure_connected()?;
+        let meta = self.thread_run_meta(&thread_id);
+        let steer_target = if meta.working && mode == FfiSendMode::Steer {
+            meta.active_run_id.as_deref()
+        } else {
+            None
+        };
+        let mut command = conn_client::commands::send_message(
+            &thread_id,
+            &text,
+            attachments,
+            meta.working,
+            steer_target,
+        )
+        .map_err(|err| map_build_error("message.dispatch", err))?;
+        if let Some(key) = key
+            && let OrchestrationV2Command::MessageDispatch(ref mut dispatch) = command
+        {
+            dispatch.command_id = key.into();
+            dispatch.message_id = format!("message-{key}");
+        }
+        self.dispatch_command(command).await
+    }
+
+    pub(crate) fn published_shell(&self) -> Option<FfiShellSnapshot> {
+        self.shell_watch.borrow().clone()
+    }
+
     /// Starts a connection. `orbit_server_id` marks an Orbit session: its bearers are reported
     /// with that id, and a rejected bearer ends it so the session can re-pair through Orbit.
     pub(crate) fn start(
@@ -256,13 +382,14 @@ impl ConnCore {
         let (shell_watch_tx, shell_watch) = watch::channel(None);
         let (status_watch_tx, status_watch) = watch::channel(FfiConnectionStatus::Connecting);
 
+        let (limits_tx, limits) = watch::channel(FfiComposerLimits::default());
         runtime_handle.spawn(run_pump(
             connection.clone(),
             events_rx,
             ctrl_rx,
             listener,
             Arc::clone(&thread_runs),
-            (shell_watch_tx, status_watch_tx),
+            (shell_watch_tx, status_watch_tx, limits_tx),
             SessionIdentity {
                 server_url: normalized_url.clone(),
                 orbit_server_id,
@@ -274,11 +401,14 @@ impl ConnCore {
             runtime: Some(runtime),
             runtime_handle,
             server_url: normalized_url,
+            uploads: conn_client::uploads::Uploads::new(connection.clone()),
             connection,
             ctrl_tx,
             thread_runs,
             shell_watch,
             status_watch,
+            limits,
+            image_reader: Default::default(),
             disconnected: AtomicBool::new(false),
             started_with_bearer,
         }))
@@ -525,6 +655,10 @@ impl ConnCore {
         self.ctrl_tx
             .send(PumpControl::EnableOffline(reader.clone()))
             .map_err(|_| FfiError::Closed)?;
+        *self
+            .image_reader
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::downgrade(&reader);
         Ok(reader)
     }
 
@@ -635,17 +769,106 @@ impl ConnCore {
         text: String,
         mode: FfiSendMode,
     ) -> Result<(), FfiError> {
+        self.send_with_files(thread_id, text, mode, None, &[]).await
+    }
+
+    pub fn composer_limits(&self) -> FfiComposerLimits {
+        *self.limits.borrow()
+    }
+
+    /// Uploads to this connection, then commits one idempotent launch or reply.
+    /// # Errors
+    /// Returns a file, upload, or dispatch error and leaves the caller's draft intact.
+    pub async fn submit_composer(
+        &self,
+        target: FfiComposerTarget,
+        key: String,
+        text: String,
+        files: Vec<FfiComposerFile>,
+    ) -> Result<String, FfiError> {
         self.ensure_connected()?;
-        let meta = self.thread_run_meta(&thread_id);
-        let steer_target = if meta.working && mode == FfiSendMode::Steer {
-            meta.active_run_id.as_deref()
-        } else {
-            None
+        let reader = self
+            .image_reader
+            .read()
+            .ok()
+            .and_then(|reader| reader.upgrade());
+        let thread = match &target {
+            FfiComposerTarget::New { .. } => format!("thread-{key}"),
+            FfiComposerTarget::Reply { thread_id, .. } => thread_id.clone(),
         };
-        let command =
-            conn_client::commands::send_message(&thread_id, &text, &[], meta.working, steer_target)
-                .map_err(|err| map_build_error("message.dispatch", err))?;
-        self.dispatch_command(command).await
+        let item = format!("turn-item:message-{key}");
+        // A reply shows in its thread at once, with its files, while they upload.
+        let pending_reply = match &target {
+            FfiComposerTarget::Reply { thread_id, .. } => {
+                let _ = self.ctrl_tx.send(PumpControl::QueueSend {
+                    thread_id: thread_id.clone(),
+                    send: crate::outbox::PendingSend {
+                        key: key.clone(),
+                        text: text.clone(),
+                        attachments: crate::outbox::pending_attachments(&key, &files),
+                        created_at: crate::outbox::iso_from_epoch_ms(now_epoch_ms()),
+                        acked: false,
+                        superseded: false,
+                    },
+                });
+                Some(thread_id.clone())
+            }
+            FfiComposerTarget::New { .. } => None,
+        };
+        let result = async {
+            let ready = self.ready_uploads(&files).await?;
+            if let Some(reader) = &reader {
+                // The picked images show from the cache instead of downloading again.
+                let (reader, thread, item) = (reader.clone(), thread.clone(), item.clone());
+                let picks: Vec<_> = ready
+                    .iter()
+                    .map(|upload| {
+                        (
+                            crate::FfiAttachment::from(&upload.attachment),
+                            upload.bytes.clone(),
+                        )
+                    })
+                    .collect();
+                let _ = self
+                    .runtime_handle
+                    .spawn(async move {
+                        for (index, (file, bytes)) in picks.into_iter().enumerate() {
+                            let _ = reader.seed_pick(&thread, &item, index, file, &bytes).await;
+                        }
+                    })
+                    .await;
+            }
+            let attachments: Vec<conn_contract::ChatAttachment> =
+                ready.into_iter().map(|upload| upload.attachment).collect();
+            match target {
+                FfiComposerTarget::New { project_id } => {
+                    let project = match project_id {
+                        Some(id) => id,
+                        None => self.ensure_scratch_project().await?,
+                    };
+                    self.launch_with_files(project, text, &key, &attachments)
+                        .await
+                }
+                FfiComposerTarget::Reply { thread_id, mode } => {
+                    self.send_with_files(thread_id.clone(), text, mode, Some(&key), &attachments)
+                        .await?;
+                    Ok(thread_id)
+                }
+            }
+        }
+        .await;
+        if let Some(thread_id) = pending_reply {
+            let _ = self.ctrl_tx.send(PumpControl::SendSettled {
+                thread_id,
+                key,
+                accepted: result.is_ok(),
+            });
+        }
+        // A refused send gives its files back to the draft, uploads and all.
+        if result.is_ok() {
+            self.uploads_sent(&files);
+        }
+        result
     }
 
     /// Answers a pending approval request (`runtime-request.respond`).
@@ -890,6 +1113,97 @@ impl ConnCore {
         self.dispatch_command(command).await
     }
 
+    /// `Send now` on a queued message: steers the active run when there is one, else starts the
+    /// queued run (desktop `promote_queued_message`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+    pub async fn send_queued_now(&self, thread_id: String, run_id: String) -> Result<(), FfiError> {
+        self.ensure_connected()?;
+        let meta = self.thread_run_meta(&thread_id);
+        let command =
+            crate::queued::send_now_command(&thread_id, &run_id, meta.active_run_id.as_deref())
+                .map_err(|err| map_build_error("queued send-now", err))?;
+        self.dispatch_command(command).await
+    }
+
+    /// Removes a queued message from the queue (`queued-run.cancel`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+    pub async fn cancel_queued_message(
+        &self,
+        thread_id: String,
+        run_id: String,
+    ) -> Result<(), FfiError> {
+        let command = conn_client::commands::cancel_queued_run(&thread_id, &run_id)
+            .map_err(|err| map_build_error("queued-run.cancel", err))?;
+        self.dispatch_command(command).await
+    }
+
+    /// Saves an edited queued message (`queued-run.edit`). `kept_attachment_ids` lists the
+    /// message's files still wanted (`None` keeps them all); `files` are new ones to upload.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FfiError::InvalidInput`] for blank text, a file that cannot be uploaded, or a run
+    /// that left the queue while its files changed; otherwise the mapped transport/RPC error.
+    pub async fn edit_queued_message(
+        &self,
+        thread_id: String,
+        run_id: String,
+        text: String,
+        kept_attachment_ids: Option<Vec<String>>,
+        files: Vec<FfiComposerFile>,
+    ) -> Result<(), FfiError> {
+        self.ensure_connected()?;
+        let text = text.trim().to_owned();
+        // `conn-server` refuses a queued message without text.
+        if text.is_empty() {
+            return Err(FfiError::InvalidInput {
+                message: "A queued message needs text.".to_owned(),
+            });
+        }
+        let existing = if kept_attachment_ids.is_some() || !files.is_empty() {
+            let (reply, rx) = oneshot::channel();
+            self.ctrl_tx
+                .send(PumpControl::QueuedAttachments {
+                    thread_id: thread_id.clone(),
+                    run_id: run_id.clone(),
+                    reply,
+                })
+                .map_err(|_| FfiError::Closed)?;
+            rx.await.map_err(|_| FfiError::Closed)?
+        } else {
+            None
+        };
+        let result = async {
+            let uploaded = self
+                .ready_uploads(&files)
+                .await?
+                .into_iter()
+                .map(|upload| upload.attachment)
+                .collect();
+            let attachments =
+                crate::queued::edit_attachments(existing, kept_attachment_ids, uploaded)?;
+            let command = conn_client::commands::edit_queued_run(
+                &thread_id,
+                &run_id,
+                &text,
+                attachments.as_deref(),
+            )
+            .map_err(|err| map_build_error("queued-run.edit", err))?;
+            self.dispatch_command(command).await
+        }
+        .await;
+        if result.is_ok() {
+            self.uploads_sent(&files);
+        }
+        result
+    }
+
     /// Moves `thread_id` into (`settled = true`) or out of (`settled = false`) the Settled shelf
     /// (`thread.settle` / `thread.unsettle`).
     ///
@@ -959,55 +1273,13 @@ impl ConnCore {
         project_id: String,
         text: String,
     ) -> Result<String, FfiError> {
-        self.ensure_connected()?;
-
-        let (defaults_tx, defaults_rx) = oneshot::channel();
-        self.ctrl_tx
-            .send(PumpControl::ResolveLaunchDefaults {
-                project_id: project_id.clone(),
-                reply: defaults_tx,
-            })
-            .map_err(|_| FfiError::Closed)?;
-        let defaults = defaults_rx.await.map_err(|_| FfiError::Closed)?;
-
-        let thread_id = conn_client::commands::new_thread_id();
-        let payload = conn_client::commands::launch_thread_payload(
-            &thread_id,
-            &project_id,
-            &text,
+        self.launch_with_files(
+            project_id,
+            text,
+            &conn_client::commands::new_thread_id(),
             &[],
-            defaults.model_selection,
-            &defaults.runtime_mode,
-            &defaults.interaction_mode,
-            WorkspaceStrategyChoice::Local,
-        );
-
-        let value = self.call_json(TAG_LAUNCH_THREAD, payload).await?;
-        let parsed = conn_contract::from_json::<OrchestrationV2ThreadLaunchResult>(value.clone());
-        let (final_thread_id, projection, sequence) = match parsed {
-            Ok(res) => (res.thread_id, Some(res.projection), res.sequence),
-            Err(_) => {
-                let fallback_id = value
-                    .get("threadId")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or(&thread_id)
-                    .to_owned();
-                (fallback_id, None, None)
-            }
-        };
-
-        let (apply_tx, apply_rx) = oneshot::channel();
-        self.ctrl_tx
-            .send(PumpControl::ApplyLaunchedThread {
-                thread_id: final_thread_id.clone(),
-                projection: Box::new(projection),
-                sequence,
-                reply: apply_tx,
-            })
-            .map_err(|_| FfiError::Closed)?;
-        let _ = apply_rx.await;
-
-        Ok(final_thread_id)
+        )
+        .await
     }
 
     /// Ensures the server's General / scratch project (`projects.ensureScratch`, `"No project"`)
@@ -1048,6 +1320,12 @@ impl ConnCore {
         self.connection.reconnect();
     }
 
+    /// Keeps a few recent threads subscribed while `true` (the app is in the foreground), so
+    /// opening one shows its latest state at once; `false` drops them until the next `true`.
+    pub fn set_foreground(&self, foreground: bool) {
+        let _ = self.ctrl_tx.send(PumpControl::SetForeground(foreground));
+    }
+
     /// Closes the connection and stops the background event pump. Safe to call more than once.
     pub fn disconnect(&self) {
         if self.disconnected.swap(true, Ordering::AcqRel) {
@@ -1078,8 +1356,22 @@ struct SessionIdentity {
     reused_session: Option<FfiSavedSession>,
 }
 
+/// What the pump did, for the burst benchmark (`pump_bench`).
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PumpStats {
+    pub events: u64,
+    /// `build_thread_snapshot` calls for the app (saved views not counted).
+    pub projections: u64,
+    /// Thread snapshots handed to the listener.
+    pub published: u64,
+    /// Thread snapshots built but not handed over, being equal to the last one.
+    pub skipped_equal: u64,
+}
+
 struct PumpState {
+    stats: PumpStats,
     offline: Option<crate::offline::SyncState>,
+    seed_offline_threads: bool,
     identity: SessionIdentity,
     connection: Connection,
     listener: Arc<dyn CoreListener>,
@@ -1089,15 +1381,77 @@ struct PumpState {
     workspace_scans: HashMap<(String, String), WorkspaceScanState>,
     threads: HashMap<String, ThreadState>,
     open_threads: HashSet<String>,
+    /// Threads kept subscribed in the background ([`conn_state::warm`]). Open threads may be
+    /// warm too; a thread's stream runs while it is open or warm.
+    warm_threads: HashSet<String>,
+    foreground: bool,
+    /// When the warm set picks again after a shell change.
+    warm_due: Option<Instant>,
+    /// Live threads whose rendered state changed since it was last saved, and when to save.
+    views_dirty: HashSet<String>,
+    views_due: Option<Instant>,
     ended_threads: HashSet<String>,
     shell_snapshot_required: bool,
+    pending_older_page: Option<oneshot::Sender<Option<conn_state::OlderPageRequest>>>,
     coalescer: SnapshotCoalescer,
+    /// The last thread snapshot handed to the listener, per open thread.
+    published: HashMap<String, FfiThreadSnapshot>,
+    /// Replies on their way, per thread.
+    outbox: HashMap<String, Vec<crate::outbox::PendingSend>>,
+    /// The server's clock minus ours (ms), from the config's `serverTime`.
+    server_clock_offset_ms: i64,
+    /// When this connection last changed status: the config request goes out after it.
+    status_changed_at_ms: i64,
     thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
     shell_watch: watch::Sender<Option<FfiShellSnapshot>>,
     status_watch: watch::Sender<FfiConnectionStatus>,
+    limits: watch::Sender<FfiComposerLimits>,
 }
 
 impl PumpState {
+    fn new(
+        connection: Connection,
+        listener: Arc<dyn CoreListener>,
+        thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
+        (shell_watch, status_watch, limits): (
+            watch::Sender<Option<FfiShellSnapshot>>,
+            watch::Sender<FfiConnectionStatus>,
+            watch::Sender<FfiComposerLimits>,
+        ),
+        identity: SessionIdentity,
+    ) -> Self {
+        Self {
+            stats: PumpStats::default(),
+            offline: None,
+            seed_offline_threads: false,
+            identity,
+            connection,
+            listener,
+            shell: ShellState::default(),
+            server_config: ServerConfigState::new(),
+            workspace_scans: HashMap::new(),
+            threads: HashMap::new(),
+            open_threads: HashSet::new(),
+            warm_threads: HashSet::new(),
+            foreground: true,
+            warm_due: None,
+            views_dirty: HashSet::new(),
+            views_due: None,
+            ended_threads: HashSet::new(),
+            shell_snapshot_required: false,
+            pending_older_page: None,
+            coalescer: SnapshotCoalescer::default(),
+            published: HashMap::new(),
+            outbox: HashMap::new(),
+            server_clock_offset_ms: 0,
+            status_changed_at_ms: now_epoch_ms(),
+            thread_runs,
+            shell_watch,
+            status_watch,
+            limits,
+        }
+    }
+
     fn resolve_thread_meta(&self, thread_id: &str) -> Option<ThreadSnapshotMeta> {
         self.shell
             .find_thread(thread_id)
@@ -1279,12 +1633,13 @@ impl PumpState {
     fn handle_control(&mut self, ctrl: PumpControl) -> bool {
         match ctrl {
             PumpControl::BeginOlderPage(reply) => {
-                self.shell.retry_older_page();
-                let request = self.shell.next_older_page(0, 1);
-                if let Some(ref request) = request {
-                    self.shell.older_page_started(request);
+                if self.shell.synchronized {
+                    self.begin_older_page(reply);
+                } else if self.pending_older_page.is_none() {
+                    self.pending_older_page = Some(reply);
+                } else {
+                    let _ = reply.send(None);
                 }
-                let _ = reply.send(request);
                 true
             }
             PumpControl::FinishOlderPage(request, page) => {
@@ -1293,25 +1648,26 @@ impl PumpState {
                 } else {
                     self.shell.older_page_failed(&request);
                 }
-                self.emit_or_buffer_shell(build_shell_snapshot(&self.shell));
+                if self.shell.synchronized {
+                    self.emit_or_buffer_shell(build_shell_snapshot(&self.shell));
+                }
                 true
             }
             PumpControl::EnableOffline(reader) => {
-                let mut sync = crate::offline::SyncState::new(reader);
-                if self.shell.synchronized {
-                    sync.shell(&self.shell, &self.open_threads);
-                    for state in self.threads.values() {
-                        sync.thread(state, state.sequence);
-                    }
+                self.offline = Some(crate::offline::SyncState::new(reader));
+                self.seed_offline_threads = true;
+                for thread_id in self.live_threads() {
+                    self.view_changed(&thread_id);
                 }
-                self.offline = Some(sync);
+                if self.shell.synchronized && !self.coalescer.has_pending_shell() {
+                    self.sync_offline_shell();
+                }
                 true
             }
             PumpControl::OpenThread(thread_id) => {
                 let is_newly_opened = self.open_threads.insert(thread_id.clone());
                 self.ended_threads.remove(&thread_id);
-                let meta = self.resolve_thread_meta(&thread_id);
-                let cached_snapshot = self
+                let cached = self
                     .threads
                     .get(&thread_id)
                     .filter(|_| {
@@ -1319,21 +1675,25 @@ impl PumpState {
                             .as_ref()
                             .is_none_or(|sync| sync.may_read(&thread_id))
                     })
-                    .filter(|state| state.synchronized || !state.entries.is_empty())
-                    .map(|state| build_thread_snapshot(state, meta.as_ref()));
+                    .is_some_and(|state| state.synchronized || !state.entries.is_empty());
+                // The app shows nothing for this thread yet: the first snapshot always goes out.
+                self.published.remove(&thread_id);
                 self.threads
                     .entry(thread_id.clone())
                     .or_insert_with(|| ThreadState::new(thread_id.clone()));
-                if is_newly_opened
-                    && !self
-                        .offline
-                        .as_ref()
-                        .is_some_and(|s| s.subscribed(&thread_id))
-                {
-                    self.connection.subscribe_thread(&thread_id);
+                conn_client::perf_log!(
+                    "ffi.open thread={thread_id} warm={} cached={}",
+                    self.warm_threads.contains(&thread_id),
+                    cached
+                );
+                if is_newly_opened {
+                    self.follow_live_threads();
+                    if !self.warm_threads.contains(&thread_id) {
+                        self.connection.subscribe_thread(&thread_id);
+                    }
                 }
-                if let Some(snapshot) = cached_snapshot {
-                    self.emit_or_buffer_thread(snapshot);
+                if cached {
+                    self.coalescer.force_thread(&thread_id);
                 }
                 true
             }
@@ -1341,14 +1701,61 @@ impl PumpState {
                 let was_open = self.open_threads.remove(&thread_id);
                 self.ended_threads.remove(&thread_id);
                 self.coalescer.cancel_thread(&thread_id);
-                if was_open
-                    && !self
-                        .offline
-                        .as_ref()
-                        .is_some_and(|s| s.subscribed(&thread_id))
-                {
+                self.published.remove(&thread_id);
+                if was_open && !self.warm_threads.contains(&thread_id) {
+                    self.save_views();
                     self.connection.unsubscribe_thread(&thread_id);
+                    self.follow_live_threads();
                 }
+                true
+            }
+            PumpControl::SetForeground(foreground) => {
+                if self.foreground != foreground {
+                    self.foreground = foreground;
+                    // The app may be killed in the background: save what it shows first.
+                    self.save_views();
+                    self.rewarm();
+                }
+                true
+            }
+            PumpControl::QueueSend { thread_id, send } => {
+                self.outbox.entry(thread_id.clone()).or_default().push(send);
+                self.coalescer.force_thread(&thread_id);
+                true
+            }
+            PumpControl::SendSettled {
+                thread_id,
+                key,
+                accepted,
+            } => {
+                if let Some(sends) = self.outbox.get_mut(&thread_id) {
+                    if accepted {
+                        if let Some(send) = sends.iter_mut().find(|send| send.key == key) {
+                            send.acked = true;
+                        }
+                    } else {
+                        sends.retain(|send| send.key != key);
+                        self.coalescer.force_thread(&thread_id);
+                    }
+                }
+                true
+            }
+            PumpControl::QueuedAttachments {
+                thread_id,
+                run_id,
+                reply,
+            } => {
+                let files = self.threads.get(&thread_id).and_then(|state| {
+                    state.entries.iter().find_map(|entry| match entry {
+                        conn_state::TimelineEntry::QueuedUser {
+                            run_id: queued,
+                            attachments,
+                            ..
+                        } if *queued == run_id => Some(attachments.clone()),
+                        _ => None,
+                    })
+                });
+                let _ = reply.send(files);
                 true
             }
             PumpControl::ResolveLaunchDefaults { project_id, reply } => {
@@ -1365,25 +1772,24 @@ impl PumpState {
                 if let Some(projection) = *projection {
                     let mut state = ThreadState::new(thread_id.clone());
                     state.apply_projection(projection, sequence);
+                    if let Some(sync) = &mut self.offline {
+                        sync.thread(&state, sequence);
+                    }
                     self.update_thread_run_meta(&thread_id, &state);
                     self.threads.insert(thread_id.clone(), state);
-                    let meta = self.resolve_thread_meta(&thread_id);
-                    let snapshot = self
-                        .threads
-                        .get(&thread_id)
-                        .map(|state| build_thread_snapshot(state, meta.as_ref()));
                     self.open_threads.insert(thread_id.clone());
                     self.ended_threads.remove(&thread_id);
+                    self.follow_live_threads();
                     self.connection.subscribe_thread(&thread_id);
-                    if let Some(snapshot) = snapshot {
-                        self.emit_or_buffer_thread(snapshot);
-                    }
+                    self.published.remove(&thread_id);
+                    self.coalescer.force_thread(&thread_id);
                 } else {
                     self.threads
                         .entry(thread_id.clone())
                         .or_insert_with(|| ThreadState::new(thread_id.clone()));
                     self.open_threads.insert(thread_id.clone());
                     self.ended_threads.remove(&thread_id);
+                    self.follow_live_threads();
                     self.connection.subscribe_thread(&thread_id);
                 }
                 let _ = reply.send(());
@@ -1454,13 +1860,24 @@ impl PumpState {
                 let _ = reply.send(self.finish_workspace_scan(&scan, after.as_deref(), now_ms));
                 true
             }
+            #[cfg(test)]
+            PumpControl::Stats(reply) => {
+                let _ = reply.send(self.stats);
+                true
+            }
             PumpControl::Shutdown => false,
         }
     }
 
     fn handle_event(&mut self, event: ClientEvent) {
+        self.stats.events += 1;
         match event {
             ClientEvent::Status(status) => {
+                // The driver resumes from its last received sequence, even mid-replay. Keep
+                // reducing into this shell, but publish only after this subscription's marker.
+                self.invalidate_shell();
+                self.shell_snapshot_required = false;
+                self.status_changed_at_ms = now_epoch_ms();
                 let ffi_status: FfiConnectionStatus = status.into();
                 self.status_watch.send_replace(ffi_status.clone());
                 self.listener.on_status(ffi_status);
@@ -1475,32 +1892,33 @@ impl PumpState {
             }
             ClientEvent::Shell(item) => {
                 let change = self.shell.apply(item);
-                self.sync_shell_run_meta();
-                if self.shell.synchronized
-                    && let Some(sync) = &mut self.offline
-                {
-                    sync.shell(&self.shell, &self.open_threads);
+                if self.shell_snapshot_required {
+                    self.shell.synchronized = false;
+                }
+                if self.shell.synchronized {
+                    self.sync_shell_run_meta();
+                    self.emit_or_buffer_shell(build_shell_snapshot(&self.shell));
+                    self.schedule_rewarm();
                 }
                 if !change.threads_changed.is_empty() {
                     self.resubscribe_ended_threads();
                 }
                 if change.snapshot_required {
+                    self.invalidate_shell();
                     self.shell_snapshot_required = true;
                     self.connection.subscribe_shell_with_idle_subagents();
                 }
-                let snapshot = build_shell_snapshot(&self.shell);
-                self.shell_watch.send_replace(Some(snapshot.clone()));
-                self.emit_or_buffer_shell(snapshot);
 
-                // Refresh header metadata (title/branch/model) on open threads updated by shell.
+                // Header metadata (title/branch/model) of open threads may have changed; a row
+                // change that leaves the snapshot equal publishes nothing.
                 for thread_id in change.threads_changed {
                     if self.open_threads.contains(&thread_id)
-                        && let Some(state) = self.threads.get(&thread_id)
-                        && (state.synchronized || !state.entries.is_empty())
+                        && self
+                            .threads
+                            .get(&thread_id)
+                            .is_some_and(|state| state.synchronized || !state.entries.is_empty())
                     {
-                        let meta = self.resolve_thread_meta(&thread_id);
-                        let thread_snapshot = build_thread_snapshot(state, meta.as_ref());
-                        self.emit_or_buffer_thread(thread_snapshot);
+                        self.coalescer.mark_thread(&thread_id);
                     }
                 }
             }
@@ -1510,6 +1928,13 @@ impl PumpState {
                     OrchestrationV2ThreadStreamItem::Snapshot(_)
                         | OrchestrationV2ThreadStreamItem::Synchronized(_)
                 );
+                if matches!(item, OrchestrationV2ThreadStreamItem::Snapshot(_))
+                    && let Some(sends) = self.outbox.get_mut(&thread_id)
+                {
+                    for send in sends.iter_mut().filter(|send| send.acked) {
+                        send.superseded = true;
+                    }
+                }
                 let meta_before = self.resolve_thread_meta(&thread_id);
                 let state = self
                     .threads
@@ -1520,7 +1945,9 @@ impl PumpState {
                     _ => None,
                 };
                 let was_deleted = state.deleted;
+                let applying = Instant::now();
                 let changed = state.apply(item);
+                let apply_ms = conn_client::perf::ms_since(applying);
                 let deleted_now = state.deleted && !was_deleted;
                 if changed && let Some(sync) = &mut self.offline {
                     sync.thread(state, snapshot_sequence);
@@ -1530,13 +1957,16 @@ impl PumpState {
                 // A thread-level event (model, title, ...) changes the header, not the timeline.
                 let meta = self.resolve_thread_meta(&thread_id);
                 let emit = changed || force_emit || meta != meta_before;
-                let snapshot = if self.open_threads.contains(&thread_id) && emit {
-                    self.threads
-                        .get(&thread_id)
-                        .map(|state| build_thread_snapshot(state, meta.as_ref()))
-                } else {
-                    None
-                };
+                let open = self.open_threads.contains(&thread_id);
+                if open && emit {
+                    self.coalescer.mark_thread(&thread_id);
+                }
+                if snapshot_sequence.is_some() || force_emit {
+                    conn_client::perf_log!(
+                        "ffi.thread_applied thread={thread_id} apply_ms={apply_ms:.1} marked={}",
+                        open && emit
+                    );
+                }
                 if let Ok(mut guard) = self.thread_runs.write() {
                     guard.insert(
                         thread_id.clone(),
@@ -1546,8 +1976,8 @@ impl PumpState {
                         },
                     );
                 }
-                if let Some(snapshot) = snapshot {
-                    self.emit_or_buffer_thread(snapshot);
+                if emit {
+                    self.view_changed(&thread_id);
                 }
                 if deleted_now {
                     self.listener.on_thread_deleted(thread_id);
@@ -1559,6 +1989,7 @@ impl PumpState {
                     self.listener.on_error(err.clone());
                 }
                 if tag == TAG_SUBSCRIBE_SHELL {
+                    self.invalidate_shell();
                     if self.shell_snapshot_required || error.is_none() {
                         self.shell_snapshot_required = false;
                         self.connection.subscribe_shell_with_idle_subagents();
@@ -1571,9 +2002,24 @@ impl PumpState {
                 }
             }
             ClientEvent::ServerConfig(event) => {
+                if let conn_contract::ServerConfigStreamEvent::Snapshot(s) = event.as_ref() {
+                    self.record_server_clock(s.config.server_time.as_deref());
+                }
+                let limits_changed =
+                    if let conn_contract::ServerConfigStreamEvent::Snapshot(s) = event.as_ref() {
+                        let caps = &s.config.environment.capabilities;
+                        let limits = FfiComposerLimits::new(caps);
+                        self.limits.send_if_modified(|current| {
+                            let changed = *current != limits;
+                            *current = limits;
+                            changed
+                        })
+                    } else {
+                        false
+                    };
                 let change = self.server_config.apply(*event);
                 // Project-only enablement arrives as `settingsUpdated`; the open picker reloads too.
-                if change.providers_changed || change.settings_changed {
+                if change.providers_changed || change.settings_changed || limits_changed {
                     self.listener.on_providers_changed();
                 }
             }
@@ -1582,7 +2028,149 @@ impl PumpState {
     }
 
     fn subscribed(&self, id: &str) -> bool {
-        self.open_threads.contains(id) || self.offline.as_ref().is_some_and(|s| s.subscribed(id))
+        self.open_threads.contains(id) || self.warm_threads.contains(id)
+    }
+
+    /// Threads whose stream runs: the open ones and the warm ones.
+    fn live_threads(&self) -> HashSet<String> {
+        self.open_threads
+            .union(&self.warm_threads)
+            .cloned()
+            .collect()
+    }
+
+    /// Lets the offline cache follow the live threads' streams.
+    fn follow_live_threads(&mut self) {
+        let live = self.live_threads();
+        if let Some(sync) = &mut self.offline {
+            sync.follow(&self.shell, &live);
+        }
+    }
+
+    /// Picks the warm set again soon: the first pick at once, later ones after a short pause
+    /// so a burst of shell events picks once.
+    fn schedule_rewarm(&mut self) {
+        if !self.foreground {
+            return;
+        }
+        if self.warm_threads.is_empty() && self.warm_due.is_none() {
+            self.rewarm();
+        } else if self.warm_due.is_none() {
+            self.warm_due = Some(
+                Instant::now() + Duration::from_millis(conn_state::warm::WARM_REPICK_DEBOUNCE_MS),
+            );
+        }
+    }
+
+    /// Subscribes the threads [`conn_state::warm::pick_warm_threads`] picks and drops the
+    /// others. In the background, or before the shell is known, no thread is warm. A thread
+    /// that leaves the set keeps its state, as a closed thread does.
+    fn rewarm(&mut self) {
+        self.warm_due = None;
+        let picked = if self.foreground && self.shell.synchronized {
+            conn_state::warm::pick_warm_threads(
+                &self.shell,
+                now_epoch_ms(),
+                conn_state::warm::WARM_THREAD_CAP,
+            )
+        } else {
+            Vec::new()
+        };
+        let target: HashSet<String> = picked.iter().cloned().collect();
+        if target == self.warm_threads {
+            return;
+        }
+        let dropped: Vec<String> = self.warm_threads.difference(&target).cloned().collect();
+        // Best first: the server answers subscriptions in order, so a thread that needs the
+        // user or works streams its snapshot before quieter ones.
+        let added: Vec<String> = picked
+            .into_iter()
+            .filter(|id| !self.warm_threads.contains(id))
+            .collect();
+        self.warm_threads = target;
+        for id in &dropped {
+            if !self.open_threads.contains(id) {
+                self.ended_threads.remove(id);
+                self.connection.unsubscribe_thread(id);
+            }
+        }
+        // The cache writers follow first, so a warm stream's first snapshot is written.
+        self.follow_live_threads();
+        for id in &added {
+            self.threads
+                .entry(id.clone())
+                .or_insert_with(|| ThreadState::new(id.clone()));
+            if !self.open_threads.contains(id) {
+                self.connection.subscribe_thread(id);
+            }
+        }
+        conn_client::perf_log!(
+            "ffi.warm added={} dropped={} warm={}",
+            added.len(),
+            dropped.len(),
+            self.warm_threads.len()
+        );
+    }
+
+    fn rewarm_due(&mut self) {
+        if self.warm_due.is_some_and(|due| due <= Instant::now()) {
+            self.rewarm();
+        }
+    }
+
+    /// The pump's next timer: a coalesced snapshot, a warm-set pick or a view save.
+    fn next_deadline(&self) -> Option<Instant> {
+        [
+            self.coalescer.next_deadline(),
+            self.warm_due,
+            self.views_due,
+        ]
+        .into_iter()
+        .flatten()
+        .min()
+    }
+
+    /// Marks a live thread's rendered state for saving ([`VIEW_SAVE_DEBOUNCE`]).
+    fn view_changed(&mut self, thread_id: &str) {
+        if self.offline.is_none() || !self.subscribed(thread_id) {
+            return;
+        }
+        self.views_dirty.insert(thread_id.to_owned());
+        self.views_due
+            .get_or_insert_with(|| Instant::now() + VIEW_SAVE_DEBOUNCE);
+    }
+
+    /// Saves the changed live threads' rendered state: the run, work groups and their
+    /// timings, subagents, queued messages and requests, as the app would show them.
+    fn save_views(&mut self) {
+        self.views_due = None;
+        let dirty = std::mem::take(&mut self.views_dirty);
+        let Some(sync) = &self.offline else {
+            return;
+        };
+        for thread_id in dirty {
+            let Some(state) = self
+                .threads
+                .get(&thread_id)
+                .filter(|state| state.synchronized && !state.deleted)
+            else {
+                continue;
+            };
+            let meta = self.resolve_thread_meta(&thread_id);
+            sync.save_view(build_thread_snapshot(
+                state,
+                meta.as_ref(),
+                self.server_config.catalog(),
+            ));
+        }
+    }
+
+    /// Runs the timers that are due.
+    fn timers_due(&mut self) {
+        self.rewarm_due();
+        if self.views_due.is_some_and(|due| due <= Instant::now()) {
+            self.save_views();
+        }
     }
 
     fn resubscribe_ended_threads(&mut self) {
@@ -1598,25 +2186,120 @@ impl PumpState {
         }
     }
 
-    fn emit_or_buffer_shell(&mut self, snapshot: FfiShellSnapshot) {
-        if let Some(ready) = self.coalescer.push_shell(snapshot, Instant::now()) {
-            self.listener.on_shell(ready);
+    fn begin_older_page(&mut self, reply: oneshot::Sender<Option<conn_state::OlderPageRequest>>) {
+        self.shell.retry_older_page();
+        let request = self.shell.next_older_page(0, 1);
+        if let Some(ref request) = request {
+            self.shell.older_page_started(request);
+        }
+        let _ = reply.send(request);
+    }
+
+    fn invalidate_shell(&mut self) {
+        self.shell.synchronized = false;
+        self.coalescer.reset_shell();
+        self.shell_watch.send_replace(None);
+    }
+
+    fn sync_offline_shell(&mut self) {
+        let live = self.live_threads();
+        if let Some(sync) = &mut self.offline {
+            sync.shell(&self.shell, &live);
+            if std::mem::take(&mut self.seed_offline_threads) {
+                for state in self.threads.values() {
+                    sync.thread(state, state.sequence);
+                }
+            }
         }
     }
 
-    fn emit_or_buffer_thread(&mut self, snapshot: FfiThreadSnapshot) {
-        if let Some(ready) = self.coalescer.push_thread(snapshot, Instant::now()) {
-            self.listener.on_thread(ready);
+    fn publish_shell(&mut self, snapshot: FfiShellSnapshot) {
+        self.sync_offline_shell();
+        self.shell_watch.send_replace(Some(snapshot.clone()));
+        self.listener.on_shell(snapshot);
+        if let Some(reply) = self.pending_older_page.take() {
+            self.begin_older_page(reply);
         }
+    }
+
+    fn emit_or_buffer_shell(&mut self, snapshot: FfiShellSnapshot) {
+        if let Some(ready) = self.coalescer.push_shell(snapshot, Instant::now()) {
+            self.publish_shell(ready);
+        }
+    }
+
+    /// Builds an open thread's snapshot, with its pending replies, and hands it over unless it
+    /// equals the last one.
+    fn publish_thread(&mut self, thread_id: &str) {
+        if !self.open_threads.contains(thread_id) {
+            return;
+        }
+        let Some(state) = self.threads.get(thread_id) else {
+            return;
+        };
+        let meta = self.resolve_thread_meta(thread_id);
+        let mut snapshot =
+            build_thread_snapshot(state, meta.as_ref(), self.server_config.catalog());
+        self.stats.projections += 1;
+        snapshot.server_clock_offset_ms = self.server_clock_offset_ms;
+        if let Some(sends) = self.outbox.get_mut(thread_id) {
+            crate::outbox::apply(&mut snapshot, sends);
+            if sends.is_empty() {
+                self.outbox.remove(thread_id);
+            }
+        }
+        if self.published.get(thread_id) == Some(&snapshot) {
+            self.stats.skipped_equal += 1;
+            return;
+        }
+        self.published
+            .insert(thread_id.to_owned(), snapshot.clone());
+        self.stats.published += 1;
+        self.listener.on_thread(snapshot);
     }
 
     fn flush_due(&mut self) {
-        let (shell, threads) = self.coalescer.drain_due(Instant::now());
-        if let Some(snapshot) = shell {
-            self.listener.on_shell(snapshot);
+        self.flush_due_at(Instant::now());
+    }
+
+    fn flush_due_at(&mut self, now: Instant) {
+        if let Some(snapshot) = self.coalescer.drain_due_shell(now) {
+            self.publish_shell(snapshot);
         }
-        for snapshot in threads {
-            self.listener.on_thread(snapshot);
+        for thread_id in self.coalescer.drain_due_threads(now) {
+            self.publish_thread(&thread_id);
+        }
+    }
+
+    /// The offset nearest 0 that the config's `serverTime` allows: the server stamped it between
+    /// the request (at the last status change) and now (`recordServerClock`).
+    fn record_server_clock(&mut self, server_time: Option<&str>) {
+        let received = now_epoch_ms();
+        let offset = server_time
+            .and_then(conn_state::parse_iso8601_epoch_ms)
+            .map_or(0, |server| {
+                if server > received {
+                    server - received
+                } else if server < self.status_changed_at_ms {
+                    server - self.status_changed_at_ms
+                } else {
+                    0
+                }
+            });
+        if offset != self.server_clock_offset_ms {
+            self.server_clock_offset_ms = offset;
+            for thread_id in &self.open_threads {
+                self.coalescer.mark_thread(thread_id);
+            }
+        }
+    }
+
+    /// Handles `first` and what else is queued, up to [`MAX_EVENTS_PER_DRAIN`].
+    fn drain_events(&mut self, first: ClientEvent, events: &mut mpsc::Receiver<ClientEvent>) {
+        self.handle_event(first);
+        for _ in 1..MAX_EVENTS_PER_DRAIN {
+            let Ok(more) = events.try_recv() else { break };
+            self.handle_event(more);
         }
     }
 }
@@ -1627,35 +2310,26 @@ async fn run_pump(
     mut ctrl_rx: mpsc::UnboundedReceiver<PumpControl>,
     listener: Arc<dyn CoreListener>,
     thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
-    (shell_watch, status_watch): (
+    (shell_watch, status_watch, limits): (
         watch::Sender<Option<FfiShellSnapshot>>,
         watch::Sender<FfiConnectionStatus>,
+        watch::Sender<FfiComposerLimits>,
     ),
     mut identity: SessionIdentity,
 ) {
     if let Some(session) = identity.reused_session.take() {
         listener.on_bearer_issued(session);
     }
-    let mut state = PumpState {
-        offline: None,
-        identity,
+    let mut state = PumpState::new(
         connection,
         listener,
-        shell: ShellState::default(),
-        server_config: ServerConfigState::new(),
-        workspace_scans: HashMap::new(),
-        threads: HashMap::new(),
-        open_threads: HashSet::new(),
-        ended_threads: HashSet::new(),
-        shell_snapshot_required: false,
-        coalescer: SnapshotCoalescer::default(),
         thread_runs,
-        shell_watch,
-        status_watch,
-    };
+        (shell_watch, status_watch, limits),
+        identity,
+    );
 
     loop {
-        if let Some(deadline) = state.coalescer.next_deadline() {
+        if let Some(deadline) = state.next_deadline() {
             let sleep_until = tokio::time::Instant::from_std(deadline);
             tokio::select! {
                 biased;
@@ -1664,17 +2338,18 @@ async fn run_pump(
                     if !state.handle_control(ctrl) {
                         break;
                     }
-                }
-                () = tokio::time::sleep_until(sleep_until) => {
                     state.flush_due();
                 }
                 maybe_event = events_rx.recv() => {
                     let Some(first) = maybe_event else { break };
-                    state.handle_event(first);
-                    while let Ok(more) = events_rx.try_recv() {
-                        state.handle_event(more);
-                    }
+                    state.drain_events(first, &mut events_rx);
                     state.flush_due();
+                    // A steady event stream can keep the timer branch from ever running.
+                    state.timers_due();
+                }
+                () = tokio::time::sleep_until(sleep_until) => {
+                    state.flush_due();
+                    state.timers_due();
                 }
             }
         } else {
@@ -1685,18 +2360,22 @@ async fn run_pump(
                     if !state.handle_control(ctrl) {
                         break;
                     }
+                    state.flush_due();
                 }
                 maybe_event = events_rx.recv() => {
                     let Some(first) = maybe_event else { break };
-                    state.handle_event(first);
-                    while let Ok(more) = events_rx.try_recv() {
-                        state.handle_event(more);
-                    }
+                    state.drain_events(first, &mut events_rx);
+                    state.flush_due();
+                    state.timers_due();
                 }
             }
         }
     }
 }
+
+#[cfg(test)]
+#[path = "pump_bench.rs"]
+mod pump_bench;
 
 #[cfg(test)]
 mod tests {
@@ -1827,6 +2506,26 @@ mod tests {
         );
     }
 
+    async fn accept_test_upload(listener: &TcpListener) -> std::io::Result<()> {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+        let (stream, _) = listener.accept().await?;
+        let mut http = BufReader::new(stream);
+        let mut header = String::new();
+        while !header.ends_with("\r\n\r\n") {
+            assert_ne!(
+                http.read_line(&mut header).await?,
+                0,
+                "incomplete upload headers"
+            );
+        }
+        let mut body = [0; b"test file".len()];
+        http.read_exact(&mut body).await?;
+        assert_eq!(&body, b"test file", "wrong staged bytes");
+        http.get_mut()
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .await
+    }
+
     struct MockRpcCall {
         tag: String,
         payload: serde_json::Value,
@@ -1869,6 +2568,10 @@ mod tests {
 
         let launch_projection = snapshot_val["projection"].clone();
 
+        let config: serde_json::Value = serde_json::from_str(include_str!(
+            "../../conn-state/tests/fixtures/server-config-snapshot.json"
+        ))?;
+        let (ack_dispatch, mut resume_dispatch) = oneshot::channel();
         let (addr, calls_rx) = server_rt.block_on(async {
             let listener = TcpListener::bind("127.0.0.1:0").await?;
             let addr = listener.local_addr()?;
@@ -1889,6 +2592,29 @@ mod tests {
                             continue;
                         };
                         match req.tag.as_str() {
+                            "subscribeServerConfig" => {
+                                let chunk = FromServer::Chunk {
+                                    request_id: req.id,
+                                    values: vec![config.clone()],
+                                };
+                                ws.send(Message::Text(encode_server_frame(&chunk).into()))
+                                    .await
+                                    .unwrap();
+                            }
+                            "attachments.createUploadUrl" => {
+                                let slot = FromServer::Exit {
+                                    request_id: req.id,
+                                    exit: Exit::success(json!({
+                                        "attachmentId": "pending-test",
+                                        "relativeUrl": "/upload",
+                                        "expiresAt": 1000
+                                    })),
+                                };
+                                ws.send(Message::Text(encode_server_frame(&slot).into()))
+                                    .await
+                                    .unwrap();
+                                accept_test_upload(&listener).await.unwrap();
+                            }
                             "orchestration.subscribeShell" => {
                                 let chunk = FromServer::Chunk {
                                     request_id: req.id,
@@ -1967,6 +2693,11 @@ mod tests {
                                     tag: req.tag.clone(),
                                     payload: req.payload.clone(),
                                 });
+                                let disconnect =
+                                    req.payload["commandId"] == "disconnect-after-dispatch";
+                                if disconnect {
+                                    (&mut resume_dispatch).await.unwrap();
+                                }
                                 let reply = FromServer::Exit {
                                     request_id: req.id,
                                     exit: Exit::success(json!({ "ok": true })),
@@ -1974,6 +2705,10 @@ mod tests {
                                 let _ = ws
                                     .send(Message::Text(encode_server_frame(&reply).into()))
                                     .await;
+                                if disconnect {
+                                    ws.close(None).await.unwrap();
+                                    return;
+                                }
                             }
                             _ => {}
                         }
@@ -2007,6 +2742,17 @@ mod tests {
                     .is_some_and(|sh| sh.synchronized && sh.projects.len() == 1)
             }),
             "must receive synchronized shell snapshot"
+        );
+
+        assert!(
+            listener
+                .inner
+                .lock()
+                .expect("listener lock")
+                .shells
+                .iter()
+                .all(|s| s.synchronized),
+            "partial inventory reached the iOS listener"
         );
 
         core.open_thread("thread-1".to_owned());
@@ -2213,6 +2959,72 @@ mod tests {
         let call = next_call();
         assert_eq!(call.payload["type"], json!("thread.delete"));
 
+        // 14b. Queued messages: Send now steers the active run, or starts the run when idle.
+        futures::executor::block_on(
+            core.send_queued_now("thread-1".to_owned(), "run-queued-1".to_owned()),
+        )?;
+        let call = next_call();
+        assert_eq!(
+            call.payload["type"],
+            json!("queued-message.promote-to-steer")
+        );
+        assert_eq!(call.payload["queuedRunId"], json!("run-queued-1"));
+        assert_eq!(call.payload["targetRunId"], json!("run-active-1"));
+
+        futures::executor::block_on(
+            core.send_queued_now("thread-idle".to_owned(), "run-queued-2".to_owned()),
+        )?;
+        let call = next_call();
+        assert_eq!(call.payload["type"], json!("queued-run.start"));
+        assert_eq!(call.payload["runId"], json!("run-queued-2"));
+
+        futures::executor::block_on(
+            core.cancel_queued_message("thread-1".to_owned(), "run-queued-1".to_owned()),
+        )?;
+        let call = next_call();
+        assert_eq!(call.payload["type"], json!("queued-run.cancel"));
+        assert_eq!(call.payload["threadId"], json!("thread-1"));
+        assert_eq!(call.payload["runId"], json!("run-queued-1"));
+
+        // Unchanged files stay off the command, so the server keeps them.
+        futures::executor::block_on(core.edit_queued_message(
+            "thread-1".to_owned(),
+            "run-queued-1".to_owned(),
+            "  Edited text ".to_owned(),
+            None,
+            Vec::new(),
+        ))?;
+        let call = next_call();
+        assert_eq!(call.payload["type"], json!("queued-run.edit"));
+        assert_eq!(call.payload["runId"], json!("run-queued-1"));
+        assert_eq!(call.payload["text"], json!("Edited text"));
+        assert!(
+            call.payload.get("attachments").is_none(),
+            "{}",
+            call.payload
+        );
+
+        let blank = futures::executor::block_on(core.edit_queued_message(
+            "thread-1".to_owned(),
+            "run-queued-1".to_owned(),
+            "   ".to_owned(),
+            None,
+            Vec::new(),
+        ))
+        .expect_err("blank queued text must be refused before dispatch");
+        assert!(matches!(blank, FfiError::InvalidInput { .. }));
+        // Changing the files of a run the thread doesn't hold as queued is refused, not sent.
+        let gone = futures::executor::block_on(core.edit_queued_message(
+            "thread-1".to_owned(),
+            "run-not-queued".to_owned(),
+            "Edited".to_owned(),
+            Some(Vec::new()),
+            Vec::new(),
+        ))
+        .expect_err("a run that left the queue can't drop files");
+        assert!(matches!(gone, FfiError::InvalidInput { .. }));
+        // Step 15 expects `launchThread` next, so a refused edit that still dispatched fails there.
+
         // 15. launch_thread: uses project's default model, applies projection, subscribes & emits.
         let launched_id = futures::executor::block_on(
             core.launch_thread("p1".to_owned(), "Build the iOS theme bridge".to_owned()),
@@ -2241,11 +3053,58 @@ mod tests {
             "launch_thread must apply projection and emit thread snapshot"
         );
 
+        let file = tempfile::NamedTempFile::new()?;
+        std::fs::write(file.path(), b"test file")?;
+        assert!(core.published_shell().is_some());
+        let mut submitted = Box::pin(core.submit_composer(
+            FfiComposerTarget::Reply {
+                thread_id: launched_id.clone(),
+                mode: FfiSendMode::Queue,
+            },
+            "disconnect-after-dispatch".into(),
+            String::new(),
+            vec![FfiComposerFile {
+                id: "test-file".into(),
+                path: file.path().to_string_lossy().into_owned(),
+                name: "test.txt".into(),
+                mime_type: "text/plain".into(),
+            }],
+        ));
+        core.runtime_handle.block_on(async {
+            tokio::select! {
+                call = calls_rx.recv() => assert_eq!(call.unwrap().payload["commandId"], "disconnect-after-dispatch"),
+                result = &mut submitted => panic!("returned before dispatch: {result:?}"),
+            }
+        });
+        // Resume Swift's future only after the acknowledgement arrived and the socket closed.
+        ack_dispatch.send(()).unwrap();
+        assert!(
+            listener.wait_for(Duration::from_secs(5), |s| matches!(
+                s.statuses.last(),
+                Some(FfiConnectionStatus::Reconnecting { .. })
+            )),
+            "server must disconnect after acknowledging the message"
+        );
+        let sent = core
+            .runtime_handle
+            .block_on(async { tokio::time::timeout(Duration::from_secs(5), submitted).await })??;
+        assert_eq!(sent, launched_id);
+
         core.close_thread("thread-1".to_owned());
         core.close_thread(launched_id);
-        core.disconnect();
         let _ = stop_tx.send(());
         let _ = server_thread.join();
+        assert!(listener.wait_for(Duration::from_secs(5), |state| {
+            state
+                .statuses
+                .iter()
+                .any(|s| matches!(s, FfiConnectionStatus::Reconnecting { .. }))
+        }));
+        assert!(
+            core.published_shell().is_none(),
+            "a previously queued iOS callback must not read the lost socket's shell"
+        );
+        core.disconnect();
         Ok(())
     }
     fn provider_json(id: &str, extra: serde_json::Value) -> serde_json::Value {
@@ -2635,6 +3494,288 @@ mod tests {
             dispatched.payload["modelSelection"]["model"].as_str(),
             Some("model-a"),
             "the switch back to A is sent"
+        );
+
+        core.disconnect();
+        let _ = stop_tx.send(());
+        let _ = server_thread.join();
+        Ok(())
+    }
+
+    fn warm_shell_thread(
+        id: &str,
+        minute: u32,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> serde_json::Value {
+        let mut thread = json!({
+            "createdBy": "user",
+            "creationSource": "web",
+            "id": id,
+            "projectId": "p1",
+            "title": format!("Thread {id}"),
+            "providerInstanceId": "claudeAgent",
+            "modelSelection": { "instanceId": "claudeAgent", "model": "claude-haiku-5-5" },
+            "runtimeMode": "full-access",
+            "interactionMode": "default",
+            "branch": null,
+            "worktreePath": null,
+            "lineage": { "rootThreadId": id, "parentThreadId": null, "relationshipToParent": null },
+            "forkedFrom": null,
+            "activeProviderThreadId": null,
+            "latestRunId": null,
+            "activeRunId": null,
+            "status": "idle",
+            "pendingRuntimeRequest": null,
+            "latestVisibleMessage": null,
+            "latestUserMessageAt": null,
+            "hasActionableProposedPlan": false,
+            "itemCount": 0,
+            "visibleItemCount": 0,
+            "createdAt": "2026-11-13T09:00:00.000Z",
+            "updatedAt": format!("2026-11-13T09:{minute:02}:00.000Z"),
+            "archivedAt": null,
+            "settledOverride": null,
+            "settledAt": null,
+            "deletedAt": null
+        });
+        edit(&mut thread);
+        thread
+    }
+
+    /// What the mock server saw: `sub <thread>` per subscribeThread, `stop <thread>` per interrupt.
+    type WireLog = Arc<Mutex<Vec<String>>>;
+
+    fn count(log: &WireLog, line: &str) -> usize {
+        log.lock()
+            .expect("log")
+            .iter()
+            .filter(|l| *l == line)
+            .count()
+    }
+
+    fn wait_log(log: &WireLog, pred: impl Fn(&[String]) -> bool) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if pred(&log.lock().expect("log")) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        pred(&log.lock().expect("log"))
+    }
+
+    #[test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test uses assert! for diffs while propagating setup errors with ?"
+    )]
+    fn warm_threads_follow_the_shell_open_close_and_foreground()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use conn_state::warm::WARM_THREAD_CAP;
+        // 14 unsettled threads (w00 oldest .. w13 newest), one settled, one subagent child.
+        let mut threads: Vec<serde_json::Value> = (0..14)
+            .map(|i| warm_shell_thread(&format!("w{i:02}"), i, |_| {}))
+            .collect();
+        threads.push(warm_shell_thread("settled", 50, |t| {
+            t["settledAt"] = json!("2026-11-13T09:50:00.000Z");
+        }));
+        threads.push(warm_shell_thread("child", 51, |t| {
+            t["lineage"]["parentThreadId"] = json!("w13");
+            t["lineage"]["relationshipToParent"] = json!("subagent");
+        }));
+        let shell = json!({ "kind": "snapshot", "snapshot": {
+            "schemaVersion": 1,
+            "snapshotSequence": 1,
+            "projects": [],
+            "threads": threads,
+            "archivedThreads": []
+        }});
+        let thread_snapshot: serde_json::Value =
+            serde_json::from_str(&conn_state::testkit::synthetic_thread_snapshot_json(
+                conn_state::testkit::SyntheticThread {
+                    turns: 2,
+                    commands_per_turn: 1,
+                    command_output_bytes: 8,
+                    assistant_bytes: 8,
+                },
+            ))?;
+
+        let server_rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let log: WireLog = Arc::default();
+        let server_log = log.clone();
+        let addr = server_rt.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            let addr = listener.local_addr()?;
+            tokio::spawn(async move {
+                let Ok((tcp, _)) = listener.accept().await else {
+                    return;
+                };
+                let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                    return;
+                };
+                let mut streams: HashMap<String, String> = HashMap::new();
+                while let Some(Ok(Message::Text(text))) = ws.next().await {
+                    let Ok(frames) = conn_wire::decode_client_message(&text) else {
+                        continue;
+                    };
+                    for frame in frames {
+                        let mut send = Vec::new();
+                        match frame {
+                            FromClient::Request(req)
+                                if req.tag == "orchestration.subscribeShell" =>
+                            {
+                                send.push(FromServer::Chunk {
+                                    request_id: req.id,
+                                    values: vec![shell.clone(), json!({ "kind": "synchronized" })],
+                                });
+                            }
+                            FromClient::Request(req)
+                                if req.tag == "orchestration.subscribeThread" =>
+                            {
+                                let thread_id = req.payload["threadId"]
+                                    .as_str()
+                                    .unwrap_or_default()
+                                    .to_owned();
+                                server_log
+                                    .lock()
+                                    .expect("log")
+                                    .push(format!("sub {thread_id}"));
+                                streams.insert(format!("{:?}", req.id), thread_id.clone());
+                                let mut snap = thread_snapshot.clone();
+                                snap["projection"]["thread"]["id"] = json!(thread_id);
+                                send.push(FromServer::Chunk {
+                                    request_id: req.id,
+                                    values: vec![snap, json!({ "kind": "synchronized" })],
+                                });
+                            }
+                            FromClient::Interrupt { request_id } => {
+                                if let Some(thread_id) = streams.remove(&format!("{request_id:?}"))
+                                {
+                                    server_log
+                                        .lock()
+                                        .expect("log")
+                                        .push(format!("stop {thread_id}"));
+                                }
+                            }
+                            _ => {}
+                        }
+                        for frame in send {
+                            let _ = ws
+                                .send(Message::Text(encode_server_frame(&frame).into()))
+                                .await;
+                        }
+                    }
+                }
+            });
+            Ok::<_, std::io::Error>(addr)
+        })?;
+        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let server_thread = std::thread::spawn(move || {
+            server_rt.block_on(async {
+                let _ = stop_rx.await;
+            });
+        });
+
+        let listener = Arc::new(RecordingListener::default());
+        let core = ConnCore::connect(
+            format!("http://{addr}"),
+            FfiCredential::Bearer {
+                token: "test-bearer".to_owned(),
+            },
+            listener.clone(),
+        )?;
+        let cache = tempfile::tempdir()?;
+        let reader = futures::executor::block_on(core.prepare_offline(
+            cache.path().to_string_lossy().into_owned(),
+            "env".to_owned(),
+        ))?;
+        let warm: Vec<String> = (14 - WARM_THREAD_CAP..14)
+            .map(|i| format!("w{i:02}"))
+            .collect();
+        assert!(
+            wait_log(&log, |l| l.len() >= WARM_THREAD_CAP),
+            "the newest threads are subscribed once the shell is known"
+        );
+        std::thread::sleep(Duration::from_millis(200));
+        let mut subscribed: Vec<String> = log.lock().expect("log").clone();
+        subscribed.sort();
+        let expected: Vec<String> = warm.iter().map(|id| format!("sub {id}")).collect();
+        assert_eq!(
+            subscribed, expected,
+            "only the capped warm set; no settled or child thread"
+        );
+        assert!(
+            listener.inner.lock().expect("listener").threads.is_empty(),
+            "warm threads that are not open send no snapshot to the app"
+        );
+
+        // A warm thread opens from memory, synchronized, without a new subscription, and stays
+        // subscribed when it closes.
+        let hot = warm[WARM_THREAD_CAP - 1].clone();
+        core.open_thread(hot.clone());
+        assert!(
+            listener.wait_for(Duration::from_secs(2), |s| s.threads.iter().any(|t| t
+                .thread_id
+                == hot
+                && t.synchronized
+                && !t.entries.is_empty())),
+            "a warm thread shows its live state on open"
+        );
+        core.close_thread(hot.clone());
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            count(&log, &format!("sub {hot}")),
+            1,
+            "no second subscription"
+        );
+        assert_eq!(
+            count(&log, &format!("stop {hot}")),
+            0,
+            "closing keeps a warm thread"
+        );
+
+        // A cold thread subscribes on open and stops on close.
+        core.open_thread("w00".to_owned());
+        assert!(wait_log(&log, |l| l.iter().any(|x| x == "sub w00")));
+        core.close_thread("w00".to_owned());
+        assert!(wait_log(&log, |l| l.iter().any(|x| x == "stop w00")));
+
+        // The background stops every warm stream; the foreground starts them again.
+        core.set_foreground(false);
+        assert!(
+            wait_log(&log, |l| warm
+                .iter()
+                .all(|id| l.contains(&format!("stop {id}")))),
+            "the background stops the warm threads"
+        );
+        // Before they stop, the background saves what each warm thread shows.
+        let check = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let saved = check.block_on(async {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let mut all = true;
+                for id in &warm {
+                    all &= reader.db.view("env", id).await.ok().flatten().is_some();
+                }
+                if all || Instant::now() > deadline {
+                    return all;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        assert!(saved, "every warm thread's view is saved for a cold start");
+        core.set_foreground(true);
+        assert!(
+            wait_log(&log, |l| warm.iter().all(|id| l
+                .iter()
+                .filter(|x| **x == format!("sub {id}"))
+                .count()
+                == 2)),
+            "the foreground subscribes them again"
         );
 
         core.disconnect();

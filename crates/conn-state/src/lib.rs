@@ -48,6 +48,7 @@ pub mod thread_feed;
 pub mod thread_models;
 pub mod thread_search;
 mod timeline;
+pub mod warm;
 
 pub use conn_contract::{
     AnnotationCapture, AnnotationRecord, AnnotationRecordSource, AnnotationStatus,
@@ -95,8 +96,8 @@ pub use crate::layout::{
 };
 pub use crate::orbit_task::{ThreadTaskLinks, is_orbit_task_create_tool, orbit_task_create_row};
 pub use crate::order_keys::{
-    OrderAssignment, order_key_between, plan_reorder, sort_active, sort_pinned, spread_order_keys,
-    top_of_pinned_run_key,
+    OrderAssignment, SidebarOrder, order_key_between, plan_reorder, sort_active, sort_pinned,
+    spread_order_keys, top_of_pinned_run_key,
 };
 pub use crate::panel_tabs::{
     ClosedTab, MAX_SAVED_THREAD_PANELS, PanelOwner, RightPanelTabs, SavedSurface, SavedThreadPanel,
@@ -134,9 +135,9 @@ pub use crate::sidebar_nav::{
 pub use crate::thread::{
     AgentMessageSender, ApprovalDetails, BackgroundCommandOutcome, BackgroundWorkItem,
     BackgroundWorkKind, ChildApproval, EntryTiming, ItemStatus, NoticeLevel, PendingApproval,
-    PendingRequest, RunStatus, RunTiming, SecretRequestStatus, SubagentModel,
-    ThreadContextWindowSnapshot, ThreadState, TimelineEntry, TurnCheckpointSummary, TurnItemStatus,
-    child_approvals, parse_iso8601_epoch_ms, request_kind_label, turn_item_detail,
+    PendingRequest, RunStatus, RunTiming, SecretRequestStatus, SubagentModel, SubagentRecord,
+    ThreadContextWindowSnapshot, ThreadState, TimelineEntry, TurnAgents, TurnCheckpointSummary,
+    TurnItemStatus, child_approvals, parse_iso8601_epoch_ms, request_kind_label, turn_item_detail,
 };
 pub use crate::timeline::{
     LocalDateTime, PLAN_PREVIEW_MAX_LINES, SubagentTone, TurnCheckpointFile, TurnDiffRow,

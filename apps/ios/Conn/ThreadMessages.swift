@@ -4,29 +4,71 @@ import SwiftUI
 struct AgentSummary: View {
     let title: String
     let text: String
-    @State private var expanded = false
+    @Environment(\.feedExpansion) private var expansion
+    @State private var localExpanded = false
     @Environment(\.connTheme) private var theme
 
+    private var key: String { "summary:\(title.hashValue):\(text.hashValue)" }
+    private var expanded: Bool { expansion?.isOpen(key) ?? localExpanded }
+
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
+
+    private var preview: String {
+        let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
+        let excerpt = String(text.prefix(2048))
+        let parsed = try? AttributedString(markdown: excerpt, options: options)
+        return (parsed.map { String($0.characters) } ?? excerpt).split(whereSeparator: \.isWhitespace).joined(separator: " ")
+    }
+
+    /// The exact line height puts its extra room under each line, not around it.
+    private var lineExtra: CGFloat { size * 1.625 - UIFont.systemFont(ofSize: size).lineHeight }
+    private var lineHeight: CGFloat { size * 1.625 }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if text.isEmpty { Text(title).font(.headline) }
-            else {
-                Button { expanded.toggle() } label: {
-                    VStack(alignment: .leading, spacing: 4) {
-                        HStack {
-                            Text(title).font(.system(size: 14, weight: .medium))
-                            Spacer()
-                            Image(systemName: expanded ? "chevron.up" : "chevron.down").font(.caption)
-                        }
-                        if !expanded {
-                            Text(text.replacingOccurrences(of: "\n", with: " "))
-                                .font(.system(size: 13)).foregroundStyle(theme.mutedForeground).lineLimit(2)
-                        }
+        VStack(alignment: .leading, spacing: 6) {
+            if text.isEmpty {
+                Text(title).fontWeight(.medium)
+            } else {
+                Button {
+                    if let expansion { expansion.toggle(key) } else { localExpanded.toggle() }
+                } label: {
+                    // The preview sits where the expanded text starts (the outer 6 pt), so
+                    // expanding doesn't shift it.
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(title).fontWeight(.medium)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        if !expanded { previewText }
                     }.contentShape(Rectangle())
-                }.buttonStyle(.plain).accessibilityValue(expanded ? "Expanded" : "Collapsed")
-                if expanded { MarkdownView(source: text, muted: true) }
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(title)
+                .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+                if expanded { MarkdownView(source: text, messageStyle: .assistant) }
             }
-        }.padding(11)
+        }
+        .font(.system(size: size))
+        .lineHeight(.exact(points: lineHeight))
+        .padding(.horizontal, 11)
+        .padding(.top, 10)
+        // The bottom gives the last line's extra room back, so the text sits as far from the
+        // bottom edge as from the top.
+        .padding(.bottom, max(0, 10 - lineExtra))
+    }
+
+    /// Two lines of the message. Longer text fades out over the second line instead of an ellipsis.
+    private var previewText: some View {
+        let text = Text(verbatim: preview).foregroundStyle(theme.mutedForeground)
+        return ViewThatFits(in: .vertical) {
+            text.fixedSize(horizontal: false, vertical: true)
+            // Laid out in full, then cut at two lines, so no ellipsis.
+            text
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(height: lineHeight * 2, alignment: .top)
+                .clipped()
+                .mask(LinearGradient(stops: [.init(color: .black, location: 0.45), .init(color: .clear, location: 1)],
+                                     startPoint: .top, endPoint: .bottom))
+        }
+        .frame(maxHeight: lineHeight * 2, alignment: .top)
     }
 }
 
@@ -34,57 +76,155 @@ struct MessageFooter: View {
     let text: String
     let timestamp: String?
     var trailingCopy = false
-    @ScaledMetric(relativeTo: .footnote) private var size: CGFloat = 13
+    var showsCopy = false
+    /// The copy button after the time (user bubbles, right-aligned) or before it (agent messages).
+    var copyAfter = true
+    // Message times sit a point below the thread text: 13 pt on Polar (thread text 14).
+    @ScaledMetric(relativeTo: .body) private var fullSize: CGFloat = ThreadText.size
+    private var size: CGFloat { trailingCopy ? fullSize * (ThreadText.size - 1) / ThreadText.size : fullSize }
     @Environment(\.connTheme) private var theme
     var body: some View {
         HStack(spacing: 4) {
-            if !trailingCopy { copyButton }
-            if let date = threadDate(timestamp) { Text(date, style: .time) }
-            if trailingCopy { copyButton }
-        }.font(.system(size: size)).foregroundStyle(theme.mutedForeground)
+            // Under an agent message the icon's left edge is the text's: the 16 pt glyph sits 4 pt
+            // inside its 24 pt tap target; under a user bubble it ends on the bubble's right edge.
+            if showsCopy && !copyAfter { copyButton.padding(.leading, -4) }
+            if let date = threadDate(timestamp) {
+                Text(date, style: .time).lineHeight(.exact(points: size * 16 / 13))
+            }
+            if showsCopy && copyAfter { copyButton.padding(.trailing, -4) }
+        }
+        .font(.system(size: size))
+        .foregroundStyle(theme.mutedForeground)
     }
 
     @ViewBuilder private var copyButton: some View {
-        if !text.isEmpty { CopyTextButton(label: "Copy message", text: text, message: true) }
+        if !text.isEmpty { CopyTextButton(label: "Copy message", text: text, message: true, glyphSize: 16) }
     }
 }
 
-/// An agent-side card with its sent time underneath. It is one timeline item, so the stack's
-/// spacing sits equally above the card and below its time. The time uses `MessageFooter`, 2 pt
-/// under the card like a user bubble's, left-aligned because the card is on the agent side.
-struct AgentCardEntry<Card: View>: View {
+/// A message's long-press menu: the sent time, Copy and Select text. A queued message adds its
+/// own actions to the menu and keeps its time in view (desktop's queued row), with an accessory.
+struct MessageReveal<Content: View, Actions: View, Accessory: View>: View {
     let text: String
     let timestamp: String?
-    @ViewBuilder let card: Card
+    /// User bubbles: footer on the right, time then copy.
+    var trailing = false
+    var enabled = true
+    /// The time stays in view; a tap shows or hides only the copy button.
+    var pinnedFooter = false
+    private let hasActions: Bool
+    private let actions: Actions
+    private let accessory: Accessory
+    private let content: Content
+    @State private var selecting = false
+
+    init(text: String, timestamp: String?, trailing: Bool = false, enabled: Bool = true, pinnedFooter: Bool = false,
+         @ViewBuilder actions: () -> Actions, @ViewBuilder accessory: () -> Accessory,
+         @ViewBuilder content: () -> Content) {
+        self.text = text
+        self.timestamp = timestamp
+        self.trailing = trailing
+        self.enabled = enabled
+        self.pinnedFooter = pinnedFooter
+        hasActions = Actions.self != EmptyView.self
+        self.actions = actions()
+        self.accessory = accessory()
+        self.content = content()
+    }
+
+    @ScaledMetric(relativeTo: .body) private var messageSize: CGFloat = ThreadText.size
+    private var previewInset: CGFloat { trailing ? 0 : 14 }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            card
-            if threadDate(timestamp) != nil || !text.isEmpty {
-                MessageFooter(text: text, timestamp: timestamp)
+        VStack(alignment: trailing ? .trailing : .leading, spacing: (messageSize * 0.85 - 1) / 2) {
+            content
+                // Agent text has no bubble: pad the preview so its rounded corners clear the glyphs.
+                .padding(previewInset)
+                .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 20, style: .continuous))
+                // A long press shows when it was sent, Copy and Select text (like ChatGPT); a
+                // queued message puts its own actions first, under the same header.
+                .contextMenu {
+                    Group {
+                        if hasActions {
+                            Section(messageSentLabel(timestamp)) { actions }
+                            Section { copyItems }
+                        } else {
+                            Section(messageSentLabel(timestamp)) { copyItems }
+                        }
+                    }
+                }
+                .padding(-previewInset)
+                .sheet(isPresented: $selecting) { SelectTextSheet(text: text) }
+                .contentShape(Rectangle())
+            // The long-press menu carries the time and Copy, so a tap reveals nothing. Only a
+            // queued message keeps its time in view.
+            if pinnedFooter {
+                HStack(spacing: 4) {
+                    MessageFooter(text: text, timestamp: timestamp, trailingCopy: true, showsCopy: false, copyAfter: trailing)
+                    accessory
+                }
+                .environment(\.layoutDirection, .leftToRight)
+                // Under a user bubble, the time ends where the bottom-right corner starts to
+                // curve (its 20 pt radius, set in a little for the glyphs' own inset).
+                .padding(.trailing, trailing ? 14 : 0)
+                .frame(maxWidth: .infinity, alignment: trailing ? .trailing : .leading)
+                .transition(.opacity.combined(with: .move(edge: .top)))
             }
         }
     }
+
+    @ViewBuilder private var copyItems: some View {
+        Button("Copy", systemImage: "doc.on.doc") {
+            UIPasteboard.general.string = text
+        }
+        Button("Select text", systemImage: "selection.pin.in.out") {
+            selecting = true
+        }
+    }
 }
+
+extension MessageReveal where Actions == EmptyView, Accessory == EmptyView {
+    init(text: String, timestamp: String?, trailing: Bool = false, enabled: Bool = true,
+         @ViewBuilder content: () -> Content) {
+        self.init(text: text, timestamp: timestamp, trailing: trailing, enabled: enabled,
+                  actions: { EmptyView() }, accessory: { EmptyView() }, content: content)
+    }
+}
+
+/// "Today, 8:45", "Yesterday, 21:10" or "26 Nov, 08:45": the long-press menu's header.
+func messageSentLabel(_ timestamp: String?) -> String {
+    guard let date = threadDate(timestamp) else { return "" }
+    let time = date.formatted(date: .omitted, time: .shortened)
+    let calendar = Calendar.current
+    if calendar.isDateInToday(date) { return "Today, " + time }
+    if calendar.isDateInYesterday(date) { return "Yesterday, " + time }
+    return date.formatted(.dateTime.day().month(.abbreviated)) + ", " + time
+}
+
 
 struct ThreadMessage: View {
     let text: String
     let date: String?
     let agent: Bool
-    let badge: String?
     let files: [FfiAttachment]
     let detail: FfiFeedDetail?
     let store: CoreStore
+    let threadId: String
     let onOpenThread: (String, String?) -> Void
     @Environment(\.connTheme) private var theme
+    @ScaledMetric(relativeTo: .body) private var messageSize: CGFloat = ThreadText.size
 
-    private var metadata: (sender: String?, thread: String?, environment: String?, reviews: [FfiReviewExcerpt]) {
-        guard case let .message(sender, thread, env, reviews) = detail else { return (nil, nil, nil, []) }
-        let localName = env == nil || env == store.environmentId ? store.shell?.threads.first(where: { $0.id == thread })?.title : nil
-        return (sender ?? localName, thread, env, reviews)
+    private var metadata: (sender: String?, thread: String?, environment: String?, reviews: [FfiReviewExcerpt], model: String?) {
+        guard case let .message(sender, thread, env, reviews, model, effort) = detail else { return (nil, nil, nil, [], nil) }
+        let local = env == nil || env == store.environmentId ? store.shell?.threads.first(where: { $0.id == thread }) : nil
+        // `<model> · <effort>` as on subagent cards: the delegate's, else the sending thread's.
+        let label = model.map { [$0, effort] } ?? local?.model.map { [$0, local?.effort] }
+        let modelLine = label?.compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
+        return (sender ?? local?.title, thread, env, reviews, modelLine)
     }
 
     private var displayText: String {
+        guard !metadata.reviews.isEmpty else { return text }
         var result = text
         for review in metadata.reviews {
             let id = NSRegularExpression.escapedPattern(for: review.contextId)
@@ -96,44 +236,56 @@ struct ThreadMessage: View {
 
     var body: some View {
         if agent {
-            AgentCardEntry(text: text, timestamp: date) {
+            // A tap shows the copy button and time below the card, like a message (MessageReveal).
+            MessageReveal(text: text, timestamp: date) {
                 ThreadCard {
-                    Label("Agent", systemImage: "person.crop.square")
-                    if let badge { Text(badge) }
-                    Spacer()
-                    if let id = metadata.thread {
-                        Button { onOpenThread(id, metadata.environment) } label: { Image(systemName: "arrow.up.right").padding(6) }
-                            .accessibilityLabel("Open sender thread")
+                    ThreadCardHeaderLink(open: metadata.thread.map { id in
+                        { onOpenThread(id, metadata.environment) }
+                    }, label: "Open sender thread") {
+                        // GPUI's solid 16 pt `comment-text`: a message, not a running agent.
+                        ThreadGlyph(name: "message-16", size: 15)
+                        Text(metadata.model ?? "Agent").lineLimit(1)
+                        Spacer()
                     }
                 } content: {
                     VStack(alignment: .leading, spacing: 3) {
                         AgentSummary(title: metadata.sender ?? "Message", text: text)
-                        if !files.isEmpty { ThreadAttachments(files: files, store: store) }
+                        if !files.isEmpty { ThreadAttachments(files: files, store: store, thread: threadId) }
                     }
                 }
             }
         } else {
-            VStack(alignment: .trailing, spacing: 2) {
-                if let badge { KitBadge(badge) }
+            // A tap on the bubble shows its time and copy button below it.
+            MessageReveal(text: text, timestamp: date, trailing: true) {
                 VStack(alignment: .leading, spacing: 3) {
                     if !displayText.isEmpty {
-                        MarkdownView(source: displayText, fillsWidth: !files.isEmpty || !metadata.reviews.isEmpty, messageStyle: .user).fixedSize(horizontal: false, vertical: true)
+                        ViewThatFits(in: .horizontal) {
+                            if files.isEmpty && metadata.reviews.isEmpty {
+                                MarkdownView(source: displayText, fillsWidth: false, messageStyle: .user)
+                                    .fixedSize()
+                            }
+                            MarkdownView(source: displayText, messageStyle: .user)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
                             .padding(.horizontal, 13)
-                            .padding(.top, 7)
+                            // Lab `.m-user-bubble`: 12 above and below text-only (3 + 9 here); with
+                            // files or images the bottom is 7 above the attachment.
+                            .padding(.top, 9)
                             .padding(.bottom, files.isEmpty ? 9 : 7)
                     }
                     ForEach(metadata.reviews, id: \.contextId) { review in
                         if !review.text.isEmpty { Text(review.text).textSelection(.enabled).padding(.horizontal, 11) }
                         CodeCard(code: review.diff, language: "diff", title: [review.filePath, review.rangeLabel].filter { !$0.isEmpty }.joined(separator: " · "))
                     }
-                    if !files.isEmpty { ThreadAttachments(files: files, store: store) }
+                    if !files.isEmpty { ThreadAttachments(files: files, store: store, thread: threadId) }
                 }
                 .padding(3)
-                .background(theme.messageSurface, in: .rect(cornerRadius: 14))
-                MessageFooter(text: text, timestamp: date, trailingCopy: true)
-                    .padding(.horizontal, 4)
+                // Lab: the corner toward the time is nearly square.
+                .background(theme.messageSurface, in: UnevenRoundedRectangle(
+                    topLeadingRadius: 20, bottomLeadingRadius: 20, bottomTrailingRadius: 20, topTrailingRadius: 20,
+                    style: .continuous))
             }
-            .containerRelativeFrame(.horizontal, alignment: .trailing) { width, _ in (width - 32) * 0.8 }
+            .modifier(UserBubbleWidth())
             .frame(maxWidth: .infinity, alignment: .trailing)
         }
     }
@@ -141,28 +293,42 @@ struct ThreadMessage: View {
 
 struct TaskReceiptCard: View {
     let task: FfiTaskSummary
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
     @Environment(\.colorScheme) private var appearance
     @Environment(\.connTheme) private var theme
 
     var body: some View {
         let row = taskReceiptRow(task: task, nowMs: Int64(Date.now.timeIntervalSince1970 * 1000))
         ThreadCard {
-            Image(systemName: "checklist")
-                .overlay(alignment: .topTrailing) { StatusBadgeDot(dot: row.dot).offset(x: 4, y: -4) }
+            ThreadGlyph(name: "checklist-16", size: 16)
+                .frame(width: 14, height: 14)
+                .cardStatusDot(dotColor(row.dot))
             Text(row.detail).lineLimit(2)
             Spacer(minLength: 0)
             if let pr = row.pullRequest, let url = URL(string: pr.url), ["https", "http"].contains(url.scheme) {
                 Link(destination: url) {
-                    Label("#\(pr.number)", systemImage: pr.state == .merged ? "arrow.triangle.merge" : "arrow.triangle.pull")
+                    HStack(spacing: 3) {
+                        ThreadGlyph(name: pr.state == .merged ? "merge" : "pull-request", size: size)
+                        Text("#\(pr.number)")
+                    }
                 }
                 .foregroundStyle(pr.state == .merged ? AdaptiveColor.violet600400.color(appearance) :
                     pr.state == .closed ? theme.destructive : AdaptiveColor.emerald700300.color(appearance))
             }
         } content: {
-            Text(row.title).font(.system(size: 14, weight: .medium)).padding(11)
+            Text(row.title).font(.system(size: size, weight: .medium)).padding(11)
         }
         .accessibilityElement(children: .contain)
         .accessibilityLabel(row.accessibilityLabel)
+    }
+
+    private func dotColor(_ dot: FfiTaskDot) -> Color {
+        switch dot {
+        case .working: AdaptiveColor.sky600400.color(appearance)
+        case .waiting: theme.mutedForeground
+        case .done: AdaptiveColor.emerald600400.color(appearance)
+        case .failed: theme.destructive
+        }
     }
 }
 
@@ -193,5 +359,64 @@ struct ProposedPlanCard: View {
                       contentType: MarkdownDocument.readableContentTypes[0], defaultFilename: "plan.md") { result in
             if case let .failure(failure) = result { error = failure.localizedDescription }
         }
+    }
+}
+
+extension FfiThreadSnapshot {
+    /// History pages are projected independently. Prefer the linked child when it and its wake meet.
+    mutating func removeRepeatedDelegatedResults() {
+        guard !delegatedTaskIds.isEmpty else { return }
+        struct ResultKey: Hashable {
+            let task: String
+            let body: String
+        }
+        let tasks = delegatedTaskIds
+        var seen = Set(entries.compactMap { entry -> ResultKey? in
+            guard case let .subagent(id, _, _, _, _, _, true, body?, _, _, _, _) = entry,
+                  let task = tasks[id] else { return nil }
+            return ResultKey(task: task, body: body.trimmingCharacters(in: .whitespacesAndNewlines))
+        })
+        entries.removeAll { entry in
+            guard case let .user(id, body, _, true, _, _, _) = entry, let task = tasks[id] else { return false }
+            return !seen.insert(ResultKey(task: task, body: body.trimmingCharacters(in: .whitespacesAndNewlines))).inserted
+        }
+    }
+}
+
+/// The whole message in a read-only text view, to select any part of it (the menu's Select text).
+struct SelectTextSheet: View {
+    let text: String
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            SelectableTextView(text: text)
+                .padding(.horizontal, 12)
+                .navigationTitle("Select text")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarTrailing) { Button(role: .close) { dismiss() } }
+                }
+        }
+        .presentationDetents([.medium, .large])
+    }
+}
+
+private struct SelectableTextView: UIViewRepresentable {
+    let text: String
+
+    func makeUIView(context: Context) -> UITextView {
+        let view = UITextView()
+        view.isEditable = false
+        view.isSelectable = true
+        view.backgroundColor = .clear
+        view.font = .systemFont(ofSize: 16)
+        view.textColor = .label
+        view.textContainerInset = UIEdgeInsets(top: 12, left: 0, bottom: 24, right: 0)
+        return view
+    }
+
+    func updateUIView(_ view: UITextView, context: Context) {
+        if view.text != text { view.text = text }
     }
 }

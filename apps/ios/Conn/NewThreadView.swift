@@ -9,10 +9,16 @@ struct NewThreadDraftView: View {
     let onCreated: (String) -> Void
 
     @Environment(\.connTheme) private var theme
-    @State private var selectedProjectId: String?
-    @State private var selectedProjectTitle: String
-    @State private var prompt = ""
-    @State private var isLaunching = false
+    private let initialProjectId: String?
+    private let initialProjectTitle: String
+    private let initialPrompt: String
+    private var draftKey: ComposerDraftKey { .new(project: initialProjectId, prompt: initialPrompt) }
+    private var draft: ComposerDraft { store.composerDraft(draftKey, initialText: initialPrompt) }
+    private var selectedProjectId: String? {
+        if let override = draft.projectOverride { return override.id }
+        return initialProjectId
+    }
+    @State private var visible = false
     @State private var showingProjectPicker = false
 
     init(
@@ -24,13 +30,9 @@ struct NewThreadDraftView: View {
     ) {
         self.store = store
         self.onCreated = onCreated
-        self._prompt = State(initialValue: initialPrompt)
-        self._selectedProjectId = State(initialValue: initialProjectId)
-        self._selectedProjectTitle = State(initialValue: initialProjectTitle)
-    }
-
-    private var canLaunch: Bool {
-        !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isLaunching && store.status == .connected
+        self.initialProjectId = initialProjectId
+        self.initialProjectTitle = initialProjectTitle
+        self.initialPrompt = initialPrompt
     }
 
     var body: some View {
@@ -42,7 +44,8 @@ struct NewThreadDraftView: View {
                 .multilineTextAlignment(.center)
                 .offset(y: -52)
             if selectedProjectId != nil {
-                Button(selectedProjectTitle) { showingProjectPicker = true }
+                Button(draft.projectOverride?.title ?? initialProjectTitle) { showingProjectPicker = true }
+                    .disabled(draft.locked)
                     .accessibilityIdentifier("newThread.projectPickerButton")
             }
             Spacer()
@@ -55,27 +58,26 @@ struct NewThreadDraftView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(theme.background.ignoresSafeArea())
-        // Draft mode of the thread screen: the same floating glass pill, no band behind it.
-        .safeAreaBar(edge: .bottom, spacing: 0) {
+        .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(alignment: .leading, spacing: 8) {
-                if store.showsOffline { OfflinePill().frame(maxWidth: .infinity) }
+                if store.showsOffline { OfflinePill(store: store).frame(maxWidth: .infinity) }
                 ConnComposerPill(
                     placeholder: "Ask anything",
-                    text: $prompt,
-                    isBusy: isLaunching,
-                    canSend: canLaunch,
+                    draft: draft,
+                    limits: store.composerLimits,
+                    canSend: draft.hasContent && !draft.locked && store.status == .connected,
                     onSend: launch,
-                    onStop: {},
                     // A new chat starts on the project's model; picking one needs a launch override.
                     trailing: { EmptyView() }
                 )
                 .accessibilityIdentifier("newThread.promptField")
             }
-            .padding(.horizontal, 12)
+            .padding(.horizontal, ComposerSheet.screenInset)
             .padding(.top, 6)
-            .padding(.bottom, 2)
+            .padding(.bottom, ComposerSheet.bottomGutter)
         }
-        .scrollEdgeEffectStyle(.soft, for: .bottom)
+        .onAppear { visible = true }
+        .onDisappear { visible = false }
         .navigationTitle("New thread")
         .navigationBarTitleDisplayMode(.inline)
         .sheet(isPresented: $showingProjectPicker) {
@@ -83,8 +85,7 @@ struct NewThreadDraftView: View {
                 store: store,
                 selectedProjectId: selectedProjectId,
                 onSelect: { id, title in
-                    selectedProjectId = id
-                    selectedProjectTitle = title
+                    draft.projectOverride = (id, title)
                     showingProjectPicker = false
                 }
             )
@@ -92,20 +93,12 @@ struct NewThreadDraftView: View {
     }
 
     private func launch() {
-        let text = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isLaunching else { return }
-        isLaunching = true
+        let sendingDraft = draft
+        let target = FfiComposerTarget.new(projectId: selectedProjectId)
         Task {
-            let threadId: String?
-            if let projectId = selectedProjectId {
-                threadId = await store.launchThread(projectId: projectId, text: text)
-            } else {
-                threadId = await store.launchGeneralThread(text: text)
-            }
-            isLaunching = false
-            if let threadId {
-                onCreated(threadId)
-            }
+            guard let threadId = await store.submit(sendingDraft, for: draftKey, to: target) else { return }
+            if visible { onCreated(threadId) }
+            else if store.openThreadId != threadId { store.closeThread(threadId) }
         }
     }
 }

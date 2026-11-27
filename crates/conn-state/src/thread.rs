@@ -444,6 +444,7 @@ struct TrackedMessage {
     created_at: String,
     created_by_agent: bool,
     is_automatic: bool,
+    completion: Option<Vec<crate::thread_feed::DelegatedResult>>,
 }
 
 /// How the provider can take the answer to one pending runtime request (its
@@ -627,6 +628,97 @@ impl SubagentModel {
     }
 }
 
+/// A subagent of the thread, from the projection's `subagents` and `subagent.updated`: what the
+/// agents capsule and sheet show, without its prompt or result bodies.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubagentRecord {
+    pub id: String,
+    pub run_id: Option<String>,
+    pub title: String,
+    pub status: TurnItemStatus,
+    pub provider_instance_id: String,
+    pub child_thread_id: Option<String>,
+    /// The environment and thread of a child that runs on another machine.
+    pub remote_child: Option<(String, String)>,
+    pub workflow: bool,
+    pub started_at: Option<String>,
+    pub updated_at: String,
+    pub completed_at: Option<String>,
+}
+
+impl SubagentRecord {
+    fn from_subagent(subagent: &conn_contract::OrchestrationV2Subagent) -> Self {
+        Self {
+            id: subagent.id.clone(),
+            run_id: subagent.run_id.clone(),
+            title: format_subagent_display_title(
+                non_empty(subagent.title.clone())
+                    .as_deref()
+                    .unwrap_or("Subagent"),
+            ),
+            status: subagent.status,
+            provider_instance_id: subagent.provider_instance_id.clone(),
+            child_thread_id: non_empty(subagent.child_thread_id.clone()),
+            remote_child: subagent
+                .remote_child
+                .as_ref()
+                .map(|child| (child.environment_id.clone(), child.thread_id.clone())),
+            workflow: subagent.workflow.is_some(),
+            started_at: subagent.started_at.clone(),
+            updated_at: subagent.updated_at.clone(),
+            completed_at: subagent.completed_at.clone(),
+        }
+    }
+
+    /// Pending, running or waiting (`isOrchestrationV2WorkActive`).
+    #[must_use]
+    pub fn live(&self) -> bool {
+        matches!(
+            self.status,
+            TurnItemStatus::Pending | TurnItemStatus::Running | TurnItemStatus::Waiting
+        )
+    }
+
+    /// Completed, failed, cancelled or interrupted (`isTerminalSubagentStatus`).
+    #[must_use]
+    pub fn settled(&self) -> bool {
+        crate::timeline::subagent_settled(self.status)
+    }
+
+    fn order_key(&self) -> i64 {
+        self.started_at
+            .as_deref()
+            .and_then(parse_iso8601_epoch_ms)
+            .or_else(|| parse_iso8601_epoch_ms(&self.updated_at))
+            .unwrap_or(0)
+    }
+}
+
+/// The agents of the thread's latest turn (Conn's `deriveThreadTurnSubagents`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TurnAgents<'a> {
+    pub run_id: Option<&'a str>,
+    pub turn_active: bool,
+    /// No later turn has run since these agents' turn.
+    pub latest_turn: bool,
+    /// In start order.
+    pub agents: Vec<&'a SubagentRecord>,
+    pub live_count: usize,
+    pub settled_count: usize,
+}
+
+impl TurnAgents<'_> {
+    /// Finished agents stay reachable until a later turn replaces them; workflows always stay
+    /// (`resolveSubagentPillSegment`).
+    #[must_use]
+    pub fn shows_pill(&self) -> bool {
+        self.turn_active
+            || self.latest_turn
+            || self.live_count > 0
+            || self.agents.iter().any(|agent| agent.workflow)
+    }
+}
+
 /// Reads `ModelSelection.options` (`[{"id", "value"}]`, or an object) into string values.
 fn model_option_strings(options: &serde_json::Value) -> HashMap<String, String> {
     let text = |value: &serde_json::Value| match value {
@@ -683,6 +775,8 @@ pub struct ThreadState {
     pub subagent_models: HashMap<String, SubagentModel>,
     /// The subagent id behind each `subagent` timeline entry, by entry id.
     pub subagent_of_entry: HashMap<String, String>,
+    /// Every subagent of the thread, by subagent id, whether or not its turn item is loaded.
+    pub subagents: HashMap<String, SubagentRecord>,
     /// What [`Self::agent_wakeups`] keeps of the agent's scheduling tool calls (`ScheduleWakeup`,
     /// `CronCreate`, `CronDelete`). A timeline row drops the call's input, so the calls are read
     /// as they arrive, and the ledger drops the ones that no longer matter.
@@ -791,6 +885,25 @@ impl ThreadState {
         })
     }
 
+    /// When a group of work entries started: the earliest `started_at_ms` among them, else the
+    /// owning run's start. A running group's clock counts from here.
+    #[must_use]
+    pub fn work_group_started_at_ms(&self, entry_ids: &[&str]) -> Option<i64> {
+        let earliest = entry_ids
+            .iter()
+            .filter_map(|id| self.entry_timings.get(*id))
+            .filter_map(|timing| timing.started_at_ms)
+            .min();
+        earliest.or_else(|| {
+            entry_ids
+                .iter()
+                .filter_map(|id| self.entry_timings.get(*id))
+                .find_map(|timing| timing.run_id.as_deref())
+                .and_then(|run| self.run_timings.get(run))
+                .and_then(|run| run.started_at_ms)
+        })
+    }
+
     /// Computes the elapsed duration in milliseconds for a contiguous group of work entries.
     ///
     /// Uses the earliest `started_at_ms` to latest `completed_at_ms` across `entry_ids`, falling
@@ -860,6 +973,93 @@ impl ThreadState {
             .filter(|run| is_run_active(run.status))
             .max_by_key(|run| run.ordinal)
             .map(|run| run.id.as_str())
+    }
+
+    /// When the running turn's work started (Unix ms, server clock): the active run's work start,
+    /// else its request; while only a queued run waits to start, that run's. One value for the
+    /// whole run, so a "Working for" clock never restarts between its tool batches.
+    #[must_use]
+    pub fn active_work_started_at_ms(&self) -> Option<i64> {
+        let run = match self.active_run_id() {
+            Some(id) => self.runs.get(id)?,
+            None => self
+                .runs
+                .values()
+                .filter(|run| is_tracked_run_working(run))
+                .max_by_key(|run| run.ordinal)?,
+        };
+        self.run_timings
+            .get(&run.id)
+            .and_then(|timing| timing.started_at_ms)
+            .or_else(|| parse_iso8601_epoch_ms(&run.requested_at))
+    }
+
+    /// The agents of the latest turn, plus any still live from an earlier one and every workflow
+    /// (Conn's `deriveThreadTurnSubagents`). `None` when the thread has none.
+    #[must_use]
+    pub fn turn_agents(&self) -> Option<TurnAgents<'_>> {
+        let rolled_back = |run_id: &str| {
+            self.runs
+                .get(run_id)
+                .is_some_and(|run| run.status == RunStatus::RolledBack)
+        };
+        let mut eligible: Vec<&SubagentRecord> = self
+            .subagents
+            .values()
+            .filter(|agent| agent.run_id.as_deref().is_none_or(|run| !rolled_back(run)))
+            .collect();
+        eligible.sort_by(|a, b| {
+            a.order_key()
+                .cmp(&b.order_key())
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        let first = *eligible.first()?;
+        let active_run = self.active_run_id();
+        let latest_updated = eligible.iter().fold(first, |latest, agent| {
+            let at = parse_iso8601_epoch_ms(&agent.updated_at).unwrap_or(0);
+            if at > parse_iso8601_epoch_ms(&latest.updated_at).unwrap_or(0) {
+                agent
+            } else {
+                latest
+            }
+        });
+        // Ordinal, not arrival: queued and never-started runs have not replaced anything yet.
+        let latest_started_run = self
+            .runs
+            .values()
+            .filter(|run| {
+                run.status != RunStatus::RolledBack
+                    && self
+                        .run_timings
+                        .get(&run.id)
+                        .is_some_and(|timing| timing.started_at_ms.is_some())
+            })
+            .max_by_key(|run| run.ordinal)
+            .map(|run| run.id.as_str());
+        let latest_started_has_agents = latest_started_run
+            .is_some_and(|run| eligible.iter().any(|a| a.run_id.as_deref() == Some(run)));
+        let run_id = active_run.or(if latest_started_has_agents {
+            latest_started_run
+        } else {
+            latest_updated.run_id.as_deref()
+        });
+        let agents: Vec<&SubagentRecord> = eligible
+            .into_iter()
+            .filter(|agent| agent.run_id.as_deref() == run_id || agent.live() || agent.workflow)
+            .collect();
+        if agents.is_empty() {
+            return None;
+        }
+        Some(TurnAgents {
+            run_id,
+            turn_active: active_run.is_some(),
+            latest_turn: run_id.is_none()
+                || latest_started_run.is_none()
+                || run_id == latest_started_run,
+            live_count: agents.iter().filter(|agent| agent.live()).count(),
+            settled_count: agents.iter().filter(|agent| agent.settled()).count(),
+            agents,
+        })
     }
 
     /// Returns the status of run `run_id`, when tracked.
@@ -1109,6 +1309,11 @@ impl ThreadState {
             .iter()
             .map(|s| (s.id.clone(), SubagentModel::from_subagent(s)))
             .collect();
+        self.subagents = projection
+            .subagents
+            .iter()
+            .map(|s| (s.id.clone(), SubagentRecord::from_subagent(s)))
+            .collect();
         self.subagent_of_entry.clear();
         let mut entries = Vec::with_capacity(capacity);
         let mut entry_index: HashMap<String, usize> = HashMap::with_capacity(capacity);
@@ -1222,6 +1427,11 @@ impl ThreadState {
 
         for row in rows {
             let item = row.item;
+            if let ProjectionTurnItem::Subagent(sub) = &item {
+                self.subagent_of_entry
+                    .entry(sub.id.clone())
+                    .or_insert_with(|| sub.subagent_id.clone());
+            }
             let feed_detail = projection_feed_detail(&item);
             let schedule_call = match &item {
                 ProjectionTurnItem::DynamicTool(tool) => {
@@ -1376,20 +1586,19 @@ impl ThreadState {
         self.sequence = Some(self.sequence.map_or(seq, |prev| prev.max(seq)));
     }
 
-    fn record_run_timing(&mut self, run: &Run) {
+    /// Returns whether the run's timing changed.
+    fn record_run_timing(&mut self, run: &Run) -> bool {
         let started = run
             .work_started_at
             .as_deref()
             .or(run.started_at.as_deref())
             .and_then(parse_iso8601_epoch_ms);
         let completed = run.completed_at.as_deref().and_then(parse_iso8601_epoch_ms);
-        self.run_timings.insert(
-            run.id.clone(),
-            RunTiming {
-                started_at_ms: started,
-                completed_at_ms: completed,
-            },
-        );
+        let timing = RunTiming {
+            started_at_ms: started,
+            completed_at_ms: completed,
+        };
+        self.run_timings.insert(run.id.clone(), timing) != Some(timing)
     }
 
     fn record_checkpoint(&mut self, cp: &Checkpoint) -> bool {
@@ -1435,23 +1644,54 @@ impl ThreadState {
         changed
     }
 
-    fn record_run(&mut self, run: &Run) {
-        self.runs.insert(
-            run.id.clone(),
-            TrackedRun {
-                id: run.id.clone(),
-                ordinal: run.ordinal,
-                user_message_id: run.user_message_id.clone(),
-                status: run.status,
-                queue_position: run.queue_position.flatten(),
-                queue_held: run.queue_held == Some(true),
-                requested_at: run.requested_at.clone(),
-            },
-        );
+    /// Returns whether the tracked run changed.
+    fn record_run(&mut self, run: &Run) -> bool {
+        let tracked = TrackedRun {
+            id: run.id.clone(),
+            ordinal: run.ordinal,
+            user_message_id: run.user_message_id.clone(),
+            status: run.status,
+            queue_position: run.queue_position.flatten(),
+            queue_held: run.queue_held == Some(true),
+            requested_at: run.requested_at.clone(),
+        };
+        self.runs.insert(run.id.clone(), tracked.clone()) != Some(tracked)
+    }
+
+    pub fn delegated_results(&self, id: &str) -> Option<&[crate::thread_feed::DelegatedResult]> {
+        use crate::thread_feed::FeedDetail;
+        match self.feed_details.get(id)? {
+            FeedDetail::Delegated(results) => Some(results),
+            FeedDetail::DelegatedNotice { run, tasks } => {
+                // Older servers replace the turn item with a receipt but keep the full wake in messages.
+                let message = id
+                    .strip_prefix("turn-item:")
+                    .and_then(|key| self.messages.get(key))
+                    .or_else(|| {
+                        self.messages
+                            .get(&self.runs.get(run.as_ref()?)?.user_message_id)
+                    });
+                Some(
+                    message
+                        .and_then(|m| m.completion.as_deref())
+                        .filter(|results| results.iter().all(|result| tasks.contains(&result.task)))
+                        .unwrap_or_default(),
+                )
+            }
+            _ => None,
+        }
     }
 
     fn record_message(&mut self, msg: &ConversationMessage) {
-        let is_automatic = msg.delegated_completion.is_some() || msg.notification.is_some();
+        let owned = msg.delegated_completion.is_some()
+            || (msg.created_by == Actor::Agent
+                && msg.creation_source == conn_contract::OrchestrationV2CreationSource::Server);
+        let completion = owned
+            .then(|| crate::thread_feed::completion_results(&msg.text))
+            .flatten();
+        let is_automatic = msg.delegated_completion.is_some()
+            || msg.notification.is_some()
+            || completion.is_some();
         self.messages.insert(
             msg.id.clone(),
             TrackedMessage {
@@ -1460,6 +1700,7 @@ impl ThreadState {
                 created_at: msg.created_at.clone(),
                 created_by_agent: is_agent_origin(msg.created_by, msg.creation_source),
                 is_automatic,
+                completion,
             },
         );
     }
@@ -1567,24 +1808,24 @@ impl ThreadState {
     fn apply_domain_event(&mut self, event: DomainEvent) -> bool {
         match event {
             DomainEvent::RunCreated(ev) => {
-                self.record_run(&ev.payload);
-                self.record_run_timing(&ev.payload);
+                let run_changed = self.record_run(&ev.payload);
+                let timing_changed = self.record_run_timing(&ev.payload);
                 self.prune_schedule_calls();
                 let next_working = self.runs.values().any(is_tracked_run_working);
                 let working_changed = self.working != next_working;
                 self.working = next_working;
                 let queue_changed = self.reconcile_queued_runs(false);
-                working_changed || queue_changed
+                run_changed || timing_changed || working_changed || queue_changed
             }
             DomainEvent::RunUpdated(ev) => {
-                self.record_run(&ev.payload);
-                self.record_run_timing(&ev.payload);
+                let run_changed = self.record_run(&ev.payload);
+                let timing_changed = self.record_run_timing(&ev.payload);
                 self.prune_schedule_calls();
                 let next_working = self.runs.values().any(is_tracked_run_working);
                 let working_changed = self.working != next_working;
                 self.working = next_working;
                 let queue_changed = self.reconcile_queued_runs(false);
-                working_changed || queue_changed
+                run_changed || timing_changed || working_changed || queue_changed
             }
             DomainEvent::RuntimeRequestUpdated(ev) => {
                 let request = ev.payload;
@@ -1597,7 +1838,7 @@ impl ThreadState {
             }
             DomainEvent::MessageUpdated(ev) => {
                 self.record_message(&ev.payload);
-                self.reconcile_queued_runs(false)
+                self.reconcile_queued_runs(false) || ev.payload.delegated_completion.is_some()
             }
             DomainEvent::TurnItemUpdated(ev) => {
                 let item_id = turn_item_id(&ev.payload).to_owned();
@@ -1606,6 +1847,7 @@ impl ThreadState {
                     _ => (None, None),
                 };
                 let detail = match &ev.payload {
+                    TurnItem::Notification(item) => crate::thread_feed::notification_detail(item),
                     TurnItem::UserMessage(item) => crate::thread_feed::message_detail(item),
                     TurnItem::DynamicTool(item) => crate::thread_feed::tool_detail(item),
                     _ => None
@@ -1686,11 +1928,16 @@ impl ThreadState {
             DomainEvent::ProviderTurnUpdated(ev) => self.record_provider_turn(&ev.payload),
             DomainEvent::SubagentUpdated(ev) => {
                 let model = SubagentModel::from_subagent(&ev.payload);
-                let changed = self.subagent_models.get(&ev.payload.id) != Some(&model);
-                if changed {
-                    self.subagent_models.insert(ev.payload.id, model);
+                let record = SubagentRecord::from_subagent(&ev.payload);
+                let model_changed = self.subagent_models.get(&ev.payload.id) != Some(&model);
+                let record_changed = self.subagents.get(&ev.payload.id) != Some(&record);
+                if model_changed {
+                    self.subagent_models.insert(ev.payload.id.clone(), model);
                 }
-                changed
+                if record_changed {
+                    self.subagents.insert(ev.payload.id, record);
+                }
+                model_changed || record_changed
             }
             DomainEvent::ThreadArchived(ev)
                 if ev.r#type
@@ -1992,6 +2239,9 @@ fn projection_feed_detail(
     item: &ProjectionTurnItem,
 ) -> Option<(String, crate::thread_feed::FeedDetail)> {
     match item {
+        ProjectionTurnItem::Notification(i) => {
+            Some((i.id.clone(), crate::thread_feed::notification_detail(i)?))
+        }
         ProjectionTurnItem::UserMessage(i) => {
             Some((i.id.clone(), crate::thread_feed::message_detail(i)?))
         }
@@ -3199,6 +3449,11 @@ mod timing_tests {
             Some(7_500),
             "duration spans earliest start to latest end"
         );
+        assert_eq!(
+            state.work_group_started_at_ms(&["e1", "e2"]),
+            Some(1_000),
+            "a running group's clock starts at its earliest step, not now minus the span"
+        );
 
         // Fallback to run timing when entries lack started_at_ms.
         state.entry_timings.insert(
@@ -3220,6 +3475,11 @@ mod timing_tests {
             state.work_group_duration_ms(&["e3"]),
             Some(12_400),
             "falls back to owning run elapsed duration"
+        );
+        assert_eq!(
+            state.work_group_started_at_ms(&["e3"]),
+            Some(10_000),
+            "without step starts, the owning run's start"
         );
     }
 

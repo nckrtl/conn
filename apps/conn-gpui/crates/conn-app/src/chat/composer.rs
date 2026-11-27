@@ -36,6 +36,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gpui_kit::TestSupportExt as _;
 
 use conn_client::Connection;
+use conn_client::uploads::{FileSource, LocalFile, UploadStatus, Uploads};
 use conn_contract::rpc::projects::search_entries;
 use conn_contract::{ChatAttachment, ProjectSearchEntriesInput};
 use conn_desktop::operator::{DictationStart, DictationWait, OperatorClient};
@@ -110,6 +111,15 @@ const PLAN_IMPLEMENTATION_PROMPT_PREFIX: &str = "PLEASE IMPLEMENT THIS PLAN:\n";
 /// `modelPicker.toggle` shortcut label.
 const MODEL_PICKER_SHORTCUT_LABEL: &str = "⌘⇧M";
 
+fn chip_upload(status: &AttachmentUploadStatus) -> super::attachment_thumb::ChipUpload {
+    use super::attachment_thumb::ChipUpload;
+    match status {
+        AttachmentUploadStatus::Uploading(p) => ChipUpload::Uploading(*p),
+        AttachmentUploadStatus::Ready(_) => ChipUpload::Ready,
+        AttachmentUploadStatus::Error(_) => ChipUpload::Failed,
+    }
+}
+
 /// State of one staged file/image attachment in the composer strip.
 #[derive(Clone, Debug)]
 struct PendingAttachment {
@@ -117,11 +127,25 @@ struct PendingAttachment {
     name: String,
     size_bytes: usize,
     status: AttachmentUploadStatus,
+    /// What to upload again on retry or after a reconnect; restored drafts have none.
+    source: Option<LocalFile>,
+    /// The server (environment key) this file uploads to: the one its draft's thread lives
+    /// on. Its upload id is valid only there, so it never uploads anywhere else.
+    server: Option<String>,
+}
+
+/// One server's upload queue and the task that applies its progress to the composer.
+struct UploadQueue {
+    server: Option<String>,
+    connection: Connection,
+    uploads: Uploads,
+    _events: gpui_kit::Task<()>,
 }
 
 #[derive(Clone, Debug)]
 enum AttachmentUploadStatus {
-    Uploading,
+    /// The share sent, 0 to 1 (`UploadStatus::Uploading`).
+    Uploading(f32),
     Ready(ChatAttachment),
     Error(String),
 }
@@ -309,6 +333,11 @@ pub(crate) struct Composer {
     /// Thumbnails of staged images, by `PendingAttachment::local_id`, decoded at chip size off
     /// the UI thread. Each is freed (pixels and window texture) once no draft holds its chip.
     attachment_previews: HashMap<u64, super::attachment_thumb::SentImage>,
+    /// Uploads start on attach (`attachmentUploads.ts`); one queue per server. A queue stays
+    /// while the chat shows another server, so a parked draft's uploads finish on their own.
+    upload_queues: Vec<UploadQueue>,
+    /// The server `connection` belongs to (its environment key); new attachments upload there.
+    server: Option<String>,
     editing_queued: Option<EditingQueuedRun>,
     dictation: DictationState,
     dictation_error: Option<String>,
@@ -464,6 +493,8 @@ impl Composer {
             applied_placeholder: COMPOSER_PLACEHOLDER,
             next_attachment_id: 1,
             attachment_previews: HashMap::new(),
+            upload_queues: Vec::new(),
+            server: None,
             editing_queued: None,
             dictation: DictationState::Idle,
             dictation_error: None,
@@ -482,15 +513,218 @@ impl Composer {
         cx.notify();
     }
 
-    /// Updates the server connection. The catalog follows the app's config stream.
+    /// Updates the server connection and the server (environment key) it belongs to. The
+    /// catalog follows the app's config stream.
     pub(crate) fn set_connection(
         &mut self,
         connection: Option<Connection>,
+        server: Option<String>,
         cx: &mut Context<'_, Self>,
     ) {
+        let same = self
+            .connection
+            .as_ref()
+            .zip(connection.as_ref())
+            .is_some_and(|(a, b)| a.same_connection(b));
         self.connection = connection;
         self.catalog_refresh_in_flight = false;
+        let old_server = std::mem::replace(&mut self.server, server);
+        if same {
+            // The same connection under a new name: what it staged keeps uploading there.
+            if old_server != self.server {
+                let server = self.server.clone();
+                for attachment in self
+                    .attachments
+                    .iter_mut()
+                    .chain(self.drafts.parked_attachments_mut())
+                    .filter(|a| a.server == old_server)
+                {
+                    attachment.server.clone_from(&server);
+                }
+                for queue in self
+                    .upload_queues
+                    .iter_mut()
+                    .filter(|q| q.server == old_server)
+                {
+                    queue.server.clone_from(&server);
+                }
+            }
+        } else {
+            self.restart_uploads(cx);
+        }
         cx.notify();
+    }
+
+    /// The connection moved: this server's unfinished or failed uploads start (again) on it.
+    /// Attachments of drafts on other servers keep their own queues and wait for their server.
+    fn restart_uploads(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(uploads) = self.upload_queue(cx) else {
+            return;
+        };
+        let server = self.server.clone();
+        for attachment in self
+            .attachments
+            .iter_mut()
+            .chain(self.drafts.parked_attachments_mut())
+            .filter(|a| a.server == server)
+        {
+            let Some(source) = &attachment.source else {
+                continue;
+            };
+            let id = attachment.local_id.to_string();
+            let queued = uploads.status(&id);
+            let restart = match attachment.status {
+                AttachmentUploadStatus::Uploading(_) => queued.is_none(),
+                AttachmentUploadStatus::Error(_) => true,
+                AttachmentUploadStatus::Ready(_) => false,
+            };
+            if !restart {
+                continue;
+            }
+            if matches!(queued, Some(UploadStatus::Failed { .. })) {
+                uploads.retry(&id);
+            } else {
+                uploads.add(&id, source.clone());
+            }
+            attachment.status = AttachmentUploadStatus::Uploading(0.0);
+        }
+    }
+
+    /// The upload queue of the current server on the current connection. A queue for this
+    /// server on an older connection (a reconnect) is dropped.
+    fn upload_queue(&mut self, cx: &mut Context<'_, Self>) -> Option<Uploads> {
+        let connection = self.connection.clone()?;
+        if let Some(queue) = self
+            .upload_queues
+            .iter()
+            .find(|q| q.server == self.server && q.connection.same_connection(&connection))
+        {
+            return Some(queue.uploads.clone());
+        }
+        let server = self.server.clone();
+        self.upload_queues.retain(|q| q.server != server);
+        let uploads = Uploads::new(connection.clone());
+        uploads.set_codec(Arc::new(super::upload_codec::DesktopImageCodec));
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<(String, Option<UploadStatus>)>();
+        uploads.set_listener(Arc::new(move |id, status| {
+            let _ = tx.unbounded_send((id.to_owned(), status.cloned()));
+        }));
+        let queue = uploads.clone();
+        let events = cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while let Some((id, status)) = rx.next().await {
+                let ready = matches!(status, Some(UploadStatus::Ready))
+                    .then(|| queue.uploaded(&id))
+                    .flatten();
+                let updated = this.update(cx, |composer, cx| {
+                    composer.apply_upload(&queue, &id, status, ready.map(|r| r.attachment), cx);
+                });
+                if updated.is_err() {
+                    break;
+                }
+            }
+        });
+        self.upload_queues.push(UploadQueue {
+            server,
+            connection,
+            uploads: uploads.clone(),
+            _events: events,
+        });
+        Some(uploads)
+    }
+
+    /// The queue `server`'s attachments upload on, if it has one.
+    fn queue_of(&self, server: &Option<String>) -> Option<&Uploads> {
+        self.upload_queues
+            .iter()
+            .find(|q| q.server == *server)
+            .map(|q| &q.uploads)
+    }
+
+    fn apply_upload(
+        &mut self,
+        queue: &Uploads,
+        id: &str,
+        status: Option<UploadStatus>,
+        ready: Option<ChatAttachment>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Ok(local_id) = id.parse::<u64>() else {
+            return;
+        };
+        // Only the queue of the attachment's own server may change it; a replaced queue is gone.
+        let Some(server) = self
+            .upload_queues
+            .iter()
+            .find(|q| q.uploads.same_queue(queue))
+            .map(|q| q.server.clone())
+        else {
+            return;
+        };
+        let next = match status {
+            Some(UploadStatus::Uploading { progress }) => {
+                AttachmentUploadStatus::Uploading(progress)
+            }
+            Some(UploadStatus::Failed { reason }) => AttachmentUploadStatus::Error(reason),
+            Some(UploadStatus::Ready) => match ready {
+                Some(attachment) => AttachmentUploadStatus::Ready(attachment),
+                None => return,
+            },
+            None => return,
+        };
+        // The upload may finish after the user switched threads; its draft is parked then.
+        if let Some(slot) = self
+            .attachments
+            .iter_mut()
+            .chain(self.drafts.parked_attachments_mut())
+            .find(|a| {
+                a.local_id == local_id
+                    && a.server == server
+                    && !matches!(a.status, AttachmentUploadStatus::Ready(_))
+            })
+        {
+            slot.status = next;
+            cx.notify();
+        }
+    }
+
+    /// Starts a failed upload again, on its own server only.
+    fn retry_attachment(&mut self, local_id: u64, cx: &mut Context<'_, Self>) {
+        let server = self.server.clone();
+        if !self.attachments.iter().any(|a| {
+            a.local_id == local_id
+                && a.server == server
+                && a.source.is_some()
+                && matches!(a.status, AttachmentUploadStatus::Error(_))
+        }) {
+            return;
+        }
+        let Some(uploads) = self.upload_queue(cx) else {
+            return;
+        };
+        let Some(attachment) = self.attachments.iter_mut().find(|a| a.local_id == local_id) else {
+            return;
+        };
+        let Some(source) = &attachment.source else {
+            return;
+        };
+        let id = local_id.to_string();
+        if uploads.status(&id).is_some() {
+            uploads.retry(&id);
+        } else {
+            uploads.add(&id, source.clone());
+        }
+        attachment.status = AttachmentUploadStatus::Uploading(0.0);
+        cx.notify();
+    }
+
+    /// The sent attachments leave the queue; their ids stay valid for a restored draft.
+    fn forget_uploads(&self) {
+        for attachment in &self.attachments {
+            if let Some(uploads) = self.queue_of(&attachment.server) {
+                let _ = uploads.forget(&[attachment.local_id.to_string()]);
+            }
+        }
     }
 
     /// Sets the workspace root used for `@` file mention searches (`projects.searchEntries`).
@@ -1179,6 +1413,8 @@ impl Composer {
                         name,
                         size_bytes: 0,
                         status: AttachmentUploadStatus::Error(err.to_string()),
+                        source: None,
+                        server: self.server.clone(),
                     });
                     cx.notify();
                 }
@@ -1186,8 +1422,8 @@ impl Composer {
         }
     }
 
-    /// Stages in-memory bytes (such as a pasted clipboard image) and uploads via
-    /// `attachments.createUploadUrl`.
+    /// Stages in-memory bytes (such as a pasted clipboard image) and starts their upload at once;
+    /// the shared queue scales images, runs three at a time and reports progress.
     pub(super) fn stage_and_upload_bytes(
         &mut self,
         name: String,
@@ -1196,40 +1432,28 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        let Some(conn) = self.connection.clone() else {
+        let Some(uploads) = self.upload_queue(cx) else {
             return;
         };
         let local_id = self.next_attachment_id;
         self.next_attachment_id = self.next_attachment_id.wrapping_add(1);
         let size_bytes = bytes.len();
         self.decode_attachment_preview(local_id, &mime_type, &bytes, window, cx);
+        let source = LocalFile {
+            source: FileSource::Bytes(Arc::new(bytes)),
+            name: name.clone(),
+            mime_type,
+        };
+        uploads.add(&local_id.to_string(), source.clone());
         self.attachments.push(PendingAttachment {
             local_id,
-            name: name.clone(),
+            name,
             size_bytes,
-            status: AttachmentUploadStatus::Uploading,
+            status: AttachmentUploadStatus::Uploading(0.0),
+            source: Some(source),
+            server: self.server.clone(),
         });
         cx.notify();
-
-        cx.spawn_in(window, async move |this, cx| {
-            let upload_res = conn.upload_chat_attachment(name, mime_type, bytes).await;
-            let _ = this.update(cx, |composer, cx| {
-                // The upload may finish after the user switched threads; its draft is parked then.
-                if let Some(slot) = composer
-                    .attachments
-                    .iter_mut()
-                    .chain(composer.drafts.parked_attachments_mut())
-                    .find(|a| a.local_id == local_id)
-                {
-                    slot.status = match upload_res {
-                        Ok(att) => AttachmentUploadStatus::Ready(att),
-                        Err(err) => AttachmentUploadStatus::Error(err.to_string()),
-                    };
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     #[cfg(test)]
@@ -1245,11 +1469,24 @@ impl Composer {
 
     #[cfg(test)]
     pub(crate) fn attachment_states_for_test(&self) -> Vec<(String, String)> {
-        self.attachments
+        Self::states_for_test(&self.attachments)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parked_attachment_states_for_test(&self, key: &str) -> Vec<(String, String)> {
+        self.drafts
+            .parked_draft(key)
+            .map(|d| Self::states_for_test(&d.attachments))
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    fn states_for_test(attachments: &[PendingAttachment]) -> Vec<(String, String)> {
+        attachments
             .iter()
             .map(|a| {
                 let state = match &a.status {
-                    AttachmentUploadStatus::Uploading => "uploading".to_owned(),
+                    AttachmentUploadStatus::Uploading(_) => "uploading".to_owned(),
                     AttachmentUploadStatus::Ready(att) => {
                         let id = match att {
                             ChatAttachment::Image(img) => img.id.as_str(),
@@ -1535,6 +1772,14 @@ impl Composer {
     }
 
     fn remove_attachment(&mut self, local_id: u64, cx: &mut Context<'_, Self>) {
+        if let Some(uploads) = self
+            .attachments
+            .iter()
+            .find(|a| a.local_id == local_id)
+            .and_then(|a| self.queue_of(&a.server))
+        {
+            uploads.remove(&local_id.to_string());
+        }
         let before = self.attachments.len();
         self.attachments.retain(|a| a.local_id != local_id);
         if let Some(preview) = self.attachment_previews.remove(&local_id) {
@@ -1641,7 +1886,9 @@ impl Composer {
             local_id,
             name: name.to_owned(),
             size_bytes: bytes.len(),
-            status: AttachmentUploadStatus::Uploading,
+            status: AttachmentUploadStatus::Uploading(0.0),
+            source: None,
+            server: self.server.clone(),
         });
         cx.notify();
         local_id
@@ -1729,7 +1976,7 @@ impl Composer {
         let still_uploading = self
             .attachments
             .iter()
-            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading));
+            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading(_)));
         if still_uploading {
             return;
         }
@@ -1757,6 +2004,7 @@ impl Composer {
                 input.set_value(editing.saved_draft, window, cx);
                 input.focus(window, cx);
             });
+            self.forget_uploads();
             self.attachments.clear();
             self.active_trigger = None;
             self.dismissed_trigger_text = None;
@@ -1802,6 +2050,7 @@ impl Composer {
             self.textarea.update(cx, |input, cx| {
                 input.set_value("", window, cx);
             });
+            self.forget_uploads();
             self.attachments.clear();
             None
         };
@@ -1820,7 +2069,7 @@ impl Composer {
         let uploading = self
             .attachments
             .iter()
-            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading));
+            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading(_)));
         QuestionComposerStatus {
             typed: self.textarea.read(cx).value().to_string(),
             voice_active: matches!(self.dictation, DictationState::Recording { .. }),
@@ -2126,6 +2375,8 @@ impl Composer {
                     name: chat_attachment_name(&att).to_owned(),
                     size_bytes: chat_attachment_size(&att),
                     status: AttachmentUploadStatus::Ready(att),
+                    source: None,
+                    server: self.server.clone(),
                 }
             })
             .collect();
@@ -2550,7 +2801,7 @@ impl Render for Composer {
         let is_uploading = self
             .attachments
             .iter()
-            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading));
+            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading(_)));
         let has_non_empty_text = !self.textarea.read(cx).value().trim().is_empty();
         let send_action = composer_send_action(&self.pending_request, !has_non_empty_text);
         let choice_only = self
@@ -2567,7 +2818,7 @@ impl Render for Composer {
         let uploading_count = self
             .attachments
             .iter()
-            .filter(|a| matches!(a.status, AttachmentUploadStatus::Uploading))
+            .filter(|a| matches!(a.status, AttachmentUploadStatus::Uploading(_)))
             .count();
         let attachment_block_reason = match uploading_count {
             0 => None,
@@ -2965,26 +3216,54 @@ impl Render for Composer {
                         local_id,
                         &att.name,
                         preview.source(),
-                        matches!(att.status, AttachmentUploadStatus::Uploading),
-                        matches!(att.status, AttachmentUploadStatus::Error(_)),
+                        chip_upload(&att.status),
                         &tokens,
                         cx.listener(move |composer, _, _, cx| {
                             composer.remove_attachment(local_id, cx);
+                        }),
+                        cx.listener(move |composer, _, _, cx| {
+                            composer.retry_attachment(local_id, cx);
                         }),
                     ));
                     continue;
                 }
                 let file_icon = crate::file_icons::file_icon(&att.name, tokens.appearance);
                 let status_label = match &att.status {
-                    AttachmentUploadStatus::Uploading => "Uploading…".to_owned(),
+                    AttachmentUploadStatus::Uploading(p) => format!("{}%", (p * 100.0).round()),
                     AttachmentUploadStatus::Ready(_) => format_byte_size(att.size_bytes),
-                    AttachmentUploadStatus::Error(err) => err.clone(),
+                    AttachmentUploadStatus::Error(_) => "Failed · Retry".to_owned(),
                 };
                 let is_err = matches!(att.status, AttachmentUploadStatus::Error(_));
+                let leading = match &att.status {
+                    AttachmentUploadStatus::Uploading(p) => {
+                        super::attachment_thumb::progress_ring(14.0, *p, fg)
+                    }
+                    AttachmentUploadStatus::Error(_) => {
+                        icons::icon(icons::REFRESH, 14.0, hsla(tokens.destructive))
+                            .into_any_element()
+                    }
+                    AttachmentUploadStatus::Ready(_) => {
+                        crate::file_icons::icon_img(file_icon.asset, 14.0).into_any_element()
+                    }
+                };
+                let tooltip = match &att.status {
+                    AttachmentUploadStatus::Error(err) => {
+                        format!("{}: {err}. Click to retry.", att.name)
+                    }
+                    _ => att.name.clone(),
+                };
                 strip = strip.child(
                     div()
                         .id(SharedString::from(format!("composer-att-{local_id}")))
                         .a11y_group(format!("composer.attachment.{local_id}"), "Attachment")
+                        .conn_tooltip(tooltip, &tokens)
+                        .when(is_err, |chip| {
+                            chip.cursor_pointer().on_click(cx.listener(
+                                move |composer, _, _, cx| {
+                                    composer.retry_attachment(local_id, cx);
+                                },
+                            ))
+                        })
                         .flex()
                         .flex_row()
                         .items_center()
@@ -3000,7 +3279,7 @@ impl Render for Composer {
                         } else {
                             hsla(tokens.shell_inner_border)
                         })
-                        .child(crate::file_icons::icon_img(file_icon.asset, 14.0))
+                        .child(leading)
                         .child(
                             div()
                                 .flex_1()

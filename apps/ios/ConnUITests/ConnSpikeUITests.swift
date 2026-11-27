@@ -2,6 +2,52 @@ import UIKit
 import XCTest
 
 @MainActor
+extension XCUIApplication {
+    func visiblePickerElement(where matches: (any XCUIElementSnapshot) -> Bool) -> (any XCUIElementSnapshot)? {
+        guard let root = try? snapshot() else { return nil }
+        func find(_ node: any XCUIElementSnapshot) -> (any XCUIElementSnapshot)? {
+            if matches(node), !node.frame.isEmpty, root.frame.contains(CGPoint(x: node.frame.midX, y: node.frame.midY)) {
+                return node
+            }
+            for child in node.children {
+                if let found = find(child) { return found }
+            }
+            return nil
+        }
+        return find(root)
+    }
+
+    func tapPickerElement(_ element: any XCUIElementSnapshot) {
+        coordinate(withNormalizedOffset: .zero)
+            .withOffset(CGVector(dx: element.frame.midX - frame.minX, dy: element.frame.midY - frame.minY)).tap()
+    }
+
+    func selectSeededPhoto() throws {
+        var thumbnail: (any XCUIElementSnapshot)?
+        let grid = NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                thumbnail = self.visiblePickerElement {
+                    ($0.elementType == .image && $0.label.hasPrefix("Photo,")) || $0.elementType == .cell
+                }
+                return thumbnail != nil
+            }
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: grid, object: nil)], timeout: 15), .completed)
+        tapPickerElement(try XCTUnwrap(thumbnail))
+
+        var confirm: (any XCUIElementSnapshot)?
+        let selected = NSPredicate { _, _ in
+            MainActor.assumeIsolated {
+                confirm = self.visiblePickerElement { $0.elementType == .button && ["Done", "Add"].contains($0.label) && $0.isEnabled }
+                return confirm != nil || self.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Remove '")).firstMatch.exists
+            }
+        }
+        XCTAssertEqual(XCTWaiter.wait(for: [XCTNSPredicateExpectation(predicate: selected, object: nil)], timeout: 15), .completed)
+        if let confirm { tapPickerElement(confirm) }
+    }
+}
+
+@MainActor
 final class ConnSpikeUITests: XCTestCase {
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -50,7 +96,7 @@ final class ConnSpikeUITests: XCTestCase {
             searchButton.tap()
             RunLoop.current.run(until: Date().addingTimeInterval(0.5))
             saveScreenshot(named: "search\(themeSuffix)", dir: screensDir)
-            let cancelSearch = app.buttons["workspace.cancelSearchButton"].firstMatch
+            let cancelSearch = app.buttons["workspace.cancelSearch"].firstMatch
             if cancelSearch.waitForExistence(timeout: 5) {
                 cancelSearch.tap()
                 RunLoop.current.run(until: Date().addingTimeInterval(0.4))
@@ -295,6 +341,40 @@ final class ConnSpikeUITests: XCTestCase {
         }
     }
 
+    func testDelegatedResultDisclosure() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let pairing = env["CONN_DELEGATE_PAIRING"] else { throw XCTSkip("Requires a delegated completion fixture") }
+        let app = XCUIApplication()
+        let theme = env["CONN_APPEARANCE"] ?? "light"
+        app.launchEnvironment["CONN_TEST_APPEARANCE"] = theme
+        app.launchArguments = ["--reset-session", "--manual-pairing", "-AppleLocale", "en_GB"]
+        app.launch()
+        let field = app.textFields["pairing.urlField"]
+        XCTAssertTrue(field.waitForExistence(timeout: 15))
+        field.tap()
+        field.typeText(pairing)
+        app.buttons["pairing.connectButton"].tap()
+        let thread = app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "Conn iOS WireGuard Launch Experience")).firstMatch
+        XCTAssertTrue(thread.waitForExistence(timeout: 20))
+        thread.tap()
+        let reply = app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Build 5 is already merged")).firstMatch
+        XCTAssertTrue(reply.wait(for: \.isHittable, toEqual: true, timeout: 15))
+        XCTAssertFalse(app.keyboards.firstMatch.exists)
+        func capture(_ name: String) {
+            let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            shot.name = theme + "-" + name
+            shot.lifetime = .keepAlways
+            add(shot)
+        }
+        capture("thread")
+        let disclosure = app.buttons.matching(NSPredicate(format: "label CONTAINS %@", "Use native Liquid Glass")).firstMatch
+        XCTAssertTrue(disclosure.exists)
+        disclosure.tap()
+        let screenshots = app.staticTexts["Screenshots"].firstMatch
+        XCTAssertTrue(screenshots.waitForExistence(timeout: 10))
+        capture("expanded")
+    }
+
     func testFeedVisualStates() throws {
         let env = ProcessInfo.processInfo.environment
         guard let pairing = env["CONN_FEED_PAIRING"] else { throw XCTSkip("Requires the feed fixture") }
@@ -417,6 +497,67 @@ final class ConnSpikeUITests: XCTestCase {
         excerpt.tap()
         assertAtLatest()
         capture("excerpt")
+    }
+
+    func testWorkspaceSystemTabs() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let pairing = env["CONN_PAIRING_URL"], !pairing.isEmpty else {
+            throw XCTSkip("Set CONN_PAIRING_URL to run against an isolated, seeded Conn server")
+        }
+        let threadTitle = env["CONN_THREAD_TITLE"] ?? "Inspect main.rs and greeting"
+        let app = XCUIApplication()
+        app.launchEnvironment["CONN_TEST_TASK_GATEWAY"] = env["CONN_TEST_TASK_GATEWAY"]
+        app.launchArguments = ["--reset-session", "--manual-pairing"]
+        app.launch()
+        let url = app.textFields["pairing.urlField"]
+        XCTAssertTrue(url.waitForExistence(timeout: 10))
+        url.tap()
+        url.typeText(pairing)
+        app.buttons["pairing.connectButton"].tap()
+
+        let bar = app.tabBars.firstMatch
+        XCTAssertTrue(bar.waitForExistence(timeout: 25))
+        let threads = bar.buttons["workspace.tab.threads"]
+        let tasks = bar.buttons["workspace.tab.tasks"]
+        let pullRequests = bar.buttons["workspace.tab.pullRequests"]
+        let search = bar.buttons["workspace.searchButton"]
+        XCTAssertTrue(threads.isSelected)
+        XCTAssertTrue(tasks.isHittable && pullRequests.isHittable && search.isHittable)
+        let center = CGVector(dx: 0.5, dy: 0.5)
+        threads.coordinate(withNormalizedOffset: center).press(forDuration: 0.35,
+            thenDragTo: tasks.coordinate(withNormalizedOffset: center), withVelocity: .slow, thenHoldForDuration: 0.2)
+        XCTAssertTrue(tasks.wait(for: \.isSelected, toEqual: true, timeout: 5))
+        XCTAssertTrue(app.buttons["tasks.laneMenu"].exists)
+
+        pullRequests.tap()
+        XCTAssertTrue(pullRequests.isSelected)
+        search.tap()
+        let field = app.textFields["workspace.searchField"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.placeholderValue, "Search pull requests")
+        let cancel = app.buttons["workspace.cancelSearch"]
+        cancel.tap()
+        XCTAssertTrue(pullRequests.wait(for: \.isSelected, toEqual: true, timeout: 5))
+
+        threads.tap()
+        search.tap()
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.placeholderValue, "Search threads")
+        field.tap()
+        field.typeText(threadTitle)
+        let row = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'inbox.thread.' AND label CONTAINS[c] %@", threadTitle)).firstMatch
+        XCTAssertTrue(row.waitForExistence(timeout: 15))
+        row.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["thread.composer"].waitForExistence(timeout: 10))
+        XCTAssertFalse(bar.exists || field.exists || cancel.exists)
+        XCTAssertFalse(app.buttons["workspace.settingsButton"].exists || app.buttons["inbox.newThreadButton"].exists)
+        app.navigationBars.buttons["Back"].tap()
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, threadTitle)
+        XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5), "Back should restore results without reopening the keyboard")
+        XCTAssertTrue(cancel.isHittable, "Cancel must be reachable after returning from a result")
+        cancel.tap()
+        XCTAssertTrue(threads.wait(for: \.isSelected, toEqual: true, timeout: 5))
     }
 
     func testWorkspaceRecords() async throws {
@@ -595,10 +736,10 @@ final class ConnSpikeUITests: XCTestCase {
         XCTAssertTrue(pr.waitForExistence(timeout: 40), "The test server should list at least one open pull request")
         app.buttons["Filter pull requests"].tap()
         capture("pull-requests-populated-filter")
-        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Draft (")).firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Draft ·")).firstMatch.tap()
         capture("filtered-prs")
         app.buttons["Filter pull requests"].tap()
-        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "All (")).firstMatch.tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "All ·")).firstMatch.tap()
         if fixture != nil { XCTAssertTrue(pr.label.contains("25d")) }
         capture("pull-requests")
         pr.tap()
@@ -723,7 +864,14 @@ final class ConnSpikeUITests: XCTestCase {
         app.buttons["pairing.connectButton"].tap()
         let row = app.buttons["inbox.thread.thread-parity-pinned"]
         XCTAssertTrue(row.waitForExistence(timeout: 15))
-        XCTAssertTrue(app.buttons["Retry discovery"].waitForExistence(timeout: 12))
+        XCTAssertFalse(app.buttons["Retry discovery"].exists)
+        app.buttons["workspace.settingsButton"].tap()
+        app.buttons.containing(.staticText, identifier: "Environments").firstMatch.tap()
+        let retry = app.buttons["Retry discovery"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 12))
+        retry.tap()
+        app.navigationBars.buttons["Settings"].tap()
+        app.buttons["settings.closeButton"].tap()
         XCTAssertFalse(app.alerts["Couldn’t reach the Orbit server"].exists)
         row.tap()
         let reply = app.staticTexts.containing(NSPredicate(format: "label CONTAINS[c] %@", "Seeded parity response")).firstMatch
@@ -1188,7 +1336,7 @@ final class ConnSpikeUITests: XCTestCase {
                 settle(1.5)
                 if let tip = first(app, ["Continue"], timeout: 2) { tip.tap() }
                 capture("prs-search")
-                if !tap(app, ["workspace.cancelSearchButton", "Cancel", "Close"]) { app.swipeDown() }
+                if !tap(app, ["workspace.cancelSearch", "Cancel", "Close"]) { app.swipeDown() }
                 settle(1.5)
             }
         }
@@ -1197,7 +1345,7 @@ final class ConnSpikeUITests: XCTestCase {
             settle(1.5)
             if let tip = first(app, ["Continue"], timeout: 2) { tip.tap() }
             capture("search")
-            if !tap(app, ["workspace.cancelSearchButton", "Cancel", "Close"]) { app.swipeDown() }
+            if !tap(app, ["workspace.cancelSearch", "Cancel", "Close"]) { app.swipeDown() }
             settle(1.5)
         }
         if barTap(["workspace.settingsButton", "Open settings"], swiftX: 0.115) {
@@ -1285,6 +1433,92 @@ final class ConnSpikeUITests: XCTestCase {
     }
 
     /// Writes the running app's accessibility tree to `CONN_DUMP_PATH` (layout debugging).
+    /// The workspace bar is one row: settings circle, tab pill, new-thread circle, level and not overlapping.
+    func testWorkspaceBarRowLayout() throws {
+        guard let pairing = ProcessInfo.processInfo.environment["CONN_PAIRING_URL"], !pairing.isEmpty else {
+            throw XCTSkip("Set CONN_PAIRING_URL to run against an isolated, seeded Conn server")
+        }
+        continueAfterFailure = true
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-session", "--manual-pairing"]
+        app.launch()
+        let url = app.textFields["pairing.urlField"]
+        XCTAssertTrue(url.waitForExistence(timeout: 10))
+        url.tap()
+        url.typeText(pairing)
+        app.buttons["pairing.connectButton"].tap()
+
+        let bar = app.tabBars.firstMatch
+        XCTAssertTrue(bar.waitForExistence(timeout: 25))
+        let settings = app.buttons["workspace.settingsButton"]
+        let newThread = app.buttons["inbox.newThreadButton"]
+        let tabs = ["threads", "tasks", "pullRequests"].map { bar.buttons["workspace.tab.\($0)"] }
+        let search = bar.buttons["workspace.searchButton"]
+        XCTAssertTrue(settings.waitForExistence(timeout: 5) && newThread.exists)
+
+        func capture(_ name: String) {
+            let shot = XCTAttachment(screenshot: XCUIScreen.main.screenshot())
+            shot.name = name
+            shot.lifetime = .keepAlways
+            add(shot)
+        }
+
+        func checkRow(_ name: String) {
+            // The tab bar element is the system's full-width container. The visible pill is the four
+            // tab items plus the pill's 4pt inner inset.
+            let items = (tabs + [search]).map(\.frame)
+            let b = items.dropFirst().reduce(items[0]) { $0.union($1) }.insetBy(dx: -4, dy: -4)
+            let s = settings.frame, n = newThread.frame
+            let named = [("settings", s), ("pill", b), ("new", n)] + (tabs + [search]).map { ($0.identifier, $0.frame) }
+            let report = named
+                .map { "\($0.0): x \($0.1.minX)–\($0.1.maxX) y \($0.1.minY)–\($0.1.maxY) h \($0.1.height)" }
+                .joined(separator: "\n")
+            let note = XCTAttachment(string: report)
+            note.name = name + "-frames"
+            note.lifetime = .keepAlways
+            add(note)
+            XCTAssertEqual(s.minY, b.minY, accuracy: 1, name + " settings minY\n" + report)
+            XCTAssertEqual(s.maxY, b.maxY, accuracy: 1, name + " settings maxY\n" + report)
+            XCTAssertEqual(n.minY, b.minY, accuracy: 1, name + " new minY\n" + report)
+            XCTAssertEqual(n.maxY, b.maxY, accuracy: 1, name + " new maxY\n" + report)
+            XCTAssertEqual(s.height, b.height, accuracy: 1, name + " height\n" + report)
+            XCTAssertEqual(n.height, b.height, accuracy: 1, name + " height\n" + report)
+            XCTAssertLessThanOrEqual(s.maxX, b.minX, name + " settings overlaps bar\n" + report)
+            XCTAssertLessThanOrEqual(b.maxX, n.minX, name + " new overlaps bar\n" + report)
+            for tab in tabs + [search] {
+                XCTAssertTrue(tab.isHittable, name + " " + tab.identifier + " is not hittable")
+                XCTAssertTrue(b.contains(tab.frame), name + " " + tab.identifier + " is outside the bar")
+            }
+            XCTAssertTrue(settings.isHittable && newThread.isHittable, name + " circles are not hittable")
+        }
+
+        for appearance in ["light", "dark"] {
+            XCUIDevice.shared.appearance = appearance == "dark" ? .dark : .light
+            for (name, tab) in zip(["threads", "tasks", "pullRequests"], tabs) {
+                tab.tap()
+                XCTAssertTrue(tab.wait(for: \.isSelected, toEqual: true, timeout: 5))
+                RunLoop.current.run(until: Date().addingTimeInterval(1))
+                checkRow(appearance + "-" + name)
+                capture(appearance + "-inbox-tab-" + name)
+            }
+            search.tap()
+            XCTAssertTrue(app.textFields["workspace.searchField"].waitForExistence(timeout: 5))
+            RunLoop.current.run(until: Date().addingTimeInterval(1))
+            capture(appearance + "-inbox-tab-search")
+            app.buttons["workspace.cancelSearch"].tap()
+            XCTAssertTrue(tabs[2].wait(for: \.isSelected, toEqual: true, timeout: 5))
+            tabs[0].tap()
+        }
+
+        // Both circles still act.
+        newThread.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["thread.composer"].waitForExistence(timeout: 10)
+            || app.navigationBars.buttons["Back"].waitForExistence(timeout: 10))
+        app.navigationBars.buttons["Back"].tap()
+        settings.tap()
+        XCTAssertTrue(app.navigationBars.firstMatch.waitForExistence(timeout: 10))
+    }
+
     func testDumpHierarchy() throws {
         guard let path = ProcessInfo.processInfo.environment["CONN_DUMP_PATH"] else {
             throw XCTSkip("Set CONN_DUMP_PATH")
@@ -1293,6 +1527,300 @@ final class ConnSpikeUITests: XCTestCase {
         app.activate()
         RunLoop.current.run(until: Date().addingTimeInterval(2))
         try app.debugDescription.write(toFile: path, atomically: true, encoding: .utf8)
+    }
+
+    func testSavedSleepingMachineInventory() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let fixture = env["CONN_INVENTORY_FIXTURE"].flatMap(URL.init(string:)),
+              let pairing = env["CONN_PAIRING_URL"] else {
+            throw XCTSkip("Run thread-inventory-fixture.mjs with the simulator UDID and sleeping")
+        }
+        func step(_ name: String) async throws -> String {
+            let (data, response) = try await URLSession.shared.data(from: fixture.appending(path: name))
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+            return String(decoding: data, as: UTF8.self)
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-session", "--manual-pairing"]
+        app.launchEnvironment["CONN_TEST_TASK_GATEWAY"] = fixture.absoluteString
+        app.launch()
+        let field = app.textFields["pairing.urlField"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.tap()
+        field.typeText(pairing)
+        app.buttons["pairing.connectButton"].tap()
+        XCTAssertTrue(app.buttons["inbox.thread.witness-running"].waitForExistence(timeout: 15))
+        app.open(try XCTUnwrap(URL(string: "conn://thread/linked/old-linked")))
+        let back = app.buttons["Back"]
+        let message = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Saved linked message")).firstMatch
+        XCTAssertTrue(message.waitForExistence(timeout: 15))
+        XCTAssertTrue(back.waitForExistence(timeout: 15))
+        back.tap()
+        let row = app.buttons["inbox.thread.old-linked"]
+        XCTAssertTrue(row.waitForExistence(timeout: 15))
+        _ = try await step("saved")
+        app.terminate()
+        _ = try await step("sleep")
+        app.launchArguments = []
+        app.launch()
+        XCTAssertTrue(row.waitForExistence(timeout: 15), "Cold launch must restore the linked inventory")
+        _ = try await step("discover-sleeping")
+        XCTAssertTrue(app.buttons["inbox.thread.witness-stopped"].waitForExistence(timeout: 15))
+        XCTAssertTrue(row.exists, "Successful discovery must retain the sleeping machine")
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        XCTAssertTrue(row.waitForExistence(timeout: 10))
+        row.tap()
+        XCTAssertTrue(message.waitForExistence(timeout: 10), "The sleeping machine must read its cached message")
+        back.tap()
+        XCTAssertTrue(row.waitForExistence(timeout: 10), "Closing a cached thread must preserve its inbox row")
+
+        _ = try await step("wake-machine")
+        XCTAssertTrue(app.staticTexts["Linked machine resumed 1"].waitForExistence(timeout: 15))
+        _ = try await step("sleep-live")
+        _ = try await step("driver-stopped")
+        XCTAssertTrue(row.exists, "Discovery must stop the running driver and retain its rows")
+        XCUIDevice.shared.press(.home)
+        app.activate()
+        row.tap()
+        XCTAssertTrue(message.waitForExistence(timeout: 10))
+        back.tap()
+        let attempts = try await step("sleeping-connection-attempts")
+        XCTAssertEqual(attempts, "0")
+        _ = try await step("wake-machine")
+        XCTAssertTrue(app.staticTexts["Linked machine resumed 2"].waitForExistence(timeout: 15))
+        let witness = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'inbox.thread.witness-'"))
+        XCTAssertEqual(witness.count, 1)
+        let savedWitness = witness.firstMatch.identifier
+        _ = try await step("remove-machine")
+        app.buttons["workspace.settingsButton"].tap()
+        app.buttons.containing(.staticText, identifier: "Environments").firstMatch.tap()
+        XCTAssertTrue(app.buttons["Retry discovery"].waitForExistence(timeout: 15), "The witness descriptor is unreachable")
+        app.navigationBars.buttons["Settings"].tap()
+        app.buttons["settings.closeButton"].tap()
+        XCTAssertFalse(row.exists, "An unrelated unresolved endpoint must not retain a removed machine")
+        XCTAssertTrue(app.buttons[savedWitness].exists, "Keep the cached witness while its endpoint is unresolved")
+        XCTAssertEqual(witness.count, 1)
+    }
+
+    func testChildArtifactFollowUpProject() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let fixture = env["CONN_INVENTORY_FIXTURE"].flatMap(URL.init(string:)),
+              let pairing = env["CONN_PAIRING_URL"] else {
+            throw XCTSkip("Run thread-inventory-fixture.mjs with the simulator UDID and child-project")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-session", "--manual-pairing"]
+        app.launchEnvironment["CONN_TEST_TASK_GATEWAY"] = "http://127.0.0.1:1"
+        app.launch()
+        let field = app.textFields["pairing.urlField"]
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        field.tap()
+        field.typeText(pairing)
+        app.buttons["pairing.connectButton"].tap()
+        let parent = app.buttons["inbox.thread.parent"]
+        XCTAssertTrue(parent.waitForExistence(timeout: 15))
+        XCTAssertFalse(app.buttons["inbox.thread.child"].exists)
+        XCTAssertFalse(app.buttons["inbox.settledThread.child"].exists)
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'inbox.thread.'")).count, 1)
+        let searchQueries = env["CONN_ARCHIVED_CHILD"] == "1" ? [] : ["Artifact child", "child-only-branch"]
+        for query in searchQueries {
+            app.tabBars.firstMatch.buttons["Search"].tap()
+            let search = app.textFields.matching(NSPredicate(format: "placeholderValue == %@", "Search threads")).firstMatch
+            XCTAssertTrue(search.waitForExistence(timeout: 5))
+            search.tap()
+            search.typeText(query)
+            XCTAssertTrue(app.buttons["inbox.thread.child"].waitForExistence(timeout: 5), query)
+            XCTAssertFalse(parent.exists)
+            app.buttons["workspace.cancelSearch"].tap()
+            XCTAssertTrue(parent.waitForExistence(timeout: 5))
+            XCTAssertFalse(app.buttons["inbox.thread.child"].exists)
+        }
+        parent.tap()
+        let child = app.buttons["Open Artifact child"]
+        XCTAssertTrue(child.waitForExistence(timeout: 10))
+        child.tap()
+        let template = app.buttons["Start a draft with Report"]
+        XCTAssertTrue(template.waitForExistence(timeout: 10))
+        template.tap()
+        let project = app.buttons["newThread.projectPickerButton"]
+        XCTAssertTrue(project.waitForExistence(timeout: 10))
+        XCTAssertEqual(project.label, "Child workspace")
+        app.buttons["Send"].tap()
+        let (projectID, response) = try await URLSession.shared.data(from: fixture.appending(path: "follow-up-project"))
+        XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        XCTAssertEqual(String(decoding: projectID, as: UTF8.self), "child-project")
+    }
+
+    func testAtomicThreadInventory() async throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let fixture = env["CONN_INVENTORY_FIXTURE"].flatMap(URL.init(string:)),
+              let primary = env["CONN_PAIRING_URL"], let linked = env["CONN_LINKED_PAIRING_URL"] else {
+            throw XCTSkip("Run apps/ios/scripts/thread-inventory-fixture.mjs with a simulator UDID")
+        }
+        let app = XCUIApplication()
+        func tap(_ element: XCUIElement) {
+            XCTAssertTrue(element.waitForExistence(timeout: 15))
+            element.tap()
+        }
+        func step(_ name: String) async throws {
+            let (_, response) = try await URLSession.shared.data(from: fixture.appending(path: name))
+            XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
+        }
+        var firstRowY: CGFloat?
+        func expectRows(_ active: [String], _ settled: [String] = [], count: Int? = nil, phase: String) {
+            let header = app.staticTexts["inbox.threadCount"]
+            XCTAssertEqual(header.label, "\(count ?? (active.count + settled.count)) threads", phase)
+            XCTAssertFalse(app.buttons["Retry"].exists)
+            XCTAssertFalse(app.buttons["Retry discovery"].exists)
+            XCTAssertFalse(app.staticTexts.matching(NSPredicate(format:
+                "label BEGINSWITH 'Loading ' OR label BEGINSWITH 'Environment discovery:' OR label CONTAINS 'Not connected'")).firstMatch.exists)
+            let query = app.buttons.matching(NSPredicate(
+                format: "identifier BEGINSWITH 'inbox.thread.' OR identifier BEGINSWITH 'inbox.settledThread.'"
+            ))
+            let expected = active.map { "inbox.thread." + $0 } + settled.map { "inbox.settledThread." + $0 }
+            let actual = query.allElementsBoundByIndex.map(\.identifier)
+            XCTAssertEqual(actual, expected, phase)
+            let y = query.firstMatch.frame.minY
+            if let firstRowY { XCTAssertEqual(y, firstRowY, accuracy: 1, phase) }
+            else { firstRowY = y }
+            print("\(phase) → \(actual), header \(header.label), first row y=\(y)")
+            let shot = XCTAttachment(screenshot: app.screenshot())
+            shot.name = phase
+            shot.lifetime = .keepAlways
+            add(shot)
+        }
+
+        app.launchArguments = ["--reset-session", "--manual-pairing"]
+        app.launchEnvironment["CONN_TEST_TASK_GATEWAY"] = "http://127.0.0.1:1"
+        app.launch()
+        let field = app.textFields["pairing.urlField"]
+        tap(field)
+        field.typeText(primary)
+        tap(app.buttons["pairing.connectButton"])
+        tap(app.buttons["workspace.settingsButton"])
+        tap(app.buttons.containing(.staticText, identifier: "Environments").firstMatch)
+        tap(app.buttons["Link environment"])
+        let linkedField = app.alerts.textFields.firstMatch
+        tap(linkedField)
+        linkedField.typeText(linked)
+        tap(app.alerts.buttons["Connect"])
+        tap(app.navigationBars.buttons["Settings"])
+        tap(app.buttons["settings.closeButton"])
+        XCTAssertTrue(app.buttons["inbox.thread.old-linked"].waitForExistence(timeout: 15))
+        expectRows(["old-linked", "old-primary"], phase: "Initial complete inventories")
+        try await step("saved")
+
+        app.terminate()
+        try await step("hold")
+        app.launchArguments = []
+        app.launch()
+        XCTAssertTrue(app.buttons["inbox.thread.old-linked"].waitForExistence(timeout: 15))
+        expectRows(["old-linked", "old-primary"], phase: "Cached inventory on cold launch")
+        try await step("staged")
+        expectRows(["old-linked", "old-primary"], phase: "Both refreshes held")
+        try await step("primary")
+        XCTAssertTrue(app.buttons["inbox.thread.p"].waitForExistence(timeout: 10))
+        expectRows(["p", "b", "old-linked", "d"], count: 5, phase: "Only primary committed")
+        try await step("interrupt")
+        expectRows(["p", "b", "old-linked", "d"], count: 5, phase: "Linked refresh interrupted and replay held")
+        try await step("linked")
+        XCTAssertTrue(app.buttons["inbox.thread.q"].waitForExistence(timeout: 10))
+        tap(app.buttons["inbox.settledHeader"])
+        let active = ["p", "q", "a", "b", "c", "d"]
+        expectRows(active, ["s", "t"], phase: "Both inventories committed")
+        tap(app.buttons["Filter threads"])
+        tap(app.buttons["inbox.environment.linked"])
+        XCTAssertTrue(app.staticTexts["Shadow b"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.buttons["inbox.thread.p"].exists)
+        tap(app.buttons["Filter threads"])
+        tap(app.buttons["All environments"])
+        XCTAssertTrue(app.staticTexts["Primary b"].waitForExistence(timeout: 5))
+        try await step("backfill")
+        expectRows(active, ["s", "t"], phase: "Message backfill persisted")
+        for phase in ["approval", "complete"] {
+            try await step(phase)
+            XCTAssertTrue(app.staticTexts["Primary b " + phase].waitForExistence(timeout: 10))
+            expectRows(active, ["s", "t"], phase: phase)
+        }
+        try await step("settle")
+        XCTAssertTrue(app.buttons["inbox.settledThread.a"].waitForExistence(timeout: 10))
+        expectRows(["p", "q", "b", "c", "d"], ["a", "s", "t"], phase: "Explicit settle")
+        try await step("unsettle")
+        XCTAssertTrue(app.buttons["inbox.thread.s"].waitForExistence(timeout: 10))
+        expectRows(["p", "q", "s", "b", "c", "d"], ["a", "t"], phase: "Explicit un-settle")
+        try await step("start-pages")
+        let loadOlder = app.buttons["Load older threads"]
+        XCTAssertTrue(app.buttons["inbox.settledThread.a"].waitForNonExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["inbox.thread.q"].waitForNonExistence(timeout: 10))
+        XCTAssertEqual(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Load older threads'")).count, 1)
+        XCTAssertEqual(loadOlder.label, "Load older threads")
+        try await step("interrupt-paging")
+        loadOlder.doubleTap()
+        XCTAssertFalse(loadOlder.isEnabled)
+        try await step("linked-page")
+        XCTAssertTrue(app.buttons["inbox.settledThread.page-09"].waitForExistence(timeout: 10))
+        expectRows(["b"], ["page-11", "page-09"], phase: "Linked page while primary replay waits")
+        XCTAssertFalse(loadOlder.isEnabled)
+        try await step("resume-paging")
+        try await step("primary-page")
+        XCTAssertTrue(app.buttons["inbox.settledThread.page-08"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.buttons["inbox.settledThread.page-11"].waitForExistence(timeout: 10))
+        expectRows(["b"], ["page-11", "page-10", "page-09", "page-08"], phase: "Merged older pages")
+        XCTAssertFalse(loadOlder.exists)
+        tap(app.buttons["inbox.thread.b"])
+        XCTAssertTrue(app.buttons["thread.moreButton"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Primary b complete"].exists)
+    }
+
+    func testGeneralDraftDoesNotCrossPrimarySignOut() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard let first = env["CONN_PAIRING_URL"], let second = env["CONN_SECOND_PAIRING_URL"] else {
+            throw XCTSkip("Requires two disposable servers and a single seeded synthetic photo.")
+        }
+        let app = XCUIApplication()
+        app.launchArguments = ["--reset-session", "--manual-pairing"]
+        app.launch()
+        func tap(_ element: XCUIElement) {
+            XCTAssertTrue(element.wait(for: \.isHittable, toEqual: true, timeout: 15))
+            element.tap()
+        }
+        let add = app.buttons["inbox.newThreadButton"]
+        func pair(_ url: String) {
+            let field = app.textFields["pairing.urlField"]
+            tap(field)
+            field.typeText(url)
+            tap(app.buttons["pairing.connectButton"])
+            tap(add)
+        }
+        pair(first)
+        let field = app.textViews.firstMatch.exists ? app.textViews.firstMatch : app.textFields.firstMatch
+        let privateText = "First environment draft"
+        tap(field)
+        field.typeText(privateText)
+        tap(app.buttons["Add attachment"].firstMatch)
+        tap(app.buttons["Photos"].firstMatch)
+        try app.selectSeededPhoto()
+        let chip = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'Remove '")).firstMatch
+        XCTAssertTrue(chip.waitForExistence(timeout: 15))
+        let filename = String(chip.label.dropFirst("Remove ".count))
+        XCTAssertFalse(filename.isEmpty)
+        let back = app.navigationBars.buttons.firstMatch
+        tap(back)
+        tap(add)
+        XCTAssertEqual(field.value as? String, privateText)
+        XCTAssertEqual(chip.label, "Remove " + filename)
+        tap(back)
+        tap(app.buttons["workspace.settingsButton"])
+        tap(app.buttons.containing(.staticText, identifier: "Environments").firstMatch)
+        tap(app.buttons["Disconnect"].firstMatch)
+        pair(second)
+        XCTAssertTrue(field.waitForExistence(timeout: 10))
+        XCTAssertTrue([nil, "", "Ask anything"].contains(field.value as? String))
+        XCTAssertFalse(chip.exists)
+        let send = app.buttons["Send"].firstMatch
+        XCTAssertTrue(send.waitForExistence(timeout: 10))
+        XCTAssertFalse(send.isEnabled)
     }
 
     func testOfflineLinkedChildKeepsItsPromptAcrossReconnect() async throws {
@@ -1333,18 +1861,16 @@ final class ConnSpikeUITests: XCTestCase {
         tap(pairField)
         pairField.typeText(linkedURL)
         tap(app.alerts.buttons["Connect"])
+        let descriptor = try XCTUnwrap(URL(string: "/.well-known/t3/environment", relativeTo: URL(string: linkedURL)))
+        let (info, _) = try await URLSession.shared.data(from: descriptor)
+        let identity = try XCTUnwrap((try JSONSerialization.jsonObject(with: info) as? [String: Any])?["environmentId"] as? String)
         try await transition("offline")
         app.terminate()
         app.launch()
 
         XCTAssertTrue(app.staticTexts["Pinned parity reference thread"].firstMatch.waitForExistence(timeout: 15))
         capture("01-offline-inbox")
-        tap(app.buttons["workspace.searchButton"])
-        let search = app.textFields["workspace.searchField"]
-        tap(search)
-        search.typeText("Linked child")
-        let child = app.buttons.containing(NSPredicate(format: "label CONTAINS %@", "Linked child")).firstMatch
-        tap(child)
+        app.open(try XCTUnwrap(URL(string: "conn://thread/\(identity)/thread-parity-sub-1")))
         XCTAssertTrue(app.staticTexts["Only the linked environment has this reply"].firstMatch.waitForExistence(timeout: 15))
         capture("02-offline-linked-child")
         tap(app.buttons["thread.moreButton"])

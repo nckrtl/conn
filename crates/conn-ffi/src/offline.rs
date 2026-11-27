@@ -1,6 +1,6 @@
 //! Offline reading keeps message bodies separate from authoritative live state.
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     sync::{Arc, RwLock},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -34,12 +34,225 @@ pub struct OfflineReader {
     dir: PathBuf,
     expires: RwLock<HashMap<String, u64>>,
     fetch_slots: tokio::sync::Semaphore,
+    image_slots: tokio::sync::Semaphore,
+    warm_slot: tokio::sync::Semaphore,
+    image_flights: std::sync::Mutex<HashMap<(String, String, bool), std::sync::Weak<ImageFlight>>>,
     connection: Option<Connection>,
+    picks: std::sync::Mutex<VecDeque<PickedImage>>,
+}
+
+type ImageFlight = tokio::sync::OnceCell<Result<Vec<u8>, FfiError>>;
+
+#[derive(Debug)]
+struct PickedImage {
+    thread: String,
+    item: String,
+    index: usize,
+    pending: crate::FfiAttachment,
+    claimed: Option<String>,
 }
 
 fn read_error(e: impl std::fmt::Display) -> FfiError {
     FfiError::Connection {
         message: e.to_string(),
+    }
+}
+
+fn image_version(file: &crate::FfiAttachment) -> Result<String, FfiError> {
+    serde_json::to_string(&(&file.id, &file.name, &file.mime_type, file.size_bytes))
+        .map_err(read_error)
+}
+
+impl OfflineReader {
+    pub(crate) async fn seed_pick(
+        &self,
+        thread: &str,
+        item: &str,
+        index: usize,
+        file: crate::FfiAttachment,
+        bytes: &[u8],
+    ) -> Result<(), FfiError> {
+        if !file.is_image || file.size_bytes != bytes.len() as i64 || !self.may_read(thread) {
+            return Ok(());
+        }
+        self.store_image(thread, &image_version(&file)?, bytes)
+            .await?;
+        let mut picks = self.picks.lock().map_err(read_error)?;
+        picks.retain(|pick| pick.thread != thread || pick.item != item || pick.index != index);
+        if picks.len() >= 128 {
+            picks.pop_front();
+        }
+        picks.push_back(PickedImage {
+            thread: thread.into(),
+            item: item.into(),
+            index,
+            pending: file,
+            claimed: None,
+        });
+        Ok(())
+    }
+
+    fn bind_picks(&self, state: &ThreadState) {
+        let Ok(mut picks) = self.picks.lock() else {
+            return;
+        };
+        for pick in picks
+            .iter_mut()
+            .filter(|pick| pick.thread == state.thread_id && pick.claimed.is_none())
+        {
+            let Some(files) = state.entries.iter().rev().find_map(|entry| match entry {
+                conn_state::TimelineEntry::User {
+                    id, attachments, ..
+                } if id == &pick.item => Some(attachments),
+                conn_state::TimelineEntry::QueuedUser {
+                    id,
+                    message_id,
+                    attachments,
+                    ..
+                } if id == &pick.item
+                    || pick.item.strip_prefix("turn-item:") == Some(message_id.as_str()) =>
+                {
+                    Some(attachments)
+                }
+                _ => None,
+            }) else {
+                continue;
+            };
+            if let Some(conn_contract::ChatAttachment::Image(file)) = files.get(pick.index)
+                && !file.id.starts_with("pending-")
+                && file.name == pick.pending.name
+                && file.mime_type == pick.pending.mime_type
+                && file.size_bytes == pick.pending.size_bytes
+            {
+                pick.claimed = Some(file.id.clone());
+            }
+        }
+    }
+
+    async fn acquire_image<F, Fut>(
+        &self,
+        thread: &str,
+        file: &crate::FfiAttachment,
+        online: bool,
+        fetch: F,
+    ) -> Result<Vec<u8>, FfiError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Result<Vec<u8>, FfiError>>,
+    {
+        if !file.is_image
+            || !(1..=10 * 1024 * 1024).contains(&file.size_bytes)
+            || self.db.is_closed()
+        {
+            return Err(FfiError::Closed);
+        }
+        let version = image_version(file)?;
+        let flight = {
+            let mut locks = self.image_flights.lock().map_err(read_error)?;
+            locks.retain(|_, weak| weak.strong_count() > 0);
+            let weak = locks
+                .entry((thread.to_owned(), version.clone(), online))
+                .or_default();
+            weak.upgrade().unwrap_or_else(|| {
+                let lock = Arc::new(ImageFlight::new());
+                *weak = Arc::downgrade(&lock);
+                lock
+            })
+        };
+        let _ = flight
+            .get_or_init(|| async {
+                if self.may_read(thread)
+                    && let Some(bytes) = self
+                        .db
+                        .image(&self.env, thread, &version)
+                        .await
+                        .map_err(read_error)?
+                    && bytes.len() == file.size_bytes as usize
+                    && self.may_read(thread)
+                {
+                    return Ok(bytes);
+                }
+                let _slot = self.image_slots.acquire().await.map_err(read_error)?;
+                if self.db.is_closed() {
+                    return Err(FfiError::Closed);
+                }
+                let pending = self
+                    .picks
+                    .lock()
+                    .map_err(read_error)?
+                    .iter()
+                    .find(|pick| {
+                        pick.thread == thread
+                            && pick.claimed.as_deref() == Some(file.id.as_str())
+                            && pick.pending.name == file.name
+                            && pick.pending.mime_type == file.mime_type
+                            && pick.pending.size_bytes == file.size_bytes
+                    })
+                    .map(|pick| image_version(&pick.pending))
+                    .transpose()?;
+                let local = if self.may_read(thread)
+                    && let Some(pending) = &pending
+                {
+                    self.db
+                        .image(&self.env, thread, pending)
+                        .await
+                        .map_err(read_error)?
+                } else {
+                    None
+                };
+                let (bytes, downloaded) = match local {
+                    Some(bytes)
+                        if bytes.len() == file.size_bytes as usize && self.may_read(thread) =>
+                    {
+                        (bytes, false)
+                    }
+                    _ if online => (fetch().await?, true),
+                    _ => return Err(FfiError::Closed),
+                };
+                if bytes.len() != file.size_bytes as usize || self.db.is_closed() {
+                    return Err(read_error("Incomplete or expired image"));
+                }
+                match self.store_image(thread, &version, &bytes).await {
+                    Ok(()) => {}
+                    Err(FfiError::Closed) if downloaded && !self.db.is_closed() => {
+                        return Ok(bytes);
+                    }
+                    Err(error) => return Err(error),
+                }
+                if pending.is_some() {
+                    self.picks.lock().map_err(read_error)?.retain(|pick| {
+                        pick.thread != thread || pick.claimed.as_deref() != Some(file.id.as_str())
+                    });
+                }
+                Ok(bytes)
+            })
+            .await;
+        if self.db.is_closed() {
+            return Err(FfiError::Closed);
+        }
+        match Arc::try_unwrap(flight) {
+            Ok(cell) => cell.into_inner(),
+            Err(cell) => cell.get().cloned(),
+        }
+        .ok_or(FfiError::Closed)?
+    }
+
+    async fn store_image(&self, thread: &str, version: &str, bytes: &[u8]) -> Result<(), FfiError> {
+        if !self.may_read(thread) {
+            return Err(FfiError::Closed);
+        }
+        self.db
+            .save_image(&self.env, thread, version, bytes)
+            .await
+            .map_err(read_error)?;
+        if !self.may_read(thread) {
+            self.db
+                .forget_image(&self.env, thread, version)
+                .await
+                .map_err(read_error)?;
+            return Err(FfiError::Closed);
+        }
+        Ok(())
     }
 }
 
@@ -103,7 +316,6 @@ impl OfflineReader {
         env: String,
         connection: Option<Connection>,
     ) -> Result<Arc<Self>, FfiError> {
-        std::fs::create_dir_all(&dir).map_err(read_error)?;
         let db = MessageCache::open(&dir.join("messages.sqlite3"))
             .await
             .map_err(read_error)?;
@@ -115,6 +327,10 @@ impl OfflineReader {
         Ok(Arc::new(Self {
             expires: RwLock::new(expires),
             fetch_slots: tokio::sync::Semaphore::new(2),
+            image_slots: tokio::sync::Semaphore::new(3),
+            warm_slot: tokio::sync::Semaphore::new(1),
+            image_flights: Default::default(),
+            picks: Default::default(),
             db,
             env,
             dir,
@@ -127,14 +343,16 @@ impl OfflineReader {
     }
 
     fn may_read(&self, thread: &str) -> bool {
-        self.expires
-            .read()
-            .is_ok_and(|map| map.get(thread).is_none_or(|at| *at > now_ms()))
+        !self.db.is_closed()
+            && self
+                .expires
+                .read()
+                .is_ok_and(|map| map.get(thread).is_none_or(|at| *at > now_ms()))
     }
 
     fn capture_shell(&self, state: &conn_state::ShellState) -> SavedShell {
         SavedShell {
-            snapshot: LinkedShellSnapshot::capture(&self.env, "", state),
+            snapshot: LinkedShellSnapshot::capture_inventory(&self.env, state),
             expires: self
                 .expires
                 .read()
@@ -162,35 +380,116 @@ impl OfflineReader {
             .map_err(read_error)
     }
 
+    async fn save_view(&self, thread: &str, snapshot: &FfiThreadSnapshot) -> Result<(), FfiError> {
+        if !self.may_read(thread) {
+            return Ok(());
+        }
+        let json = serde_json::to_string(snapshot).map_err(read_error)?;
+        self.db
+            .save_view(&self.env, thread, &json)
+            .await
+            .map_err(read_error)
+    }
+
+    /// The thread's last saved rendered state, marked not synchronized until the live
+    /// projection replaces it.
+    async fn saved_view(&self, thread: &str) -> Option<FfiThreadSnapshot> {
+        let json = self.db.view(&self.env, thread).await.ok()??;
+        let mut snapshot: FfiThreadSnapshot = serde_json::from_str(&json).ok()?;
+        (snapshot.thread_id == thread).then_some(())?;
+        snapshot.synchronized = false;
+        snapshot.server_page = false;
+        Some(snapshot)
+    }
+
     fn snapshot(&self, thread: &str, bodies: Vec<String>) -> Result<FfiThreadSnapshot, FfiError> {
         let mut state = ThreadState::new(thread);
         for body in bodies {
-            state.entries.push(
-                serde_json::from_str::<Message>(&body)
-                    .map_err(read_error)?
-                    .entry(),
-            );
+            let message = serde_json::from_str::<Message>(&body).map_err(read_error)?;
+            if let Some(results) = message.delegated_results() {
+                state.feed_details.insert(
+                    message.id().to_owned(),
+                    conn_state::thread_feed::FeedDetail::Delegated(results),
+                );
+            }
+            state.entries.push(message.entry());
         }
-        Ok(build_thread_snapshot(&state, None))
+        Ok(build_thread_snapshot(&state, None, &Default::default()))
     }
+}
+
+pub(crate) async fn read_saved_shell(
+    dir: &std::path::Path,
+    identity: &str,
+) -> Option<FfiShellSnapshot> {
+    let bytes = tokio::fs::read(dir.join("shell.json")).await.ok()?;
+    let saved = LinkedShellSnapshot::from_json(&bytes)?;
+    if saved.environment_id != identity {
+        return None;
+    }
+    let mut snapshot = build_shell_snapshot(&saved.into_shell());
+    snapshot.synchronized = false;
+    Some(snapshot)
 }
 
 #[uniffi::export(async_runtime = "tokio")]
 impl OfflineReader {
-    pub async fn saved_shell(&self) -> Option<FfiShellSnapshot> {
-        let bytes = tokio::fs::read(self.dir.join("shell.json")).await.ok()?;
-        let saved = LinkedShellSnapshot::from_json(&bytes)?;
-        if saved.environment_id != self.env {
-            return None;
-        }
-        let mut snapshot = build_shell_snapshot(&saved.into_shell());
-        snapshot.synchronized = false;
-        Some(snapshot)
+    pub fn retains_thread(&self, thread: String) -> bool {
+        self.may_read(&thread)
     }
 
+    pub async fn image_bytes(
+        self: Arc<Self>,
+        thread: String,
+        file: crate::FfiAttachment,
+        online: bool,
+    ) -> Result<Vec<u8>, FfiError> {
+        let reader = self.clone();
+        tokio::spawn(async move {
+            reader
+                .acquire_image(&thread, &file, online, || async {
+                    reader
+                        .online()?
+                        .fetch_attachment_bytes_limited(
+                            &file.id,
+                            conn_client::FetchDeadlines {
+                                rpc: Duration::from_secs(15),
+                                download: Duration::from_secs(30),
+                            },
+                            Some(file.size_bytes as usize),
+                        )
+                        .await
+                        .map_err(|_| read_error("Image unavailable"))
+                })
+                .await
+        })
+        .await
+        .map_err(|_| FfiError::Closed)?
+    }
+
+    pub async fn discard_image(
+        &self,
+        thread: String,
+        file: crate::FfiAttachment,
+    ) -> Result<(), FfiError> {
+        self.db
+            .forget_image(&self.env, &thread, &image_version(&file)?)
+            .await
+            .map_err(read_error)
+    }
+
+    pub async fn saved_shell(&self) -> Option<FfiShellSnapshot> {
+        read_saved_shell(&self.dir, &self.env).await
+    }
+
+    /// The thread as last seen: its saved rendered state (run state, work groups, subagents,
+    /// requests), else its latest saved messages.
     pub async fn recent(&self, thread: String) -> Result<FfiThreadSnapshot, FfiError> {
         if !self.may_read(&thread) {
             return self.snapshot(&thread, Vec::new());
+        }
+        if let Some(view) = self.saved_view(&thread).await {
+            return Ok(view);
         }
         self.snapshot(
             &thread,
@@ -236,7 +535,7 @@ impl OfflineReader {
         let page = self.online()?.fetch_thread_window(&thread, &id).await?;
         let mut state = ThreadState::new(thread);
         state.prepend_history_page(page);
-        let mut snapshot = build_thread_snapshot(&state, None);
+        let mut snapshot = build_thread_snapshot(&state, None, &Default::default());
         snapshot.server_page = true;
         Ok(snapshot)
     }
@@ -267,14 +566,14 @@ impl OfflineReader {
                     .and_then(|saved| saved.stamp.cursor),
             };
             let Some(cursor) = cursor else {
-                return Ok(build_thread_snapshot(&state, None));
+                return Ok(build_thread_snapshot(&state, None, &Default::default()));
             };
             self.online()?
                 .fetch_history_before_message(&thread, &cursor, &anchor)
                 .await?
         };
         state.prepend_history_page(page);
-        Ok(build_thread_snapshot(&state, None))
+        Ok(build_thread_snapshot(&state, None, &Default::default()))
     }
 
     pub async fn outline(
@@ -319,6 +618,66 @@ struct Update {
     sequence: Option<i64>,
     cursor: Option<String>,
     messages: Vec<Message>,
+    queued_images: Vec<crate::FfiAttachment>,
+}
+
+fn recent_images(prefix: &[Message], update: &Update) -> Vec<crate::FfiAttachment> {
+    let mut ids = std::collections::HashSet::new();
+    let images = update
+        .messages
+        .iter()
+        .rev()
+        .chain(prefix.iter().rev())
+        .filter(|message| ids.insert(message.id()))
+        .take(100)
+        .filter_map(|message| {
+            if let Message::User { attachments, .. } = message {
+                Some(attachments)
+            } else {
+                None
+            }
+        })
+        .flatten()
+        .filter(|file| matches!(file, conn_contract::ChatAttachment::Image(_)))
+        .map(crate::FfiAttachment::from);
+    let mut batch = Vec::new();
+    for image in update.queued_images.iter().cloned().chain(images) {
+        if !batch.contains(&image) {
+            batch.push(image);
+        }
+        if batch.len() == 6 {
+            break;
+        }
+    }
+    batch
+}
+
+/// What a thread's cache writer has written so far.
+#[derive(Default)]
+struct WriterProgress {
+    previous: Option<HistoryStamp>,
+    applied_generation: Option<u64>,
+    warm_prefix: Vec<Message>,
+    outline: FetchedOutline,
+}
+
+/// The outline a cache writer fetched last: a streaming turn changes only the tail, so the
+/// outline is fetched again when a prompt is added or after [`OUTLINE_REFRESH`].
+#[derive(Default)]
+struct FetchedOutline {
+    outline: Option<ThreadOutline>,
+    prompts: Vec<String>,
+    at: Option<std::time::Instant>,
+}
+
+const OUTLINE_REFRESH: Duration = Duration::from_secs(60);
+
+fn prompt_ids(messages: &[Message]) -> Vec<String> {
+    messages
+        .iter()
+        .filter(|message| matches!(message, Message::User { .. }))
+        .map(|message| message.id().to_owned())
+        .collect()
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -348,9 +707,25 @@ impl OfflineReader {
         &self,
         thread: &str,
         update: &Update,
-        previous: &mut Option<HistoryStamp>,
-        applied_generation: &mut Option<u64>,
+        progress: &mut WriterProgress,
+        warming: &watch::Sender<Vec<crate::FfiAttachment>>,
     ) -> Result<(), FfiError> {
+        let WriterProgress {
+            previous,
+            applied_generation,
+            warm_prefix,
+            outline: fetched,
+        } = progress;
+        let warm = |prefix: &[Message]| {
+            let images = recent_images(prefix, update);
+            warming.send_if_modified(|current| {
+                if *current == images {
+                    return false;
+                }
+                *current = images;
+                true
+            });
+        };
         let key = HistoryStamp {
             sequence: update.sequence,
             cursor: update.cursor.clone(),
@@ -375,6 +750,18 @@ impl OfflineReader {
             .is_some_and(|old| old == &key || old.same_bounded_tail(&key))
         {
             self.save_thread(thread, &update.messages).await?;
+            if applied_generation.is_none() && update.messages.len() < 100 {
+                let rows = self
+                    .db
+                    .recent(&self.env, thread)
+                    .await
+                    .map_err(read_error)?;
+                *warm_prefix = rows
+                    .iter()
+                    .filter_map(|body| serde_json::from_str(body).ok())
+                    .collect();
+            }
+            warm(warm_prefix);
             *previous = Some(key);
             *applied_generation = Some(update.generation);
             return Ok(());
@@ -388,7 +775,22 @@ impl OfflineReader {
             })
         {
             self.save_thread(thread, &update.messages).await?;
-            let outline = self.online()?.fetch_thread_outline(thread).await?;
+            warm(warm_prefix);
+            let prompts = prompt_ids(&update.messages);
+            let outline = match fetched.outline.take() {
+                Some(outline)
+                    if fetched.prompts == prompts
+                        && fetched.at.is_some_and(|at| at.elapsed() < OUTLINE_REFRESH) =>
+                {
+                    outline
+                }
+                _ => {
+                    fetched.at = Some(std::time::Instant::now());
+                    self.online()?.fetch_thread_outline(thread).await?
+                }
+            };
+            fetched.prompts = prompts;
+            fetched.outline = Some(outline.clone());
             self.save_index(thread, outline, &key).await?;
             *previous = Some(key);
             return Ok(());
@@ -405,7 +807,15 @@ impl OfflineReader {
             Vec::new()
         };
         let outline = self.online()?.fetch_thread_outline(thread).await?;
+        *fetched = FetchedOutline {
+            outline: Some(outline.clone()),
+            prompts: prompt_ids(&update.messages),
+            at: Some(std::time::Instant::now()),
+        };
         replace_history(&self.db, &self.env, thread, &prefix, &update.messages).await?;
+        *warm_prefix = prefix.into_iter().rev().take(100).collect();
+        warm_prefix.reverse();
+        warm(warm_prefix);
         self.save_index(thread, outline, &key).await?;
         *previous = Some(key);
         *applied_generation = Some(update.generation);
@@ -449,18 +859,25 @@ async fn replace_history(
 struct Subscription {
     generation: u64,
     updates: watch::Sender<Option<Update>>,
+    /// The thread's latest rendered state to save. Its writer is not aborted on drop, so the
+    /// last state sent before the thread stops being live still reaches the disk.
+    view: watch::Sender<Option<FfiThreadSnapshot>>,
     worker: tokio::task::JoinHandle<()>,
+    warmer: tokio::task::JoinHandle<()>,
     sequence: Option<i64>,
 }
 impl Drop for Subscription {
     fn drop(&mut self) {
         self.worker.abort();
+        self.warmer.abort();
     }
 }
 
 pub(crate) struct SyncState {
     reader: Arc<OfflineReader>,
     subscriptions: std::collections::HashMap<String, Subscription>,
+    /// The threads [`Self::retained`] held at the last shell.
+    retained: std::collections::HashSet<String>,
     pruning: HashMap<String, (u64, tokio::task::JoinHandle<()>)>,
     shell_updates: watch::Sender<Option<SavedShell>>,
 }
@@ -482,6 +899,7 @@ impl SyncState {
             pruning: HashMap::new(),
             reader,
             subscriptions: Default::default(),
+            retained: Default::default(),
             shell_updates,
         };
         sync.prune();
@@ -522,21 +940,24 @@ impl SyncState {
         self.reader.may_read(id)
     }
 
-    pub(crate) fn subscribed(&self, thread: &str) -> bool {
-        self.subscriptions.contains_key(thread)
-    }
-
-    pub(crate) fn shell(
-        &mut self,
-        state: &conn_state::ShellState,
-        open: &std::collections::HashSet<String>,
-    ) {
-        let desired: std::collections::HashSet<_> = state
+    /// Threads whose saved history is kept: unsettled and not deleted.
+    fn retained(state: &conn_state::ShellState) -> std::collections::HashSet<String> {
+        state
             .threads
             .iter()
             .filter(|t| t.deleted_at.is_none() && !conn_state::ShellState::is_settled(t))
             .map(|t| t.id.clone())
-            .collect();
+            .collect()
+    }
+
+    /// Records the shell: retention deadlines, the saved shell, and the cache writers of the
+    /// `live` threads (open or warm; the pump subscribes them).
+    pub(crate) fn shell(
+        &mut self,
+        state: &conn_state::ShellState,
+        live: &std::collections::HashSet<String>,
+    ) {
+        let desired = Self::retained(state);
         if let Ok(mut expires) = self.reader.expires.write() {
             for id in &desired {
                 expires.remove(id);
@@ -544,44 +965,71 @@ impl SyncState {
             expires.extend(deadlines(
                 state.threads.iter().chain(&state.archived_threads),
             ));
-            for id in self.subscriptions.keys() {
+            for id in self.retained.iter().chain(self.subscriptions.keys()) {
                 if !desired.contains(id) {
                     expires.entry(id.clone()).or_insert(0);
                 }
             }
         }
-        self.subscriptions.retain(|id, _| {
-            if desired.contains(id) {
-                return true;
-            }
-            if !open.contains(id)
-                && let Some(connection) = &self.reader.connection
-            {
-                connection.unsubscribe_thread(id);
-            }
-            false
-        });
+        self.retained = desired;
         self.prune();
-        for thread in desired {
-            if self.subscribed(&thread) {
-                continue;
-            }
-            if !open.contains(&thread)
-                && let Some(connection) = &self.reader.connection
-            {
-                connection.subscribe_thread(&thread);
-            }
+        self.write_live(live);
+        self.shell_updates
+            .send_replace(Some(self.reader.capture_shell(state)));
+    }
+
+    /// Follows a change of the live threads without a new shell.
+    pub(crate) fn follow(
+        &mut self,
+        state: &conn_state::ShellState,
+        live: &std::collections::HashSet<String>,
+    ) {
+        if self.retained.is_empty() {
+            self.retained = Self::retained(state);
+        }
+        self.write_live(live);
+    }
+
+    /// Runs one cache writer per live, retained thread.
+    fn write_live(&mut self, live: &std::collections::HashSet<String>) {
+        let retained = &self.retained;
+        self.subscriptions
+            .retain(|id, _| live.contains(id) && retained.contains(id));
+        let wanted: Vec<String> = live
+            .iter()
+            .filter(|id| self.retained.contains(*id) && !self.subscriptions.contains_key(*id))
+            .cloned()
+            .collect();
+        for thread in wanted {
             let reader = self.reader.clone();
             let (updates, mut rx) = watch::channel(None::<Update>);
+            let (warming, mut images) = watch::channel(Vec::<crate::FfiAttachment>::new());
+            let cache = self.reader.clone();
+            let warm_thread = thread.clone();
+            let warmer = tokio::spawn(async move {
+                while images.changed().await.is_ok() {
+                    let batch = images.borrow_and_update().clone();
+                    for file in batch {
+                        let Ok(_permit) = cache.warm_slot.acquire().await else {
+                            return;
+                        };
+                        if images.has_changed().unwrap_or(true) || !cache.may_read(&warm_thread) {
+                            break;
+                        }
+                        let _ = cache
+                            .clone()
+                            .image_bytes(warm_thread.clone(), file, true)
+                            .await;
+                    }
+                }
+            });
             let id = thread.clone();
             let worker = tokio::spawn(async move {
-                let mut previous = None;
-                let mut applied_generation = None;
+                let mut progress = WriterProgress::default();
                 while rx.changed().await.is_ok() {
                     let mut next = rx.borrow_and_update().clone();
                     while let Some(update) = next.take() {
-                        let reconcile =
-                            reader.reconcile(&id, &update, &mut previous, &mut applied_generation);
+                        let reconcile = reader.reconcile(&id, &update, &mut progress, &warming);
                         tokio::pin!(reconcile);
                         loop {
                             tokio::select! {
@@ -609,21 +1057,42 @@ impl SyncState {
                     }
                 }
             });
+            let (view, mut views) = watch::channel(None::<FfiThreadSnapshot>);
+            let saver = self.reader.clone();
+            let view_thread = thread.clone();
+            tokio::spawn(async move {
+                while views.changed().await.is_ok() {
+                    let Some(snapshot) = views.borrow_and_update().clone() else {
+                        continue;
+                    };
+                    if let Err(error) = saver.save_view(&view_thread, &snapshot).await {
+                        tracing::warn!(%error, "thread view write failed");
+                    }
+                }
+            });
             self.subscriptions.insert(
                 thread,
                 Subscription {
                     generation: 0,
                     updates,
+                    view,
                     worker,
+                    warmer,
                     sequence: None,
                 },
             );
         }
-        self.shell_updates
-            .send_replace(Some(self.reader.capture_shell(state)));
+    }
+
+    /// Saves a live thread's rendered state, so a cold start shows it before the server answers.
+    pub(crate) fn save_view(&self, snapshot: FfiThreadSnapshot) {
+        if let Some(sub) = self.subscriptions.get(&snapshot.thread_id) {
+            sub.view.send_replace(Some(snapshot));
+        }
     }
 
     pub(crate) fn thread(&mut self, state: &ThreadState, snapshot: Option<i64>) {
+        self.reader.bind_picks(state);
         let Some(sub) = self.subscriptions.get_mut(&state.thread_id) else {
             return;
         };
@@ -638,7 +1107,7 @@ impl SyncState {
             .entries
             .iter()
             .rev()
-            .filter_map(Message::capture)
+            .filter_map(|entry| Message::capture_for_feed(state, entry))
             .take(conn_cache::MESSAGE_CAP)
             .collect::<Vec<_>>();
         messages.reverse();
@@ -646,6 +1115,23 @@ impl SyncState {
             generation: sub.generation,
             sequence: sub.sequence,
             cursor: state.history_cursor.clone(),
+            queued_images: state
+                .entries
+                .iter()
+                .rev()
+                .take(100)
+                .filter_map(|entry| {
+                    if let conn_state::TimelineEntry::QueuedUser { attachments, .. } = entry {
+                        Some(attachments)
+                    } else {
+                        None
+                    }
+                })
+                .flatten()
+                .filter(|file| matches!(file, conn_contract::ChatAttachment::Image(_)))
+                .take(6)
+                .map(crate::FfiAttachment::from)
+                .collect(),
             messages,
         }));
     }
@@ -663,6 +1149,79 @@ impl Drop for SyncState {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test uses assert! for diffs while propagating setup errors with ?"
+    )]
+    async fn image_remount_and_offline_reopen_do_not_fetch_again()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let open = |env: &str| OfflineReader::open(dir.path().into(), env.to_owned(), None);
+        let reader = open("phone-a").await?;
+        let mut file = crate::FfiAttachment {
+            id: "image-1".into(),
+            name: "IMG_3145.png".into(),
+            mime_type: "image/png".into(),
+            size_bytes: 4,
+            is_image: true,
+        };
+        let calls = std::cell::Cell::new(0);
+        let sign_and_fetch = || async {
+            calls.set(calls.get() + 1);
+            Ok(b"data".to_vec())
+        };
+        let (first, remount) = tokio::join!(
+            reader.acquire_image("chat", &file, true, sign_and_fetch),
+            reader.acquire_image("chat", &file, true, sign_and_fetch),
+        );
+        assert_eq!(first?, remount?);
+        assert_eq!(
+            reader
+                .acquire_image("chat", &file, true, sign_and_fetch)
+                .await?,
+            b"data"
+        );
+        assert_eq!(calls.get(), 1);
+        drop(reader);
+        let cold = open("phone-a").await?;
+        assert_eq!(
+            cold.clone()
+                .image_bytes("chat".into(), file.clone(), false)
+                .await?,
+            b"data"
+        );
+        let other = open("phone-b").await?;
+        assert!(
+            other
+                .clone()
+                .image_bytes("chat".into(), file.clone(), false)
+                .await
+                .is_err()
+        );
+        assert!(
+            other
+                .acquire_image("chat", &file, true, || async { Ok(vec![1]) })
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            other
+                .acquire_image("chat", &file, true, || async { Ok(b"else".to_vec()) })
+                .await?,
+            b"else"
+        );
+        assert_eq!(
+            cold.clone()
+                .image_bytes("chat".into(), file.clone(), false)
+                .await?,
+            b"data"
+        );
+        file.name = "revised.png".into();
+        assert!(cold.image_bytes("chat".into(), file, false).await.is_err());
+        Ok(())
+    }
+
     fn message(id: &str) -> Message {
         Message::Assistant {
             id: id.into(),
@@ -673,6 +1232,166 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test uses assert! for diffs while propagating setup errors with ?"
+    )]
+    async fn image_thumbnail_and_original_stay_online_only_after_expiry()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let reader = OfflineReader::open(dir.path().into(), "env".into(), None).await?;
+        let file = crate::FfiAttachment::from(&attachment("image"));
+        let version = image_version(&file)?;
+        let thumbnail = reader
+            .acquire_image("chat", &file, true, || async {
+                reader
+                    .expires
+                    .write()
+                    .map_err(read_error)?
+                    .insert("chat".into(), now_ms());
+                Ok(b"tile".to_vec())
+            })
+            .await?;
+        assert_eq!(thumbnail, b"tile");
+        assert!(reader.db.image("env", "chat", &version).await?.is_none());
+        let original = reader
+            .acquire_image("chat", &file, true, || async { Ok(b"full".to_vec()) })
+            .await?;
+        assert_eq!(original, b"full");
+        assert!(reader.db.image("env", "chat", &version).await?.is_none());
+        assert!(
+            reader
+                .image_bytes("chat".into(), file, false)
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    fn attachment(id: &str) -> conn_contract::ChatAttachment {
+        conn_contract::ChatAttachment::Image(conn_contract::ChatImageAttachment {
+            r#type: conn_contract::lit::Image,
+            id: id.into(),
+            name: "IMG_3145.png".into(),
+            mime_type: "image/png".into(),
+            size_bytes: 4,
+            source: None,
+        })
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test uses assert! for diffs while propagating setup errors with ?"
+    )]
+    async fn image_pick_survives_queue_to_sent_without_network()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let reader = OfflineReader::open(dir.path().into(), "env".into(), None).await?;
+        let item = "turn-item:message-local";
+        let picked = crate::FfiAttachment::from(&attachment("pending-1"));
+        let claimed = attachment("thread-1");
+        let file = crate::FfiAttachment::from(&claimed);
+        reader.seed_pick("chat", item, 0, picked, b"pick").await?;
+        let mut state = ThreadState::new("chat");
+        state.entries.push(conn_state::TimelineEntry::QueuedUser {
+            id: "queued".into(),
+            run_id: "run".into(),
+            message_id: "message-other".into(),
+            text: String::new(),
+            attachments: vec![claimed.clone()],
+            created_at: String::new(),
+            created_by_agent: false,
+        });
+        reader.bind_picks(&state);
+        assert!(
+            reader
+                .clone()
+                .image_bytes("chat".into(), file.clone(), false)
+                .await
+                .is_err()
+        );
+        if let conn_state::TimelineEntry::QueuedUser { message_id, .. } = &mut state.entries[0] {
+            *message_id = "message-local".into();
+        }
+        reader.bind_picks(&state);
+        assert_eq!(
+            reader
+                .clone()
+                .image_bytes("chat".into(), file.clone(), false)
+                .await?,
+            b"pick"
+        );
+        drop(reader);
+        let sent = OfflineReader::open(dir.path().into(), "env".into(), None).await?;
+        state.entries = vec![
+            Message::User {
+                id: item.into(),
+                text: String::new(),
+                created_by_agent: false,
+                sender: None,
+                delegated_completion: None,
+                notice_results: None,
+                created_at: None,
+                attachments: vec![claimed],
+                is_steer: false,
+                review_comments: Vec::new(),
+                run_id: None,
+            }
+            .entry(),
+        ];
+        sent.bind_picks(&state);
+        let conn_state::TimelineEntry::User { attachments, .. } = &state.entries[0] else {
+            panic!("expected sent user message");
+        };
+        assert_eq!(
+            sent.image_bytes("chat".into(), (&attachments[0]).into(), false)
+                .await?,
+            b"pick"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn image_warming_bounds_recent_messages_and_skips_duplicates() {
+        let user = |id: &str| Message::User {
+            id: id.into(),
+            text: String::new(),
+            created_by_agent: false,
+            sender: None,
+            delegated_completion: None,
+            notice_results: None,
+            created_at: None,
+            attachments: vec![attachment(id)],
+            is_steer: false,
+            review_comments: Vec::new(),
+            run_id: None,
+        };
+        let mut update = Update {
+            generation: 1,
+            sequence: None,
+            cursor: None,
+            messages: (0..8).map(|id| user(&id.to_string())).collect(),
+            queued_images: vec![(&attachment("7")).into()],
+        };
+        let selected = recent_images(&update.messages, &update);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|file| file.id.as_str())
+                .collect::<Vec<_>>(),
+            ["7", "6", "5", "4", "3", "2"]
+        );
+        update.queued_images.clear();
+        update.messages = (0..100).map(|id| message(&id.to_string())).collect();
+        assert!(recent_images(&[user("older")], &update).is_empty());
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test uses assert! for diffs while propagating setup errors with ?"
+    )]
     async fn an_omitted_settled_child_expires_after_offline_reopen()
     -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
@@ -690,6 +1409,7 @@ mod tests {
         };
         let reader = open().await?;
         reader.save_thread("child", &[message("old")]).await?;
+        reader.db.save_image("env", "child", "old", b"data").await?;
         reader.db.save_outline("env", "child", "{}").await?;
         reader
             .expires
@@ -706,6 +1426,7 @@ mod tests {
             .remove("child")
             .ok_or("omitted child's deadline was lost")?;
         removal.await?;
+        assert!(reopened.db.image("env", "child", "old").await?.is_none());
         if !reopened.db.recent("env", "child").await?.is_empty()
             || reopened.db.outline("env", "child").await?.is_some()
         {
@@ -766,6 +1487,148 @@ mod tests {
         if !db.recent("env", "thread").await?.is_empty() {
             return Err("rolled-back messages remain".into());
         }
+        Ok(())
+    }
+    fn unsettled_shell(thread: &str) -> Result<conn_state::ShellState, serde_json::Error> {
+        let item: conn_contract::OrchestrationV2ShellStreamItem = conn_contract::from_json(
+            serde_json::json!({
+                "kind": "snapshot",
+                "snapshot": {
+                    "schemaVersion": 1,
+                    "snapshotSequence": 1,
+                    "projects": [],
+                    "threads": [{
+                        "createdBy": "user", "creationSource": "web", "id": thread,
+                        "projectId": "p", "title": "Working", "providerInstanceId": "claudeAgent",
+                        "modelSelection": { "instanceId": "claudeAgent", "model": "claude-haiku-5-5" },
+                        "runtimeMode": "full-access", "interactionMode": "default",
+                        "branch": null, "worktreePath": null,
+                        "lineage": { "rootThreadId": thread, "parentThreadId": null, "relationshipToParent": null },
+                        "forkedFrom": null, "activeProviderThreadId": null, "latestRunId": "r1",
+                        "activeRunId": "r1", "status": "running", "pendingRuntimeRequest": null,
+                        "latestVisibleMessage": null, "latestUserMessageAt": null,
+                        "hasActionableProposedPlan": false, "itemCount": 4, "visibleItemCount": 4,
+                        "createdAt": "2026-11-26T09:00:00.000Z", "updatedAt": "2026-11-26T09:00:00.000Z",
+                        "archivedAt": null, "settledOverride": null, "settledAt": null, "deletedAt": null
+                    }],
+                    "archivedThreads": []
+                }
+            }),
+        )?;
+        let mut shell = conn_state::ShellState::default();
+        shell.apply(item);
+        Ok(shell)
+    }
+
+    fn running_subagent(id: &str) -> conn_state::TimelineEntry {
+        conn_state::TimelineEntry::Subagent {
+            id: id.into(),
+            child_thread_id: Some(format!("child-{id}")),
+            title: format!("Agent {id}"),
+            role: "claudeAgent".into(),
+            status: conn_state::TurnItemStatus::Running,
+            summary: None,
+            remote_child: None,
+            created_at: Some("2026-11-26T09:00:05Z".into()),
+            started_at: Some("2026-11-26T09:00:05Z".into()),
+            completed_at: None,
+        }
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test uses assert! for diffs while propagating setup errors with ?"
+    )]
+    async fn a_killed_app_restores_a_working_threads_run_group_and_subagents()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let reader = OfflineReader::open(dir.path().into(), "env".into(), None).await?;
+        let mut sync = SyncState::new(reader.clone());
+        let live: std::collections::HashSet<String> = ["t1".to_owned()].into();
+        sync.shell(&unsettled_shell("t1")?, &live);
+
+        let mut state = ThreadState::new("t1");
+        state.synchronized = true;
+        state.working = true;
+        state.entries = vec![
+            conn_state::TimelineEntry::User {
+                id: "u1".into(),
+                text: "Review the change".into(),
+                created_by_agent: false,
+                sender: None,
+                created_at: Some("2026-11-26T09:00:00Z".into()),
+                attachments: Vec::new(),
+                is_steer: false,
+                review_comments: Vec::new(),
+                run_id: Some("r1".into()),
+            },
+            conn_state::TimelineEntry::Tool {
+                id: "tool1".into(),
+                kind: "command".into(),
+                title: "cargo test".into(),
+                detail: None,
+                status: conn_state::ItemStatus::Running,
+                output_omitted: false,
+            },
+            running_subagent("sa1"),
+            running_subagent("sa2"),
+        ];
+        state.entry_timings.insert(
+            "tool1".into(),
+            conn_state::EntryTiming {
+                run_id: Some("r1".into()),
+                started_at_ms: Some(1_795_000_001_000),
+                completed_at_ms: None,
+            },
+        );
+        state.run_timings.insert(
+            "r1".into(),
+            conn_state::RunTiming {
+                started_at_ms: Some(1_795_000_000_000),
+                completed_at_ms: None,
+            },
+        );
+        let shown = build_thread_snapshot(&state, None, &Default::default());
+        sync.save_view(shown.clone());
+        // The app dies: the pump and its cache writers go away.
+        drop(sync);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while reader.db.view("env", "t1").await?.is_none() {
+            if std::time::Instant::now() > deadline {
+                return Err("the view was never written".into());
+            }
+            tokio::task::yield_now().await;
+        }
+        drop(reader);
+
+        let restored = OfflineReader::open(dir.path().into(), "env".into(), None)
+            .await?
+            .recent("t1".into())
+            .await?;
+        assert!(restored.working, "the run is still working");
+        assert!(
+            !restored.synchronized,
+            "not synchronized until the live projection"
+        );
+        let group = restored
+            .work_groups
+            .first()
+            .ok_or("the active work group is gone")?;
+        assert!(group.has_active);
+        assert_eq!(group.started_at_ms, Some(1_795_000_001_000));
+        let agents = restored
+            .entries
+            .iter()
+            .filter(|entry| matches!(entry, crate::FfiTimelineEntry::Subagent { .. }))
+            .count();
+        assert_eq!(agents, 2, "both subagents survive");
+        let mut expected = shown;
+        expected.synchronized = false;
+        assert_eq!(
+            restored, expected,
+            "the first frame equals the last live state"
+        );
         Ok(())
     }
 }

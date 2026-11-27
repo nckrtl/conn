@@ -634,6 +634,24 @@ fileprivate struct FfiConverterString: FfiConverter {
     }
 }
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterData: FfiConverterRustBuffer {
+    typealias SwiftType = Data
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
+        let len: Int32 = try readInt(&buf)
+        return Data(try readBytes(&buf, count: Int(len)))
+    }
+
+    public static func write(_ value: Data, into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        writeBytes(&buf, value)
+    }
+}
+
 
 
 
@@ -641,6 +659,25 @@ fileprivate struct FfiConverterString: FfiConverter {
  * UniFFI handle to a running `conn-server` connection, state reducer, and Tokio runtime.
  */
 public protocol ConnCoreProtocol: AnyObject, Sendable {
+    
+    /**
+     * Starts uploading a file the draft holds, unless it already is.
+     */
+    func attachUpload(file: FfiComposerFile) 
+    
+    /**
+     * The draft let go of the file: stops its upload or deletes it from the server.
+     */
+    func dropUpload(id: String) 
+    
+    func retryUpload(id: String) 
+    
+    /**
+     * The listener for status changes and the codec that scales images before they upload.
+     */
+    func setUploadHandlers(listener: FfiUploadListener, codec: FfiImageCodec) 
+    
+    func uploadStatus(id: String)  -> FfiUploadStatus?
     
     /**
      * Saves or declines a pending secret request (`secrets.answerRequest`).
@@ -660,9 +697,20 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
     func attachmentUrl(id: String, name: String, mime: String, mcpApp: Bool) async throws  -> String
     
     /**
+     * Removes a queued message from the queue (`queued-run.cancel`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func cancelQueuedMessage(threadId: String, runId: String) async throws 
+    
+    /**
      * Unsubscribes from `thread_id` while retaining its cached timeline for fast re-open.
      */
     func closeThread(threadId: String) 
+    
+    func composerLimits()  -> FfiComposerLimits
     
     /**
      * Permanently deletes `thread_id` (`thread.delete`).
@@ -687,6 +735,17 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
      * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
      */
     func dismissUserInput(threadId: String, requestId: String) async throws 
+    
+    /**
+     * Saves an edited queued message (`queued-run.edit`). `kept_attachment_ids` lists the
+     * message's files still wanted (`None` keeps them all); `files` are new ones to upload.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::InvalidInput`] for blank text, a file that cannot be uploaded, or a run
+     * that left the queue while its files changed; otherwise the mapped transport/RPC error.
+     */
+    func editQueuedMessage(threadId: String, runId: String, text: String, keptAttachmentIds: [String]?, files: [FfiComposerFile]) async throws 
     
     /**
      * Ensures the server's General / scratch project (`projects.ensureScratch`, `"No project"`)
@@ -841,9 +900,25 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
     func sendMessage(threadId: String, text: String, mode: FfiSendMode) async throws 
     
     /**
+     * `Send now` on a queued message: steers the active run when there is one, else starts the
+     * queued run (desktop `promote_queued_message`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+    func sendQueuedNow(threadId: String, runId: String) async throws 
+    
+    /**
      * Returns the normalized HTTP base URL this connection targets.
      */
     func serverUrl()  -> String
+    
+    /**
+     * Keeps a few recent threads subscribed while `true` (the app is in the foreground), so
+     * opening one shows its latest state at once; `false` drops them until the next `true`.
+     */
+    func setForeground(foreground: Bool) 
     
     /**
      * Moves `thread_id` into (`settled = true`) or out of (`settled = false`) the Settled shelf
@@ -863,6 +938,13 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
      * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
      */
     func stopThread(threadId: String) async throws 
+    
+    /**
+     * Uploads to this connection, then commits one idempotent launch or reply.
+     * # Errors
+     * Returns a file, upload, or dispatch error and leaves the caller's draft intact.
+     */
+    func submitComposer(target: FfiComposerTarget, key: String, text: String, files: [FfiComposerFile]) async throws  -> String
     
     func turnPatch(threadId: String, turn: Int64) async throws  -> [FfiFilePatch]
     
@@ -948,6 +1030,62 @@ public static func connect(serverUrl: String, credential: FfiCredential, listene
 
     
     /**
+     * Starts uploading a file the draft holds, unless it already is.
+     */
+open func attachUpload(file: FfiComposerFile)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_conncore_attach_upload(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeFfiComposerFile_lower(file),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * The draft let go of the file: stops its upload or deletes it from the server.
+     */
+open func dropUpload(id: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_conncore_drop_upload(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(id),uniffiCallStatus
+    )
+}
+}
+    
+open func retryUpload(id: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_conncore_retry_upload(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(id),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * The listener for status changes and the codec that scales images before they upload.
+     */
+open func setUploadHandlers(listener: FfiUploadListener, codec: FfiImageCodec)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_conncore_set_upload_handlers(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeFfiUploadListener_lower(listener),
+        FfiConverterTypeFfiImageCodec_lower(codec),uniffiCallStatus
+    )
+}
+}
+    
+open func uploadStatus(id: String) -> FfiUploadStatus?  {
+    return try!  FfiConverterOptionTypeFfiUploadStatus.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_conncore_upload_status(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(id),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * Saves or declines a pending secret request (`secrets.answerRequest`).
      *
      * Pass `Some(secret)` to save (trimmed; blank strings are rejected) or `None` to decline.
@@ -993,6 +1131,29 @@ open func attachmentUrl(id: String, name: String, mime: String, mcpApp: Bool)asy
 }
     
     /**
+     * Removes a queued message from the queue (`queued-run.cancel`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func cancelQueuedMessage(threadId: String, runId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_cancel_queued_message(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(runId)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
      * Unsubscribes from `thread_id` while retaining its cached timeline for fast re-open.
      */
 open func closeThread(threadId: String)  {try! rustCall() {
@@ -1002,6 +1163,15 @@ open func closeThread(threadId: String)  {try! rustCall() {
         FfiConverterString.lower(threadId),uniffiCallStatus
     )
 }
+}
+    
+open func composerLimits() -> FfiComposerLimits  {
+    return try!  FfiConverterTypeFfiComposerLimits_lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_conncore_composer_limits(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+})
 }
     
     /**
@@ -1052,6 +1222,31 @@ open func dismissUserInput(threadId: String, requestId: String)async throws   {
             rustFutureFunc: {
                 uniffi_conn_ffi_fn_method_conncore_dismiss_user_input(
                         self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(requestId)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Saves an edited queued message (`queued-run.edit`). `kept_attachment_ids` lists the
+     * message's files still wanted (`None` keeps them all); `files` are new ones to upload.
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::InvalidInput`] for blank text, a file that cannot be uploaded, or a run
+     * that left the queue while its files changed; otherwise the mapped transport/RPC error.
+     */
+open func editQueuedMessage(threadId: String, runId: String, text: String, keptAttachmentIds: [String]?, files: [FfiComposerFile])async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_edit_queued_message(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(runId),FfiConverterString.lower(text),FfiConverterOptionSequenceString.lower(keptAttachmentIds),FfiConverterSequenceTypeFfiComposerFile.lower(files)
                 )
             },
             pollFunc: ffi_conn_ffi_rust_future_poll_void,
@@ -1453,6 +1648,30 @@ open func sendMessage(threadId: String, text: String, mode: FfiSendMode)async th
 }
     
     /**
+     * `Send now` on a queued message: steers the active run when there is one, else starts the
+     * queued run (desktop `promote_queued_message`).
+     *
+     * # Errors
+     *
+     * Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+     */
+open func sendQueuedNow(threadId: String, runId: String)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_send_queued_now(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(threadId),FfiConverterString.lower(runId)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
      * Returns the normalized HTTP base URL this connection targets.
      */
 open func serverUrl() -> String  {
@@ -1462,6 +1681,19 @@ open func serverUrl() -> String  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+    /**
+     * Keeps a few recent threads subscribed while `true` (the app is in the foreground), so
+     * opening one shows its latest state at once; `false` drops them until the next `true`.
+     */
+open func setForeground(foreground: Bool)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_conncore_set_foreground(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(foreground),uniffiCallStatus
+    )
+}
 }
     
     /**
@@ -1507,6 +1739,27 @@ open func stopThread(threadId: String)async throws   {
             completeFunc: ffi_conn_ffi_rust_future_complete_void,
             freeFunc: ffi_conn_ffi_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+    /**
+     * Uploads to this connection, then commits one idempotent launch or reply.
+     * # Errors
+     * Returns a file, upload, or dispatch error and leaves the caller's draft intact.
+     */
+open func submitComposer(target: FfiComposerTarget, key: String, text: String, files: [FfiComposerFile])async throws  -> String  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_conncore_submit_composer(
+                        self.uniffiCloneHandle(),FfiConverterTypeFfiComposerTarget_lower(target),FfiConverterString.lower(key),FfiConverterString.lower(text),FfiConverterSequenceTypeFfiComposerFile.lower(files)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterString.lift,
             errorHandler: FfiConverterTypeFfiError_lift
         )
 }
@@ -1609,6 +1862,16 @@ public func FfiConverterTypeConnCore_lower(_ value: ConnCore) -> UInt64 {
 public protocol ConnSessionProtocol: AnyObject, Sendable {
     
     /**
+     * The app went to the background: stop the warm thread streams until [`Self::foreground`].
+     */
+    func background() 
+    
+    /**
+     * Reads only the completed inbox file. Message database opening and backfill run separately.
+     */
+    func cachedShell(identity: String) async  -> FfiShellSnapshot?
+    
+    /**
      * The user left this thread: unsubscribe it.
      */
     func closeThread(threadId: String) 
@@ -1659,6 +1922,11 @@ public protocol ConnSessionProtocol: AnyObject, Sendable {
     func pairManual(serverUrl: String, pairingCode: String) 
     
     /**
+     * Read at presentation time: a callback queued before a socket retry carries no stale rows.
+     */
+    func publishedShell(connectionId: UInt64)  -> FfiShellSnapshot?
+    
+    /**
      * A linked environment's session at launch: its saved Orbit environment or manual server.
      */
     func restore(saved: FfiSavedSession?) 
@@ -1666,13 +1934,15 @@ public protocol ConnSessionProtocol: AnyObject, Sendable {
     func retry() 
     
     /**
-     * Opens existing history for the primary saved identity while gateway discovery is pending.
+     * Opens a saved environment's matching cache while its connection or discovery is pending.
      */
-    func savedOfflineReader() async  -> OfflineReader?
+    func savedOfflineReader(identity: String) async  -> OfflineReader?
     
     func signOut() 
     
     func state()  -> FfiSessionState
+    
+    func suspend() 
     
 }
 /**
@@ -1748,6 +2018,37 @@ public convenience init(gatewayUrl: String?, cacheDirectory: String?, listener: 
 
     
 
+    
+    /**
+     * The app went to the background: stop the warm thread streams until [`Self::foreground`].
+     */
+open func background()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_connsession_background(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * Reads only the completed inbox file. Message database opening and backfill run separately.
+     */
+open func cachedShell(identity: String)async  -> FfiShellSnapshot?  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_connsession_cached_shell(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(identity)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterOptionTypeFfiShellSnapshot.lift,
+            errorHandler: nil
+            
+        )
+}
     
     /**
      * The user left this thread: unsubscribe it.
@@ -1898,6 +2199,19 @@ open func pairManual(serverUrl: String, pairingCode: String)  {try! rustCall() {
 }
     
     /**
+     * Read at presentation time: a callback queued before a socket retry carries no stale rows.
+     */
+open func publishedShell(connectionId: UInt64) -> FfiShellSnapshot?  {
+    return try!  FfiConverterOptionTypeFfiShellSnapshot.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_connsession_published_shell(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(connectionId),uniffiCallStatus
+    )
+})
+}
+    
+    /**
      * A linked environment's session at launch: its saved Orbit environment or manual server.
      */
 open func restore(saved: FfiSavedSession?)  {try! rustCall() {
@@ -1918,14 +2232,14 @@ open func retry()  {try! rustCall() {
 }
     
     /**
-     * Opens existing history for the primary saved identity while gateway discovery is pending.
+     * Opens a saved environment's matching cache while its connection or discovery is pending.
      */
-open func savedOfflineReader()async  -> OfflineReader?  {
+open func savedOfflineReader(identity: String)async  -> OfflineReader?  {
     return
         try!  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_conn_ffi_fn_method_connsession_saved_offline_reader(
-                        self.uniffiCloneHandle()
+                        self.uniffiCloneHandle(),FfiConverterString.lower(identity)
                 )
             },
             pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
@@ -1952,6 +2266,14 @@ open func state() -> FfiSessionState  {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 })
+}
+    
+open func suspend()  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_connsession_suspend(
+            self.uniffiCloneHandle(),uniffiCallStatus
+    )
+}
 }
     
 
@@ -2442,6 +2764,275 @@ public func FfiConverterTypeCoreListener_lower(_ value: CoreListener) -> UInt64 
 
 
 /**
+ * The app's image codec (ImageIO on iPhone); the core decides sizes and formats
+ * (`conn_client::uploads::prepare`).
+ */
+public protocol FfiImageCodec: AnyObject, Sendable {
+    
+    /**
+     * The size once the orientation is applied, and whether the image has transparency.
+     */
+    func inspect(bytes: Data)  -> FfiImageInfo?
+    
+    /**
+     * Scales to exactly `width`×`height` after orienting, then encodes a JPEG when
+     * `jpeg_quality` is set and a PNG when `png` is.
+     */
+    func encode(bytes: Data, width: UInt32, height: UInt32, jpegQuality: Float?, png: Bool)  -> FfiEncodedImage?
+    
+}
+/**
+ * The app's image codec (ImageIO on iPhone); the core decides sizes and formats
+ * (`conn_client::uploads::prepare`).
+ */
+open class FfiImageCodecImpl: FfiImageCodec, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_conn_ffi_fn_clone_ffiimagecodec(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_conn_ffi_fn_free_ffiimagecodec(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * The size once the orientation is applied, and whether the image has transparency.
+     */
+open func inspect(bytes: Data) -> FfiImageInfo?  {
+    return try!  FfiConverterOptionTypeFfiImageInfo.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_ffiimagecodec_inspect(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(bytes),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Scales to exactly `width`×`height` after orienting, then encodes a JPEG when
+     * `jpeg_quality` is set and a PNG when `png` is.
+     */
+open func encode(bytes: Data, width: UInt32, height: UInt32, jpegQuality: Float?, png: Bool) -> FfiEncodedImage?  {
+    return try!  FfiConverterOptionTypeFfiEncodedImage.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_ffiimagecodec_encode(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(bytes),
+        FfiConverterUInt32.lower(width),
+        FfiConverterUInt32.lower(height),
+        FfiConverterOptionFloat.lower(jpegQuality),
+        FfiConverterBool.lower(png),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceFfiImageCodec {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceFfiImageCodec = UniffiVTableCallbackInterfaceFfiImageCodec(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeFfiImageCodec.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface FfiImageCodec: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeFfiImageCodec.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface FfiImageCodec: handle missing in uniffiClone")
+            }
+        },
+        inspect: { (
+            uniffiHandle: UInt64,
+            bytes: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> FfiImageInfo? in
+                guard let uniffiObj = try? FfiConverterTypeFfiImageCodec.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.inspect(
+                     bytes: try FfiConverterData.lift(bytes)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionTypeFfiImageInfo.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        encode: { (
+            uniffiHandle: UInt64,
+            bytes: RustBuffer,
+            width: UInt32,
+            height: UInt32,
+            jpegQuality: RustBuffer,
+            png: Int8,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> FfiEncodedImage? in
+                guard let uniffiObj = try? FfiConverterTypeFfiImageCodec.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.encode(
+                     bytes: try FfiConverterData.lift(bytes),
+                     width: try FfiConverterUInt32.lift(width),
+                     height: try FfiConverterUInt32.lift(height),
+                     jpegQuality: try FfiConverterOptionFloat.lift(jpegQuality),
+                     png: try FfiConverterBool.lift(png)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionTypeFfiEncodedImage.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceFfiImageCodec> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceFfiImageCodec>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitFfiImageCodec() {
+    uniffi_conn_ffi_fn_init_callback_vtable_ffiimagecodec(UniffiCallbackInterfaceFfiImageCodec.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiImageCodec: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<FfiImageCodec>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = FfiImageCodec
+
+    public static func lift(_ handle: UInt64) throws -> FfiImageCodec {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return FfiImageCodecImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: FfiImageCodec) -> UInt64 {
+         if let rustImpl = value as? FfiImageCodecImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiImageCodec {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: FfiImageCodec, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiImageCodec_lift(_ handle: UInt64) throws -> FfiImageCodec {
+    return try FfiConverterTypeFfiImageCodec.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiImageCodec_lower(_ value: FfiImageCodec) -> UInt64 {
+    return FfiConverterTypeFfiImageCodec.lower(value)
+}
+
+
+
+
+
+
+/**
  * Measures whether the agent's context fits the panel's three lines; Swift measures with the
  * panel's font and width.
  */
@@ -2659,15 +3250,232 @@ public func FfiConverterTypeFfiTextFits_lower(_ value: FfiTextFits) -> UInt64 {
 
 
 
+/**
+ * Upload status changes; `None` once the upload is gone (removed or sent).
+ */
+public protocol FfiUploadListener: AnyObject, Sendable {
+    
+    func onUpload(id: String, status: FfiUploadStatus?) 
+    
+}
+/**
+ * Upload status changes; `None` once the upload is gone (removed or sent).
+ */
+open class FfiUploadListenerImpl: FfiUploadListener, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_conn_ffi_fn_clone_ffiuploadlistener(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_conn_ffi_fn_free_ffiuploadlistener(handle, $0) }
+    }
+
+    
+
+    
+open func onUpload(id: String, status: FfiUploadStatus?)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_ffiuploadlistener_on_upload(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(id),
+        FfiConverterOptionTypeFfiUploadStatus.lower(status),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceFfiUploadListener {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceFfiUploadListener = UniffiVTableCallbackInterfaceFfiUploadListener(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeFfiUploadListener.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface FfiUploadListener: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeFfiUploadListener.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface FfiUploadListener: handle missing in uniffiClone")
+            }
+        },
+        onUpload: { (
+            uniffiHandle: UInt64,
+            id: RustBuffer,
+            status: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeFfiUploadListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onUpload(
+                     id: try FfiConverterString.lift(id),
+                     status: try FfiConverterOptionTypeFfiUploadStatus.lift(status)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceFfiUploadListener> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceFfiUploadListener>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitFfiUploadListener() {
+    uniffi_conn_ffi_fn_init_callback_vtable_ffiuploadlistener(UniffiCallbackInterfaceFfiUploadListener.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiUploadListener: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<FfiUploadListener>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = FfiUploadListener
+
+    public static func lift(_ handle: UInt64) throws -> FfiUploadListener {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return FfiUploadListenerImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: FfiUploadListener) -> UInt64 {
+         if let rustImpl = value as? FfiUploadListenerImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiUploadListener {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: FfiUploadListener, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiUploadListener_lift(_ handle: UInt64) throws -> FfiUploadListener {
+    return try FfiConverterTypeFfiUploadListener.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiUploadListener_lower(_ value: FfiUploadListener) -> UInt64 {
+    return FfiConverterTypeFfiUploadListener.lower(value)
+}
+
+
+
+
+
+
 public protocol OfflineReaderProtocol: AnyObject, Sendable {
     
     func before(thread: String, id: String) async throws  -> FfiThreadSnapshot
+    
+    func discardImage(thread: String, file: FfiAttachment) async throws 
+    
+    func imageBytes(thread: String, file: FfiAttachment, online: Bool) async throws  -> Data
     
     func outline(thread: String, online: Bool) async throws  -> [FfiPromptMarker]
     
     func promptWindow(thread: String, id: String, online: Bool) async throws  -> FfiThreadSnapshot
     
+    /**
+     * The thread as last seen: its saved rendered state (run state, work groups, subagents,
+     * requests), else its latest saved messages.
+     */
     func recent(thread: String) async throws  -> FfiThreadSnapshot
+    
+    func retainsThread(thread: String)  -> Bool
     
     func savedShell() async  -> FfiShellSnapshot?
     
@@ -2743,6 +3551,38 @@ open func before(thread: String, id: String)async throws  -> FfiThreadSnapshot  
         )
 }
     
+open func discardImage(thread: String, file: FfiAttachment)async throws   {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_offlinereader_discard_image(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(thread),FfiConverterTypeFfiAttachment_lower(file)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_void,
+            completeFunc: ffi_conn_ffi_rust_future_complete_void,
+            freeFunc: ffi_conn_ffi_rust_future_free_void,
+            liftFunc: { $0 },
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
+open func imageBytes(thread: String, file: FfiAttachment, online: Bool)async throws  -> Data  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_offlinereader_image_bytes(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(thread),FfiConverterTypeFfiAttachment_lower(file),FfiConverterBool.lower(online)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterData.lift,
+            errorHandler: FfiConverterTypeFfiError_lift
+        )
+}
+    
 open func outline(thread: String, online: Bool)async throws  -> [FfiPromptMarker]  {
     return
         try  await uniffiRustCallAsync(
@@ -2775,6 +3615,10 @@ open func promptWindow(thread: String, id: String, online: Bool)async throws  ->
         )
 }
     
+    /**
+     * The thread as last seen: its saved rendered state (run state, work groups, subagents,
+     * requests), else its latest saved messages.
+     */
 open func recent(thread: String)async throws  -> FfiThreadSnapshot  {
     return
         try  await uniffiRustCallAsync(
@@ -2789,6 +3633,16 @@ open func recent(thread: String)async throws  -> FfiThreadSnapshot  {
             liftFunc: FfiConverterTypeFfiThreadSnapshot_lift,
             errorHandler: FfiConverterTypeFfiError_lift
         )
+}
+    
+open func retainsThread(thread: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_offlinereader_retains_thread(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(thread),uniffiCallStatus
+    )
+})
 }
     
 open func savedShell()async  -> FfiShellSnapshot?  {
@@ -4118,7 +4972,7 @@ public protocol SessionListener: AnyObject, Sendable {
      */
     func onSave(session: FfiSavedSession?) 
     
-    func onShell(connectionId: UInt64, snapshot: FfiShellSnapshot) 
+    func onShellChanged(connectionId: UInt64) 
     
     func onThread(connectionId: UInt64, snapshot: FfiThreadSnapshot) 
     
@@ -4209,12 +5063,11 @@ open func onSave(session: FfiSavedSession?)  {try! rustCall() {
 }
 }
     
-open func onShell(connectionId: UInt64, snapshot: FfiShellSnapshot)  {try! rustCall() {
+open func onShellChanged(connectionId: UInt64)  {try! rustCall() {
         uniffiCallStatus in
-    uniffi_conn_ffi_fn_method_sessionlistener_on_shell(
+    uniffi_conn_ffi_fn_method_sessionlistener_on_shell_changed(
             self.uniffiCloneHandle(),
-        FfiConverterUInt64.lower(connectionId),
-        FfiConverterTypeFfiShellSnapshot_lower(snapshot),uniffiCallStatus
+        FfiConverterUInt64.lower(connectionId),uniffiCallStatus
     )
 }
 }
@@ -4335,10 +5188,9 @@ fileprivate struct UniffiCallbackInterfaceSessionListener {
                 writeReturn: writeReturn
             )
         },
-        onShell: { (
+        onShellChanged: { (
             uniffiHandle: UInt64,
             connectionId: UInt64,
-            snapshot: RustBuffer,
             uniffiOutReturn: UnsafeMutableRawPointer,
             uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
         ) in
@@ -4347,9 +5199,8 @@ fileprivate struct UniffiCallbackInterfaceSessionListener {
                 guard let uniffiObj = try? FfiConverterTypeSessionListener.handleMap.get(handle: uniffiHandle) else {
                     throw UniffiInternalError.unexpectedStaleHandle
                 }
-                return uniffiObj.onShell(
-                     connectionId: try FfiConverterUInt64.lift(connectionId),
-                     snapshot: try FfiConverterTypeFfiShellSnapshot_lift(snapshot)
+                return uniffiObj.onShellChanged(
+                     connectionId: try FfiConverterUInt64.lift(connectionId)
                 )
             }
 
@@ -5178,6 +6029,185 @@ public func FfiConverterTypeFfiColor_lower(_ value: FfiColor) -> RustBuffer {
 }
 
 
+public struct FfiComposerFile: Equatable, Hashable {
+    /**
+     * The draft's id for this file; its upload is keyed by it.
+     */
+    public var id: String
+    public var path: String
+    public var name: String
+    public var mimeType: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The draft's id for this file; its upload is keyed by it.
+         */id: String, path: String, name: String, mimeType: String) {
+        self.id = id
+        self.path = path
+        self.name = name
+        self.mimeType = mimeType
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiComposerFile: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiComposerFile: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiComposerFile {
+        return
+            try FfiComposerFile(
+                id: FfiConverterString.read(from: &buf), 
+                path: FfiConverterString.read(from: &buf), 
+                name: FfiConverterString.read(from: &buf), 
+                mimeType: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiComposerFile, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.path, into: &buf)
+        FfiConverterString.write(value.name, into: &buf)
+        FfiConverterString.write(value.mimeType, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiComposerFile_lift(_ buf: RustBuffer) throws -> FfiComposerFile {
+    return try FfiConverterTypeFfiComposerFile.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiComposerFile_lower(_ value: FfiComposerFile) -> RustBuffer {
+    return FfiConverterTypeFfiComposerFile.lower(value)
+}
+
+
+public struct FfiComposerLimits: Equatable, Hashable {
+    public var images: Bool
+    public var maxFileBytes: UInt64?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(images: Bool, maxFileBytes: UInt64?) {
+        self.images = images
+        self.maxFileBytes = maxFileBytes
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiComposerLimits: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiComposerLimits: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiComposerLimits {
+        return
+            try FfiComposerLimits(
+                images: FfiConverterBool.read(from: &buf), 
+                maxFileBytes: FfiConverterOptionUInt64.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiComposerLimits, into buf: inout [UInt8]) {
+        FfiConverterBool.write(value.images, into: &buf)
+        FfiConverterOptionUInt64.write(value.maxFileBytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiComposerLimits_lift(_ buf: RustBuffer) throws -> FfiComposerLimits {
+    return try FfiConverterTypeFfiComposerLimits.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiComposerLimits_lower(_ value: FfiComposerLimits) -> RustBuffer {
+    return FfiConverterTypeFfiComposerLimits.lower(value)
+}
+
+
+/**
+ * Conn's friendly label and icon for one of its own MCP tools.
+ */
+public struct FfiConnToolLabel: Equatable, Hashable {
+    public var displayName: String
+    public var icon: FfiConnToolIcon
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(displayName: String, icon: FfiConnToolIcon) {
+        self.displayName = displayName
+        self.icon = icon
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiConnToolLabel: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiConnToolLabel: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiConnToolLabel {
+        return
+            try FfiConnToolLabel(
+                displayName: FfiConverterString.read(from: &buf), 
+                icon: FfiConverterTypeFfiConnToolIcon.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiConnToolLabel, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.displayName, into: &buf)
+        FfiConverterTypeFfiConnToolIcon.write(value.icon, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiConnToolLabel_lift(_ buf: RustBuffer) throws -> FfiConnToolLabel {
+    return try FfiConverterTypeFfiConnToolLabel.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiConnToolLabel_lower(_ value: FfiConnToolLabel) -> RustBuffer {
+    return FfiConverterTypeFfiConnToolLabel.lower(value)
+}
+
+
 /**
  * Canonical reference to a Conn conversation linked to an Orbit Task agent.
  */
@@ -5293,6 +6323,60 @@ public func FfiConverterTypeFfiDeliverable_lower(_ value: FfiDeliverable) -> Rus
 }
 
 
+public struct FfiEncodedImage: Equatable, Hashable {
+    public var jpeg: Data?
+    public var png: Data?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(jpeg: Data?, png: Data?) {
+        self.jpeg = jpeg
+        self.png = png
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiEncodedImage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiEncodedImage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiEncodedImage {
+        return
+            try FfiEncodedImage(
+                jpeg: FfiConverterOptionData.read(from: &buf), 
+                png: FfiConverterOptionData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiEncodedImage, into buf: inout [UInt8]) {
+        FfiConverterOptionData.write(value.jpeg, into: &buf)
+        FfiConverterOptionData.write(value.png, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiEncodedImage_lift(_ buf: RustBuffer) throws -> FfiEncodedImage {
+    return try FfiConverterTypeFfiEncodedImage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiEncodedImage_lower(_ value: FfiEncodedImage) -> RustBuffer {
+    return FfiConverterTypeFfiEncodedImage.lower(value)
+}
+
+
 public struct FfiFilePatch: Equatable, Hashable {
     public var newPath: String?
     public var oldPath: String?
@@ -5356,6 +6440,64 @@ public func FfiConverterTypeFfiFilePatch_lift(_ buf: RustBuffer) throws -> FfiFi
 #endif
 public func FfiConverterTypeFfiFilePatch_lower(_ value: FfiFilePatch) -> RustBuffer {
     return FfiConverterTypeFfiFilePatch.lower(value)
+}
+
+
+public struct FfiImageInfo: Equatable, Hashable {
+    public var width: UInt32
+    public var height: UInt32
+    public var alpha: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(width: UInt32, height: UInt32, alpha: Bool) {
+        self.width = width
+        self.height = height
+        self.alpha = alpha
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiImageInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiImageInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiImageInfo {
+        return
+            try FfiImageInfo(
+                width: FfiConverterUInt32.read(from: &buf), 
+                height: FfiConverterUInt32.read(from: &buf), 
+                alpha: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiImageInfo, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.width, into: &buf)
+        FfiConverterUInt32.write(value.height, into: &buf)
+        FfiConverterBool.write(value.alpha, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiImageInfo_lift(_ buf: RustBuffer) throws -> FfiImageInfo {
+    return try FfiConverterTypeFfiImageInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiImageInfo_lower(_ value: FfiImageInfo) -> RustBuffer {
+    return FfiConverterTypeFfiImageInfo.lower(value)
 }
 
 
@@ -5510,12 +6652,14 @@ public func FfiConverterTypeFfiInsightTrendPoint_lower(_ value: FfiInsightTrendP
 public struct FfiLinkedDiscovery: Equatable, Hashable {
     public var targets: [FfiOrbitEnvironment]
     public var unresolvedEndpoints: [String]
+    public var unresolvedServerIds: [String]
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(targets: [FfiOrbitEnvironment], unresolvedEndpoints: [String]) {
+    public init(targets: [FfiOrbitEnvironment], unresolvedEndpoints: [String], unresolvedServerIds: [String]) {
         self.targets = targets
         self.unresolvedEndpoints = unresolvedEndpoints
+        self.unresolvedServerIds = unresolvedServerIds
     }
 
     
@@ -5535,13 +6679,15 @@ public struct FfiConverterTypeFfiLinkedDiscovery: FfiConverterRustBuffer {
         return
             try FfiLinkedDiscovery(
                 targets: FfiConverterSequenceTypeFfiOrbitEnvironment.read(from: &buf), 
-                unresolvedEndpoints: FfiConverterSequenceString.read(from: &buf)
+                unresolvedEndpoints: FfiConverterSequenceString.read(from: &buf), 
+                unresolvedServerIds: FfiConverterSequenceString.read(from: &buf)
         )
     }
 
     public static func write(_ value: FfiLinkedDiscovery, into buf: inout [UInt8]) {
         FfiConverterSequenceTypeFfiOrbitEnvironment.write(value.targets, into: &buf)
         FfiConverterSequenceString.write(value.unresolvedEndpoints, into: &buf)
+        FfiConverterSequenceString.write(value.unresolvedServerIds, into: &buf)
     }
 }
 
@@ -8638,6 +9784,13 @@ public struct FfiSessionState: Equatable, Hashable {
      * switch, say): the previous environment's threads are gone.
      */
     public var identityEpoch: UInt64
+    /**
+     * Diagnostics for the app's log; nothing renders them. Connection tries that failed since
+     * the last handshake, start retries used, and whether the grace window is open.
+     */
+    public var failedTries: UInt32
+    public var startRetries: UInt32
+    public var inGrace: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -8658,7 +9811,11 @@ public struct FfiSessionState: Equatable, Hashable {
         /**
          * Grows when this scope connects to a different server than before (an Orbit primary
          * switch, say): the previous environment's threads are gone.
-         */identityEpoch: UInt64) {
+         */identityEpoch: UInt64, 
+        /**
+         * Diagnostics for the app's log; nothing renders them. Connection tries that failed since
+         * the last handshake, start retries used, and whether the grace window is open.
+         */failedTries: UInt32, startRetries: UInt32, inGrace: Bool) {
         self.revision = revision
         self.connectionId = connectionId
         self.phase = phase
@@ -8668,6 +9825,9 @@ public struct FfiSessionState: Equatable, Hashable {
         self.showsOffline = showsOffline
         self.hasConnected = hasConnected
         self.identityEpoch = identityEpoch
+        self.failedTries = failedTries
+        self.startRetries = startRetries
+        self.inGrace = inGrace
     }
 
     
@@ -8694,7 +9854,10 @@ public struct FfiConverterTypeFfiSessionState: FfiConverterRustBuffer {
                 offlineReady: FfiConverterBool.read(from: &buf), 
                 showsOffline: FfiConverterBool.read(from: &buf), 
                 hasConnected: FfiConverterBool.read(from: &buf), 
-                identityEpoch: FfiConverterUInt64.read(from: &buf)
+                identityEpoch: FfiConverterUInt64.read(from: &buf), 
+                failedTries: FfiConverterUInt32.read(from: &buf), 
+                startRetries: FfiConverterUInt32.read(from: &buf), 
+                inGrace: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -8708,6 +9871,9 @@ public struct FfiConverterTypeFfiSessionState: FfiConverterRustBuffer {
         FfiConverterBool.write(value.showsOffline, into: &buf)
         FfiConverterBool.write(value.hasConnected, into: &buf)
         FfiConverterUInt64.write(value.identityEpoch, into: &buf)
+        FfiConverterUInt32.write(value.failedTries, into: &buf)
+        FfiConverterUInt32.write(value.startRetries, into: &buf)
+        FfiConverterBool.write(value.inGrace, into: &buf)
     }
 }
 
@@ -8885,14 +10051,22 @@ public struct FfiShellSnapshot: Equatable, Hashable {
     public var olderSettledCount: UInt64
     public var projects: [FfiProject]
     public var threads: [FfiThreadSummary]
+    /**
+     * IDs held by this environment that must also mask later environments in a merged inbox.
+     */
+    public var hiddenThreadIds: [String]
     public var synchronized: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(olderSettledCount: UInt64, projects: [FfiProject], threads: [FfiThreadSummary], synchronized: Bool) {
+    public init(olderSettledCount: UInt64, projects: [FfiProject], threads: [FfiThreadSummary], 
+        /**
+         * IDs held by this environment that must also mask later environments in a merged inbox.
+         */hiddenThreadIds: [String], synchronized: Bool) {
         self.olderSettledCount = olderSettledCount
         self.projects = projects
         self.threads = threads
+        self.hiddenThreadIds = hiddenThreadIds
         self.synchronized = synchronized
     }
 
@@ -8915,6 +10089,7 @@ public struct FfiConverterTypeFfiShellSnapshot: FfiConverterRustBuffer {
                 olderSettledCount: FfiConverterUInt64.read(from: &buf), 
                 projects: FfiConverterSequenceTypeFfiProject.read(from: &buf), 
                 threads: FfiConverterSequenceTypeFfiThreadSummary.read(from: &buf), 
+                hiddenThreadIds: FfiConverterSequenceString.read(from: &buf), 
                 synchronized: FfiConverterBool.read(from: &buf)
         )
     }
@@ -8923,6 +10098,7 @@ public struct FfiConverterTypeFfiShellSnapshot: FfiConverterRustBuffer {
         FfiConverterUInt64.write(value.olderSettledCount, into: &buf)
         FfiConverterSequenceTypeFfiProject.write(value.projects, into: &buf)
         FfiConverterSequenceTypeFfiThreadSummary.write(value.threads, into: &buf)
+        FfiConverterSequenceString.write(value.hiddenThreadIds, into: &buf)
         FfiConverterBool.write(value.synchronized, into: &buf)
     }
 }
@@ -10492,11 +11668,13 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
     public var historyCursor: String?
     public var serverPage: Bool
     public var threadId: String
+    public var projectId: String?
     public var title: String?
     public var branch: String?
     public var modelLabel: String?
     public var entries: [FfiTimelineEntry]
     public var feedDetails: [String: FfiFeedDetail]
+    public var delegatedTaskIds: [String: String]
     public var workGroups: [FfiWorkGroupTiming]
     public var working: Bool
     public var activeRunId: String?
@@ -10512,10 +11690,25 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
      * panel shows it (Conn mobile's `feedWithoutOpenQuestionRow`).
      */
     public var pendingQuestion: FfiPendingQuestion?
+    /**
+     * When the running turn's work started (Unix ms, server clock): one start for the whole run,
+     * which every "Working for" row counts from (Conn mobile's `activeWorkStartedAt`).
+     */
+    public var activeWorkStartedAtMs: Int64?
+    /**
+     * The server's clock minus this device's (ms), from the server config's `serverTime`
+     * (Conn mobile's `toServerClock`). 0 when unknown.
+     */
+    public var serverClockOffsetMs: Int64
+    /**
+     * The latest turn's agents for the agents capsule, from the projection's subagents and runs
+     * (Conn mobile's `deriveThreadTurnSubagents`); `None` when the capsule hides.
+     */
+    public var turnAgents: FfiTurnAgents?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(historyCursor: String?, serverPage: Bool, threadId: String, title: String?, branch: String?, modelLabel: String?, entries: [FfiTimelineEntry], feedDetails: [String: FfiFeedDetail], workGroups: [FfiWorkGroupTiming], working: Bool, activeRunId: String?, queuedCount: UInt32, synchronized: Bool, 
+    public init(historyCursor: String?, serverPage: Bool, threadId: String, projectId: String?, title: String?, branch: String?, modelLabel: String?, entries: [FfiTimelineEntry], feedDetails: [String: FfiFeedDetail], delegatedTaskIds: [String: String], workGroups: [FfiWorkGroupTiming], working: Bool, activeRunId: String?, queuedCount: UInt32, synchronized: Bool, 
         /**
          * Approvals still waiting for an answer, in timeline order; the card above the composer
          * shows the first (Conn mobile's `activePendingApproval`).
@@ -10523,15 +11716,29 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
         /**
          * The question the panel above the composer asks; `entries` leaves its row out, since the
          * panel shows it (Conn mobile's `feedWithoutOpenQuestionRow`).
-         */pendingQuestion: FfiPendingQuestion?) {
+         */pendingQuestion: FfiPendingQuestion?, 
+        /**
+         * When the running turn's work started (Unix ms, server clock): one start for the whole run,
+         * which every "Working for" row counts from (Conn mobile's `activeWorkStartedAt`).
+         */activeWorkStartedAtMs: Int64?, 
+        /**
+         * The server's clock minus this device's (ms), from the server config's `serverTime`
+         * (Conn mobile's `toServerClock`). 0 when unknown.
+         */serverClockOffsetMs: Int64, 
+        /**
+         * The latest turn's agents for the agents capsule, from the projection's subagents and runs
+         * (Conn mobile's `deriveThreadTurnSubagents`); `None` when the capsule hides.
+         */turnAgents: FfiTurnAgents?) {
         self.historyCursor = historyCursor
         self.serverPage = serverPage
         self.threadId = threadId
+        self.projectId = projectId
         self.title = title
         self.branch = branch
         self.modelLabel = modelLabel
         self.entries = entries
         self.feedDetails = feedDetails
+        self.delegatedTaskIds = delegatedTaskIds
         self.workGroups = workGroups
         self.working = working
         self.activeRunId = activeRunId
@@ -10539,6 +11746,9 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
         self.synchronized = synchronized
         self.pendingApprovals = pendingApprovals
         self.pendingQuestion = pendingQuestion
+        self.activeWorkStartedAtMs = activeWorkStartedAtMs
+        self.serverClockOffsetMs = serverClockOffsetMs
+        self.turnAgents = turnAgents
     }
 
     
@@ -10560,18 +11770,23 @@ public struct FfiConverterTypeFfiThreadSnapshot: FfiConverterRustBuffer {
                 historyCursor: FfiConverterOptionString.read(from: &buf), 
                 serverPage: FfiConverterBool.read(from: &buf), 
                 threadId: FfiConverterString.read(from: &buf), 
+                projectId: FfiConverterOptionString.read(from: &buf), 
                 title: FfiConverterOptionString.read(from: &buf), 
                 branch: FfiConverterOptionString.read(from: &buf), 
                 modelLabel: FfiConverterOptionString.read(from: &buf), 
                 entries: FfiConverterSequenceTypeFfiTimelineEntry.read(from: &buf), 
                 feedDetails: FfiConverterDictionaryStringTypeFfiFeedDetail.read(from: &buf), 
+                delegatedTaskIds: FfiConverterDictionaryStringString.read(from: &buf), 
                 workGroups: FfiConverterSequenceTypeFfiWorkGroupTiming.read(from: &buf), 
                 working: FfiConverterBool.read(from: &buf), 
                 activeRunId: FfiConverterOptionString.read(from: &buf), 
                 queuedCount: FfiConverterUInt32.read(from: &buf), 
                 synchronized: FfiConverterBool.read(from: &buf), 
                 pendingApprovals: FfiConverterSequenceTypeFfiPendingApproval.read(from: &buf), 
-                pendingQuestion: FfiConverterOptionTypeFfiPendingQuestion.read(from: &buf)
+                pendingQuestion: FfiConverterOptionTypeFfiPendingQuestion.read(from: &buf), 
+                activeWorkStartedAtMs: FfiConverterOptionInt64.read(from: &buf), 
+                serverClockOffsetMs: FfiConverterInt64.read(from: &buf), 
+                turnAgents: FfiConverterOptionTypeFfiTurnAgents.read(from: &buf)
         )
     }
 
@@ -10579,11 +11794,13 @@ public struct FfiConverterTypeFfiThreadSnapshot: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.historyCursor, into: &buf)
         FfiConverterBool.write(value.serverPage, into: &buf)
         FfiConverterString.write(value.threadId, into: &buf)
+        FfiConverterOptionString.write(value.projectId, into: &buf)
         FfiConverterOptionString.write(value.title, into: &buf)
         FfiConverterOptionString.write(value.branch, into: &buf)
         FfiConverterOptionString.write(value.modelLabel, into: &buf)
         FfiConverterSequenceTypeFfiTimelineEntry.write(value.entries, into: &buf)
         FfiConverterDictionaryStringTypeFfiFeedDetail.write(value.feedDetails, into: &buf)
+        FfiConverterDictionaryStringString.write(value.delegatedTaskIds, into: &buf)
         FfiConverterSequenceTypeFfiWorkGroupTiming.write(value.workGroups, into: &buf)
         FfiConverterBool.write(value.working, into: &buf)
         FfiConverterOptionString.write(value.activeRunId, into: &buf)
@@ -10591,6 +11808,9 @@ public struct FfiConverterTypeFfiThreadSnapshot: FfiConverterRustBuffer {
         FfiConverterBool.write(value.synchronized, into: &buf)
         FfiConverterSequenceTypeFfiPendingApproval.write(value.pendingApprovals, into: &buf)
         FfiConverterOptionTypeFfiPendingQuestion.write(value.pendingQuestion, into: &buf)
+        FfiConverterOptionInt64.write(value.activeWorkStartedAtMs, into: &buf)
+        FfiConverterInt64.write(value.serverClockOffsetMs, into: &buf)
+        FfiConverterOptionTypeFfiTurnAgents.write(value.turnAgents, into: &buf)
     }
 }
 
@@ -10614,6 +11834,9 @@ public func FfiConverterTypeFfiThreadSnapshot_lower(_ value: FfiThreadSnapshot) 
  * Summary row for one thread in [`FfiShellSnapshot`].
  */
 public struct FfiThreadSummary: Equatable, Hashable {
+    public var orderGroup: UInt8
+    public var orderKey: String
+    public var orderTimeMs: Int64
     public var sidebarProjectKey: String
     public var orbitProjectSlug: String?
     public var id: String
@@ -10623,7 +11846,6 @@ public struct FfiThreadSummary: Equatable, Hashable {
     public var activity: FfiThreadActivity
     public var updatedAt: String?
     public var settled: Bool
-    public var isSubagent: Bool
     public var pinned: Bool
     public var unread: Bool
     /**
@@ -10636,10 +11858,20 @@ public struct FfiThreadSummary: Equatable, Hashable {
      * warning ("limited") instead of an error.
      */
     public var usageLimited: Bool
+    /**
+     * The thread's current provider driver (`claudeAgent`, `codex`, `antigravity`, `grok`), for
+     * the row's meta-line icon. An unrecognised instance keeps its id; `None` without one.
+     */
+    public var provider: String?
+    /**
+     * The thread's model and effort labels (`Opus 5.5`, `high`), for agent message cards.
+     */
+    public var model: String?
+    public var effort: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(sidebarProjectKey: String, orbitProjectSlug: String?, id: String, projectId: String, title: String, branch: String?, activity: FfiThreadActivity, updatedAt: String?, settled: Bool, isSubagent: Bool, pinned: Bool, unread: Bool, 
+    public init(orderGroup: UInt8, orderKey: String, orderTimeMs: Int64, sidebarProjectKey: String, orbitProjectSlug: String?, id: String, projectId: String, title: String, branch: String?, activity: FfiThreadActivity, updatedAt: String?, settled: Bool, pinned: Bool, unread: Bool, 
         /**
          * The provider's error (`lastError`) while the thread has failed; `None` otherwise.
          * Conn mobile shows it as a third row line (`ThreadListV2Row`).
@@ -10647,7 +11879,17 @@ public struct FfiThreadSummary: Equatable, Hashable {
         /**
          * The failure is a usage limit (`lastErrorClass: usage_limit`), which mobile shows as a
          * warning ("limited") instead of an error.
-         */usageLimited: Bool) {
+         */usageLimited: Bool, 
+        /**
+         * The thread's current provider driver (`claudeAgent`, `codex`, `antigravity`, `grok`), for
+         * the row's meta-line icon. An unrecognised instance keeps its id; `None` without one.
+         */provider: String?, 
+        /**
+         * The thread's model and effort labels (`Opus 5.5`, `high`), for agent message cards.
+         */model: String?, effort: String?) {
+        self.orderGroup = orderGroup
+        self.orderKey = orderKey
+        self.orderTimeMs = orderTimeMs
         self.sidebarProjectKey = sidebarProjectKey
         self.orbitProjectSlug = orbitProjectSlug
         self.id = id
@@ -10657,11 +11899,13 @@ public struct FfiThreadSummary: Equatable, Hashable {
         self.activity = activity
         self.updatedAt = updatedAt
         self.settled = settled
-        self.isSubagent = isSubagent
         self.pinned = pinned
         self.unread = unread
         self.failureMessage = failureMessage
         self.usageLimited = usageLimited
+        self.provider = provider
+        self.model = model
+        self.effort = effort
     }
 
     
@@ -10680,6 +11924,9 @@ public struct FfiConverterTypeFfiThreadSummary: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiThreadSummary {
         return
             try FfiThreadSummary(
+                orderGroup: FfiConverterUInt8.read(from: &buf), 
+                orderKey: FfiConverterString.read(from: &buf), 
+                orderTimeMs: FfiConverterInt64.read(from: &buf), 
                 sidebarProjectKey: FfiConverterString.read(from: &buf), 
                 orbitProjectSlug: FfiConverterOptionString.read(from: &buf), 
                 id: FfiConverterString.read(from: &buf), 
@@ -10689,15 +11936,20 @@ public struct FfiConverterTypeFfiThreadSummary: FfiConverterRustBuffer {
                 activity: FfiConverterTypeFfiThreadActivity.read(from: &buf), 
                 updatedAt: FfiConverterOptionString.read(from: &buf), 
                 settled: FfiConverterBool.read(from: &buf), 
-                isSubagent: FfiConverterBool.read(from: &buf), 
                 pinned: FfiConverterBool.read(from: &buf), 
                 unread: FfiConverterBool.read(from: &buf), 
                 failureMessage: FfiConverterOptionString.read(from: &buf), 
-                usageLimited: FfiConverterBool.read(from: &buf)
+                usageLimited: FfiConverterBool.read(from: &buf), 
+                provider: FfiConverterOptionString.read(from: &buf), 
+                model: FfiConverterOptionString.read(from: &buf), 
+                effort: FfiConverterOptionString.read(from: &buf)
         )
     }
 
     public static func write(_ value: FfiThreadSummary, into buf: inout [UInt8]) {
+        FfiConverterUInt8.write(value.orderGroup, into: &buf)
+        FfiConverterString.write(value.orderKey, into: &buf)
+        FfiConverterInt64.write(value.orderTimeMs, into: &buf)
         FfiConverterString.write(value.sidebarProjectKey, into: &buf)
         FfiConverterOptionString.write(value.orbitProjectSlug, into: &buf)
         FfiConverterString.write(value.id, into: &buf)
@@ -10707,11 +11959,13 @@ public struct FfiConverterTypeFfiThreadSummary: FfiConverterRustBuffer {
         FfiConverterTypeFfiThreadActivity.write(value.activity, into: &buf)
         FfiConverterOptionString.write(value.updatedAt, into: &buf)
         FfiConverterBool.write(value.settled, into: &buf)
-        FfiConverterBool.write(value.isSubagent, into: &buf)
         FfiConverterBool.write(value.pinned, into: &buf)
         FfiConverterBool.write(value.unread, into: &buf)
         FfiConverterOptionString.write(value.failureMessage, into: &buf)
         FfiConverterBool.write(value.usageLimited, into: &buf)
+        FfiConverterOptionString.write(value.provider, into: &buf)
+        FfiConverterOptionString.write(value.model, into: &buf)
+        FfiConverterOptionString.write(value.effort, into: &buf)
     }
 }
 
@@ -10728,6 +11982,222 @@ public func FfiConverterTypeFfiThreadSummary_lift(_ buf: RustBuffer) throws -> F
 #endif
 public func FfiConverterTypeFfiThreadSummary_lower(_ value: FfiThreadSummary) -> RustBuffer {
     return FfiConverterTypeFfiThreadSummary.lower(value)
+}
+
+
+/**
+ * One agent in [`FfiTurnAgents`].
+ */
+public struct FfiTurnAgent: Equatable, Hashable {
+    public var id: String
+    public var title: String
+    /**
+     * Provider instance that runs it.
+     */
+    public var provider: String?
+    /**
+     * Model name then version, no vendor (`SubagentModel::label`).
+     */
+    public var model: String?
+    public var effort: String?
+    public var status: FfiTurnItemStatus
+    public var statusLabel: String
+    public var live: Bool
+    public var settled: Bool
+    /**
+     * The thread to open: the remote child's on its machine, else the local child's.
+     */
+    public var childThreadId: String?
+    /**
+     * The machine a remote child runs on.
+     */
+    public var environmentId: String?
+    public var startedAt: String?
+    public var updatedAt: String
+    public var completedAt: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(id: String, title: String, 
+        /**
+         * Provider instance that runs it.
+         */provider: String?, 
+        /**
+         * Model name then version, no vendor (`SubagentModel::label`).
+         */model: String?, effort: String?, status: FfiTurnItemStatus, statusLabel: String, live: Bool, settled: Bool, 
+        /**
+         * The thread to open: the remote child's on its machine, else the local child's.
+         */childThreadId: String?, 
+        /**
+         * The machine a remote child runs on.
+         */environmentId: String?, startedAt: String?, updatedAt: String, completedAt: String?) {
+        self.id = id
+        self.title = title
+        self.provider = provider
+        self.model = model
+        self.effort = effort
+        self.status = status
+        self.statusLabel = statusLabel
+        self.live = live
+        self.settled = settled
+        self.childThreadId = childThreadId
+        self.environmentId = environmentId
+        self.startedAt = startedAt
+        self.updatedAt = updatedAt
+        self.completedAt = completedAt
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTurnAgent: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTurnAgent: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTurnAgent {
+        return
+            try FfiTurnAgent(
+                id: FfiConverterString.read(from: &buf), 
+                title: FfiConverterString.read(from: &buf), 
+                provider: FfiConverterOptionString.read(from: &buf), 
+                model: FfiConverterOptionString.read(from: &buf), 
+                effort: FfiConverterOptionString.read(from: &buf), 
+                status: FfiConverterTypeFfiTurnItemStatus.read(from: &buf), 
+                statusLabel: FfiConverterString.read(from: &buf), 
+                live: FfiConverterBool.read(from: &buf), 
+                settled: FfiConverterBool.read(from: &buf), 
+                childThreadId: FfiConverterOptionString.read(from: &buf), 
+                environmentId: FfiConverterOptionString.read(from: &buf), 
+                startedAt: FfiConverterOptionString.read(from: &buf), 
+                updatedAt: FfiConverterString.read(from: &buf), 
+                completedAt: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTurnAgent, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
+        FfiConverterString.write(value.title, into: &buf)
+        FfiConverterOptionString.write(value.provider, into: &buf)
+        FfiConverterOptionString.write(value.model, into: &buf)
+        FfiConverterOptionString.write(value.effort, into: &buf)
+        FfiConverterTypeFfiTurnItemStatus.write(value.status, into: &buf)
+        FfiConverterString.write(value.statusLabel, into: &buf)
+        FfiConverterBool.write(value.live, into: &buf)
+        FfiConverterBool.write(value.settled, into: &buf)
+        FfiConverterOptionString.write(value.childThreadId, into: &buf)
+        FfiConverterOptionString.write(value.environmentId, into: &buf)
+        FfiConverterOptionString.write(value.startedAt, into: &buf)
+        FfiConverterString.write(value.updatedAt, into: &buf)
+        FfiConverterOptionString.write(value.completedAt, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTurnAgent_lift(_ buf: RustBuffer) throws -> FfiTurnAgent {
+    return try FfiConverterTypeFfiTurnAgent.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTurnAgent_lower(_ value: FfiTurnAgent) -> RustBuffer {
+    return FfiConverterTypeFfiTurnAgent.lower(value)
+}
+
+
+/**
+ * The agents capsule above the composer and its sheet.
+ */
+public struct FfiTurnAgents: Equatable, Hashable {
+    public var runId: String?
+    public var turnActive: Bool
+    /**
+     * In start order.
+     */
+    public var agents: [FfiTurnAgent]
+    /**
+     * Pending, running or waiting.
+     */
+    public var liveCount: UInt32
+    /**
+     * Completed, failed, cancelled or interrupted.
+     */
+    public var settledCount: UInt32
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(runId: String?, turnActive: Bool, 
+        /**
+         * In start order.
+         */agents: [FfiTurnAgent], 
+        /**
+         * Pending, running or waiting.
+         */liveCount: UInt32, 
+        /**
+         * Completed, failed, cancelled or interrupted.
+         */settledCount: UInt32) {
+        self.runId = runId
+        self.turnActive = turnActive
+        self.agents = agents
+        self.liveCount = liveCount
+        self.settledCount = settledCount
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiTurnAgents: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiTurnAgents: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiTurnAgents {
+        return
+            try FfiTurnAgents(
+                runId: FfiConverterOptionString.read(from: &buf), 
+                turnActive: FfiConverterBool.read(from: &buf), 
+                agents: FfiConverterSequenceTypeFfiTurnAgent.read(from: &buf), 
+                liveCount: FfiConverterUInt32.read(from: &buf), 
+                settledCount: FfiConverterUInt32.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiTurnAgents, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.runId, into: &buf)
+        FfiConverterBool.write(value.turnActive, into: &buf)
+        FfiConverterSequenceTypeFfiTurnAgent.write(value.agents, into: &buf)
+        FfiConverterUInt32.write(value.liveCount, into: &buf)
+        FfiConverterUInt32.write(value.settledCount, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTurnAgents_lift(_ buf: RustBuffer) throws -> FfiTurnAgents {
+    return try FfiConverterTypeFfiTurnAgents.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiTurnAgents_lower(_ value: FfiTurnAgents) -> RustBuffer {
+    return FfiConverterTypeFfiTurnAgents.lower(value)
 }
 
 
@@ -11083,13 +12553,22 @@ public struct FfiWorkGroupTiming: Equatable, Hashable {
     public var continuesSteer: Bool
     public var durationMs: UInt64?
     public var durationLabel: String?
+    /**
+     * When the group started (Unix ms). `duration_ms` is the span of its finished steps, not
+     * the time since it started, so a running group's clock counts from here.
+     */
+    public var startedAtMs: Int64?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
     public init(
         /**
          * Stable group id matching desktop (`work-group-<first_entry_id>`).
-         */id: String, firstEntryId: String, entryIds: [String], runId: String?, hasActive: Bool, continuesSteer: Bool, durationMs: UInt64?, durationLabel: String?) {
+         */id: String, firstEntryId: String, entryIds: [String], runId: String?, hasActive: Bool, continuesSteer: Bool, durationMs: UInt64?, durationLabel: String?, 
+        /**
+         * When the group started (Unix ms). `duration_ms` is the span of its finished steps, not
+         * the time since it started, so a running group's clock counts from here.
+         */startedAtMs: Int64?) {
         self.id = id
         self.firstEntryId = firstEntryId
         self.entryIds = entryIds
@@ -11098,6 +12577,7 @@ public struct FfiWorkGroupTiming: Equatable, Hashable {
         self.continuesSteer = continuesSteer
         self.durationMs = durationMs
         self.durationLabel = durationLabel
+        self.startedAtMs = startedAtMs
     }
 
     
@@ -11123,7 +12603,8 @@ public struct FfiConverterTypeFfiWorkGroupTiming: FfiConverterRustBuffer {
                 hasActive: FfiConverterBool.read(from: &buf), 
                 continuesSteer: FfiConverterBool.read(from: &buf), 
                 durationMs: FfiConverterOptionUInt64.read(from: &buf), 
-                durationLabel: FfiConverterOptionString.read(from: &buf)
+                durationLabel: FfiConverterOptionString.read(from: &buf), 
+                startedAtMs: FfiConverterOptionInt64.read(from: &buf)
         )
     }
 
@@ -11136,6 +12617,7 @@ public struct FfiConverterTypeFfiWorkGroupTiming: FfiConverterRustBuffer {
         FfiConverterBool.write(value.continuesSteer, into: &buf)
         FfiConverterOptionUInt64.write(value.durationMs, into: &buf)
         FfiConverterOptionString.write(value.durationLabel, into: &buf)
+        FfiConverterOptionInt64.write(value.startedAtMs, into: &buf)
     }
 }
 
@@ -11787,6 +13269,169 @@ public func FfiConverterTypeFfiChangeTone_lower(_ value: FfiChangeTone) -> RustB
 
 
 
+
+public enum FfiComposerTarget: Equatable, Hashable {
+    
+    case new(projectId: String?
+    )
+    case reply(threadId: String, mode: FfiSendMode
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiComposerTarget: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiComposerTarget: FfiConverterRustBuffer {
+    typealias SwiftType = FfiComposerTarget
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiComposerTarget {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .new(projectId: try FfiConverterOptionString.read(from: &buf)
+        )
+        
+        case 2: return .reply(threadId: try FfiConverterString.read(from: &buf), mode: try FfiConverterTypeFfiSendMode.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiComposerTarget, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .new(projectId):
+            writeInt(&buf, Int32(1))
+            FfiConverterOptionString.write(projectId, into: &buf)
+            
+        
+        case let .reply(threadId,mode):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(threadId, into: &buf)
+            FfiConverterTypeFfiSendMode.write(mode, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiComposerTarget_lift(_ buf: RustBuffer) throws -> FfiComposerTarget {
+    return try FfiConverterTypeFfiComposerTarget.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiComposerTarget_lower(_ value: FfiComposerTarget) -> RustBuffer {
+    return FfiConverterTypeFfiComposerTarget.lower(value)
+}
+
+
+
+/**
+ * Which icon a Conn tool row draws (`conn_state::conn_tools::ConnToolIcon`).
+ */
+
+public enum FfiConnToolIcon: Equatable, Hashable {
+    
+    case connMark
+    case browser
+    case device
+    case pullRequest
+    case credential
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiConnToolIcon: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiConnToolIcon: FfiConverterRustBuffer {
+    typealias SwiftType = FfiConnToolIcon
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiConnToolIcon {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .connMark
+        
+        case 2: return .browser
+        
+        case 3: return .device
+        
+        case 4: return .pullRequest
+        
+        case 5: return .credential
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiConnToolIcon, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case .connMark:
+            writeInt(&buf, Int32(1))
+        
+        
+        case .browser:
+            writeInt(&buf, Int32(2))
+        
+        
+        case .device:
+            writeInt(&buf, Int32(3))
+        
+        
+        case .pullRequest:
+            writeInt(&buf, Int32(4))
+        
+        
+        case .credential:
+            writeInt(&buf, Int32(5))
+        
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiConnToolIcon_lift(_ buf: RustBuffer) throws -> FfiConnToolIcon {
+    return try FfiConverterTypeFfiConnToolIcon.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiConnToolIcon_lower(_ value: FfiConnToolIcon) -> RustBuffer {
+    return FfiConverterTypeFfiConnToolIcon.lower(value)
+}
+
+
+
 /**
  * Connection lifecycle reported to [`crate::CoreListener::on_status`].
  */
@@ -12106,7 +13751,10 @@ public func FfiConverterTypeFfiError_lower(_ value: FfiError) -> RustBuffer {
 
 public enum FfiFeedDetail: Equatable, Hashable {
     
-    case message(sender: String?, thread: String?, environment: String?, reviews: [FfiReviewExcerpt]
+    case message(sender: String?, thread: String?, environment: String?, reviews: [FfiReviewExcerpt], 
+        /**
+         * The sending agent's model and effort when the feed knows them (delegated results).
+         */model: String?, effort: String?
     )
     case html(attachment: String, title: String, height: UInt32
     )
@@ -12137,7 +13785,7 @@ public struct FfiConverterTypeFfiFeedDetail: FfiConverterRustBuffer {
         let variant: Int32 = try readInt(&buf)
         switch variant {
         
-        case 1: return .message(sender: try FfiConverterOptionString.read(from: &buf), thread: try FfiConverterOptionString.read(from: &buf), environment: try FfiConverterOptionString.read(from: &buf), reviews: try FfiConverterSequenceTypeFfiReviewExcerpt.read(from: &buf)
+        case 1: return .message(sender: try FfiConverterOptionString.read(from: &buf), thread: try FfiConverterOptionString.read(from: &buf), environment: try FfiConverterOptionString.read(from: &buf), reviews: try FfiConverterSequenceTypeFfiReviewExcerpt.read(from: &buf), model: try FfiConverterOptionString.read(from: &buf), effort: try FfiConverterOptionString.read(from: &buf)
         )
         
         case 2: return .html(attachment: try FfiConverterString.read(from: &buf), title: try FfiConverterString.read(from: &buf), height: try FfiConverterUInt32.read(from: &buf)
@@ -12160,12 +13808,14 @@ public struct FfiConverterTypeFfiFeedDetail: FfiConverterRustBuffer {
         switch value {
         
         
-        case let .message(sender,thread,environment,reviews):
+        case let .message(sender,thread,environment,reviews,model,effort):
             writeInt(&buf, Int32(1))
             FfiConverterOptionString.write(sender, into: &buf)
             FfiConverterOptionString.write(thread, into: &buf)
             FfiConverterOptionString.write(environment, into: &buf)
             FfiConverterSequenceTypeFfiReviewExcerpt.write(reviews, into: &buf)
+            FfiConverterOptionString.write(model, into: &buf)
+            FfiConverterOptionString.write(effort, into: &buf)
             
         
         case let .html(attachment,title,height):
@@ -14123,6 +15773,7 @@ public enum FfiSessionPhase: Equatable, Hashable {
      */
     case failed(message: String, detail: String?, retry: FfiSessionTarget
     )
+    case suspended
 
 
 
@@ -14156,6 +15807,8 @@ public struct FfiConverterTypeFfiSessionPhase: FfiConverterRustBuffer {
         case 4: return .failed(message: try FfiConverterString.read(from: &buf), detail: try FfiConverterOptionString.read(from: &buf), retry: try FfiConverterTypeFfiSessionTarget.read(from: &buf)
         )
         
+        case 5: return .suspended
+        
         default: throw UniffiInternalError.unexpectedEnumCase
         }
     }
@@ -14185,6 +15838,10 @@ public struct FfiConverterTypeFfiSessionPhase: FfiConverterRustBuffer {
             FfiConverterOptionString.write(detail, into: &buf)
             FfiConverterTypeFfiSessionTarget.write(retry, into: &buf)
             
+        
+        case .suspended:
+            writeInt(&buf, Int32(5))
+        
         }
     }
 }
@@ -15154,7 +16811,10 @@ public enum FfiTimelineEntry: Equatable, Hashable {
     )
     case turnCheckpoint(id: String, runId: String, appRunOrdinal: Int64?, fileCount: UInt32, additions: Int64, deletions: Int64, files: [FfiTurnCheckpointFile]
     )
-    case notice(id: String, text: String, isError: Bool
+    case notice(id: String, text: String, 
+        /**
+         * A warning or an error: drawn as desktop's warning row, not the info divider.
+         */isError: Bool
     )
     /**
      * Fallback for future timeline entry kinds not yet mapped to a dedicated variant.
@@ -15502,6 +17162,91 @@ public func FfiConverterTypeFfiTurnItemStatus_lower(_ value: FfiTurnItemStatus) 
 
 
 /**
+ * A draft file's upload (`AttachmentUploadStatus`).
+ */
+
+public enum FfiUploadStatus: Equatable, Hashable {
+    
+    /**
+     * `progress` is the share sent, 0 to 1 in 5% steps.
+     */
+    case uploading(progress: Float
+    )
+    case ready
+    case failed(reason: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiUploadStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiUploadStatus: FfiConverterRustBuffer {
+    typealias SwiftType = FfiUploadStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiUploadStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .uploading(progress: try FfiConverterFloat.read(from: &buf)
+        )
+        
+        case 2: return .ready
+        
+        case 3: return .failed(reason: try FfiConverterString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiUploadStatus, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .uploading(progress):
+            writeInt(&buf, Int32(1))
+            FfiConverterFloat.write(progress, into: &buf)
+            
+        
+        case .ready:
+            writeInt(&buf, Int32(2))
+        
+        
+        case let .failed(reason):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(reason, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiUploadStatus_lift(_ buf: RustBuffer) throws -> FfiUploadStatus {
+    return try FfiConverterTypeFfiUploadStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiUploadStatus_lower(_ value: FfiUploadStatus) -> RustBuffer {
+    return FfiConverterTypeFfiUploadStatus.lower(value)
+}
+
+
+
+/**
  * Value submitted for one user-input question in [`crate::ConnCore::respond_user_input`].
  */
 
@@ -15650,6 +17395,30 @@ fileprivate struct FfiConverterOptionInt64: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionFloat: FfiConverterRustBuffer {
+    typealias SwiftType = Float?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterFloat.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterFloat.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionDouble: FfiConverterRustBuffer {
     typealias SwiftType = Double?
 
@@ -15722,6 +17491,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
+    typealias SwiftType = Data?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterData.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterData.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeConnCore: FfiConverterRustBuffer {
     typealias SwiftType = ConnCore?
 
@@ -15770,6 +17563,30 @@ fileprivate struct FfiConverterOptionTypeOfflineReader: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeFfiConnToolLabel: FfiConverterRustBuffer {
+    typealias SwiftType = FfiConnToolLabel?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiConnToolLabel.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiConnToolLabel.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeFfiConversationRef: FfiConverterRustBuffer {
     typealias SwiftType = FfiConversationRef?
 
@@ -15786,6 +17603,54 @@ fileprivate struct FfiConverterOptionTypeFfiConversationRef: FfiConverterRustBuf
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeFfiConversationRef.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiEncodedImage: FfiConverterRustBuffer {
+    typealias SwiftType = FfiEncodedImage?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiEncodedImage.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiEncodedImage.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiImageInfo: FfiConverterRustBuffer {
+    typealias SwiftType = FfiImageInfo?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiImageInfo.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiImageInfo.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -16178,6 +18043,30 @@ fileprivate struct FfiConverterOptionTypeFfiThemeTokens: FfiConverterRustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeFfiTurnAgents: FfiConverterRustBuffer {
+    typealias SwiftType = FfiTurnAgents?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiTurnAgents.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiTurnAgents.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeFfiWorktreeSetup: FfiConverterRustBuffer {
     typealias SwiftType = FfiWorktreeSetup?
 
@@ -16394,6 +18283,54 @@ fileprivate struct FfiConverterOptionTypeFfiTaskLabelTone: FfiConverterRustBuffe
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeFfiUploadStatus: FfiConverterRustBuffer {
+    typealias SwiftType = FfiUploadStatus?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiUploadStatus.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiUploadStatus.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionSequenceString: FfiConverterRustBuffer {
+    typealias SwiftType = [String]?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterSequenceString.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterSequenceString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionSequenceTypeFfiUserInputSubmission: FfiConverterRustBuffer {
     typealias SwiftType = [FfiUserInputSubmission]?
 
@@ -16560,6 +18497,31 @@ fileprivate struct FfiConverterSequenceTypeFfiCodeSpan: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeFfiCodeSpan.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeFfiComposerFile: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiComposerFile]
+
+    public static func write(_ value: [FfiComposerFile], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiComposerFile.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiComposerFile] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiComposerFile]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiComposerFile.read(from: &buf))
         }
         return seq
     }
@@ -17293,6 +19255,31 @@ fileprivate struct FfiConverterSequenceTypeFfiThreadSummary: FfiConverterRustBuf
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeFfiTurnAgent: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiTurnAgent]
+
+    public static func write(_ value: [FfiTurnAgent], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiTurnAgent.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiTurnAgent] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiTurnAgent]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiTurnAgent.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFfiTurnCheckpointFile: FfiConverterRustBuffer {
     typealias SwiftType = [FfiTurnCheckpointFile]
 
@@ -17715,6 +19702,18 @@ public func changedFileRows(files: [FfiTurnCheckpointFile], overrides: [String: 
     )
 })
 }
+/**
+ * The label desktop shows for a Conn MCP tool call (`mcp__conn__conn_thread_send`, any provider
+ * spelling), or `None` for other tools, which keep their own title.
+ */
+public func connToolLabel(title: String) -> FfiConnToolLabel?  {
+    return try!  FfiConverterOptionTypeFfiConnToolLabel.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_func_conn_tool_label(
+        FfiConverterString.lower(title),uniffiCallStatus
+    )
+})
+}
 public func highlightCode(source: String, language: String, theme: String) -> [[FfiCodeSpan]]  {
     return try!  FfiConverterSequenceSequenceTypeFfiCodeSpan.lift(try! rustCall() {
         uniffiCallStatus in
@@ -17921,6 +19920,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_func_changed_file_rows() != 50125) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_func_conn_tool_label() != 58499) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_func_highlight_code() != 49332) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -17966,13 +19968,43 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_func_theme_tokens() != 49538) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_ffiimagecodec_inspect() != 26577) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_ffiimagecodec_encode() != 51920) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_ffiuploadlistener_on_upload() != 55828) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_attach_upload() != 31090) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_drop_upload() != 8624) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_retry_upload() != 44057) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_set_upload_handlers() != 27271) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_upload_status() != 48305) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_conncore_answer_secret_request() != 53478) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_attachment_url() != 3853) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_conncore_cancel_queued_message() != 20281) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_conncore_close_thread() != 13465) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_composer_limits() != 43499) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_delete_thread() != 14454) {
@@ -17982,6 +20014,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_dismiss_user_input() != 10644) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_edit_queued_message() != 22144) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_ensure_scratch_project() != 24904) {
@@ -18038,13 +20073,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_conncore_send_message() != 39835) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_conncore_send_queued_now() != 53620) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_conncore_server_url() != 43789) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_set_foreground() != 6752) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_settle_thread() != 64028) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_stop_thread() != 56935) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_submit_composer() != 29646) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_turn_patch() != 19061) {
@@ -18098,13 +20142,22 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_offlinereader_before() != 42718) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_offlinereader_discard_image() != 39557) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_offlinereader_image_bytes() != 27491) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_offlinereader_outline() != 14487) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_offlinereader_prompt_window() != 2929) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_offlinereader_recent() != 57075) {
+    if (uniffi_conn_ffi_checksum_method_offlinereader_recent() != 17942) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_offlinereader_retains_thread() != 10877) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_offlinereader_saved_shell() != 26240) {
@@ -18197,6 +20250,12 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_ffitextfits_fits() != 56087) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_connsession_background() != 59524) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_connsession_cached_shell() != 29377) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_connsession_close_thread() != 18448) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -18236,13 +20295,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_connsession_pair_manual() != 12047) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_connsession_published_shell() != 24802) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_connsession_restore() != 5191) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_retry() != 5291) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_connsession_saved_offline_reader() != 11824) {
+    if (uniffi_conn_ffi_checksum_method_connsession_saved_offline_reader() != 45730) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_sign_out() != 51503) {
@@ -18251,13 +20313,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_connsession_state() != 16395) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_connsession_suspend() != 44540) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_sessionlistener_on_state() != 42113) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_sessionlistener_on_save() != 47827) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_sessionlistener_on_shell() != 11746) {
+    if (uniffi_conn_ffi_checksum_method_sessionlistener_on_shell_changed() != 4741) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_sessionlistener_on_thread() != 42157) {
@@ -18283,7 +20348,9 @@ private let initializationResult: InitializationResult = {
     }
 
     uniffiCallbackInitCoreListener()
+    uniffiCallbackInitFfiImageCodec()
     uniffiCallbackInitFfiTextFits()
+    uniffiCallbackInitFfiUploadListener()
     uniffiCallbackInitOrbitListener()
     uniffiCallbackInitSessionListener()
     return InitializationResult.ok

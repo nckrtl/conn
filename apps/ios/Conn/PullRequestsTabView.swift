@@ -1,3 +1,4 @@
+import Observation
 import SwiftUI
 
 struct PullRequestRow: Codable, Identifiable, Hashable {
@@ -25,7 +26,7 @@ struct PullRequestRow: Codable, Identifiable, Hashable {
     }
 }
 
-private struct PullRequestStats: Decodable {
+fileprivate struct PullRequestStats: Decodable {
     struct Stat: Decodable {
         let projectId, repository: String
         let number, additions, deletions: Int
@@ -44,46 +45,24 @@ private struct PullRequestPage: Decodable {
 struct PullRequestsTabView: View {
     let store: CoreStore
     let searchQuery: String
-    @State private var rows: [PullRequestRow] = []
-    @State private var checkCounts: [String: String] = [:]
-    @State private var stats: [String: PullRequestStats.Stat] = [:]
-    @State private var request = UUID()
-    @State private var notice: String?
-    @State private var loading = true
-    @State private var filter = "All"
+    @Bindable var model: WorkspacePullRequests
     @Environment(\.connTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
-        let candidates = rows.filter { row in
-            searchQuery.isEmpty || [row.title, row.repository, row.projectTitle, "#\(row.number)", row.headBranch, row.author?.login ?? "", row.labels?.map(\.name).joined(separator: " ") ?? ""]
-                .joined(separator: " ").localizedCaseInsensitiveContains(searchQuery)
-        }
-        let selected = candidates.filter { filter == "All" || $0.status == filter }
+        let candidates = model.candidates(query: searchQuery)
+        let selected = model.selected(query: searchQuery)
+        // The title, counts and status filter live in the navigation bar (`WorkspaceRootView`).
         ScrollView {
             LazyVStack(spacing: 0) {
-                ZStack(alignment: .trailing) {
-                    VStack(spacing: 0) {
-                        Text("Pull Requests").font(.system(size: 18, weight: .medium))
-                        Text("\(selected.count) open · \(selected.filter { $0.status == "Checks running" }.count) in progress")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }.frame(maxWidth: .infinity)
-                    Menu {
-                        Picker("Status", selection: $filter) {
-                            ForEach(["All", "Checks running", "Checks passed", "Checks failed", "Draft"], id: \.self) { option in
-                                let label = option == "Checks running" ? "In progress" : option
-                                Text("\(label) (\(candidates.filter { option == "All" || $0.status == option }.count))").tag(option)
-                            }
-                        }.pickerStyle(.inline)
-                    } label: { WorkspaceFilterIcon() }
-                    .accessibilityLabel("Filter pull requests")
-                }.frame(height: 56)
-                if loading { ProgressView() }
-                if let notice { Text(notice).foregroundStyle(.secondary).padding() }
-                if !loading && notice == nil && selected.isEmpty {
+                if model.loading { ProgressView() }
+                if let notice = model.notice { Text(notice).foregroundStyle(theme.mutedForeground).padding() }
+                if !model.loading && model.notice == nil && selected.isEmpty {
                     let empty = candidates.isEmpty && searchQuery.isEmpty
                     VStack(spacing: 4) {
                         Text(empty ? "No pull requests" : "No matching pull requests")
                             .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(theme.foreground)
                         if empty {
                             Text("Pull requests from connected environments will appear here.")
                                 .font(.system(size: 15)).foregroundStyle(theme.mutedForeground)
@@ -92,57 +71,78 @@ struct PullRequestsTabView: View {
                 }
                 ForEach(selected) { row in
                     NavigationLink(value: WorkspaceRoute.pullRequest(row)) {
-                        HStack(alignment: .top, spacing: 12) {
-                            ProjectFaviconView(title: row.projectTitle, size: 20)
-                                .projectStatusDot(statusColor(row))
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack(spacing: 6) {
-                                    Text(row.title).font(.system(size: 16, weight: .medium)).lineLimit(1)
-                                    Spacer(minLength: 0)
-                                    if let stat = stats[row.id] {
-                                        HStack(spacing: 4) {
-                                            Text("+\(stat.additions)").foregroundStyle(theme.diffAdded)
-                                            Text("−\(stat.deletions)").foregroundStyle(theme.diffRemoved)
-                                        }.font(.caption.monospacedDigit()).fixedSize()
-                                    }
-                                }
-                                HStack(spacing: 6) {
-                                    Text(["#" + String(row.number), row.author?.login, checkCounts[row.id] ?? row.status].compactMap { $0 }.joined(separator: " · "))
-                                    Spacer(minLength: 4)
-                                    if let age = shortAge(row.updatedAt) { Text(age + " ago").monospacedDigit() }
-                                }.font(.system(size: 13)).foregroundStyle(theme.mutedForeground).lineLimit(1)
+                        ProjectListRow(project: row.projectTitle, status: statusDot(row), title: row.title) {
+                            if let stat = model.stats[row.id] {
+                                HStack(spacing: 4) {
+                                    Text("+\(stat.additions)").foregroundStyle(AdaptiveColor.emerald700300.color(colorScheme))
+                                    Text("−\(stat.deletions)").foregroundStyle(theme.destructive)
+                                }.font(.system(size: 14).monospacedDigit()).fixedSize()
                             }
-                        }.padding(.vertical, 12).contentShape(Rectangle())
+                        } meta: {
+                            HStack(spacing: 4) {
+                                ForEach(Array(["#" + String(row.number), row.author?.login, model.checkCounts[row.id] ?? row.status].compactMap { $0 }.enumerated()), id: \.offset) { index, part in
+                                    if index > 0 { Text("·") }
+                                    Text(part).monospacedDigit().lineLimit(1)
+                                }
+                            }
+                            Spacer(minLength: 4)
+                            if let age = shortAge(row.updatedAt) { Text(age + " ago").monospacedDigit().fixedSize() }
+                        }
                     }.buttonStyle(.plain).accessibilityIdentifier("pr.row.\(row.repository).\(row.number)")
-                    .task(id: request) {
-                        guard checkCounts[row.id] == nil else { return }
+                    .padding(.top, row.id == selected.first?.id ? 4 : 0)
+                    .task(id: model.rowsGeneration) { [generation = model.rowsGeneration] in
+                        guard model.checkCounts[row.id] == nil else { return }
                         struct Checks: Decodable { let checks: [PullRequestRecord.Detail.Check] }
                         guard let result = try? await store.pullRequest(.checks, input: row.ref, as: Checks?.self),
-                              !Task.isCancelled else { return }
+                              !Task.isCancelled, generation == model.rowsGeneration else { return }
                         let runs = result.checks.filter { $0.placeholder != true }
                         if !runs.isEmpty {
-                            checkCounts[row.id] = "\(runs.filter { $0.status == "success" }.count) of \(runs.count) passed"
+                            model.checkCounts[row.id] = "\(runs.filter { $0.status == "success" }.count) of \(runs.count) passed"
                         }
                     }
                 }
-            }.padding(.horizontal, 12)
+            }
         }
         .background(theme.background)
-        .refreshable { await load() }
-        .task(id: store.environmentId) { await load() }
+        .refreshable { await model.load(store: store) }
     }
 
-    private func statusColor(_ row: PullRequestRow) -> Color {
-        if row.isDraft { return theme.mutedForeground }
+    /// The lab's `dotStates`: draft and plain open grey, running blue, passed green, failed amber.
+    private func statusDot(_ row: PullRequestRow) -> StatusDotState {
+        if row.isDraft { return .waiting }
         switch row.checksState {
-        case "pending": return theme.info
-        case "failing": return theme.warning
-        case "passing": return theme.success
-        default: return theme.mutedForeground
+        case "pending": return .working
+        case "failing": return .limited
+        case "passing": return .done
+        default: return .waiting
+        }
+    }
+}
+
+@MainActor
+@Observable
+final class WorkspacePullRequests {
+    var rows: [PullRequestRow] = []
+    var checkCounts: [String: String] = [:]
+    fileprivate var stats: [String: PullRequestStats.Stat] = [:]
+    private(set) var rowsGeneration = UUID()
+    private var request = UUID()
+    var notice: String?
+    var loading = true
+    var filter = "All"
+
+    func candidates(query: String) -> [PullRequestRow] {
+        rows.filter { row in
+            query.isEmpty || [row.title, row.repository, row.projectTitle, "#\(row.number)", row.headBranch, row.author?.login ?? "", row.labels?.map(\.name).joined(separator: " ") ?? ""]
+                .joined(separator: " ").localizedCaseInsensitiveContains(query)
         }
     }
 
-    private func load() async {
+    func selected(query: String) -> [PullRequestRow] {
+        candidates(query: query).filter { filter == "All" || $0.status == filter }
+    }
+
+    func load(store: CoreStore) async {
         let generation = UUID()
         request = generation
         loading = true
@@ -168,6 +168,7 @@ struct PullRequestsTabView: View {
             }
             checkCounts = [:]
             rows = result
+            rowsGeneration = generation
             notice = messages.isEmpty ? nil : messages.sorted().joined(separator: "\n")
             loading = false
             stats = [:]
@@ -187,6 +188,25 @@ struct PullRequestsTabView: View {
     }
 }
 
+/// The list's status filter, behind the header's 44pt glass button.
+struct PullRequestFilterMenu: View {
+    @Bindable var model: WorkspacePullRequests
+    let searchQuery: String
+
+    var body: some View {
+        let candidates = model.candidates(query: searchQuery)
+        Menu {
+            Picker("Status", selection: $model.filter) {
+                ForEach(["All", "Checks running", "Checks passed", "Checks failed", "Draft"], id: \.self) { option in
+                    let label = option == "Checks running" ? "In progress" : option
+                    Text("\(label) · \(candidates.filter { option == "All" || $0.status == option }.count)").tag(option)
+                }
+            }.pickerStyle(.inline)
+        } label: { WorkspaceFilterIcon() }
+        .accessibilityLabel("Filter pull requests")
+    }
+}
+
 struct PullRequestRecord: View {
     struct Detail: Decodable {
         struct Check: Decodable {
@@ -197,11 +217,20 @@ struct PullRequestRecord: View {
 
             var duration: String? { threadElapsed(startedAt, completedAt) }
 
+            var indicator: RecordStatus {
+                switch status {
+                case "success": .passed
+                case "failure": .failed
+                case "pending": threadDate(startedAt) == nil ? .queued : .running
+                default: .queued
+                }
+            }
+
             var stateLabel: String {
                 switch status {
                 case "success": "Passed"
                 case "failure": "Failed"
-                case "pending": threadDate(startedAt) == nil ? "Pending" : "Running"
+                case "pending": threadDate(startedAt) == nil ? "Queued" : "Running"
                 default: status.replacingOccurrences(of: "-", with: " ").capitalized
                 }
             }
@@ -281,7 +310,12 @@ struct PullRequestRecord: View {
         case "Checks":
             return "\(checkFilter == "All" ? checks.filter { $0.status == "success" }.count : visibleChecks.count) of \(checks.count) checks \(checkFilter == "All" ? "passed" : checkFilter.lowercased())"
         case "Timeline": return shortAge(row.updatedAt).map { "Updated " + $0 + " ago" }
-        case "Code": return detail.map { "\($0.changedFiles) changed \($0.changedFiles == 1 ? "file" : "files")" }
+        case "Code":
+            if let patches {
+                let count = patches.filter { fileFilter == "Changed" || $0.kind == fileFilter }.count
+                return "\(count) \(fileFilter.lowercased()) \(count == 1 ? "file" : "files")"
+            }
+            return detail.map { "\($0.changedFiles) changed \($0.changedFiles == 1 ? "file" : "files")" }
         default: return nil
         }
     }
@@ -294,44 +328,52 @@ struct PullRequestRecord: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 0) {
                 if let failure { Text(failure); Button("Try again") { attempt += 1 } }
                 if let detail {
                     switch section {
                     case "Checks":
-                        VStack(spacing: 0) {
-                            ForEach(Array(visibleChecks.enumerated()), id: \.offset) { index, check in
-                                HStack(spacing: 8) {
-                                    RecordStatusIndicator(status: check.stateLabel)
-                                    Text(check.name).font(.system(size: 14))
-                                    Spacer()
-                                    if let duration = check.duration {
-                                        Text(duration).font(.system(size: 13)).monospacedDigit().foregroundStyle(.secondary)
-                                    }
-                                }.frame(minHeight: 22).padding(.bottom, 12).padding(.top, index == 0 ? 0 : 12)
-                                    .accessibilityElement(children: .combine).accessibilityValue(check.stateLabel)
-                                if index + 1 < visibleChecks.count { Divider() }
+                        ForEach(Array(visibleChecks.enumerated()), id: \.offset) { index, check in
+                            HStack(spacing: 8) {
+                                RecordStatusIndicator(status: check.indicator, failedColor: theme.warning)
+                                Text(check.name)
+                                Spacer(minLength: 8)
+                                Text(check.indicator == .queued ? "—" : check.duration ?? "")
+                                    .font(.system(size: 13)).monospacedDigit().foregroundStyle(theme.mutedForeground)
                             }
+                            .frame(minHeight: 22).padding(.top, index == 0 ? 0 : 12).padding(.bottom, 12)
+                            .overlay(alignment: .bottom) {
+                                if index + 1 < visibleChecks.count { Rectangle().fill(theme.border).frame(height: 1) }
+                            }
+                            .accessibilityElement(children: .combine).accessibilityValue(check.stateLabel)
                         }
                     case "Code":
                         if let patches {
-                            ForEach(patches.filter { fileFilter == "Changed" || $0.kind == fileFilter }, id: \.patch.path) { change in
+                            ForEach(Array(patches.filter { fileFilter == "Changed" || $0.kind == fileFilter }.enumerated()), id: \.element.patch.path) { index, change in
                                 let path = change.patch.path as NSString
                                 Button {
                                     selectedFile = change
                                 } label: {
-                                    HStack(spacing: 10) {
-                                        ChangedFileIcon(path: change.patch.path)
-                                        VStack(alignment: .leading, spacing: 2) {
-                                            Text(path.lastPathComponent).fontWeight(.medium)
+                                    HStack(alignment: .top, spacing: 8) {
+                                        ChangedFileIcon(path: change.patch.path).frame(height: 21)
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                                Text(path.lastPathComponent)
+                                                    .font(.system(size: 16, weight: .medium))
+                                                    .frame(maxWidth: .infinity, minHeight: 21, alignment: .leading)
+                                                FileLineStats(additions: change.additions, deletions: change.deletions)
+                                            }
                                             if !path.deletingLastPathComponent.isEmpty {
-                                                Text(path.deletingLastPathComponent).font(.caption).foregroundStyle(.secondary)
+                                                Text(path.deletingLastPathComponent)
+                                                    .font(.system(size: 13)).foregroundStyle(theme.mutedForeground)
+                                                    .frame(minHeight: 17)
                                             }
                                         }
-                                        Spacer()
-                                        Text("+\(change.additions)").foregroundStyle(.green)
-                                        Text("−\(change.deletions)").foregroundStyle(.red)
-                                    }.font(.subheadline).lineLimit(1).contentShape(Rectangle())
+                                    }
+                                    .lineLimit(1)
+                                    .padding(.top, index == 0 ? 0 : 10).padding(.bottom, 10)
+                                    .frame(minHeight: 48, alignment: .top)
+                                    .contentShape(Rectangle())
                                 }.buttonStyle(.plain).accessibilityIdentifier("pr.file.\(change.patch.path)")
                             }
                             ForEach(omitted, id: \.self) { path in
@@ -339,37 +381,45 @@ struct PullRequestRecord: View {
                                     NavigationLink(path) { OmittedPatch(store: store, row: row, path: path, canComment: canCommentOnFile) }
                                 } else { LabeledContent(path, value: "Diff unavailable") }
                             }
-                            if truncated { Text("Some changes were omitted by the host.").foregroundStyle(.secondary) }
-                            if patches.isEmpty && omitted.isEmpty && !truncated { Text("No changed files") }
+                            if truncated { Text("Some changes were omitted by the host.").foregroundStyle(theme.mutedForeground) }
+                            if patches.isEmpty && omitted.isEmpty && !truncated { Text("No changed files").foregroundStyle(theme.mutedForeground) }
                         } else if failure == nil { ProgressView() }
                     case "Timeline":
                         if let activity {
                             let comments = activity.comments + (activity.reviewThreads + (activity.overviewThreads ?? [])).flatMap(\.comments)
+                            let commits = Set(activity.commits.map(\.oid))
                             let events = Dictionary(grouping: comments, by: \.id).values.compactMap(\.first).map { ($0.createdAt, $0.id, $0.body) }
                                 + activity.commits.map { ($0.committedDate, $0.oid, $0.messageHeadline) }
-                            if events.isEmpty { Text("No activity").accessibilityIdentifier("pr.timeline.empty") }
-                            ForEach(events.sorted { $0.0 < $1.0 }, id: \.1) { event in
-                                VStack(alignment: .leading) {
-                                    HStack(alignment: .top, spacing: 12) {
-                                        ConnIcon(activity.commits.contains { $0.oid == event.1 } ? "arrow.triangle.branch" : "text.bubble")
-                                            .foregroundStyle(.secondary).frame(width: 16)
-                                        VStack(alignment: .leading, spacing: 4) {
-                                            MarkdownView(source: event.2, recordStyle: true)
-                                            if let date = threadDate(event.0) { Text(date, style: .relative).font(.caption).foregroundStyle(.secondary) }
-                                        }
+                            let sorted = events.sorted { $0.0 < $1.0 }
+                            VStack(alignment: .leading, spacing: 0) {
+                                TimelineEvent(icon: "pull-request", last: false) {
+                                    Text("\(Text(row.author?.login ?? "Someone").bold()) opened \(row.isDraft ? "a draft pull request" : "the pull request").")
+                                }
+                                .accessibilityElement(children: .combine).accessibilityIdentifier("pr.timeline.opened")
+                                ForEach(sorted, id: \.1) { event in
+                                    TimelineEvent(icon: commits.contains(event.1) ? "branch" : "comment-text", last: false) {
+                                        MarkdownView(source: event.2, recordStyle: true)
+                                        if let age = shortAge(event.0) { TimelineAge(text: age + " ago") }
                                     }
-                                }.accessibilityElement(children: .combine).accessibilityIdentifier("pr.timeline.event")
+                                    .accessibilityElement(children: .combine).accessibilityIdentifier("pr.timeline.event")
+                                }
+                                TimelineEvent(icon: "clock", last: true) {
+                                    Text(row.status).bold()
+                                    if let age = shortAge(row.updatedAt) { TimelineAge(text: age + " ago") }
+                                }
                             }
                         } else if failure == nil { ProgressView() }
                     default:
-                        VStack(alignment: .leading, spacing: 14) {
+                        RecordHeading(title: row.title) {
                             RecordField(icon: "folder", label: "Repository", value: row.repository)
-                            if let author = row.author { RecordField(icon: "person.2", label: "Author", value: [author.login, shortAge(row.updatedAt).map { $0 + " ago" }].compactMap { $0 }.joined(separator: " · ")) }
-                            RecordField(icon: "arrow.triangle.branch", label: "Branch", value: "\(row.headBranch) → \(row.baseBranch)")
-                            RecordLineStats(added: Double(detail.additions), removed: Double(detail.deletions), withIcon: true)
-                        }.padding(.bottom, 12)
-                        Text(row.title).font(.system(size: 17, weight: .medium))
+                            if let author = row.author { RecordField(icon: "users", label: "Author", value: [author.login, shortAge(row.updatedAt).map { $0 + " ago" }].compactMap { $0 }.joined(separator: " · ")) }
+                            RecordField(icon: "branch", label: "Branch", value: "\(row.headBranch) → \(row.baseBranch)")
+                            RecordFieldRow(icon: "trend-up", label: "Changes") {
+                                RecordLineStats(added: Double(detail.additions), removed: Double(detail.deletions))
+                            }
+                        }
                         MarkdownView(source: detail.body, recordStyle: true)
+                            .padding(.top, 13)
                         let verdicts = detail.viewerPermissions.verdicts.filter { detail.capabilities.review.verdicts.contains($0) }
                         if !verdicts.isEmpty {
                             Menu("Review") {
@@ -380,13 +430,17 @@ struct PullRequestRecord: View {
                         }
                     }
                 } else if failure == nil { ProgressView() }
-            }.frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.top, 20)
+            }
+            .font(.system(size: 14))
+            .foregroundStyle(theme.foreground)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20).padding(.top, 28).padding(.bottom, 100)
         }
         .background(theme.background)
         .modifier(RecordChrome(title: section == "Overview" ? "Pull request #\(row.number)" : section,
                                subtitle: subtitle,
-                               tabs: [("Overview", "doc.text"), ("Checks", "checkmark.circle"), ("Timeline", "clock")]
-                                  + (detail?.capabilities.diff == true ? [("Code", "chevron.left.forwardslash.chevron.right")] : []),
+                               tabs: [("Overview", "file-text"), ("Checks", "check-circle"), ("Timeline", "clock")]
+                                  + (detail?.capabilities.diff == true ? [("Code", "code")] : []),
                                selection: section) { section = $0 })
         .toolbar {
             if section == "Checks" || (section == "Code" && Set(patches?.map(\.kind) ?? []).count > 1) {
@@ -506,16 +560,13 @@ private struct ReviewFileView: View {
         .toolbar {
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 0) {
-                    Text((file.patch.path as NSString).lastPathComponent).font(.headline).lineLimit(1)
-                    HStack(spacing: 5) {
-                        if file.additions > 0 { Text("+\(file.additions)").foregroundStyle(.green) }
-                        if file.deletions > 0 { Text("−\(file.deletions)").foregroundStyle(.red) }
-                    }.font(.caption.monospacedDigit())
+                    Text((file.patch.path as NSString).lastPathComponent).font(.system(size: 17, weight: .semibold)).lineLimit(1)
+                    FileLineStats(additions: file.additions, deletions: file.deletions).font(.system(size: 12))
                 }
             }
         }
         .safeAreaInset(edge: .bottom) {
-            if store.showsOffline { OfflinePill().padding(.bottom, 8) }
+            if store.showsOffline { OfflinePill(store: store).padding(.bottom, 8) }
         }
         .sheet(isPresented: Binding(get: { line != nil }, set: { if !$0 { line = nil } })) {
             NavigationStack {
@@ -594,6 +645,60 @@ private struct OmittedPatch: View {
     }
 }
 
+/// `FileStats`: +additions and −deletions 5pt apart, each hidden at zero; 14pt unless set.
+private struct FileLineStats: View {
+    let additions: Int
+    let deletions: Int
+    @Environment(\.connTheme) private var theme
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack(spacing: 5) {
+            if additions > 0 { Text("+\(additions)").foregroundStyle(AdaptiveColor.emerald700300.color(colorScheme)) }
+            if deletions > 0 { Text("−\(deletions)").foregroundStyle(theme.destructive) }
+        }
+        .font(.system(size: 14))
+        .monospacedDigit()
+        .fixedSize()
+    }
+}
+
+/// One `ios-pr-timeline` item: a 16pt muted glyph (2pt down), 12pt gap, 22pt below, and a 1pt
+/// line from under the glyph to the next item.
+private struct TimelineEvent<Content: View>: View {
+    let icon: String
+    let last: Bool
+    @ViewBuilder let content: Content
+    @Environment(\.connTheme) private var theme
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            ThreadGlyph(name: icon, size: 16)
+                .foregroundStyle(theme.mutedForeground)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 0) { content }
+                .lineHeight(.exact(points: RecordRow.lineHeight))
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .padding(.bottom, 22)
+        .overlay(alignment: .topLeading) {
+            if !last {
+                Rectangle().fill(theme.border).frame(width: 1)
+                    .padding(.top, 22).padding(.bottom, 3).padding(.leading, 7)
+            }
+        }
+    }
+}
+
+private struct TimelineAge: View {
+    let text: String
+    @Environment(\.connTheme) private var theme
+
+    var body: some View {
+        Text(text).font(.system(size: 11.67)).foregroundStyle(theme.mutedForeground)
+    }
+}
+
 private func shortAge(_ timestamp: String?) -> String? {
     guard let date = threadDate(timestamp) else { return nil }
     let seconds = max(0, Int(-date.timeIntervalSinceNow))
@@ -606,6 +711,7 @@ private func shortAge(_ timestamp: String?) -> String? {
 private struct ChangedFileIcon: View {
     let path: String
     @Environment(\.colorScheme) private var scheme
+    @Environment(\.connTheme) private var theme
 
     var body: some View {
         let ext = (path as NSString).pathExtension.lowercased()
@@ -626,7 +732,7 @@ private struct ChangedFileIcon: View {
             if let icon {
                 Image("file-" + icon.0).resizable().scaledToFit()
                     .foregroundStyle(Color(rgbHex: scheme == .dark ? icon.2 : icon.1))
-            } else { ConnIcon("doc").foregroundStyle(.secondary) }
-        }.frame(width: 16, height: 16).accessibilityHidden(true)
+            } else { ThreadGlyph(name: "file-text", size: 18).foregroundStyle(theme.mutedForeground) }
+        }.frame(width: 18, height: 18).accessibilityHidden(true)
     }
 }

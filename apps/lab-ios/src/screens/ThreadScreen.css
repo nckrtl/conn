@@ -54,7 +54,7 @@
   :is(
     .m-md,
     .m-md :is(h1, h2, h3, h4, h5, h6),
-    .m-user-bubble,
+    .m-gallery-file-list,
     .m-feed-card-title,
     .m-feed-card-preview,
     .m-code-body,
@@ -75,6 +75,15 @@
     .m-change-stats
   ) {
   font-size: var(--m-text-xs, 13px);
+}
+.m-thread .m-feed :is(.m-feed-text, .m-feed-card-summary) > .m-md,
+.m-thread
+  .m-feed
+  :is(.m-feed-text, .m-feed-card-summary)
+  > .m-md
+  :is(h1, h2, h3, h4, h5, h6, table, .m-md-code) {
+  font-size: var(--m-text-base);
+  line-height: 1.5;
 }
 .m-feed-inner {
   min-height: 100%;

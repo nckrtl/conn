@@ -1,9 +1,9 @@
 //! Time-window coalescing for high-frequency shell and thread snapshots.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
-use crate::types::{FfiShellSnapshot, FfiThreadSnapshot};
+use crate::types::FfiShellSnapshot;
 
 /// Minimum interval between consecutive `on_shell` or per-thread `on_thread` callbacks.
 ///
@@ -11,17 +11,30 @@ use crate::types::{FfiShellSnapshot, FfiThreadSnapshot};
 /// 50 ms (~20 Hz) keeps SwiftUI smooth while always flushing the latest state.
 pub(crate) const COALESCE_WINDOW: Duration = Duration::from_millis(50);
 
-/// Coalesces [`FfiShellSnapshot`] and per-thread [`FfiThreadSnapshot`] updates so at most one
-/// snapshot per channel is emitted every [`COALESCE_WINDOW`], always retaining the latest value.
+/// Coalesces shell snapshots and thread changes so each channel publishes at most once every
+/// [`COALESCE_WINDOW`], always with the latest state.
+///
+/// A thread is only marked changed here; the pump builds its snapshot when it is due, so a burst
+/// of events costs one projection per window instead of one per event.
 #[derive(Debug, Default)]
 pub(crate) struct SnapshotCoalescer {
     last_shell_emit: Option<Instant>,
     pending_shell: Option<FfiShellSnapshot>,
     last_thread_emit: HashMap<String, Instant>,
-    pending_threads: HashMap<String, FfiThreadSnapshot>,
+    dirty_threads: HashSet<String>,
 }
 
 impl SnapshotCoalescer {
+    /// A new subscription starts its own publication window.
+    pub(crate) fn reset_shell(&mut self) {
+        self.pending_shell = None;
+        self.last_shell_emit = None;
+    }
+
+    pub(crate) fn has_pending_shell(&self) -> bool {
+        self.pending_shell.is_some()
+    }
+
     /// Records a new shell snapshot. Returns `Some(snapshot)` when it can be emitted immediately,
     /// or `None` when it has been buffered to flush at the end of the current 50 ms window.
     pub(crate) fn push_shell(
@@ -42,61 +55,49 @@ impl SnapshotCoalescer {
         }
     }
 
-    /// Records a new thread snapshot. Returns `Some(snapshot)` when it can be emitted immediately,
-    /// or `None` when it has been buffered to flush at the end of that thread's 50 ms window.
-    pub(crate) fn push_thread(
-        &mut self,
-        snapshot: FfiThreadSnapshot,
-        now: Instant,
-    ) -> Option<FfiThreadSnapshot> {
-        let ready = self
-            .last_thread_emit
-            .get(&snapshot.thread_id)
-            .is_none_or(|last| now.saturating_duration_since(*last) >= COALESCE_WINDOW);
-        if ready {
-            self.last_thread_emit
-                .insert(snapshot.thread_id.clone(), now);
-            self.pending_threads.remove(&snapshot.thread_id);
-            Some(snapshot)
-        } else {
-            self.pending_threads
-                .insert(snapshot.thread_id.clone(), snapshot);
-            None
+    /// Marks `thread_id` changed; it publishes once its window allows.
+    pub(crate) fn mark_thread(&mut self, thread_id: &str) {
+        if !self.dirty_threads.contains(thread_id) {
+            self.dirty_threads.insert(thread_id.to_owned());
         }
     }
 
-    /// Drops any pending snapshot and timing history for `thread_id` (called on `close_thread`).
+    /// Marks `thread_id` changed and due now, whatever its window (an open, a send).
+    pub(crate) fn force_thread(&mut self, thread_id: &str) {
+        self.last_thread_emit.remove(thread_id);
+        self.mark_thread(thread_id);
+    }
+
+    /// Drops any pending change and timing history for `thread_id` (called on `close_thread`).
     pub(crate) fn cancel_thread(&mut self, thread_id: &str) {
-        self.pending_threads.remove(thread_id);
+        self.dirty_threads.remove(thread_id);
         self.last_thread_emit.remove(thread_id);
     }
 
-    /// Returns the earliest instant when any buffered snapshot becomes due to flush.
-    #[must_use]
-    pub(crate) fn next_deadline(&self) -> Option<Instant> {
-        let mut earliest: Option<Instant> = None;
-        if self.pending_shell.is_some() {
-            let due = self
-                .last_shell_emit
-                .map_or_else(Instant::now, |last| last + COALESCE_WINDOW);
-            earliest = Some(due);
-        }
-        for thread_id in self.pending_threads.keys() {
-            let due = self
-                .last_thread_emit
-                .get(thread_id)
-                .map_or_else(Instant::now, |last| *last + COALESCE_WINDOW);
-            earliest = Some(earliest.map_or(due, |cur| cur.min(due)));
-        }
-        earliest
+    fn thread_due_at(&self, thread_id: &str) -> Option<Instant> {
+        self.last_thread_emit
+            .get(thread_id)
+            .map(|last| *last + COALESCE_WINDOW)
     }
 
-    /// Drains all buffered snapshots whose [`COALESCE_WINDOW`] has elapsed by `now`.
-    pub(crate) fn drain_due(
-        &mut self,
-        now: Instant,
-    ) -> (Option<FfiShellSnapshot>, Vec<FfiThreadSnapshot>) {
-        let shell = if self.pending_shell.is_some()
+    /// Returns the earliest instant when any buffered snapshot or changed thread becomes due.
+    #[must_use]
+    pub(crate) fn next_deadline(&self) -> Option<Instant> {
+        let now = Instant::now();
+        let shell = self.pending_shell.as_ref().map(|_| {
+            self.last_shell_emit
+                .map_or(now, |last| last + COALESCE_WINDOW)
+        });
+        let threads = self
+            .dirty_threads
+            .iter()
+            .map(|id| self.thread_due_at(id).unwrap_or(now));
+        shell.into_iter().chain(threads).min()
+    }
+
+    /// Takes the buffered shell snapshot once its [`COALESCE_WINDOW`] has elapsed by `now`.
+    pub(crate) fn drain_due_shell(&mut self, now: Instant) -> Option<FfiShellSnapshot> {
+        if self.pending_shell.is_some()
             && self
                 .last_shell_emit
                 .is_none_or(|last| now.saturating_duration_since(last) >= COALESCE_WINDOW)
@@ -105,39 +106,35 @@ impl SnapshotCoalescer {
             self.pending_shell.take()
         } else {
             None
-        };
+        }
+    }
 
-        let mut due_ids: Vec<String> = self
-            .pending_threads
-            .keys()
-            .filter(|id| {
-                self.last_thread_emit
-                    .get(*id)
-                    .is_none_or(|last| now.saturating_duration_since(*last) >= COALESCE_WINDOW)
-            })
+    /// Takes the changed threads whose window has elapsed by `now`, sorted, and starts their next
+    /// window. The caller builds and publishes each.
+    pub(crate) fn drain_due_threads(&mut self, now: Instant) -> Vec<String> {
+        let mut due: Vec<String> = self
+            .dirty_threads
+            .iter()
+            .filter(|id| self.thread_due_at(id).is_none_or(|at| now >= at))
             .cloned()
             .collect();
-        due_ids.sort();
-
-        let mut threads = Vec::with_capacity(due_ids.len());
-        for thread_id in due_ids {
-            if let Some(snap) = self.pending_threads.remove(&thread_id) {
-                self.last_thread_emit.insert(thread_id, now);
-                threads.push(snap);
-            }
+        due.sort();
+        for id in &due {
+            self.dirty_threads.remove(id);
+            self.last_thread_emit.insert(id.clone(), now);
         }
-
-        (shell, threads)
+        due
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use crate::types::FfiTimelineEntry;
+    use crate::types::{FfiThreadSnapshot, FfiTimelineEntry};
 
     fn shell_snap(synchronized: bool, project_count: usize) -> FfiShellSnapshot {
         FfiShellSnapshot {
+            hidden_thread_ids: vec![],
             older_settled_count: 0,
             projects: (0..project_count)
                 .map(|i| crate::types::FfiProject {
@@ -151,15 +148,17 @@ mod tests {
         }
     }
 
-    fn thread_snap(thread_id: &str, text: &str, working: bool) -> FfiThreadSnapshot {
+    pub(crate) fn thread_snap(thread_id: &str, text: &str, working: bool) -> FfiThreadSnapshot {
         FfiThreadSnapshot {
             history_cursor: None,
             server_page: false,
             thread_id: thread_id.to_owned(),
+            project_id: None,
             title: None,
             branch: None,
             model_label: None,
             feed_details: Default::default(),
+            delegated_task_ids: Default::default(),
             entries: vec![FfiTimelineEntry::Assistant {
                 id: "a1".to_owned(),
                 markdown: text.to_owned(),
@@ -179,6 +178,9 @@ mod tests {
             synchronized: true,
             pending_approvals: Vec::new(),
             pending_question: None,
+            active_work_started_at_ms: None,
+            server_clock_offset_ms: 0,
+            turn_agents: None,
         }
     }
 
@@ -212,11 +214,12 @@ mod tests {
             "deadline must be 50 ms after the previous emission"
         );
 
-        let (due_early, _) = coalescer.drain_due(t0 + Duration::from_millis(49));
+        let due_early = coalescer.drain_due_shell(t0 + Duration::from_millis(49));
         assert!(due_early.is_none(), "must not flush before 50 ms elapses");
 
-        let (due, _) = coalescer.drain_due(t0 + COALESCE_WINDOW);
-        let due = due.expect("latest shell snapshot must flush at 50 ms");
+        let due = coalescer
+            .drain_due_shell(t0 + COALESCE_WINDOW)
+            .expect("latest shell snapshot must flush at 50 ms");
         assert!(due.synchronized, "flushed snapshot must carry latest flag");
         assert_eq!(
             due.projects.len(),
@@ -230,87 +233,68 @@ mod tests {
     }
 
     #[test]
-    fn coalesces_per_thread_independently_and_keeps_latest_delta() {
-        let mut coalescer = SnapshotCoalescer::default();
-        let t0 = Instant::now();
-
-        assert!(
-            coalescer
-                .push_thread(thread_snap("t1", "a", true), t0)
-                .is_some(),
-            "first snapshot for t1 must emit immediately"
-        );
-        assert!(
-            coalescer
-                .push_thread(
-                    thread_snap("t2", "hello", true),
-                    t0 + Duration::from_millis(5)
-                )
-                .is_some(),
-            "first snapshot for t2 must emit independently of t1"
-        );
-
-        // Rapid streaming deltas for t1 within 50 ms.
-        assert!(
-            coalescer
-                .push_thread(
-                    thread_snap("t1", "ab", true),
-                    t0 + Duration::from_millis(15)
-                )
-                .is_none(),
-            "t1 delta 1 must coalesce"
-        );
-        assert!(
-            coalescer
-                .push_thread(
-                    thread_snap("t1", "abc", false),
-                    t0 + Duration::from_millis(30)
-                )
-                .is_none(),
-            "t1 delta 2 must replace earlier pending snapshot"
-        );
-
-        let (_, flushed) = coalescer.drain_due(t0 + COALESCE_WINDOW);
-        assert_eq!(flushed.len(), 1, "only t1 should flush");
-        assert_eq!(flushed[0].thread_id, "t1");
-        assert!(!flushed[0].working, "flushed t1 must carry latest working");
-        assert_eq!(
-            flushed[0].entries,
-            vec![FfiTimelineEntry::Assistant {
-                id: "a1".to_owned(),
-                markdown: "abc".to_owned(),
-                streaming: false,
-                created_at: None,
-                run_id: None,
-                status: crate::types::FfiItemStatus::Completed,
-            }],
-            "flushed t1 must carry the final streaming text"
-        );
+    fn a_retry_discards_the_previous_sockets_buffer_and_publishes_its_marker_immediately() {
+        let mut buffer = SnapshotCoalescer::default();
+        let now = Instant::now();
+        assert!(buffer.push_shell(shell_snap(true, 1), now).is_some());
+        assert!(buffer.push_shell(shell_snap(true, 2), now).is_none());
+        buffer.reset_shell();
+        assert!(buffer.drain_due_shell(now + COALESCE_WINDOW).is_none());
+        assert!(buffer.push_shell(shell_snap(true, 3), now).is_some());
     }
 
     #[test]
-    fn cancel_thread_drops_buffered_snapshot() {
+    fn a_burst_of_thread_changes_is_due_once_per_window_per_thread() {
         let mut coalescer = SnapshotCoalescer::default();
         let t0 = Instant::now();
 
+        coalescer.mark_thread("t1");
+        coalescer.mark_thread("t2");
+        assert_eq!(
+            coalescer.drain_due_threads(t0),
+            vec!["t1".to_owned(), "t2".to_owned()],
+            "a first change is due at once"
+        );
+
+        for _ in 0..500 {
+            coalescer.mark_thread("t1");
+        }
         assert!(
             coalescer
-                .push_thread(thread_snap("t1", "v1", true), t0)
-                .is_some(),
-            "initial emit"
+                .drain_due_threads(t0 + Duration::from_millis(30))
+                .is_empty(),
+            "inside the window nothing is due"
         );
-        assert!(
-            coalescer
-                .push_thread(thread_snap("t1", "v2", true), t0 + Duration::from_millis(5))
-                .is_none(),
-            "buffered update"
+        assert_eq!(coalescer.next_deadline(), Some(t0 + COALESCE_WINDOW));
+        assert_eq!(
+            coalescer.drain_due_threads(t0 + COALESCE_WINDOW),
+            vec!["t1".to_owned()],
+            "500 changes publish once, and only the changed thread"
         );
+        assert!(coalescer.next_deadline().is_none());
+    }
+
+    #[test]
+    fn a_forced_thread_is_due_at_once_and_a_cancelled_one_never() {
+        let mut coalescer = SnapshotCoalescer::default();
+        let t0 = Instant::now();
+        coalescer.mark_thread("t1");
+        assert_eq!(coalescer.drain_due_threads(t0).len(), 1);
+
+        coalescer.force_thread("t1");
+        assert_eq!(
+            coalescer.drain_due_threads(t0 + Duration::from_millis(5)),
+            vec!["t1".to_owned()],
+            "an open or a send does not wait for the window"
+        );
+
+        coalescer.mark_thread("t1");
         coalescer.cancel_thread("t1");
+        assert!(coalescer.next_deadline().is_none());
         assert!(
-            coalescer.next_deadline().is_none(),
-            "cancelling thread clears deadline"
+            coalescer
+                .drain_due_threads(t0 + Duration::from_secs(1))
+                .is_empty()
         );
-        let (_, flushed) = coalescer.drain_due(t0 + Duration::from_secs(1));
-        assert!(flushed.is_empty(), "cancelled thread must not flush");
     }
 }

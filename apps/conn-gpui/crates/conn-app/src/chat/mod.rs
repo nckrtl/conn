@@ -71,6 +71,7 @@ mod timeline_spacing;
 #[cfg(test)]
 mod timeline_spacing_tests;
 mod toc;
+mod upload_codec;
 mod worktree_setup;
 
 use std::collections::{HashMap, HashSet};
@@ -693,8 +694,10 @@ impl ChatView {
         self.connected = connection.is_some();
         self.connection = connection.clone();
         self.clear_thumbs(cx);
+        // The environment key names the server, so each draft's files upload to its own one.
+        let server = self.environment_key.clone();
         self.composer
-            .update(cx, |c, cx| c.set_connection(connection, cx));
+            .update(cx, |c, cx| c.set_connection(connection, server, cx));
         cx.notify();
     }
 

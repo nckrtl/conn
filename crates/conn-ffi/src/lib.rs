@@ -10,17 +10,19 @@ mod composer;
 mod core;
 mod feed;
 pub use feed::{
-    FfiChangedFileRow, FfiCodeSpan, FfiFeedDetail, FfiFilePatch, FfiPatchLine, FfiReviewExcerpt,
-    FfiSetupStage, FfiWorktreeSetup, WorktreeSetupFeed, changed_file_rows, highlight_code,
-    parse_file_patches,
+    FfiChangedFileRow, FfiCodeSpan, FfiConnToolIcon, FfiConnToolLabel, FfiFeedDetail, FfiFilePatch,
+    FfiPatchLine, FfiReviewExcerpt, FfiSetupStage, FfiWorktreeSetup, WorktreeSetupFeed,
+    changed_file_rows, conn_tool_label, highlight_code, parse_file_patches,
 };
 mod mcp_app;
 mod model_picker;
 pub use mcp_app::{FfiMcpToolInfo, ThreadMcpApp};
 mod offline;
 mod orbit;
+mod outbox;
 mod phone_tasks;
 mod questions;
+mod queued;
 mod session;
 mod theme;
 mod types;
@@ -28,7 +30,10 @@ mod types;
 uniffi::setup_scaffolding!();
 
 pub use crate::approvals::{FfiApprovalOption, FfiButtonTone, FfiPendingApproval};
-pub use crate::composer::composer_restore_draft;
+pub use crate::composer::{
+    FfiComposerFile, FfiComposerLimits, FfiComposerTarget, FfiEncodedImage, FfiImageCodec,
+    FfiImageInfo, FfiUploadListener, FfiUploadStatus, composer_restore_draft,
+};
 pub use crate::core::{ConnCore, CoreListener, FfiPullRequestOperation};
 pub use crate::model_picker::{
     FfiModelControl, FfiModelPicker, FfiModelPickerRow, FfiModelPickerSection, FfiModelSave,
@@ -72,9 +77,9 @@ pub use crate::types::{
     FfiApprovalDecision, FfiAttachment, FfiConnectionStatus, FfiCredential, FfiError,
     FfiItemStatus, FfiOrbitErrorReason, FfiProject, FfiSavedSession, FfiSecretRequestStatus,
     FfiSendMode, FfiShellSnapshot, FfiThreadActivity, FfiThreadSnapshot, FfiThreadSummary,
-    FfiTimelineEntry, FfiTurnCheckpointFile, FfiTurnItemStatus, FfiUserInputAnswer,
-    FfiUserInputAnswerValue, FfiUserInputOption, FfiUserInputQuestion, FfiUserInputSubmission,
-    FfiWorkGroupTiming,
+    FfiTimelineEntry, FfiTurnAgent, FfiTurnAgents, FfiTurnCheckpointFile, FfiTurnItemStatus,
+    FfiUserInputAnswer, FfiUserInputAnswerValue, FfiUserInputOption, FfiUserInputQuestion,
+    FfiUserInputSubmission, FfiWorkGroupTiming,
 };
 
 const _: () = {

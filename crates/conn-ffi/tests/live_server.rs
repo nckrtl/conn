@@ -12,12 +12,69 @@ use std::time::{Duration, Instant};
 
 use conn_client::{Connection, Credential, ServerConfig};
 use conn_ffi::{
-    ConnCore, CoreListener, FfiConnectionStatus, FfiCredential, FfiSavedSession, FfiSendMode,
-    FfiShellSnapshot, FfiThreadSnapshot,
+    ConnCore, CoreListener, FfiComposerFile, FfiComposerTarget, FfiConnectionStatus, FfiCredential,
+    FfiEncodedImage, FfiImageCodec, FfiImageInfo, FfiSavedSession, FfiSendMode, FfiShellSnapshot,
+    FfiThreadSnapshot, FfiTimelineEntry, FfiUploadListener, FfiUploadStatus,
 };
 use serde_json::json;
 
 struct ChildGuard(Child);
+
+#[derive(Default)]
+struct UploadLog {
+    latest: Mutex<Option<Option<FfiUploadStatus>>>,
+    notify: Condvar,
+}
+
+impl UploadLog {
+    fn wait_for(&self, pred: impl Fn(Option<&FfiUploadStatus>) -> bool) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut latest = self.latest.lock().map_err(|_| "upload log poisoned")?;
+        loop {
+            if let Some(status) = latest.as_ref()
+                && pred(status.as_ref())
+            {
+                *latest = None;
+                return Ok(());
+            }
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| format!("timed out; last upload status {latest:?}"))?;
+            latest = self
+                .notify
+                .wait_timeout(latest, remaining)
+                .map_err(|_| "upload log poisoned")?
+                .0;
+        }
+    }
+}
+
+impl FfiUploadListener for UploadLog {
+    fn on_upload(&self, _id: String, status: Option<FfiUploadStatus>) {
+        if let Ok(mut latest) = self.latest.lock() {
+            *latest = Some(status);
+            self.notify.notify_all();
+        }
+    }
+}
+
+struct NoCodec;
+
+impl FfiImageCodec for NoCodec {
+    fn inspect(&self, _: Vec<u8>) -> Option<FfiImageInfo> {
+        None
+    }
+    fn encode(
+        &self,
+        _: Vec<u8>,
+        _: u32,
+        _: u32,
+        _: Option<f32>,
+        _: bool,
+    ) -> Option<FfiEncodedImage> {
+        None
+    }
+}
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -348,9 +405,10 @@ fn connects_with_pairing_code_receives_shell_and_opens_thread()
     core.close_thread(target_thread_id);
 
     // Launch a new thread via ConnCore::launch_thread and stop it via ConnCore::stop_thread.
-    let launched_id = futures::executor::block_on(
-        core.launch_thread(project_id, "Hello from conn-ffi launch_thread".to_owned()),
-    )?;
+    let launched_id = futures::executor::block_on(core.launch_thread(
+        project_id.clone(),
+        "Hello from conn-ffi launch_thread".to_owned(),
+    ))?;
     assert!(
         !launched_id.is_empty(),
         "launch_thread must return a non-empty thread id"
@@ -360,6 +418,130 @@ fn connects_with_pairing_code_receives_shell_and_opens_thread()
             .as_ref()
             .is_some_and(|th| th.thread_id == launched_id && !th.entries.is_empty())
     })?;
+    let stage = tempfile::tempdir()?;
+    let path = stage.path().join("draft-file");
+    let file = |name: &str, mime: &str| FfiComposerFile {
+        id: name.into(),
+        name: name.into(),
+        mime_type: mime.into(),
+        path: path.to_string_lossy().into_owned(),
+    };
+    let create = || FfiComposerTarget::New {
+        project_id: Some(project_id.clone()),
+    };
+    let submit = |target, key: &str, text: &str, file| {
+        futures::executor::block_on(core.submit_composer(
+            target,
+            key.into(),
+            text.into(),
+            vec![file],
+        ))
+    };
+    let report = || file("crash.txt", "text/plain");
+    let key = conn_client::commands::new_thread_id();
+    assert!(submit(create(), &key, "", report()).is_err());
+    let original = b"initial report\nexact bytes";
+    std::fs::write(&path, original)?;
+    let created = submit(create(), &key, "", report())?;
+    assert_eq!(submit(create(), &key, "", report())?, created);
+    let check = |name: &str,
+                 mime: &str,
+                 image: bool,
+                 bytes: &[u8]|
+     -> Result<(), Box<dyn std::error::Error>> {
+        let matches = |state: &LiveState| {
+            state
+                .latest_thread
+                .as_ref()
+                .filter(|t| t.thread_id == created)
+                .into_iter()
+                .flat_map(|t| &t.entries)
+                .filter_map(|entry| match entry {
+                    FfiTimelineEntry::User { attachments, .. }
+                    | FfiTimelineEntry::QueuedUser { attachments, .. } => Some(attachments),
+                    _ => None,
+                })
+                .flatten()
+                // The local pending row shows first; the check reads the server's copy.
+                .filter(|a| a.name == name && !a.id.starts_with("pending:"))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        listener.wait_for(Duration::from_secs(20), |state| !matches(state).is_empty())?;
+        let items = matches(&*listener.inner.lock().map_err(|_| "listener lock")?);
+        assert_eq!(items.len(), 1);
+        let item = &items[0];
+        assert_eq!(item.mime_type, mime);
+        assert_eq!(item.is_image, image);
+        assert_eq!(item.size_bytes, i64::try_from(bytes.len())?);
+        let asset = futures::executor::block_on(core.attachment_url(
+            item.id.clone(),
+            item.name.clone(),
+            item.mime_type.clone(),
+            false,
+        ))?;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()?;
+        let received =
+            rt.block_on(async { reqwest::get(asset).await?.error_for_status()?.bytes().await })?;
+        assert_eq!(&received[..], bytes);
+        Ok(())
+    };
+    check("crash.txt", "text/plain", false, original)?;
+    let image = b"GIF89a\x01\x00\x01\x00\x80\x00\x00\x00\x00\x00\xff\xff\xff,\x00\x00\x00\x00\x01\x00\x01\x00\x00\x02\x02D\x01\x00;";
+    std::fs::write(&path, image)?;
+    let reply = || FfiComposerTarget::Reply {
+        thread_id: created.clone(),
+        mode: FfiSendMode::Queue,
+    };
+    let reply_key = conn_client::commands::new_thread_id();
+    for _ in 0..2 {
+        submit(
+            reply(),
+            &reply_key,
+            "Screenshot",
+            file("screen.gif", "image/gif"),
+        )?;
+    }
+    check("screen.gif", "image/gif", true, image)?;
+
+    // A draft file uploads when it is attached; a failed one retries; sending only claims it.
+    let uploads = Arc::new(UploadLog::default());
+    core.set_upload_handlers(uploads.clone(), Arc::new(NoCodec));
+    let early = stage.path().join("early.gif");
+    let attached = FfiComposerFile {
+        id: "early".into(),
+        path: early.to_string_lossy().into_owned(),
+        name: "early.gif".into(),
+        mime_type: "image/gif".into(),
+    };
+    core.attach_upload(attached.clone());
+    uploads.wait_for(|s| matches!(s, Some(FfiUploadStatus::Failed { .. })))?;
+    std::fs::write(&early, image)?;
+    core.retry_upload("early".into());
+    uploads.wait_for(|s| s == Some(&FfiUploadStatus::Ready))?;
+    assert_eq!(
+        core.upload_status("early".into()),
+        Some(FfiUploadStatus::Ready)
+    );
+    let sent_key = conn_client::commands::new_thread_id();
+    futures::executor::block_on(core.submit_composer(
+        reply(),
+        sent_key,
+        "Early".into(),
+        vec![attached.clone()],
+    ))?;
+    check("early.gif", "image/gif", true, image)?;
+    assert_eq!(
+        core.upload_status("early".into()),
+        None,
+        "a sent upload is forgotten"
+    );
+    core.attach_upload(attached);
+    uploads.wait_for(|s| s == Some(&FfiUploadStatus::Ready))?;
+    core.drop_upload("early".into());
+    uploads.wait_for(|s| s.is_none())?;
     futures::executor::block_on(core.stop_thread(launched_id.clone()))?;
     core.close_thread(launched_id);
 

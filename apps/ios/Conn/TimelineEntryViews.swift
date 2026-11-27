@@ -1,68 +1,313 @@
 import DesignKit
 import SwiftUI
 
-struct WorkGroupCard: View {
+/// "Worked for" / "Working for": a one-line label in a paragraph's place. Message lines carry the
+/// 1.6 line height's extra room under them, so the label adds the same room below itself; then the
+/// gap to what follows reads as a paragraph gap.
+enum FoldRow {
+    static func leading(_ size: CGFloat) -> CGFloat {
+        max(0, size * 1.6 - UIFont.systemFont(ofSize: size).lineHeight)
+    }
+}
+
+/// The thread feed's spacing between items (messages, cards, work groups).
+enum ThreadFeed {
+    static let spacing: CGFloat = 36
+    /// Between the user's consecutive messages.
+    static let userRunSpacing: CGFloat = 8
+}
+
+struct WorkGroupCard: View, Equatable {
     let group: FfiWorkGroupTiming
     let entries: [FfiTimelineEntry]
+    /// The running turn's work start (server clock, Unix ms): every "Working for" row of the run
+    /// counts from it, so the count never restarts between tool batches or on a rebuilt row.
+    var workStartedAtMs: Int64? = nil
+    var clockOffsetMs: Int64 = 0
     @Environment(\.connTheme) private var theme
-    @State private var expanded = false
+    @Environment(\.colorScheme) private var appearance
+    @Environment(\.feedExpansion) private var expansion
+    @State private var localExpanded = false
+
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
+
+    /// Kept by the feed, so the log stays open when its row scrolls away and back.
+    private var expanded: Bool { expansion?.isOpen("wg:" + group.id) ?? localExpanded }
 
     private var title: String {
-        if group.hasActive {
-            return group.durationLabel.map { "Working (\($0))…" } ?? "Working…"
-        }
-        if let label = group.durationLabel, !label.isEmpty {
-            return "Worked for \(label)"
+        if let ms = group.durationMs, ms > 0 {
+            return "Worked for \(durationText(ms))"
         }
         let count = entries.count
         return count == 1 ? "1 step" : "\(count) steps"
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Button {
-                withAnimation(Kit.Motion.fast) {
-                    expanded.toggle()
-                }
-            } label: {
-                HStack(spacing: 6) {
-                    Text(title)
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(theme.mutedForeground)
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(theme.mutedForeground)
-                    Spacer()
-                }
-                .padding(.vertical, 4)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+    /// The paragraph gap (MarkdownView `blockSpacing`): the space above and below the divider.
+    private var gap: CGFloat { size * 0.85 }
 
-            if expanded {
-                VStack(alignment: .leading, spacing: Kit.Space.s) {
-                    ForEach(entries, id: \.entryId) { entry in
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.group == rhs.group && lhs.entries == rhs.entries
+            && lhs.workStartedAtMs == rhs.workStartedAtMs && lhs.clockOffsetMs == rhs.clockOffsetMs
+    }
+
+    var body: some View {
+        let _ = BodyCount.tick("WorkGroupCard")
+        VStack(alignment: .leading, spacing: gap) {
+            if group.hasActive {
+                // Mobile's `RunFoldWorking` and desktop's working row: plain text, no chevron.
+                // The plain gap to its rule, like "Worked for"; the live row the same gap below.
+                WorkingFoldLabel(startedAtMs: workStartedAtMs ?? group.startedAtMs, offsetMs: clockOffsetMs, size: size)
+            } else {
+                Button {
+                    withAnimation(Kit.Motion.fast) {
+                        if let expansion { expansion.toggle("wg:" + group.id) } else { localExpanded.toggle() }
+                    }
+                } label: {
+                    // No fixed line box, so the chevron centres on the text's own glyphs.
+                    HStack(alignment: .center, spacing: 4) {
+                        Text(title)
+                            .font(.system(size: size))
+                            .foregroundStyle(theme.mutedForeground)
+                        ThreadGlyph(name: expanded ? "chevron-down" : "chevron-right", size: 14)
+                            .foregroundStyle(theme.mutedForeground)
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+
+            Group {
+                // Lab `.m-work-log`: plain 44 pt rows split by subtle dividers, no cards.
+                let steps = entries.filter {
+                    if case .thinking = $0 { return true }
+                    if case .tool = $0 { return true }
+                    return false
+                }
+                VStack(alignment: .leading, spacing: 0) {
+                    // The rule under "Worked for" is always there, the plain gap below the label
+                    // (as far as the first row's text sits under it). Expanded, it opens the log;
+                    // rules split the rows and close the log.
+                    Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
+                    if expanded && !group.hasActive {
+                    ForEach(Array(steps.enumerated()), id: \.element.entryId) { index, entry in
+                        if index > 0 {
+                            Rectangle()
+                                .fill(threadDividerColor(theme, appearance).opacity(0.6))
+                                .frame(height: 1)
+                        }
                         switch entry {
                         case let .thinking(_, text, streaming, _, _):
-                            ThinkingRow(text: text, streaming: streaming)
+                            // Desktop shows the thought's first line beside the brain.
+                            let line = text.split(whereSeparator: \.isNewline).first.map {
+                                $0.trimmingCharacters(in: .whitespaces)
+                            }
+                            WorkLogRow(key: entry.entryId, title: line.flatMap { $0.isEmpty ? nil : $0 } ?? (streaming ? "Thinking…" : "Thought"),
+                                       status: streaming ? .running : .completed, duration: nil,
+                                       detail: text.isEmpty ? nil : text, monospaced: false, size: size,
+                                       glyph: "work-thinking")
                         case let .tool(_, kind, title, detail, status, _, _, durationMs):
-                            ToolRow(kind: kind, title: title, detail: detail, status: status, durationMs: durationMs)
+                            // Conn's own MCP tools get desktop's label (`conn_tools`).
+                            let conn = title.isEmpty ? nil : connToolLabel(title: title)
+                            WorkLogRow(key: entry.entryId, title: conn?.displayName ?? (title.isEmpty ? kind : title), status: status,
+                                       duration: workDurationLabel(durationMs),
+                                       detail: detail?.isEmpty == false ? detail : nil, monospaced: true, size: size,
+                                       glyph: WorkLogIcon.glyph(kind: kind, title: title, conn: conn?.icon))
                         default:
                             EmptyView()
                         }
                     }
+                    Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
+                    }
                 }
-                .padding(.bottom, 4)
+                // The message follows the last rule by the plain gap: the same distance as from a
+                // message's last line down to its own rule above the copy and time row.
             }
-
-            Divider()
-                .overlay(theme.border.opacity(0.6))
         }
+        // The feed pulls the next item up to a paragraph gap (ThreadView `foldGap`).
         .accessibilityIdentifier("thread.workGroup.\(group.id)")
     }
 }
 
-struct TimelineEntryRow: View {
+/// The working divider when no work group is running yet: the same row and rule as a group's.
+struct WorkingFold: View {
+    let startedAtMs: Int64?
+    let offsetMs: Int64
+    @Environment(\.connTheme) private var theme
+    @Environment(\.colorScheme) private var appearance
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
+
+    var body: some View {
+        let gap = size * 0.85
+        // The same rule as under "Worked for", then the live row a paragraph gap below it.
+        // The plain gap above and below the rule, like "Worked for" to its rule.
+        VStack(alignment: .leading, spacing: gap) {
+            WorkingFoldLabel(startedAtMs: startedAtMs, offsetMs: offsetMs, size: size)
+            Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
+        }
+        .padding(.bottom, gap)
+    }
+}
+
+/// "Working for 59s", ticking once a second (mobile `RunFoldWorking`, desktop `format_working_elapsed`).
+/// It counts from the run's start on the server's clock: this device's clock plus the core's offset
+/// (mobile `toServerClock`), worked out each tick, so a rebuilt row never shows 0 s.
+struct WorkingFoldLabel: View {
+    let startedAtMs: Int64?
+    let offsetMs: Int64
+    let size: CGFloat
+    @Environment(\.connTheme) private var theme
+
+    static func seconds(at date: Date, startedAtMs: Int64, offsetMs: Int64) -> Int {
+        let nowMs = Int64((date.timeIntervalSince1970 * 1000).rounded(.down)) + offsetMs
+        return max(0, Int((nowMs - startedAtMs) / 1000))
+    }
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            let label = startedAtMs.map { start in
+                let seconds = Self.seconds(at: context.date, startedAtMs: start, offsetMs: offsetMs)
+                return "Working for \(durationText(UInt64(seconds) * 1000))"
+            } ?? "Working"
+            Text(label)
+                .font(.system(size: size))
+                .monospacedDigit()
+                .foregroundStyle(theme.mutedForeground)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityIdentifier("thread.workingFold")
+    }
+}
+
+/// Conn's live row (`ThinkingTimelineRow`): an icon and a shimmering label, never a spinner.
+struct LiveWorkRow: View {
+    let label: String
+    /// Superheroicons `thinking`, as the lab and desktop (`icons::BRAIN`) draw it.
+    var glyph = "thinking"
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
+    @Environment(\.connTheme) private var theme
+
+    var body: some View {
+        HStack(spacing: 6) {
+            // No padded box: the glyph starts on the feed's text edge.
+            ThreadGlyph(name: glyph, size: 16)
+                .foregroundStyle(theme.mutedForeground)
+            ShimmerText(label, size: size)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier("thread.liveWork")
+    }
+}
+
+/// Conn's `live-tool-shine`: a 72 pt highlight band sweeps the label over 1.35 s, then rests
+/// 1.45 s. The sweep is smooth (a keyframe animation of the band's mask); Reduce Motion shows
+/// plain muted text.
+struct ShimmerText: View {
+    let text: String
+    let size: CGFloat
+    @Environment(\.connTheme) private var theme
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    init(_ text: String, size: CGFloat) {
+        self.text = text
+        self.size = size
+    }
+
+    var body: some View {
+        let font = Font.system(size: size)
+        Text(text)
+            .font(font)
+            .lineLimit(1)
+            .foregroundStyle(theme.mutedForeground)
+            .overlay {
+                if !reduceMotion {
+                    // A smooth sweep at the display's frame rate (Nick: the stepped one looked
+                    // low-FPS). Only this label's band moves; the rest pause matches the old timing.
+                    Text(text)
+                        .font(font)
+                        .lineLimit(1)
+                        .foregroundStyle(theme.foreground)
+                        .keyframeAnimator(initialValue: 0.0, repeating: true) { content, progress in
+                            content.mask { ShimmerBand(progress: progress) }
+                        } keyframes: { _ in
+                            LinearKeyframe(1.0, duration: ShimmerSchedule.sweep)
+                            LinearKeyframe(1.0, duration: ShimmerSchedule.pause)
+                        }
+                        .accessibilityHidden(true)
+                }
+            }
+    }
+}
+
+private struct ShimmerBand: View {
+    /// 0 is the band's left edge off the text's left, 1 is its left edge past the text's right.
+    let progress: Double
+    private static let width: CGFloat = 72
+
+    var body: some View {
+        GeometryReader { geometry in
+            LinearGradient(
+                stops: [
+                    .init(color: .white.opacity(0), location: 0),
+                    .init(color: .white.opacity(0.12), location: 0.15),
+                    .init(color: .white.opacity(0.55), location: 0.35),
+                    .init(color: .white, location: 0.5),
+                    .init(color: .white.opacity(0.55), location: 0.65),
+                    .init(color: .white.opacity(0.12), location: 0.85),
+                    .init(color: .white.opacity(0), location: 1),
+                ],
+                startPoint: .leading, endPoint: .trailing
+            )
+            .frame(width: Self.width)
+            .offset(x: -Self.width + progress * (geometry.size.width + Self.width))
+            .frame(width: geometry.size.width, height: geometry.size.height, alignment: .leading)
+        }
+    }
+}
+
+/// Fires at each of the shimmer's 12 steps and not between, so the view updates about 4 times a
+/// second on average and sleeps through the rest.
+struct ShimmerSchedule: TimelineSchedule {
+    static let steps = 12
+    static let sweep: TimeInterval = 1.35
+    static let pause: TimeInterval = 1.45
+    private static var cycle: TimeInterval { sweep + pause }
+    private static var step: TimeInterval { sweep / Double(steps) }
+
+    /// The band's progress at `date`: the last step reached in the sweep, then fully past the text
+    /// through the pause. All shimmers share the clock, so they sweep together.
+    static func progress(at date: Date) -> Double {
+        let phase = date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: cycle)
+        return Double(min(Int(phase / step + 1e-6), steps)) / Double(steps)
+    }
+
+    func entries(from start: Date, mode: Mode) -> Entries {
+        Entries(cursor: start.timeIntervalSinceReferenceDate, first: true)
+    }
+
+    struct Entries: Sequence, IteratorProtocol {
+        var cursor: TimeInterval
+        var first: Bool
+
+        mutating func next() -> Date? {
+            if first {
+                first = false
+                return Date(timeIntervalSinceReferenceDate: cursor)
+            }
+            let cycle = ShimmerSchedule.cycle
+            let step = ShimmerSchedule.step
+            let cycleStart = (cursor / cycle).rounded(.down) * cycle
+            let nextStep = ((cursor - cycleStart) / step + 1e-6).rounded(.down) + 1
+            cursor = nextStep <= Double(ShimmerSchedule.steps)
+                ? cycleStart + nextStep * step
+                : cycleStart + cycle + step
+            return Date(timeIntervalSinceReferenceDate: cursor)
+        }
+    }
+}
+
+struct TimelineEntryRow: View, Equatable {
     let threadId: String
     let entry: FfiTimelineEntry
     @Bindable var store: CoreStore
@@ -71,8 +316,17 @@ struct TimelineEntryRow: View {
     let onOpenThread: (String, String?) -> Void
     let onTemplate: (String) -> Void
     @Environment(\.connTheme) private var theme
+    @ScaledMetric(relativeTo: .body) private var messageSize: CGFloat = ThreadText.size
+    @Environment(\.colorScheme) private var appearance
+
+    /// The closures and store never change for a thread's rows; the drawn inputs decide.
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.threadId == rhs.threadId && lhs.entry == rhs.entry && lhs.detail == rhs.detail
+            && lhs.interactive == rhs.interactive && lhs.store === rhs.store
+    }
 
     var body: some View {
+        let _ = BodyCount.tick("Row")
         switch detail {
         case let .html(attachment, title, height):
             ThreadEmbed(store: store, thread: threadId, item: entry.entryId, attachment: attachment, title: title, height: CGFloat(height), mcp: false)
@@ -87,20 +341,21 @@ struct TimelineEntryRow: View {
 
     @ViewBuilder private var entryView: some View {
         switch entry {
-        case let .user(_, text, date, agent, steer, _, files):
-            ThreadMessage(text: text, date: date, agent: agent, badge: steer ? "Steer" : nil, files: files,
-                          detail: detail, store: store, onOpenThread: onOpenThread)
+        case let .user(_, text, date, agent, _, _, files):
+            ThreadMessage(text: text, date: date, agent: agent, files: files,
+                          detail: detail, store: store, threadId: threadId, onOpenThread: onOpenThread)
         case let .queuedUser(_, _, _, text, date, agent, files):
-            ThreadMessage(text: text, date: date, agent: agent, badge: "Queued", files: files,
-                          detail: detail, store: store, onOpenThread: onOpenThread)
+            ThreadMessage(text: text, date: date, agent: agent, files: files,
+                          detail: detail, store: store, threadId: threadId, onOpenThread: onOpenThread)
         case let .assistant(_, markdown, streaming, timestamp, _, status):
-            VStack(alignment: .leading, spacing: 6) {
-                MarkdownView(source: markdown, messageStyle: .assistant, onTemplate: onTemplate)
-                if streaming { KitStatusIcon(.working, size: 12, label: "Streaming") }
-                else {
-                    HStack {
-                        if status == .failed { Label("Response interrupted", systemImage: "exclamationmark.circle").font(.caption) }
-                        MessageFooter(text: markdown, timestamp: timestamp)
+            // A tap shows the copy button and time below the message (MessageReveal).
+            MessageReveal(text: markdown, timestamp: timestamp, enabled: !streaming) {
+                VStack(alignment: .leading, spacing: 6) {
+                    MarkdownView(source: markdown, messageStyle: .assistant, onTemplate: onTemplate, cacheID: entry.entryId)
+                    if streaming { KitStatusIcon(.working, size: 12, label: "Streaming") }
+                    if !streaming, status == .failed {
+                        Label("Response interrupted", systemImage: "exclamationmark.circle").font(.caption)
+                            .foregroundStyle(theme.mutedForeground)
                     }
                 }
             }
@@ -118,8 +373,8 @@ struct TimelineEntryRow: View {
             // no spinner, so a waiting approval never repaints.
             ApprovalWorkRow(title: title, detail: detail)
 
-        case let .userInputRequest(_, _, _, _, _, pending, answers, _, _):
-            QuestionRow(pending: pending, answers: answers)
+        case let .userInputRequest(_, _, _, _, _, pending, answers, _, createdAt):
+            QuestionRow(pending: pending, answers: answers, createdAt: createdAt)
 
         case let .secretRequest(id, label, reason, url, placeholder, _, status, pending, _):
             SecretRequestCard(
@@ -139,21 +394,22 @@ struct TimelineEntryRow: View {
             ProposedPlanCard(title: title, markdown: markdown, display: display, streaming: streaming)
         case let .subagent(_, child, title, role, status, label, _, summary, remoteLabel, created, started, ended):
             let metadata = subagentMetadata
-            AgentCardEntry(text: summary ?? "", timestamp: created) {
+            // A tap shows the copy button and time below the card, like a message (MessageReveal).
+            MessageReveal(text: summary ?? "", timestamp: created) {
                 ThreadCard {
-                    ProviderIcon(driver: metadata.provider, size: 14).overlay(alignment: .bottomTrailing) {
-                        Circle().fill(status == .completed ? theme.success : status == .failed ? theme.destructive : theme.warning)
-                            .frame(width: 6, height: 6)
-                    }
+                    // Lab `SubagentCard`: `<model> · <effort>`, the run time at the right. As on desktop,
+                    // the header opens the child thread.
+                    ThreadCardHeaderLink(open: (metadata.thread ?? child).map { destination in
+                        { onOpenThread(destination, metadata.environment) }
+                    }, label: "Open " + title) {
+                        // GPUI's fixed info and success colours (lab `--thread-info`, `--thread-success`).
+                        ProviderIcon(driver: metadata.provider, size: 14).cardStatusDot(
+                            status == .completed ? Color(rgbHex: 0x00BC7D) : status == .failed ? theme.destructive : Color(rgbHex: 0x2B7FFF))
                     let elapsed = threadElapsed(started, ended)
                     Text([metadata.model ?? role, metadata.effort, elapsed == nil ? label : nil, remoteLabel]
                         .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")).lineLimit(2)
                     Spacer(minLength: 0)
                     if let elapsed { Text(elapsed).monospacedDigit().fixedSize() }
-                    if let destination = metadata.thread ?? child {
-                        Button { onOpenThread(destination, metadata.environment) } label: {
-                            Image(systemName: "arrow.up.right").padding(6)
-                        }.accessibilityLabel("Open " + title)
                     }
                 } content: { AgentSummary(title: title, text: summary ?? "") }
             }
@@ -162,7 +418,7 @@ struct TimelineEntryRow: View {
                                ordinal: ordinal, threadId: threadId, store: store)
 
         case let .notice(_, text, isError):
-            KitNotice(text, icon: isError ? .warning : .info, tone: isError ? .error : .info)
+            ThreadNotice(text: text, isError: isError)
 
         case let .other(_, label):
             KitBadge(label)
@@ -175,6 +431,27 @@ struct TimelineEntryRow: View {
         return (nil, nil, nil, nil, nil)
     }
 
+}
+
+/// A card header row that opens a thread when tapped, in place of a separate open button.
+struct ThreadCardHeaderLink<Content: View>: View {
+    let open: (() -> Void)?
+    let label: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        let row = HStack(spacing: 8) { content }
+            .padding(.trailing, 6)
+            .frame(maxWidth: .infinity, minHeight: 30, alignment: .leading)
+            .contentShape(Rectangle())
+        if let open {
+            Button(action: open) { row }
+                .buttonStyle(.plain)
+                .accessibilityLabel(label)
+        } else {
+            row
+        }
+    }
 }
 
 struct ThinkingRow: View {
@@ -212,8 +489,7 @@ struct ToolRow: View {
 
     private var durationLabel: String? {
         guard let ms = durationMs, ms > 0 else { return nil }
-        if ms < 1000 { return "\(ms)ms" }
-        return String(format: "%.1fs", Double(ms) / 1000.0)
+        return durationText(ms)
     }
 
     var body: some View {
@@ -266,41 +542,71 @@ private struct ApprovalWorkRow: View {
     }
 }
 
-/// A question's feed row, like Conn mobile's "Input requested" work row: it expands to the
-/// answers (`QuestionAnswerHistory`). The open question has no row; the panel above the
-/// composer asks it.
+/// A question's feed row, drawn like an expanded "Worked for" log row: the question icon, muted
+/// "Input requested", a chevron that opens the answers; then a soft rule and the copy and time
+/// row, as under an agent message. The open question has no row; the panel above the composer
+/// asks it.
 private struct QuestionRow: View {
     let pending: Bool
     let answers: [FfiUserInputAnswer]
+    let createdAt: String?
     @Environment(\.connTheme) private var theme
+    @Environment(\.colorScheme) private var appearance
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
+
+    private var answersText: String {
+        answers.map { answer in
+            [answer.question, answer.answer.isEmpty ? nil : "→ " + answer.answer]
+                .compactMap { $0?.isEmpty == false ? $0 : nil }
+                .joined(separator: "\n")
+        }
+        .joined(separator: "\n\n")
+    }
 
     var body: some View {
-        KitCollapsibleCard(
-            "Input requested",
-            status: pending ? .working : .ok,
-            statusLabel: "question",
-            trailingText: nil,
-            expandable: !answers.isEmpty
-        ) {
-            VStack(alignment: .leading, spacing: 8) {
-                ForEach(answers, id: \.questionId) { answer in
-                    VStack(alignment: .leading, spacing: 4) {
-                        if !answer.question.isEmpty {
-                            Text(answer.question)
-                                .font(.system(size: 14))
-                                .foregroundStyle(theme.mutedForeground)
-                        }
-                        if !answer.answer.isEmpty {
-                            Text(answer.answer)
-                                .font(.system(size: 14))
-                                .foregroundStyle(theme.mutedForeground)
-                                .padding(.leading, 12)
-                        }
-                    }
-                }
+        VStack(alignment: .leading, spacing: size * 0.85 - 1) {
+            VStack(alignment: .leading, spacing: 0) {
+                WorkLogRow(key: "question:\(createdAt ?? ""):\(answersText.hashValue)", title: "Input requested", status: pending ? .running : .completed, duration: nil,
+                           detail: answers.isEmpty ? nil : answersText, monospaced: false, size: size,
+                           glyph: "work-question")
+                Rectangle().fill(threadDividerColor(theme, appearance).opacity(0.6)).frame(height: 1)
             }
-            .textSelection(.enabled)
+            if !pending {
+                MessageFooter(text: answersText, timestamp: createdAt)
+            }
         }
+    }
+}
+
+/// Lab `.m-gallery-card-body input`: 32 pt tall, 5/10 padding, 8 pt corners, a fill 7% lighter
+/// than the card's inner surface with a 1 pt border 17% lighter (light mode: white on a soft
+/// input border).
+private struct SecretInput: View {
+    let placeholder: String
+    @Binding var text: String
+    @Environment(\.connTheme) private var theme
+    @Environment(\.colorScheme) private var appearance
+
+    var body: some View {
+        let outer = threadCardSurface(theme, appearance)
+        let inner = appearance == .light ? Color.white : outer.mix(with: .white, by: 0.06, in: .device)
+        let fill = appearance == .light ? Color.white : inner.mix(with: .white, by: 0.07, in: .device)
+        let stroke = appearance == .light
+            ? theme.border.mix(with: .white, by: 0.28, in: .device)
+            : inner.mix(with: .white, by: 0.17, in: .device)
+        SecureField(placeholder, text: $text, prompt: Text(placeholder).foregroundStyle(theme.placeholder))
+            .textFieldStyle(.plain)
+            .font(.system(size: 14))
+            .foregroundStyle(theme.foreground)
+            .tint(theme.foreground)
+            .textInputAutocapitalization(.never)
+            .autocorrectionDisabled()
+            .privacySensitive()
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .frame(minHeight: 32)
+            .background(fill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(stroke, lineWidth: 1))
     }
 }
 
@@ -322,11 +628,15 @@ private struct SecretRequestCard: View {
 
     var body: some View {
         ThreadCard {
-            Label("Secret request", systemImage: "key")
+            // Solid glyphs only (desktop's 16 pt set): a lock, not the outline key.
+            HStack(spacing: 6) {
+                ThreadGlyph(name: "work-lock", size: 14)
+                Text("Secret request")
+            }
             Spacer()
             if pending && interactive {
                 let canSave = !secret.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !submitting
-                HStack(spacing: 6) {
+                HStack(spacing: 14) {
                     Button("Decline", role: .destructive) { answer(nil) }
                         .foregroundStyle(theme.destructive)
                         .disabled(submitting)
@@ -341,7 +651,10 @@ private struct SecretRequestCard: View {
                     .disabled(!canSave)
                 }
                 .buttonStyle(.plain)
-            } else { Text(statusLabel) }
+            } else {
+                // The header's trailing inset is sized for icon buttons; text needs the leading 11.
+                Text(statusLabel).padding(.trailing, 6)
+            }
         } content: {
             VStack(alignment: .leading, spacing: 8) {
                 if !label.isEmpty { Text(label).font(.system(size: 14, weight: .medium)) }
@@ -350,9 +663,7 @@ private struct SecretRequestCard: View {
                     if let url, let source = URL(string: url), source.scheme == "https" {
                         Link("Open secret provider", destination: source)
                     }
-                    SecureField(placeholder ?? "Enter secret…", text: $secret)
-                        .textFieldStyle(.roundedBorder).textInputAutocapitalization(.never)
-                        .autocorrectionDisabled().privacySensitive()
+                    SecretInput(placeholder: placeholder ?? "Enter secret…", text: $secret)
                         .disabled(submitting)
                 }
             }.padding(11)
@@ -396,6 +707,232 @@ extension FfiTimelineEntry {
         case let .turnCheckpoint(id, _, _, _, _, _, _): id
         case let .notice(id, _, _): id
         case let .other(id, _): id
+        }
+    }
+}
+
+private func workDurationLabel(_ ms: UInt64?) -> String? {
+    guard let ms, ms > 0 else { return nil }
+    return durationText(ms)
+}
+
+/// One notation for every duration (Nick): whole seconds under a minute ("21s", at least 1s), then
+/// minutes and seconds ("3m 24s"), then hours and minutes ("1h 5m").
+func durationText(_ ms: UInt64) -> String {
+    let seconds = max(1, Int((Double(ms) / 1000).rounded()))
+    if seconds < 60 { return "\(seconds)s" }
+    if seconds < 3600 {
+        let (m, s) = (seconds / 60, seconds % 60)
+        return s == 0 ? "\(m)m" : "\(m)m \(s)s"
+    }
+    let (h, m) = (seconds / 3600, (seconds % 3600) / 60)
+    return m == 0 ? "\(h)h" : "\(h)h \(m)m"
+}
+
+/// One step of an expanded "Worked for" log (lab `.m-work-log li`): status glyph, title, duration and a
+/// chevron when there is detail to show; a tap reveals the detail under the row.
+private struct WorkLogRow: View {
+    /// The step's entry id, for the feed's expansion state.
+    let key: String
+    let title: String
+    let status: FfiItemStatus
+    let duration: String?
+    let detail: String?
+    let monospaced: Bool
+    let size: CGFloat
+    /// Desktop's icon for the step kind; shown unless the step runs or failed.
+    var glyph: String? = nil
+    @Environment(\.connTheme) private var theme
+    @Environment(\.feedExpansion) private var expansion
+    @State private var localOpen = false
+    private var open: Bool { expansion?.isOpen("log:" + key) ?? localOpen }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Button {
+                guard detail != nil else { return }
+                withAnimation(Kit.Motion.fast) {
+                    if let expansion { expansion.toggle("log:" + key) } else { localOpen.toggle() }
+                }
+            } label: {
+                HStack(spacing: 10) {
+                    Group {
+                        switch status {
+                        case .running: KitStatusIcon(.working, size: 16, label: "Running")
+                        case .completed: ThreadGlyph(name: glyph ?? "check-circle", size: 16).foregroundStyle(theme.mutedForeground)
+                        case .failed: ThreadGlyph(name: "error-circle", size: 16).foregroundStyle(theme.destructive)
+                        }
+                    }
+                    .frame(width: 16, height: 16)
+                    // Muted like the "Worked for" label above the log.
+                    Text(title).font(.system(size: size)).foregroundStyle(theme.mutedForeground).lineLimit(1)
+                    Spacer(minLength: 8)
+                    if let duration {
+                        Text(duration).font(.system(size: size).monospacedDigit()).foregroundStyle(theme.mutedForeground)
+                    }
+                    if detail != nil {
+                        ThreadGlyph(name: open ? "chevron-down" : "chevron-right", size: 14)
+                            .foregroundStyle(theme.mutedForeground.opacity(0.6))
+                    }
+                }
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            if open, let detail {
+                if monospaced {
+                    // Tool output as a code card: no wrapping, sideways scrolling, capped height; JSON
+                    // pretty-printed (nested JSON strings decoded in place) and highlighted.
+                    let pretty = PrettyJSON.cached(detail)
+                    CodeCard(code: pretty ?? detail, language: pretty == nil ? nil : "json",
+                             maxHeight: 320, codeSize: ThreadText.codeSize - 1)
+                        .padding(.bottom, 10)
+                } else {
+                    // The thread text size (15 pt on Polar), with 1.6x lines, flush with the row's left edge.
+                    let detailSize = size
+                    Text(detail)
+                        .font(.system(size: detailSize))
+                        .lineHeight(.exact(points: detailSize * 1.6))
+                        .foregroundStyle(theme.mutedForeground)
+                        .textSelection(.enabled)
+                        .padding(.bottom, 10)
+                }
+            }
+        }
+    }
+}
+
+/// Pretty-prints tool output that is JSON, with 2-space indents. A string value that is itself a JSON
+/// object or array (an MCP result's `content`, say) is decoded and printed in place, so no escaped
+/// quotes show. Anything that isn't JSON returns nil and shows as it is.
+enum PrettyJSON {
+    @MainActor private static var memo: [String: String?] = [:]
+
+    /// `format`, kept per text: an expanded row's body re-runs on every scroll and snapshot.
+    @MainActor
+    static func cached(_ text: String) -> String? {
+        if let hit = memo[text] { return hit }
+        let pretty = format(text)
+        if memo.count >= 200 { memo.removeAll(keepingCapacity: true) }
+        memo[text] = pretty
+        return pretty
+    }
+
+    static func format(_ text: String) -> String? {
+        BodyCount.tick("prettyJSON")
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let first = trimmed.first, first == "{" || first == "[", trimmed.utf8.count <= 256 * 1024,
+              let object = parse(trimmed) else { return nil }
+        let expanded = expand(object, depth: 0)
+        guard JSONSerialization.isValidJSONObject(expanded),
+              let data = try? JSONSerialization.data(
+                  withJSONObject: expanded, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]),
+              let pretty = String(data: data, encoding: .utf8) else { return nil }
+        return pretty
+    }
+
+    private static func parse(_ text: String) -> Any? {
+        try? JSONSerialization.jsonObject(with: Data(text.utf8), options: [.fragmentsAllowed])
+    }
+
+    private static func expand(_ value: Any, depth: Int) -> Any {
+        guard depth < 8 else { return value }
+        switch value {
+        case let dict as [String: Any]:
+            return dict.mapValues { expand($0, depth: depth + 1) }
+        case let array as [Any]:
+            return array.map { expand($0, depth: depth + 1) }
+        case let string as String:
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let first = trimmed.first, first == "{" || first == "[",
+                  let inner = parse(trimmed), inner is [String: Any] || inner is [Any] else { return string }
+            return expand(inner, depth: depth + 1)
+        default:
+            return value
+        }
+    }
+}
+
+extension FfiConnToolIcon {
+    /// The glyph for each Conn tool icon (GPUI's `conn_icon_path`).
+    var glyph: String {
+        switch self {
+        case .connMark: "conn-mark"
+        case .browser: "work-globe"
+        case .device: "work-phone"
+        case .pullRequest: "work-pull-request"
+        case .credential: "work-key"
+        }
+    }
+}
+
+/// Desktop's work-log icons (GPUI `chat/icons.rs` `tool_icon_path`), from its 16 pt solid set.
+enum WorkLogIcon {
+    static func glyph(kind: String, title: String, conn: FfiConnToolIcon?) -> String {
+        switch kind {
+        case "command": return "work-terminal"
+        case "file_change": return "work-compose"
+        case "file_read", "read": return "work-show"
+        case "file_search": return "work-search"
+        case "web_search": return "work-globe"
+        case "subagent": return "work-agent"
+        case "todo_list": return "work-checklist"
+        case "thread_created": return "work-thread"
+        case "approval", "secret_request", "link_request": return "work-needs-approval"
+        default:
+            if let conn { return conn.glyph }
+            return fromTitle(title) ?? (kind == "dynamic_tool" ? "work-build" : "work-tool")
+        }
+    }
+
+    /// `infer_tool_icon_from_title`.
+    private static func fromTitle(_ title: String) -> String? {
+        let lower = title.trimmingCharacters(in: .whitespaces).lowercased()
+        func starts(_ prefixes: [String]) -> Bool { prefixes.contains { lower.hasPrefix($0) } }
+        if starts(["read ", "view ", "inspect "]) || lower == "read file" { return "work-show" }
+        if starts(["edit ", "write ", "create ", "update ", "patch ", "delete "]) { return "work-compose" }
+        if starts(["ran ", "run ", "exec ", "shell "]) { return "work-terminal" }
+        if starts(["search ", "find ", "grep ", "glob ", "list "]) { return "work-search" }
+        if starts(["web ", "fetch "]) { return "work-globe" }
+        if starts(["subagent", "delegate"]) { return "work-agent" }
+        return nil
+    }
+}
+
+
+/// A feed notice, as Conn mobile draws a system notice: a work-log row with the glyph and the
+/// text at the thread size. Info ("Command … finished", "Context compacted") is muted; a warning
+/// or error is desktop's `runtime.warning` row in the warning colour, one line until tapped.
+struct ThreadNotice: View {
+    let text: String
+    let isError: Bool
+    @Environment(\.connTheme) private var theme
+    @ScaledMetric(relativeTo: .body) private var size: CGFloat = ThreadText.size
+    @State private var expanded = false
+
+    private var glyph: String {
+        if isError { return "notice-warning" }
+        return text.lowercased().contains("compact") ? "notice-compact" : "notice-info"
+    }
+
+    var body: some View {
+        let row = HStack(alignment: .firstTextBaseline, spacing: 8) {
+            ThreadGlyph(name: glyph, size: size)
+                .alignmentGuide(.firstTextBaseline) { $0[.bottom] - size * 0.12 }
+            Text(text)
+                .fontWeight(isError ? .medium : .regular)
+                .lineLimit(isError && !expanded ? 1 : nil)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .font(.system(size: size))
+        .foregroundStyle(isError ? theme.warning : theme.mutedForeground)
+        .contentShape(Rectangle())
+        if isError {
+            Button { withAnimation(Kit.Motion.fast) { expanded.toggle() } } label: { row }
+                .buttonStyle(.plain)
+                .accessibilityValue(expanded ? "Expanded" : "Collapsed")
+        } else {
+            row.accessibilityElement(children: .combine)
         }
     }
 }

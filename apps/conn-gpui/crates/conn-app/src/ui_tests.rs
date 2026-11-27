@@ -1290,6 +1290,223 @@ fn composer_attach_file_uploads_via_background_tokio_runtime(cx: &mut TestAppCon
     );
 }
 
+/// A loopback Conn server that hands out `attachment_id` and answers its first `fail_first`
+/// uploads with a 500. Returns its address and how many uploads reached it.
+fn upload_mock_server(
+    attachment_id: &'static str,
+    fail_first: usize,
+) -> (
+    std::net::SocketAddr,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let uploads = std::sync::Arc::new(AtomicUsize::new(0));
+    let counter = std::sync::Arc::clone(&uploads);
+    let addr = RT.block_on(async move {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback listener");
+        let addr = listener.local_addr().expect("listener addr");
+        tokio::spawn(async move {
+            while let Ok((mut tcp, _)) = listener.accept().await {
+                let mut peek = [0u8; 4096];
+                let Ok(n) = tcp.peek(&mut peek).await else {
+                    continue;
+                };
+                let head = String::from_utf8_lossy(&peek[..n]);
+                if head.starts_with("POST /api/attachments/upload/") {
+                    let seen = counter.fetch_add(1, Ordering::SeqCst);
+                    tokio::spawn(async move {
+                        let mut raw = Vec::new();
+                        let mut buf = [0u8; 4096];
+                        let header_end = loop {
+                            let Ok(read) = tcp.read(&mut buf).await else {
+                                return;
+                            };
+                            if read == 0 {
+                                return;
+                            }
+                            raw.extend_from_slice(&buf[..read]);
+                            if let Some(pos) = raw.windows(4).position(|w| w == b"\r\n\r\n") {
+                                break pos + 4;
+                            }
+                        };
+                        let headers = String::from_utf8_lossy(&raw[..header_end]).into_owned();
+                        let content_len = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (k, v) = line.split_once(':')?;
+                                k.eq_ignore_ascii_case("content-length")
+                                    .then(|| v.trim().parse::<usize>().ok())
+                                    .flatten()
+                            })
+                            .unwrap_or(0);
+                        while raw.len() < header_end + content_len {
+                            let Ok(read) = tcp.read(&mut buf).await else {
+                                break;
+                            };
+                            if read == 0 {
+                                break;
+                            }
+                            raw.extend_from_slice(&buf[..read]);
+                        }
+                        let reply: &[u8] = if seen < fail_first {
+                            b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}"
+                        } else {
+                            b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}"
+                        };
+                        let _ = tcp.write_all(reply).await;
+                    });
+                    continue;
+                }
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
+                        return;
+                    };
+                    while let Some(Ok(Message::Text(text))) = ws.next().await {
+                        let Ok(frames) = conn_wire::decode_client_message(&text) else {
+                            continue;
+                        };
+                        for frame in frames {
+                            if let conn_wire::FromClient::Request(req) = frame
+                                && req.tag == "attachments.createUploadUrl"
+                            {
+                                let reply = conn_wire::FromServer::Exit {
+                                    request_id: req.id,
+                                    exit: conn_wire::Exit::success(json!({
+                                        "attachmentId": attachment_id,
+                                        "relativeUrl": format!("/api/attachments/upload/tok-{attachment_id}"),
+                                        "expiresAt": 1_900_000_000_000_i64
+                                    })),
+                                };
+                                let _ = ws
+                                    .send(Message::Text(
+                                        conn_wire::encode_server_frame(&reply).into(),
+                                    ))
+                                    .await;
+                            }
+                        }
+                    }
+                });
+            }
+        });
+        addr
+    });
+    (addr, uploads)
+}
+
+/// A connected client for a [`upload_mock_server`].
+fn connect_mock(addr: std::net::SocketAddr) -> Connection {
+    let base_url = url::Url::parse(&format!("http://{addr}")).expect("loopback URL");
+    let (conn, mut events) = Connection::start(
+        ServerConfig {
+            http_base_url: base_url,
+            credential: Credential::Bearer("test-token".to_owned()),
+        },
+        RT.handle(),
+    );
+    RT.block_on(async {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Some(ClientEvent::Status(ConnectionStatus::Connected))) =
+                tokio::time::timeout(Duration::from_secs(1), events.recv()).await
+            {
+                return;
+            }
+        }
+        panic!("mock connection did not reach Connected status");
+    });
+    conn
+}
+
+/// Pumps GPUI until `done` holds, or five seconds pass.
+fn pump_until(cx: &mut TestAppContext, mut done: impl FnMut(&mut TestAppContext) -> bool) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        cx.run_until_parked();
+        if done(cx) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+/// A draft's files upload only to its own thread's server. Moving the chat to a thread on
+/// another linked environment must not re-upload a parked draft's failed file there: that id
+/// is unknown to the draft's own server, which then refuses the send.
+#[gpui_kit::test]
+fn a_parked_draft_never_uploads_to_another_server(cx: &mut TestAppContext) {
+    cx.executor().allow_parking();
+    let (window, app) = mount_app(cx);
+    let (addr_a, uploads_a) = upload_mock_server("att-on-a", 1);
+    let (addr_b, uploads_b) = upload_mock_server("att-on-b", 0);
+    let conn_a = connect_mock(addr_a);
+    let conn_b = connect_mock(addr_b);
+    let server_a = format!("http://{addr_a}/");
+    let server_b = format!("http://{addr_b}/");
+
+    let chat = cx.read(|cx| app.read(cx).chat_for_test());
+    let composer = cx.read(|cx| chat.read(cx).composer_for_test());
+    let show = |cx: &mut TestAppContext, server: &str, conn: &Connection, key: &str| {
+        let _ = cx.update_window(window, |_, window, cx| {
+            chat.update(cx, |chat, cx| {
+                chat.set_environment_key(Some(server.to_owned()));
+                chat.set_connection(Some(conn.clone()), cx);
+            });
+            composer.update(cx, |c, cx| c.sync_draft_key(Some(key), window, cx));
+        });
+    };
+
+    // A thread on A: the file's first upload fails there.
+    show(cx, &server_a, &conn_a, "thread:on-a");
+    let tmp = std::env::temp_dir().join(format!("conn-gpui-parked-{}.txt", std::process::id()));
+    std::fs::write(&tmp, b"hello").expect("write temp file");
+    let _ = cx.update_window(window, |_, window, cx| {
+        composer.update(cx, |c, cx| c.attach_paths(vec![tmp.clone()], window, cx));
+    });
+    let failed = pump_until(cx, |cx| {
+        cx.read(|cx| composer.read(cx).attachment_states_for_test())
+            .iter()
+            .any(|(_, st)| st.starts_with("error:"))
+    });
+    let _ = std::fs::remove_file(&tmp);
+    assert!(failed, "the first upload to A fails");
+
+    // Open a thread on B: A's parked draft keeps its failed file and B gets nothing.
+    show(cx, &server_b, &conn_b, "thread:on-b");
+    pump_until(cx, |_| false);
+    assert_eq!(
+        uploads_b.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a draft of A must never upload to B"
+    );
+    let parked = cx.read(|cx| {
+        composer
+            .read(cx)
+            .parked_attachment_states_for_test("thread:on-a")
+    });
+    assert!(
+        parked.iter().all(|(_, st)| !st.starts_with("ready:")),
+        "A's parked file holds no upload id from B: {parked:?}"
+    );
+
+    // Back on A, the file uploads again to A and gets A's id.
+    show(cx, &server_a, &conn_a, "thread:on-a");
+    let ready = pump_until(cx, |cx| {
+        cx.read(|cx| composer.read(cx).attachment_states_for_test())
+            .iter()
+            .any(|(_, st)| st == "ready:att-on-a")
+    });
+    let states = cx.read(|cx| composer.read(cx).attachment_states_for_test());
+    assert!(
+        ready,
+        "A's file uploads to A when its thread opens again: {states:?}"
+    );
+    assert_eq!(uploads_a.load(std::sync::atomic::Ordering::SeqCst), 2);
+    assert_eq!(uploads_b.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
 #[gpui_kit::test]
 fn composer_keeps_bottom_breathing_room_and_context_strip_layout(cx: &mut TestAppContext) {
     let (window, app) = mount_app(cx);

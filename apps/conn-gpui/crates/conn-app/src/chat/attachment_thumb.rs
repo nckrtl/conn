@@ -11,10 +11,10 @@ use std::sync::atomic::AtomicBool;
 
 use conn_theme::Tokens;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Image, ImageFormat, ImageSource, InteractiveElement as _,
-    IntoElement as _, ObjectFit, ParentElement as _, RenderImage, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, SvgRenderer, Window, div, img,
-    px,
+    AnyElement, App, Bounds, ClickEvent, Hsla, Image, ImageFormat, ImageSource,
+    InteractiveElement as _, IntoElement as _, ObjectFit, ParentElement as _, PathBuilder, Pixels,
+    RenderImage, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
+    SvgRenderer, Window, canvas, div, img, point, px,
 };
 
 use super::icons;
@@ -463,26 +463,88 @@ pub(super) fn gallery_cell(
         .aspect_ratio(GALLERY_TILE_ASPECT)
 }
 
+/// A staged attachment's upload, as its chip shows it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum ChipUpload {
+    /// The share sent, 0 to 1.
+    Uploading(f32),
+    Ready,
+    Failed,
+}
+
+/// A still ring: a faint track and the share sent (lab `UploadOverlay`). It never animates.
+pub(super) fn progress_ring(side: f32, progress: f32, color: Hsla) -> AnyElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| paint_ring(bounds, progress, color, window),
+    )
+    .flex_none()
+    .size(px(side))
+    .into_any_element()
+}
+
+fn paint_ring(bounds: Bounds<Pixels>, progress: f32, color: Hsla, window: &mut Window) {
+    let stroke = 2.0_f32;
+    let side = f32::from(bounds.size.width).min(f32::from(bounds.size.height));
+    let radius = ((side - stroke) / 2.0).max(1.0);
+    let center = bounds.center();
+    let at = |turn: f32| {
+        let angle = (turn - 0.25) * std::f32::consts::TAU;
+        point(
+            center.x + px(radius * angle.cos()),
+            center.y + px(radius * angle.sin()),
+        )
+    };
+    let arc = |from: f32, to: f32, color: Hsla, window: &mut Window| {
+        let mut path = PathBuilder::stroke(px(stroke));
+        path.move_to(at(from));
+        path.arc_to(
+            point(px(radius), px(radius)),
+            px(0.0),
+            to - from > 0.5,
+            true,
+            at(to),
+        );
+        if let Ok(built) = path.build() {
+            window.paint_path(built, color);
+        }
+    };
+    let track = Hsla {
+        a: color.a * 0.25,
+        ..color
+    };
+    arc(0.0, 0.5, track, window);
+    arc(0.5, 1.0, track, window);
+    let share = progress.clamp(0.04, 0.999);
+    arc(0.0, share, color, window);
+}
+
 /// A staged image in the composer strip (`ComposerAttachmentStrip.tsx`): a `64px` square,
-/// `rounded-lg`, `border-border/80`, `object-cover`, with the remove button on its corner.
-/// `image` is the chip-sized thumbnail, or `None` while it decodes.
+/// `rounded-lg`, `border-border/80`, `object-cover`, with the remove button on its corner. While
+/// it uploads a scrim and a progress ring cover it; a failed one shows the retry glyph and a red
+/// border, and a click retries. `image` is the chip-sized thumbnail, or `None` while it decodes.
 pub(super) fn staged_image_chip(
     local_id: u64,
     name: &str,
     image: Option<ImageSource>,
-    uploading: bool,
-    failed: bool,
+    upload: ChipUpload,
     tokens: &Tokens,
     on_remove: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_retry: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let muted = hsla(tokens.muted_foreground);
     let scrim = hsla_alpha(tokens.background, 0.85);
+    let failed = upload == ChipUpload::Failed;
+    let label = match upload {
+        ChipUpload::Uploading(p) => {
+            format!("Attachment {name}, uploading {}%", (p * 100.0).round())
+        }
+        ChipUpload::Failed => format!("Attachment {name}, upload failed. Click to retry."),
+        ChipUpload::Ready => format!("Attachment {name}"),
+    };
     let mut chip = div()
         .id(SharedString::from(format!("composer-att-{local_id}")))
-        .a11y_group(
-            format!("composer.attachment.{local_id}"),
-            format!("Attachment {name}"),
-        )
+        .a11y_group(format!("composer.attachment.{local_id}"), label)
         .relative()
         .flex_none()
         .size(px(64.0))
@@ -515,23 +577,34 @@ pub(super) fn staged_image_chip(
                 None => placeholder(),
             }
         });
-    if uploading || failed {
-        chip = chip.child(
-            div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(hsla_alpha(tokens.background, 0.55))
-                .text_size(px(11.0))
-                .text_color(if failed {
-                    hsla(tokens.destructive)
-                } else {
-                    muted
-                })
-                .child(if failed { "Failed" } else { "Uploading…" }),
-        );
+    let overlay = || {
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(hsla_alpha(tokens.background, 0.55))
+    };
+    match upload {
+        ChipUpload::Uploading(progress) => {
+            chip =
+                chip.child(overlay().child(progress_ring(22.0, progress, hsla(tokens.foreground))));
+        }
+        ChipUpload::Failed => {
+            chip = chip.child(
+                overlay()
+                    .id(SharedString::from(format!("composer-att-retry-{local_id}")))
+                    .a11y_button(
+                        SharedString::from(format!("composer.att.retry.{local_id}")),
+                        "Retry upload",
+                    )
+                    .cursor_pointer()
+                    .on_click(on_retry)
+                    .child(icons::icon(icons::REFRESH, 16.0, hsla(tokens.destructive))),
+            );
+        }
+        ChipUpload::Ready => {}
     }
     chip.child(
         div()

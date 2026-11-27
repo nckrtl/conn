@@ -1,40 +1,87 @@
 import AVKit
+import ImageIO
 import QuickLook
 import SwiftUI
 import UniformTypeIdentifiers
 import WebKit
 
+@MainActor
+final class AttachmentThumbnails {
+    private let images = NSCache<NSString, UIImage>()
+
+    init() { images.totalCostLimit = 32 * 1024 * 1024 }
+
+    func clear() { images.removeAllObjects() }
+
+    func image(_ key: String) -> UIImage? { images.object(forKey: key as NSString) }
+
+    func insert(_ image: CGImage, key: String) {
+        images.setObject(UIImage(cgImage: image), forKey: key as NSString, cost: image.bytesPerRow * image.height)
+    }
+
+    nonisolated static func decode(_ bytes: Data) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(bytes as CFData, nil),
+              CGImageSourceGetStatus(source) == .statusComplete else { return nil }
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: 1024,
+        ] as CFDictionary)
+    }
+}
+
 struct ThreadAttachments: View {
+    static let radius: CGFloat = 17
+    static let tailRadius: CGFloat = 17
     let files: [FfiAttachment]
     let store: CoreStore
+    let thread: String
     var body: some View {
         let images = files.filter { $0.isImage }
         let others = files.filter { !$0.isImage }
         VStack(alignment: .leading, spacing: 3) {
-            if !images.isEmpty {
+            if let only = images.first, images.count == 1 {
+                // One image takes the whole width at its own aspect ratio (lab `[data-count="1"]`).
+                AttachmentTile(file: only, store: store, thread: thread, single: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .id([only.id, thread, store.attachmentEnvironment, String(store.identityEpoch)])
+            } else if !images.isEmpty {
                 LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 3), count: min(2, images.count)), spacing: 3) {
-                    ForEach(images, id: \.id) { AttachmentTile(file: $0, store: store) }
+                    ForEach(images, id: \.id) { file in
+                        // Each tile needs its own identity: a shared `.id` made the grid draw only one.
+                        AttachmentTile(file: file, store: store, thread: thread)
+                            .id([file.id, thread, store.attachmentEnvironment, String(store.identityEpoch)])
+                    }
                 }
             }
             ForEach(others, id: \.id) { file in
-                let top: CGFloat = images.isEmpty && file.id == others.first?.id ? 11 : 4
-                let bottom: CGFloat = file.id == others.last?.id ? 11 : 4
-                AttachmentTile(file: file, store: store)
+                let top: CGFloat = images.isEmpty && file.id == others.first?.id ? Self.radius : 4
+                let bottom: CGFloat = file.id == others.last?.id ? Self.radius : 4
+                AttachmentTile(file: file, store: store, thread: thread)
                     .clipShape(UnevenRoundedRectangle(
                         topLeadingRadius: top, bottomLeadingRadius: bottom,
-                        bottomTrailingRadius: bottom, topTrailingRadius: top
+                        bottomTrailingRadius: file.id == others.last?.id ? Self.tailRadius : bottom,
+                        topTrailingRadius: top, style: .continuous
                     ))
             }
         }
-        .clipShape(.rect(cornerRadius: 11))
+        // Concentric with the user bubble (20 on every corner) 3 inside it.
+        .clipShape(UnevenRoundedRectangle(
+            topLeadingRadius: Self.radius, bottomLeadingRadius: Self.radius,
+            bottomTrailingRadius: Self.tailRadius, topTrailingRadius: Self.radius, style: .continuous
+        ))
     }
 }
 
 private struct AttachmentTile: View {
     let file: FfiAttachment
     let store: CoreStore
+    let thread: String
+    /// The message's only image: full width at its own aspect ratio, at most `singleImageMaxHeight` tall.
+    var single = false
     @Environment(\.connTheme) private var theme
-    @State private var signedURL: URL?
+    @State private var loaded: UIImage?
     @State private var preview: URL?
     @State private var directory: URL?
     @State private var busy = false
@@ -45,20 +92,48 @@ private struct AttachmentTile: View {
     @State private var attempt = 0
     @State private var player: AVPlayer?
     private var video: Bool { file.mimeType.hasPrefix("video/") }
+    private var thumbnailKey: String {
+        [store.attachmentEnvironment, thread, file.id, file.name, file.mimeType, String(file.sizeBytes)]
+            .map { "\($0.utf8.count):\($0)" }.joined()
+    }
+
+    private var thumbnail: UIImage? {
+        if file.id.hasPrefix("pending:") { return loaded }
+        if store.offlineReader?.retainsThread(thread: thread) == true {
+            return loaded ?? store.imageThumbnails.image(thumbnailKey)
+        }
+        return store.status == .connected ? loaded : nil
+    }
+
+    private static let singleImageMaxHeight: CGFloat = 320
+
+    /// 4:3 in a grid. A single image keeps its own ratio; the tile caps its height.
+    private var imageRatio: CGFloat {
+        guard single, let image = thumbnail, image.size.height > 0 else { return 4 / 3 }
+        return image.size.width / image.size.height
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             if let player {
                 VideoPlayer(player: player).aspectRatio(16 / 9, contentMode: .fit)
                     .onDisappear { player.pause() }
-            } else if file.isImage, let signedURL {
+            } else if file.isImage {
                 Button { Task { await openFile() } } label: {
-                    Color.clear.aspectRatio(4 / 3, contentMode: .fit).overlay {
-                        AsyncImage(url: signedURL) { phase in
-                            if let image = phase.image { image.resizable().scaledToFill() }
-                            else { fileLabel }
-                        }
-                    }.clipped()
+                    // The ratio sets the height from the width, the frame stops a tall image at
+                    // the cap, and the image fills (and is cropped to) that tile.
+                    Color.clear
+                        .aspectRatio(imageRatio, contentMode: .fit)
+                        .frame(maxWidth: .infinity, maxHeight: single ? Self.singleImageMaxHeight : nil)
+                        .overlay {
+                        if let image = thumbnail {
+                            Image(uiImage: image).resizable().scaledToFill().allowsHitTesting(false)
+                        } else { fileLabel }
+                    }
+                    .clipped()
+                    // `clipped` only clips drawing: the filled image's overflow still took taps
+                    // meant for the message text. Only the tile itself opens the image.
+                    .contentShape(Rectangle())
                 }
             } else {
                 Button {
@@ -82,13 +157,40 @@ private struct AttachmentTile: View {
         .buttonStyle(.plain)
         .disabled(busy)
         .accessibilityLabel(file.name)
-        .task(id: "\(file.id)|\(attempt)|\(store.status == .connected)") {
-            guard (file.isImage || video), store.status == .connected else { return }
+        .task(id: "\(file.id)|\(attempt)|\(store.status == .connected)|\(String(describing: store.offlineReader.map(ObjectIdentifier.init)))") {
             do {
+                if file.isImage, let local = store.pendingUploads[file.id] {
+                    // A reply still uploading: its picked copy stands in.
+                    let bytes = try Data(contentsOf: local.url)
+                    if let thumbnail = await Task.detached(operation: { AttachmentThumbnails.decode(bytes) }).value {
+                        loaded = UIImage(cgImage: thumbnail)
+                    }
+                    return
+                }
+                if file.isImage {
+                    guard let reader = store.offlineReader, thumbnail == nil else { return }
+                    for pass in 0..<2 {
+                        let bytes = try await reader.imageBytes(thread: thread, file: file, online: store.status == .connected)
+                        try Task.checkCancellation()
+                        let thumbnail = await Task.detached { AttachmentThumbnails.decode(bytes) }.value
+                        try Task.checkCancellation()
+                        guard store.offlineReader === reader else { return }
+                        if let thumbnail {
+                            if reader.retainsThread(thread: thread) { store.imageThumbnails.insert(thumbnail, key: thumbnailKey) }
+                            else if store.status != .connected { return }
+                            loaded = UIImage(cgImage: thumbnail)
+                            failure = nil
+                            return
+                        }
+                        try await reader.discardImage(thread: thread, file: file)
+                        if pass == 1 || store.status != .connected { throw URLError(.cannotDecodeContentData) }
+                    }
+                    return
+                }
+                guard video, store.status == .connected else { return }
                 let url = try await store.assetURL(id: file.id, name: file.name, mime: file.mimeType)
                 try Task.checkCancellation()
-                signedURL = url
-                if video { player = AVPlayer(url: url) }
+                player = AVPlayer(url: url)
             } catch {
                 if !Task.isCancelled { failure = .preview }
             }
@@ -126,21 +228,33 @@ private struct AttachmentTile: View {
 
     private func openFile() async {
         guard !busy else { return }
+        if let local = store.pendingUploads[file.id] {
+            preview = local.url
+            return
+        }
         busy = true
         defer { busy = false }
         do {
             let epoch = store.identityEpoch
-            let url = try await store.assetURL(id: file.id, name: file.name, mime: file.mimeType)
-            let (temp, response) = try await URLSession.shared.download(from: url)
-            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { throw URLError(.badServerResponse) }
-            guard store.identityEpoch == epoch else { return }
             removeDownload()
             let folder = URL.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false)
             directory = folder
             let name = (file.name as NSString).lastPathComponent
             let local = folder.appending(path: ["", ".", "..", "/"].contains(name) ? "Attachment" : name)
-            try FileManager.default.moveItem(at: temp, to: local)
+            if file.isImage {
+                guard let reader = store.offlineReader else { throw URLError(.notConnectedToInternet) }
+                let bytes = try await reader.imageBytes(thread: thread, file: file, online: store.status == .connected)
+                guard store.identityEpoch == epoch, store.offlineReader === reader,
+                      reader.retainsThread(thread: thread) || store.status == .connected else { throw URLError(.cancelled) }
+                try bytes.write(to: local, options: .atomic)
+            } else {
+                let url = try await store.assetURL(id: file.id, name: file.name, mime: file.mimeType)
+                let (temp, response) = try await URLSession.shared.download(from: url)
+                guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { throw URLError(.badServerResponse) }
+                guard store.identityEpoch == epoch else { throw URLError(.cancelled) }
+                try FileManager.default.moveItem(at: temp, to: local)
+            }
             preview = local
             failure = nil
         } catch {

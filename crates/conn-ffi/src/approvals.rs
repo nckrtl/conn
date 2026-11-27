@@ -14,7 +14,9 @@ use crate::types::FfiApprovalDecision;
 const APP_NAME: &str = "Conn";
 
 /// A full-width button's colours (mobile `Button` tones).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, uniffi::Enum, serde::Serialize, serde::Deserialize,
+)]
 pub enum FfiButtonTone {
     Primary,
     Secondary,
@@ -22,7 +24,7 @@ pub enum FfiButtonTone {
 }
 
 /// One answer button on the approval card.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct FfiApprovalOption {
     pub decision: FfiApprovalDecision,
     pub label: String,
@@ -31,7 +33,7 @@ pub struct FfiApprovalOption {
 }
 
 /// A pending approval as the card above the composer shows it.
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct FfiPendingApproval {
     /// The approval's timeline entry.
     pub entry_id: String,

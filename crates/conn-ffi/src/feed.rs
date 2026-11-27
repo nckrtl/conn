@@ -6,7 +6,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct FfiReviewExcerpt {
     pub context_id: String,
     pub file_path: String,
@@ -15,13 +15,16 @@ pub struct FfiReviewExcerpt {
     pub diff: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum)]
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Enum, serde::Serialize, serde::Deserialize)]
 pub enum FfiFeedDetail {
     Message {
         sender: Option<String>,
         thread: Option<String>,
         environment: Option<String>,
         reviews: Vec<FfiReviewExcerpt>,
+        /// The sending agent's model and effort when the feed knows them (delegated results).
+        model: Option<String>,
+        effort: Option<String>,
     },
     Html {
         attachment: String,
@@ -48,12 +51,15 @@ pub enum FfiFeedDetail {
 impl FfiFeedDetail {
     pub(crate) fn from_detail(detail: &FeedDetail) -> Option<Self> {
         Some(match detail {
+            FeedDetail::Delegated(_) | FeedDetail::DelegatedNotice { .. } => return None,
             FeedDetail::Message {
                 sender,
                 thread,
                 environment,
                 reviews,
             } => Self::Message {
+                model: None,
+                effort: None,
                 sender: sender.clone(),
                 thread: thread.clone(),
                 environment: environment.clone(),
@@ -91,6 +97,86 @@ impl FfiFeedDetail {
                     .into(),
             },
         })
+    }
+}
+
+/// A child card can precede its wake, follow it in a history window, or be outside the window.
+pub(crate) struct CompletionCards<'a> {
+    shown: std::collections::HashSet<(&'a str, &'a str)>,
+    pub(crate) task_ids: std::collections::HashMap<String, String>,
+}
+
+impl<'a> CompletionCards<'a> {
+    pub(crate) fn new(thread: &'a conn_state::ThreadState) -> Self {
+        let shown = thread
+            .entries
+            .iter()
+            .filter_map(|entry| {
+                let conn_state::TimelineEntry::Subagent {
+                    id,
+                    status,
+                    summary: Some(body),
+                    ..
+                } = entry
+                else {
+                    return None;
+                };
+                if !conn_state::subagent_settled(*status) {
+                    return None;
+                }
+                Some((thread.subagent_of_entry.get(id)?.as_str(), body.trim()))
+            })
+            .collect();
+        Self {
+            shown,
+            task_ids: thread.subagent_of_entry.clone(),
+        }
+    }
+
+    pub(crate) fn append(
+        &mut self,
+        id: &str,
+        results: &'a [conn_state::thread_feed::DelegatedResult],
+        entries: &mut Vec<crate::FfiTimelineEntry>,
+        details: &mut std::collections::HashMap<String, FfiFeedDetail>,
+    ) {
+        for (index, result) in results.iter().enumerate() {
+            if !self.shown.insert((&result.task, result.body.trim())) {
+                continue;
+            }
+            let id = if index == 0 {
+                id.to_owned()
+            } else {
+                format!("{id}/result/{index}")
+            };
+            self.task_ids.insert(id.clone(), result.task.clone());
+            let title = result.title.as_deref().unwrap_or("Delegated task");
+            let sender = if result.state == "Completed" {
+                title.to_owned()
+            } else {
+                format!("{title} · {}", result.state)
+            };
+            details.insert(
+                id.clone(),
+                FfiFeedDetail::Message {
+                    sender: Some(sender),
+                    thread: None,
+                    environment: None,
+                    reviews: vec![],
+                    model: None,
+                    effort: None,
+                },
+            );
+            entries.push(crate::FfiTimelineEntry::User {
+                id,
+                text: result.body.clone(),
+                created_at: None,
+                created_by_agent: true,
+                is_steer: false,
+                run_id: None,
+                attachments: vec![],
+            });
+        }
     }
 }
 
@@ -288,4 +374,39 @@ pub fn changed_file_rows(
         deletions: r.deletions,
     })
     .collect()
+}
+
+/// Which icon a Conn tool row draws (`conn_state::conn_tools::ConnToolIcon`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum FfiConnToolIcon {
+    ConnMark,
+    Browser,
+    Device,
+    PullRequest,
+    Credential,
+}
+
+/// Conn's friendly label and icon for one of its own MCP tools.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct FfiConnToolLabel {
+    pub display_name: String,
+    pub icon: FfiConnToolIcon,
+}
+
+/// The label desktop shows for a Conn MCP tool call (`mcp__conn__conn_thread_send`, any provider
+/// spelling), or `None` for other tools, which keep their own title.
+#[uniffi::export]
+pub fn conn_tool_label(title: String) -> Option<FfiConnToolLabel> {
+    use conn_state::conn_tools::{ConnToolIcon, conn_tool_presentation};
+    let found = conn_tool_presentation(&title)?;
+    Some(FfiConnToolLabel {
+        display_name: found.display_name.into_owned(),
+        icon: match found.icon {
+            ConnToolIcon::ConnMark => FfiConnToolIcon::ConnMark,
+            ConnToolIcon::Browser => FfiConnToolIcon::Browser,
+            ConnToolIcon::Device => FfiConnToolIcon::Device,
+            ConnToolIcon::PullRequest => FfiConnToolIcon::PullRequest,
+            ConnToolIcon::Credential => FfiConnToolIcon::Credential,
+        },
+    })
 }

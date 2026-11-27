@@ -351,10 +351,12 @@ dependencies = [
 name = "conn-client"
 version = "0.1.0"
 dependencies = [
+ "bytes",
  "conn-contract",
  "conn-state",
  "conn-wire",
  "futures",
+ "http-body",
  "reqwest",
  "serde",
  "serde_json",

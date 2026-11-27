@@ -3811,3 +3811,56 @@ fn inherited_document_uses_the_source_item_for_app_requests_after_reopening_and_
                 if id == "visible-id" && source_thread_id == "child" && source_item_id == "child-item"));
     }
 }
+
+#[test]
+fn merged_desktop_sidebar_orders_the_iphone_fixture() {
+    let fixture: Value =
+        serde_json::from_str(include_str!("fixtures/sidebar_inventory.json")).unwrap();
+    let events: Vec<Value> =
+        serde_json::from_str(include_str!("fixtures/shell_thread_updates.json")).unwrap();
+    let machine = |name: &str| {
+        let threads: Vec<_> = fixture[name]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|fields| {
+                let mut thread = events[0]["thread"].clone();
+                thread["lineage"] = json!({"rootThreadId": fields["id"]});
+                thread
+                    .as_object_mut()
+                    .unwrap()
+                    .extend(fields.as_object().unwrap().clone());
+                thread
+            })
+            .collect();
+        from_json(
+            json!({"kind":"snapshot","snapshot":{"schemaVersion":1, "snapshotSequence":1,
+            "projects":[], "threads":threads, "archivedThreads":[]}}),
+        )
+        .unwrap()
+    };
+    let mut primary = ShellState::default();
+    primary.apply(machine("primary"));
+    let mut linked = conn_state::environments::LinkedShells::default();
+    linked.ensure("linked", "Linked");
+    linked.apply("linked", machine("linked"));
+    let shell = linked.merged("primary", "Primary", &primary).shell;
+    let (mut pinned, mut active): (Vec<_>, Vec<_>) = shell
+        .top_level_active_threads()
+        .filter(|t| t.archived_at.as_deref().is_none_or(str::is_empty))
+        .partition(|t| t.pinned_at.as_ref().is_some_and(Option::is_some));
+    conn_state::sort_pinned(&mut pinned);
+    conn_state::sort_active(&mut active);
+    let settled = shell
+        .top_level_settled_threads()
+        .into_iter()
+        .filter(|t| t.archived_at.as_deref().is_none_or(str::is_empty));
+    let ids: Vec<_> = pinned
+        .into_iter()
+        .chain(active)
+        .chain(settled)
+        .map(|t| t.id.as_str())
+        .collect();
+    assert_eq!(ids, ["p", "q", "a", "b", "c", "d", "s", "t"]);
+    assert_eq!(shell.find_thread("b").unwrap().title, "Primary b");
+}

@@ -16,44 +16,41 @@ struct ThreadView: View {
     @Environment(\.connTheme) private var theme
     @Environment(\.dismiss) private var dismiss
     @State private var readingWindow: FfiThreadSnapshot?
+    /// Older history loaded above the live thread. It is joined to the live snapshot instead of
+    /// freezing a copy, so the thread keeps updating and the composer stays usable.
+    @State private var earlier: EarlierHistory?
+    /// The live snapshot with `earlier` joined in, for one live revision: the join copies every
+    /// entry, and `snapshot` is read many times per update while a reply streams.
+    @State private var joined = JoinedSnapshot()
     @State private var markers: [FfiPromptMarker] = []
     @State private var outlineQuery = ""
     @State private var showsOutline = false
+    @ScaledMetric(relativeTo: .body) private var feedTextSize: CGFloat = ThreadText.size
+    /// The paragraph gap below a fold row, less the feed spacing the stack already adds.
+    private var foldGap: CGFloat { feedTextSize * 0.85 - ThreadFeed.spacing }
+    /// The last feed shown, kept while another thread covers this one.
+    @State private var retainedSnapshot: FfiThreadSnapshot?
+    private static let titleInset: CGFloat = 16 + 44 + 16
+    @State private var showsAgents = false
+    /// The feed's scroll state (pinned, jump button), owned by the feed controller.
+    @State private var chrome = FeedChrome()
     @State private var historyNotice: String?
-    @State private var scrollTarget: String?
+    @State private var scrollRequest: FeedScrollRequest?
     @State private var historyRequest = UUID()
-    @State private var viewport = TimelineViewport()
-    @State private var prependAnchor: UnitPoint?
-    @State private var requestedByScroll = false
     @State private var paging = false
     @State private var pageExhausted = false
-    @State private var userScrolling = false
-    @State private var stickToBottom = true
+    /// When this thread opened, for the first-frame log.
+    @State private var openedAt = Date.distantPast
+    /// The open whose first frame was logged (`logFirstFrame`); a class, so body may set it.
+    @State private var frameLogged = FrameLog()
     @State private var settled: Bool
     @State private var showingRename = false
     @State private var renameDraft = ""
-    /// The approval whose answer is on its way; its buttons stay off until the server answers.
-    @State private var respondingApprovalId: String?
-    /// Each open question's answers so far, by request id, then question id.
-    @State private var questionDrafts: [String: [String: FfiQuestionDraft]] = [:]
-    /// The step each open question shows, by request id.
-    @State private var questionSteps: [String: Int] = [:]
-    /// The question whose answers are on their way.
-    @State private var respondingUserInputId: String?
-    /// The step whose single-choice pick is about to move on (mobile's 200 ms).
-    @State private var advancingStep: Int?
-    @State private var advanceTask: Task<Void, Never>?
-    @State private var viewHeight: CGFloat = 800
+    @State private var viewSize: CGSize = .zero
 
-    /// This thread's composer text, kept in the store by thread id.
-    private var draft: String {
-        get { store.drafts[threadId] ?? "" }
-        nonmutating set { store.drafts[threadId] = newValue.isEmpty ? nil : newValue }
-    }
+    /// The draft object only: its text is read by `ThreadComposerArea`, so typing leaves this body.
+    private var composer: ComposerDraft { store.composerDraft(.thread(threadId)) }
 
-    private var draftBinding: Binding<String> {
-        Binding(get: { draft }, set: { draft = $0 })
-    }
     /// The chip's provider and the sheet; `model_picker` in conn-ffi builds both.
     @State private var modelPicker: FfiModelPicker?
     @State private var showingModelPicker = false
@@ -77,18 +74,20 @@ struct ThreadView: View {
         self.onOpenThread = onOpenThread
         self.onTemplate = onTemplate
         self._settled = State(initialValue: initialSettled)
+        // Start at the screen size, so the first frame of a push already lays the title out
+        // between the buttons instead of full width (the geometry arrives a frame later).
+        let screen = (UIApplication.shared.connectedScenes.first as? UIWindowScene)?.screen.bounds.size
+        self._viewSize = State(initialValue: screen ?? .zero)
     }
 
     private var snapshot: FfiThreadSnapshot? {
         if let readingWindow, readingWindow.threadId == threadId { return readingWindow }
-        guard let current = store.openThread, current.threadId == threadId else { return nil }
-        return current
-    }
-
-    /// An approval gives up height to the feed: at most 560pt, at least 160pt, and never more
-    /// than the screen leaves above the composer (`derivePendingUserInputMaxHeight`).
-    private var approvalMaxHeight: CGFloat {
-        min(560, max(160, viewHeight - 140))
+        if let current = store.openThread, current.threadId == threadId {
+            guard let earlier, earlier.threadId == threadId else { return current }
+            return joined.value(revision: store.openThreadRevision, earlier: earlier, live: current)
+        }
+        // Covered by a thread opened from a link: keep the feed, so Back returns to the same spot.
+        return retainedSnapshot?.threadId == threadId ? retainedSnapshot : nil
     }
 
     private var pendingApprovals: [FfiPendingApproval] {
@@ -98,113 +97,6 @@ struct ThreadView: View {
         readingWindow == nil && pendingApprovals.isEmpty && store.status == .connected ? snapshot?.pendingQuestion : nil
     }
 
-    /// The open question's panel for its current step; the composer's text shows as the answer.
-    private var questionPanelModel: FfiQuestionPanel? {
-        guard let question = pendingQuestion else { return nil }
-        return questionPanel(
-            pending: question,
-            step: UInt32(clamping: questionSteps[question.requestId] ?? 0),
-            drafts: questionDrafts[question.requestId] ?? [:],
-            typedAnswer: draft,
-            responding: respondingUserInputId == question.requestId
-        )
-    }
-
-    /// The panel leaves some of the feed in view above itself (`QUESTION_PANEL_FEED_PEEK`).
-    private var questionMaxHeight: CGFloat {
-        min(560, max(160, viewHeight - 140 - 96))
-    }
-
-    private func setQuestionStep(_ step: Int, for question: FfiPendingQuestion) {
-        advanceTask?.cancel()
-        advanceTask = nil
-        advancingStep = nil
-        questionSteps[question.requestId] = max(0, step)
-    }
-
-    private func selectQuestionOption(_ value: String, question: FfiPendingQuestion, panel: FfiQuestionPanel) {
-        UISelectionFeedbackGenerator().selectionChanged()
-        questionDrafts[question.requestId] = questionToggleOption(
-            pending: question,
-            questionId: panel.questionId,
-            drafts: questionDrafts[question.requestId] ?? [:],
-            value: value
-        )
-        guard panel.advancesOnPick else { return }
-        advanceTask?.cancel()
-        let step = Int(panel.step)
-        advancingStep = step
-        advanceTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(200))
-            guard !Task.isCancelled else { return }
-            advanceTask = nil
-            advancingStep = nil
-            questionSteps[question.requestId] = step + 1
-        }
-    }
-
-    private func submitQuestion(_ question: FfiPendingQuestion) {
-        guard let answers = questionAnswers(
-            pending: question,
-            drafts: questionDrafts[question.requestId] ?? [:]
-        ) else { return }
-        respondingUserInputId = question.requestId
-        Task {
-            await store.respondUserInput(threadId: threadId, requestId: question.requestId, answers: answers)
-            if respondingUserInputId == question.requestId {
-                respondingUserInputId = nil
-            }
-        }
-    }
-
-    private func dismissQuestion(_ question: FfiPendingQuestion) {
-        respondingUserInputId = question.requestId
-        Task {
-            await store.dismissUserInput(threadId: threadId, requestId: question.requestId)
-            if respondingUserInputId == question.requestId {
-                respondingUserInputId = nil
-            }
-        }
-    }
-
-    /// Text sent while a question is open answers it: the prompt box is the free-text answer.
-    private func answerQuestion(with text: String, question: FfiPendingQuestion, panel: FfiQuestionPanel) {
-        questionDrafts[question.requestId] = questionSetCustomAnswer(
-            pending: question,
-            questionId: panel.questionId,
-            drafts: questionDrafts[question.requestId] ?? [:],
-            text: text
-        )
-        draft = ""
-        if panel.isLast {
-            submitQuestion(question)
-        } else {
-            setQuestionStep(Int(panel.step) + 1, for: question)
-        }
-    }
-
-    /// The composer's send button with no text: the next question, or the answers.
-    private func runAnswerAction(question: FfiPendingQuestion, panel: FfiQuestionPanel) {
-        if panel.isLast {
-            submitQuestion(question)
-        } else {
-            setQuestionStep(Int(panel.step) + 1, for: question)
-        }
-    }
-
-    private func respond(to approval: FfiPendingApproval, with decision: FfiApprovalDecision) {
-        respondingApprovalId = approval.requestId
-        Task {
-            await store.respondApproval(
-                threadId: threadId,
-                requestId: approval.requestId,
-                decision: decision
-            )
-            if respondingApprovalId == approval.requestId {
-                respondingApprovalId = nil
-            }
-        }
-    }
 
     private var displayTitle: String {
         if let title = snapshot?.title, !title.isEmpty { return title }
@@ -223,6 +115,9 @@ struct ThreadView: View {
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
+    /// Rows taken from the message cache per step of older history (about ten turns).
+    private static let cachedPageEntries = 20
+
     private var canReadEarlier: Bool {
         guard let snapshot, store.offlineReader != nil, !snapshot.entries.isEmpty, !pageExhausted else { return false }
         return readingWindow != nil || !snapshot.synchronized || snapshot.historyCursor != nil
@@ -232,45 +127,13 @@ struct ThreadView: View {
         snapshot?.working == true
     }
 
-    private var hasDraft: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    /// With a question open, text answers it and an empty composer runs the answer action.
-    private var overlayHasCards: Bool {
-        !pendingApprovals.isEmpty || questionPanelModel != nil
-            || (snapshot?.queuedCount ?? 0) > 0
-            || historyNotice != nil || (store.showsOffline && !store.showsSavedConnectionAlert)
-    }
-
-    private var composerCanSend: Bool {
-        guard store.status == .connected, readingWindow == nil else { return false }
-        guard let question = pendingQuestion, let panel = questionPanelModel else {
-            return hasDraft && !store.isSending
-        }
-        if hasDraft {
-            return panel.acceptsText && question.answerable
-                && respondingUserInputId != question.requestId
-        }
-        return panel.answerActionReady
-    }
-
-    private var scrollFingerprint: String {
-        guard let snapshot else { return "loading" }
-        let last = snapshot.entries.last.map(entryFingerprint) ?? "empty"
-        return "\(snapshot.entries.count):\(snapshot.working):\(snapshot.queuedCount):\(last)"
-    }
-
     private func latest() {
         historyRequest = UUID()
-        requestedByScroll = false
-        prependAnchor = nil
         paging = false
         pageExhausted = false
         readingWindow = nil
         historyNotice = nil
-        stickToBottom = true
-        scrollTarget = "timeline-bottom"
+        scrollRequest = FeedScrollRequest(target: .end)
     }
 
     private func readHistory(prompt: String? = nil) {
@@ -288,16 +151,20 @@ struct ThreadView: View {
                     guard request == historyRequest, store.offlineReader === reader,
                           store.openThreadId == threadId else { return }
                     pageExhausted = window.serverPage && window.historyCursor == nil
-                    stickToBottom = false
                     readingWindow = window
-                    scrollTarget = "e:" + prompt
+                    scrollRequest = FeedScrollRequest(target: .item("e:" + prompt))
                 } else {
                     guard let first = current.entries.first(where: {
                         switch $0 { case .user, .assistant: true; default: false }
                     })?.entryId ?? current.entries.first?.entryId else { return }
                     var older: [FfiTimelineEntry] = []
                     if !current.serverPage {
-                        older = try await reader.before(thread: threadId, id: first).entries
+                        let page = try await reader.before(thread: threadId, id: first)
+                        // The cache hands back everything it has; take the newest part and fetch
+                        // the next part (from the cache, so it is quick) as the reader scrolls up.
+                        older = Array(page.entries.suffix(Self.cachedPageEntries))
+                        current.feedDetails.merge(page.feedDetails) { current, _ in current }
+                        current.delegatedTaskIds.merge(page.delegatedTaskIds) { current, _ in current }
                     }
                     if older.isEmpty {
                         guard online else {
@@ -321,6 +188,7 @@ struct ThreadView: View {
                             current.serverPage = true
                             current.historyCursor = page.historyCursor
                             current.feedDetails.merge(page.feedDetails) { current, _ in current }
+                            current.delegatedTaskIds.merge(page.delegatedTaskIds) { current, _ in current }
                             current.workGroups.insert(contentsOf: page.workGroups, at: 0)
                         } while older.isEmpty
                     }
@@ -328,19 +196,17 @@ struct ThreadView: View {
                           store.openThreadId == threadId else { return }
                     var ids = Set(current.entries.map(\.entryId))
                     current.entries.insert(contentsOf: older.filter { ids.insert($0.entryId).inserted }, at: 0)
+                    current.removeRepeatedDelegatedResults()
                     pageExhausted = current.serverPage && current.historyCursor == nil
                     guard !older.isEmpty else {
                         historyNotice = nil
                         return
                     }
-                    stickToBottom = false
-                    let visible = viewport.frames.filter { $0.value.minY >= 0 && $0.value.minY < viewHeight }
-                        .min { $0.value.minY < $1.value.minY }
-                    readingWindow = current
-                    if let visible {
-                        let fraction = visible.value.minY / max(1, viewHeight - visible.value.height)
-                        prependAnchor = UnitPoint(x: 0.5, y: min(1, fraction))
-                        scrollTarget = visible.key
+                    // The feed keeps the first visible row in place as the older rows land above it.
+                    if readingWindow != nil {
+                        readingWindow = current
+                    } else if let live = store.openThread, live.threadId == threadId {
+                        earlier = EarlierHistory(threadId: threadId, merged: current, live: live)
                     }
                 }
                 historyNotice = nil
@@ -362,261 +228,27 @@ struct ThreadView: View {
     }
 
     var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
-                    if let error = store.lastError, !error.isEmpty {
-                        KitNotice(error, icon: .warning, tone: .error)
-                    }
-
-                    if let snapshot {
-                        if canReadEarlier {
-                            Button("Earlier messages") { readHistory() }
-                                .disabled(paging)
-                                .font(.kitDetail)
-                        }
-                        if let setup, setup.threadId == threadId, readingWindow == nil { ThreadWorktreeCard(setup: setup) }
-                        if snapshot.entries.isEmpty {
-                            Text(store.status == .connected ? "No messages in this thread yet." : "No saved messages for this thread.")
-                                .font(.kitDetail)
-                                .foregroundStyle(theme.mutedForeground)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 48)
-                        } else {
-                            let items = renderItems(for: snapshot)
-                            let anchorCandidates = Set(items.prefix(12).map(\.id))
-                            ForEach(items) { item in
-                                Group {
-                                    switch item {
-                                    case let .workGroup(group, entries):
-                                        WorkGroupCard(group: group, entries: entries)
-                                    case let .entry(entry):
-                                        TimelineEntryRow(
-                                            threadId: threadId,
-                                            entry: entry,
-                                            store: store,
-                                            detail: snapshot.feedDetails[entry.entryId],
-                                            interactive: readingWindow == nil && store.status == .connected,
-                                            onOpenThread: onOpenThread,
-                                            onTemplate: onTemplate
-                                        )
-                                    }
-                                }
-                                .background {
-                                    if anchorCandidates.contains(item.id) {
-                                        GeometryReader { geometry in
-                                            Color.clear.preference(
-                                                key: TimelineFrames.self,
-                                                value: [item.id: geometry.frame(in: .named("timeline-viewport"))]
-                                            )
-                                        }
-                                    }
-                                }
-                                .id(item.id)
-                            }
-                        }
-
-                        if snapshot.working && store.status == .connected && pendingApprovals.isEmpty && pendingQuestion == nil {
-                            HStack(spacing: Kit.Space.m) {
-                                // Mobile's `RunFoldWorking` is plain text, never a spinner.
-                                Text("Working…")
-                                    .font(.system(size: 14, weight: .medium))
-                                    .foregroundStyle(theme.mutedForeground)
-                            }
-                            .padding(.top, Kit.Space.xs)
-                        }
-                    } else {
-                        HStack(spacing: Kit.Space.m) {
-                            KitStatusIcon(.working, size: 16, label: "Loading")
-                            Text("Loading timeline…")
-                                .font(.kitDetail)
-                                .foregroundStyle(theme.mutedForeground)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 48)
-                    }
-
-                    Color.clear
-                        .frame(height: 1)
-                        .id("timeline-bottom")
-                }
-                .scrollTargetLayout()
-                .padding(.horizontal, 16)
-                .padding(.top, 12)
-                // The stack gap and bottom anchor already contribute 13 of the 14 points.
-                .padding(.bottom, 1)
-            }
-            .background(theme.background.ignoresSafeArea())
-            .defaultScrollAnchor(.bottom, for: .alignment)
-            .defaultScrollAnchor(.bottom, for: .initialOffset)
-            .coordinateSpace(name: "timeline-viewport")
-            .onPreferenceChange(TimelineFrames.self) { viewport.frames = $0 }
-            .onScrollPhaseChange { _, phase, context in
-                if phase == .interacting { userScrolling = true }
-                if phase == .idle {
-                    if userScrolling { stickToBottom = TimelineEdges(context.geometry).nearEnd }
-                    userScrolling = false
-                    if requestedByScroll {
-                        requestedByScroll = false
-                        readHistory()
-                    }
-                }
-            }
-            .onScrollGeometryChange(for: TimelineEdges.self, of: { TimelineEdges($0) }) { previous, edges in
-                if userScrolling {
-                    stickToBottom = edges.nearEnd
-                    if edges.top < previous.top && !paging { requestedByScroll = true }
-                }
-            }
-            .scrollDismissesKeyboard(.interactively)
-            .onChange(of: scrollFingerprint) { _, _ in
-                if stickToBottom && readingWindow == nil {
-                    withAnimation(Kit.Motion.fast) {
-                        proxy.scrollTo("timeline-bottom", anchor: .bottom)
-                    }
-                }
-            }
-            .onChange(of: scrollTarget) { _, target in
-                if let target {
-                    proxy.scrollTo(target, anchor: prependAnchor ?? (target == "timeline-bottom" ? .bottom : .top))
-                    prependAnchor = nil
-                    scrollTarget = nil
-                }
-            }
-            // Mobile's thread overlay (`ThreadDetailScreen.tsx` 1640-1660, 1805-1862): the cards and the
-            // composer float over the full-width feed. `safeAreaBar` insets the feed and gives the
-            // bottom scroll-edge blur its height (mobile's `EdgeBlur` behind the composer).
-            .safeAreaBar(edge: .bottom, spacing: 0) {
-                VStack(alignment: .leading, spacing: 0) {
-                    if snapshot != nil && (!stickToBottom || readingWindow != nil) {
-                        Button {
-                            UISelectionFeedbackGenerator().selectionChanged()
-                            latest()
-                        } label: {
-                            ThreadGlyph(name: "chevron-down", size: 16)
-                                .foregroundStyle(theme.foreground)
-                                .frame(width: 38.5, height: 38.5)
-                                .glassEffect(.regular.interactive(), in: .circle)
-                                .frame(width: 44, height: 44)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .frame(maxWidth: .infinity)
-                        .accessibilityLabel("Jump to latest")
-                        .accessibilityIdentifier("thread.scrollToEnd")
-                    }
-                  VStack(alignment: .leading, spacing: 10.5) {
-                    if let historyNotice {
-                        Text(historyNotice).font(.kitDetail)
-                    }
-                    if store.showsOffline && !store.showsSavedConnectionAlert {
-                        OfflinePill().frame(maxWidth: .infinity)
-                    }
-                    // Conn mobile pins the first pending approval above the composer.
-                    if let approval = pendingApprovals.first {
-                        HeightCappedScroll(maxHeight: approvalMaxHeight) {
-                            PendingApprovalCard(
-                                approval: approval,
-                                remaining: pendingApprovals.count,
-                                responding: respondingApprovalId == approval.requestId
-                            ) { decision in
-                                respond(to: approval, with: decision)
-                            }
-                        }
-                        .modifier(ComposerDeck(remaining: pendingApprovals.count))
-                        .id(approval.requestId)
-                        .transition(.opacity.combined(with: .move(edge: .bottom)))
-                    }
-                    if let question = pendingQuestion, let panel = questionPanelModel {
-                        PendingUserInputCard(
-                            question: question,
-                            panel: panel,
-                            responding: respondingUserInputId == question.requestId,
-                            advancing: advancingStep == Int(panel.step),
-                            maxHeight: questionMaxHeight,
-                            onSelectOption: { value in
-                                selectQuestionOption(value, question: question, panel: panel)
-                            },
-                            onStepChange: { step in
-                                UISelectionFeedbackGenerator().selectionChanged()
-                                setQuestionStep(step, for: question)
-                            },
-                            onSubmit: { submitQuestion(question) },
-                            onDismiss: { dismissQuestion(question) }
-                        )
-                        .modifier(ComposerDeck(remaining: question.questions.count - Int(panel.step)))
-                        .id(question.requestId)
-                        .transition(.opacity.combined(with: .move(edge: .bottom)))
-                    }
-                    if let queued = snapshot?.queuedCount, queued > 0 {
-                        KitBadge("\(queued) queued")
-                            .accessibilityIdentifier("thread.queuedBadge")
-                    }
-                  }
-                  // Cards: `px-[14px] pb-[7px] gap-2.5` (2pt more than the composer's 12).
-                  .padding(.horizontal, 2)
-                  .padding(.bottom, overlayHasCards ? 7 : 0)
-
-                    ConnComposerPill(
-                        placeholder: questionPanelModel?.composerPlaceholder
-                            ?? (isWorking ? "Queue a follow-up…" : "Ask anything"),
-                        text: draftBinding,
-                        isBusy: isWorking && !hasDraft && questionPanelModel == nil,
-                        canSend: composerCanSend,
-                        onSend: {
-                            if let question = pendingQuestion, let panel = questionPanelModel {
-                                if hasDraft {
-                                    answerQuestion(with: draft, question: question, panel: panel)
-                                } else {
-                                    runAnswerAction(question: question, panel: panel)
-                                }
-                            } else {
-                                sendDraft(scrollProxy: proxy)
-                            }
-                        },
-                        onStop: {
-                            Task {
-                                await store.stopThread(threadId: threadId)
-                            }
-                        },
-                        trailing: {
-                            HStack(spacing: 4) {
-                                if isWorking && (hasDraft || questionPanelModel != nil) {
-                                    Button {
-                                        Task {
-                                            await store.stopThread(threadId: threadId)
-                                        }
-                                    } label: {
-                                        ThreadGlyph(name: "stop", size: 13)
-                                            .foregroundStyle(theme.destructive)
-                                            .frame(width: 28, height: 28)
-                                    }
-                                    .buttonStyle(.plain)
-                                    .accessibilityLabel("Stop")
-                                }
-                                ConnComposerModelChip(
-                                    driver: modelPicker?.selectedDriver,
-                                    modelLabel: modelPicker?.selectedLabel ?? snapshot?.modelLabel
-                                ) {
-                                    showingModelPicker = true
-                                }
-                            }
-                        }
-                    )
-                    .disabled(store.status != .connected || readingWindow != nil)
-                    .accessibilityIdentifier("thread.composer")
-                }
-                // `ThreadComposer`: `px-[12px]`, and 2pt (`COMPOSER_BOTTOM_GUTTER`) above the safe area.
-                .padding(.horizontal, 12)
-                .padding(.bottom, 2)
-            }
-            .scrollEdgeEffectHidden(true, for: .top)
-            .scrollEdgeEffectStyle(.soft, for: .bottom)
-        }
+        let _ = BodyCount.tick("ThreadView")
+        // The feed runs under the header and composer, and iOS's soft scroll edge blurs it there,
+        // as Conn mobile's EdgeBlur does. It handles the keyboard itself.
+        ThreadFeedHost(
+            threadId: threadId,
+            rows: feedRows,
+            // The stack gap and 1 pt end marker under the last row; over a capsule, 10 less.
+            bottomPadding: capsuleShown ? ThreadFeed.spacing - 8 : ThreadFeed.spacing + 2,
+            capsuleInset: capsuleShown ? Self.floatingRowHeight : 0,
+            forceJump: readingWindow != nil,
+            hasContent: snapshot != nil,
+            scrollRequest: scrollRequest,
+            chrome: chrome,
+            composer: AnyView(composerArea),
+            floating: AnyView(floatingControl),
+            onReachTop: { readHistory() }
+        )
+        .ignoresSafeArea()
+        .background(theme.background.ignoresSafeArea())
         .navigationTitle(displayTitle)
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(theme.background, for: .navigationBar)
-        .toolbarBackgroundVisibility(.visible, for: .navigationBar)
         .navigationBarBackButtonHidden()
         .background { ThreadEdgePopGesture() }
         .toolbar {
@@ -633,12 +265,17 @@ struct ThreadView: View {
             .sharedBackgroundVisibility(.hidden)
             ToolbarItem(placement: .principal) {
                 VStack(spacing: 0) {
-                    Text(displayTitle).font(.headline)
+                    // Lab `.m-header-title-text`: 17/22 at 600; `.m-header-subtitle`: 12/16, muted.
+                    Text(displayTitle).font(.system(size: 17, weight: .semibold)).lineHeight(.exact(points: 22))
                     if let displaySubtitle {
-                        Text(displaySubtitle).font(.caption).foregroundStyle(theme.mutedForeground)
+                        Text(displaySubtitle).font(.system(size: 12)).lineHeight(.exact(points: 16))
+                            .foregroundStyle(theme.mutedForeground)
                     }
                 }
                 .lineLimit(1)
+                .truncationMode(.tail)
+                // 16 from the screen edge, the 44 pt button, then a clear 16 pt gap on each side.
+                .frame(width: viewSize.width > Self.titleInset * 2 ? viewSize.width - Self.titleInset * 2 : nil)
                 .foregroundStyle(theme.foreground)
                 .accessibilityElement(children: .combine)
                 .accessibilityAddTraits(.isHeader)
@@ -657,13 +294,15 @@ struct ThreadView: View {
             }
             .sharedBackgroundVisibility(.hidden)
         }
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { viewHeight = $0 }
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { viewSize = $0 }
         .animation(.easeOut(duration: 0.2), value: snapshot?.pendingApprovals.first?.requestId)
         .animation(.easeOut(duration: 0.2), value: pendingQuestion?.requestId)
-        .onChange(of: pendingQuestion?.requestId) { _, current in
-            // Drafts of answered, skipped or expired questions go (`pruneResolvedRequestDrafts`).
-            questionDrafts = questionDrafts.filter { $0.key == current }
-            questionSteps = questionSteps.filter { $0.key == current }
+        .sheet(isPresented: $showsAgents) {
+            ThreadAgentsSheet(agents: turnSubagents) { agent in
+                guard let child = agent.child else { return }
+                showsAgents = false
+                onOpenThread(child, agent.environment)
+            }
         }
         .sheet(isPresented: $showsOutline) {
             NavigationStack {
@@ -693,10 +332,9 @@ struct ThreadView: View {
             }
         }
         .onChange(of: store.status) { _, status in
+            // The feed keeps the reader's row in place on its own; freezing a copy here left the
+            // composer disabled until Jump.
             if status == .connected { historyNotice = nil }
-            if !stickToBottom && readingWindow == nil {
-                readingWindow = store.openThread
-            }
         }
         .alert("Rename Thread", isPresented: $showingRename) {
             TextField("Title", text: $renameDraft)
@@ -722,6 +360,7 @@ struct ThreadView: View {
             } onCancel: { feed.cancel() }
         }
         .task(id: threadId) {
+            openedAt = Date()
             store.openThread(threadId)
         }
         .task(id: "\(threadId)|\(store.providersRevision)|\(snapshot?.modelLabel ?? "")") {
@@ -732,20 +371,270 @@ struct ThreadView: View {
                 .presentationDetents([.large])
         }
         .onDisappear {
+            retainedSnapshot = snapshot
             historyRequest = UUID()
             store.closeThread(threadId)
         }
     }
 
-    /// `CoreStore.sendDraft` clears the thread's draft as it sends and restores it on failure.
-    private func sendDraft(scrollProxy: ScrollViewProxy) {
-        stickToBottom = true
-        Task {
-            if await store.sendDraft(threadId: threadId) {
-                withAnimation(Kit.Motion.fast) {
-                    scrollProxy.scrollTo("timeline-bottom", anchor: .bottom)
+    /// The feed's rows, in the SwiftUI stack's order and spacing: 36 between items (lab
+    /// `.m-feed-inner`), a paragraph gap under a "Worked for" row, 8 between the user's own
+    /// consecutive messages.
+    private var feedRows: [FeedRow] {
+        let _ = BodyCount.tick("ThreadView.feed")
+        var rows: [FeedRow] = []
+        let linkProject: @MainActor (String) -> String? = { [store] in store.linkProjectTitle(threadId: $0) }
+        // Thread links in messages (`t3-thread://v2/…`, `conn://thread/…`) open in the app; other
+        // links go to the system.
+        let openURL = OpenURLAction { [onOpenThread] url in
+            guard let link = ThreadLink(url: url) else { return .systemAction }
+            onOpenThread(link.threadId, link.environmentId)
+            return .handled
+        }
+        // What a row draws from, beyond its id: the feed re-measures and redraws a row only when
+        // this changes, so updates elsewhere (a clock tick, another row streaming) leave it alone.
+        let shellStamp = feedSignature(store.shell?.threads.count, store.identityEpoch, store.status == .connected)
+        func add(_ id: String, extra: CGFloat = 0, key: Int = 0,
+                 @ViewBuilder _ content: @escaping @MainActor () -> some View) {
+            rows.append(FeedRow(id: id, gap: ThreadFeed.spacing + extra, signature: key) {
+                AnyView(
+                    content()
+                        // Card edges line up with the composer's 12-point inset.
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
+                        .environment(\.threadLinkProject, linkProject)
+                        .environment(\.openURL, openURL)
+                )
+            })
+        }
+
+        if let error = store.lastError, !error.isEmpty {
+            add("notice:error", key: error.hashValue) { KitNotice(error, icon: .warning, tone: .error) }
+        }
+        guard let snapshot else {
+            add("loading") { [theme] in
+                HStack(spacing: Kit.Space.m) {
+                    KitStatusIcon(.working, size: 16, label: "Loading")
+                    Text("Loading timeline…")
+                        .font(.kitDetail)
+                        .foregroundStyle(theme.mutedForeground)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 48)
+            }
+            return rows
+        }
+        if canReadEarlier {
+            let paging = paging
+            add("earlier", key: paging.hashValue) {
+                Button("Earlier messages") { readHistory() }
+                    .disabled(paging)
+                    .font(.kitDetail)
+            }
+        }
+        if let setup, setup.threadId == threadId, readingWindow == nil {
+            add("worktree", key: setup.hashValue) { ThreadWorktreeCard(setup: setup) }
+        }
+        if snapshot.entries.isEmpty {
+            let text = store.status == .connected ? "No messages in this thread yet." : "No saved messages for this thread."
+            add("empty", key: text.hashValue) { [theme] in
+                Text(text)
+                    .font(.kitDetail)
+                    .foregroundStyle(theme.mutedForeground)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 48)
+            }
+        } else {
+            let _ = logFirstFrame(snapshot)
+            let items = renderItems(for: snapshot)
+            // What follows a "Worked for" row sits a paragraph gap below it, not the feed spacing.
+            let afterFold = Set(zip(items, items.dropFirst()).compactMap { pair -> String? in
+                if case .workGroup = pair.0 { return pair.1.id } else { return nil }
+            })
+            // A question or approval row is a work-log row: it hangs straight off the fold's
+            // divider, its own padding the same above as below.
+            let logRows = Set(items.compactMap { Self.isLogRow($0) ? $0.id : nil })
+            // The user's messages sent one after another, with nothing between, sit close together
+            // (`ThreadFeed.userRunSpacing`) and read as one group.
+            let inUserRun = Set(zip(items, items.dropFirst()).compactMap { pair -> String? in
+                Self.isUserMessage(pair.0) && Self.isUserMessage(pair.1) ? pair.1.id : nil
+            })
+            let interactive = readingWindow == nil && store.status == .connected
+            for item in items {
+                let extra = afterFold.contains(item.id) && logRows.contains(item.id) ? -ThreadFeed.spacing
+                    : afterFold.contains(item.id) ? foldGap
+                    : inUserRun.contains(item.id) ? ThreadFeed.userRunSpacing - ThreadFeed.spacing : 0
+                switch item {
+                case let .workGroup(group, entries):
+                    let start = snapshot.activeWorkStartedAtMs
+                    let offset = snapshot.serverClockOffsetMs
+                    add(item.id, extra: extra, key: feedSignature(group, entries, start, offset)) {
+                        WorkGroupCard(group: group, entries: entries, workStartedAtMs: start, clockOffsetMs: offset)
+                            .equatable()
+                    }
+                case let .entry(entry):
+                    let detail = snapshot.feedDetails[entry.entryId]
+                    add(item.id, extra: extra, key: feedSignature(entry, detail, interactive, shellStamp)) {
+                        [store, threadId, onOpenThread, onTemplate] in
+                        TimelineEntryRow(
+                            threadId: threadId,
+                            entry: entry,
+                            store: store,
+                            detail: detail,
+                            interactive: interactive,
+                            onOpenThread: onOpenThread,
+                            onTemplate: onTemplate
+                        )
+                        .equatable()
+                    }
                 }
             }
+        }
+
+        if snapshot.working && store.status == .connected && pendingApprovals.isEmpty && pendingQuestion == nil {
+            // Mobile's live fold row and `ThinkingTimelineRow`. A running work group already
+            // carries the "Working for" row; without one it stands alone.
+            let running = snapshot.workGroups.contains(where: \.hasActive)
+            let start = snapshot.activeWorkStartedAtMs
+            let offset = snapshot.serverClockOffsetMs
+            let live = liveWork
+            // Under a running group's "Working for" row: the paragraph gap, as above.
+            add("live", extra: running ? foldGap : 0, key: feedSignature(live.label, live.icon, running, start, offset)) {
+                VStack(alignment: .leading, spacing: 0) {
+                    if !running { WorkingFold(startedAtMs: start, offsetMs: offset) }
+                    LiveWorkRow(label: live.label, glyph: live.icon)
+                }
+            }
+        }
+        // Desktop: queued messages sit at the very bottom, after the live row.
+        let queued = snapshot.entries.compactMap(QueuedMessage.init)
+        if !queued.isEmpty {
+            let editBlocked = pendingQuestion != nil || !pendingApprovals.isEmpty
+            let queuedEntries = snapshot.entries.filter { QueuedMessage($0) != nil }
+            add("queued-messages", key: feedSignature(queuedEntries, editBlocked, shellStamp)) { [store, threadId] in
+                QueuedMessagesSection(threadId: threadId, messages: queued, store: store, editBlocked: editBlocked)
+            }
+        }
+        return rows
+    }
+
+    private var composerArea: some View {
+        ThreadComposerArea(
+            store: store,
+            threadId: threadId,
+            pendingApprovals: pendingApprovals,
+            pendingQuestion: pendingQuestion,
+            isWorking: isWorking,
+            readingHistory: readingWindow != nil,
+            historyNotice: historyNotice,
+            viewHeight: viewSize.height,
+            modelDriver: modelPicker?.selectedDriver,
+            modelLabel: modelPicker?.selectedLabel ?? snapshot?.modelLabel,
+            onModelChip: { showingModelPicker = true },
+            onSendReply: { sendDraft() }
+        )
+    }
+
+    /// What the running turn does now, for the live row: a running tool, the subagents it waits on,
+    /// or thinking (mobile `liveToolActivitySummary`, `waitingOnSubagentsLabel`).
+    private var liveWork: (label: String, icon: String) {
+        guard let snapshot else { return ("Thinking", "thinking") }
+        let last = snapshot.entries.last { if case .queuedUser = $0 { false } else { true } }
+        if case let .tool(_, kind, title, _, .running, _, _, _)? = last {
+            return (connToolLabel(title: title)?.displayName ?? (title.isEmpty ? kind : title), "thinking")
+        }
+        let waiting = turnSubagents.filter { !$0.settled }.count
+        if waiting > 0 {
+            return (waiting == 1 ? "Waiting on a subagent" : "Waiting on \(waiting) subagents", "thinking")
+        }
+        return ("Thinking", "thinking")
+    }
+
+    struct TurnSubagent: Identifiable {
+        let id: String
+        let title: String
+        let child: String?
+        let environment: String?
+        let settled: Bool
+        let status: String
+        let state: FfiTurnItemStatus
+        let provider: String?
+        let model: String?
+        let updatedAt: String?
+    }
+
+    /// Logs the first frame that draws this thread's messages, once per open.
+    private func logFirstFrame(_ snapshot: FfiThreadSnapshot) {
+        guard openedAt != .distantPast,
+              frameLogged.thread != threadId || frameLogged.openedAt != openedAt else { return }
+        frameLogged.thread = threadId
+        frameLogged.openedAt = openedAt
+        let ms = Int(Date().timeIntervalSince(openedAt) * 1000)
+        CoreStore.openLog.info("frame thread=\(threadId, privacy: .public) entries=\(snapshot.entries.count) capsule=\(turnSubagents.count) ms=\(ms)")
+    }
+
+    /// The latest turn's agents, plus any still live from an earlier turn, from the projection's
+    /// subagents and runs (the core's `turn_agents`, mobile's `deriveThreadTurnSubagents`): there
+    /// with the first projection, and a delegated completion row never ends the turn.
+    private var turnSubagents: [TurnSubagent] {
+        (snapshot?.turnAgents?.agents ?? []).map { agent in
+            TurnSubagent(id: agent.id, title: agent.title, child: agent.childThreadId,
+                         environment: agent.environmentId, settled: agent.settled,
+                         status: agent.statusLabel, state: agent.status, provider: agent.provider,
+                         model: agent.model, updatedAt: agent.completedAt ?? agent.startedAt ?? agent.updatedAt)
+        }
+    }
+
+    /// Mobile's `FloatingWorkingControl`, above the approvals and the composer: a glass capsule for
+    /// the running subagents ("2/3", or "3 done" once they settle) and the jump-to-latest circle,
+    /// 16 apart, 12 above the composer.
+    private var syncing: Bool {
+        snapshot.map { !$0.synchronized } ?? false && !store.showsOffline && readingWindow == nil
+    }
+
+    /// The agents or syncing capsule floats over the end of the feed.
+    private var capsuleShown: Bool { !turnSubagents.isEmpty || syncing }
+
+    /// The floating row: the 44 pt control and 9.25 pt under it (a 12 pt gap to the composer).
+    static let floatingRowHeight: CGFloat = 44 + 9.25
+
+    private var floatingControl: some View {
+        FeedFloatingControl(
+            chrome: chrome,
+            agents: turnSubagents,
+            liveCount: Int(snapshot?.turnAgents?.liveCount ?? 0),
+            settledCount: Int(snapshot?.turnAgents?.settledCount ?? 0),
+            syncing: syncing,
+            onJump: { latest() },
+            onAgents: { showsAgents = true }
+        )
+    }
+
+    private func sendDraft() {
+        // Follow the end, so the sent message and the reply stay in view.
+        scrollRequest = FeedScrollRequest(target: .end)
+        let draft = composer
+        let mode: FfiSendMode = store.followUpSteers(threadId) ? .steer : .queue
+        Task {
+            _ = await store.submit(draft, for: .thread(threadId), to: .reply(threadId: threadId, mode: mode))
+        }
+    }
+
+    /// A message the user wrote (not an agent-authored row such as a delegated result).
+    private static func isLogRow(_ item: RenderItem) -> Bool {
+        guard case let .entry(entry) = item else { return false }
+        switch entry {
+        case .userInputRequest, .approval: return true
+        default: return false
+        }
+    }
+
+    private static func isUserMessage(_ item: RenderItem) -> Bool {
+        guard case let .entry(entry) = item else { return false }
+        switch entry {
+        case let .user(_, _, _, byAgent, _, _, _): return !byAgent
+        case let .queuedUser(_, _, _, _, _, byAgent, _): return !byAgent
+        default: return false
         }
     }
 
@@ -771,13 +660,13 @@ struct ThreadView: View {
             }
         }
 
-        let entriesById = Dictionary(uniqueKeysWithValues: snapshot.entries.map { ($0.entryId, $0) })
+        let entriesById = Dictionary(snapshot.entries.map { ($0.entryId, $0) }, uniquingKeysWith: { first, _ in first })
         var items: [RenderItem] = []
 
         let waiting = Set(pendingApprovals.map(\.entryId))
         for entry in snapshot.entries {
             let id = entry.entryId
-            if waiting.contains(id) { continue }
+            if waiting.contains(id) || QueuedMessage(entry) != nil { continue }
             if let group = groupByFirstId[id] {
                 let groupedEntries = group.entryIds.compactMap { entriesById[$0] }
                 if !groupedEntries.isEmpty {
@@ -789,52 +678,23 @@ struct ThreadView: View {
                 items.append(.entry(entry))
             }
         }
-        return items
-    }
-
-    private func entryFingerprint(_ entry: FfiTimelineEntry) -> String {
-        switch entry {
-        case let .user(id, text, _, _, _, _, _): "u:\(id):\(text.count)"
-        case let .queuedUser(id, _, _, text, _, _, _): "q:\(id):\(text.count)"
-        case let .assistant(id, markdown, streaming, _, _, _): "a:\(id):\(streaming):\(markdown.count)"
-        case let .thinking(id, text, streaming, _, _): "th:\(id):\(streaming):\(text.count)"
-        case let .tool(id, _, title, detail, status, _, _, _): "t:\(id):\(status):\(title.count):\(detail?.count ?? 0)"
-        case let .approval(id, _, title, _): "ap:\(id):\(title.count)"
-        case let .userInputRequest(id, _, _, questions, _, pending, answers, _, _):
-            "ui:\(id):\(pending):\(questions.count):\(answers.count)"
-        case let .secretRequest(id, label, _, _, _, _, status, pending, _):
-            "sec:\(id):\(status):\(pending):\(label.count)"
-        case let .proposedPlan(id, _, title, markdown, _, _, _, streaming, _, _):
-            "plan:\(id):\(streaming):\(title.count):\(markdown.count)"
-        case let .subagent(id, _, title, _, status, _, _, summary, _, _, _, _):
-            "sub:\(id):\(status):\(title.count):\(summary?.count ?? 0)"
-        case let .turnCheckpoint(id, _, _, fileCount, additions, deletions, _):
-            "cp:\(id):\(fileCount):\(additions):\(deletions)"
-        case let .notice(id, text, isError): "n:\(id):\(isError):\(text.count)"
-        case let .other(id, label): "o:\(id):\(label.count)"
+        // A message sent while the agent works lands after the running group, which split
+        // "Working for" from the live row drawn at the end. Keep the running group last, under
+        // the messages sent during it, so the fold and its live row stay together.
+        if let index = items.lastIndex(where: { if case let .workGroup(group, _) = $0 { group.hasActive } else { false } }),
+           index < items.count - 1,
+           items[(index + 1)...].allSatisfy({ item in
+               if case let .entry(entry) = item {
+                   switch entry {
+                   case .user, .queuedUser: return true
+                   default: return false
+                   }
+               }
+               return false
+           }) {
+            items.append(items.remove(at: index))
         }
-    }
-}
-
-private final class TimelineViewport {
-    var frames: [String: CGRect] = [:]
-}
-
-private struct TimelineFrames: PreferenceKey {
-    static let defaultValue: [String: CGRect] = [:]
-
-    static func reduce(value: inout [String: CGRect], nextValue: () -> [String: CGRect]) {
-        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
-    }
-}
-
-private struct TimelineEdges: Equatable {
-    let top: Int
-    let nearEnd: Bool
-
-    init(_ geometry: ScrollGeometry) {
-        top = Int(min(160, geometry.contentOffset.y + geometry.contentInsets.top))
-        nearEnd = geometry.visibleRect.maxY >= geometry.contentSize.height - 80
+        return items
     }
 }
 
@@ -871,5 +731,179 @@ private struct ThreadEdgePopGesture: UIViewControllerRepresentable {
             guard let navigationController else { return false }
             return navigationController.viewControllers.count > 1 && navigationController.transitionCoordinator == nil
         }
+    }
+}
+
+/// Which open of a thread already logged its first frame.
+private final class FrameLog {
+    var thread: String?
+    var openedAt: Date?
+}
+
+/// The floating row over the end of the feed. It is a separate host from the composer, and never
+/// changes the feed's inset itself, so the jump circle coming and going can't move the feed and
+/// flip itself again.
+struct FeedFloatingControl: View {
+    let chrome: FeedChrome
+    let agents: [ThreadView.TurnSubagent]
+    let liveCount: Int
+    let settledCount: Int
+    let syncing: Bool
+    let onJump: () -> Void
+    let onAgents: () -> Void
+    @Environment(\.connTheme) private var theme
+    @Namespace private var floatingGlass
+
+    var body: some View {
+        let showsJump = chrome.showsJump
+        let visible = showsJump || !agents.isEmpty || syncing
+        // Merge spacing 8, as the composer's container had: the controls never blend.
+        GlassEffectContainer(spacing: 8) {
+            // The row stays in place, so the jump circle can fade and shrink out, the reverse of how
+            // it appears; removing the row with it used to cut the exit short.
+            HStack(spacing: 16) {
+                if syncing { syncingCapsule }
+                if !agents.isEmpty { agentsCapsule }
+                if showsJump {
+                    Button {
+                        UISelectionFeedbackGenerator().selectionChanged()
+                        onJump()
+                    } label: {
+                        ThreadGlyph(name: "chevron-down", size: 16)
+                            .foregroundStyle(theme.foreground)
+                            .frame(width: 38.5, height: 38.5)
+                            .glassEffect(.regular.interactive(), in: .circle)
+                            // The glass container draws the circle, so the glass makes its own
+                            // entrance and exit: alone it materializes, beside the agents capsule it
+                            // morphs out of and back into it. The chevron only fades in place.
+                            .glassEffectID("jump", in: floatingGlass)
+                            .glassEffectTransition(agents.isEmpty ? .materialize : .matchedGeometry)
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .transition(.opacity)
+                    .accessibilityLabel("Jump to latest")
+                    .accessibilityIdentifier("thread.scrollToEnd")
+                }
+            }
+            .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(Self.space)) } action: { chrome.reportFloatingFrame($0) }
+        }
+        .frame(maxWidth: .infinity)
+        // The 38.5 pt circle sits 2.75 pt inside its 44 pt frame: 9.25 more makes a 12 pt gap.
+        .padding(.bottom, visible ? 9.25 : 0)
+        .frame(maxHeight: .infinity, alignment: .bottom)
+        // The capsule re-centres as the jump circle morphs in or out, both ways.
+        .animation(.smooth(duration: 0.35), value: showsJump)
+        .animation(.smooth(duration: 0.35), value: visible)
+        // The host's own space: the frame is where its pass-through view lets touches in.
+        .coordinateSpace(.named(Self.space))
+    }
+
+    private static let space = "feed.floating"
+
+    /// "Syncing" while the feed still shows cached state, in the agents capsule's style.
+    private var syncingCapsule: some View {
+        HStack(spacing: 6) {
+            ProgressView().controlSize(.mini).tint(theme.mutedForeground)
+            Text("Syncing")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(theme.foreground)
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 38.5)
+        .glassEffect(.regular, in: .capsule)
+        .frame(height: 44)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Syncing the latest messages")
+        .accessibilityIdentifier("thread.syncing")
+    }
+
+    private var agentsCapsule: some View {
+        let label = liveCount > 0 ? "\(liveCount)/\(agents.count)" : "\(settledCount) done"
+        return Button {
+            UISelectionFeedbackGenerator().selectionChanged()
+            onAgents()
+        } label: {
+            HStack(spacing: 6) {
+                ThreadGlyph(name: "users", size: 14)
+                    .font(.system(size: 13))
+                    .foregroundStyle(theme.mutedForeground)
+                Text(label)
+                    .font(.system(size: 12, weight: .medium))
+                    .monospacedDigit()
+                    .foregroundStyle(theme.foreground)
+            }
+            .padding(.horizontal, 12)
+            // Mobile's 38.5pt control in a 44pt target, like the jump circle beside it.
+            .frame(height: 38.5)
+            .glassEffect(.regular.interactive(), in: .capsule)
+            .glassEffectID("agents", in: floatingGlass)
+            .frame(height: 44)
+            .contentShape(Capsule())
+        }
+        .accessibilityLabel(liveCount > 0 ? "Open agents, \(liveCount) of \(agents.count) agents working"
+                            : "Open agents, \(settledCount) done")
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("thread.agents")
+    }
+}
+
+/// A row's content signature for the feed (`FeedRow.signature`).
+func feedSignature(_ parts: AnyHashable?...) -> Int {
+    var hasher = Hasher()
+    for part in parts { hasher.combine(part) }
+    return hasher.finalize()
+}
+
+/// History loaded above the live thread: the entries and their details, plus where paging goes
+/// on from. `join` puts them in front of each new live snapshot.
+@MainActor
+final class JoinedSnapshot {
+    private var key: (revision: Int, earlier: UUID)?
+    private var cached: FfiThreadSnapshot?
+
+    func value(revision: Int, earlier: EarlierHistory, live: FfiThreadSnapshot) -> FfiThreadSnapshot {
+        if let key, key.revision == revision, key.earlier == earlier.version, let cached { return cached }
+        var result = live
+        earlier.join(into: &result)
+        key = (revision, earlier.version)
+        cached = result
+        return result
+    }
+}
+
+struct EarlierHistory {
+    let threadId: String
+    /// New for every page, so the joined snapshot is rebuilt when more history arrives.
+    let version = UUID()
+    var entries: [FfiTimelineEntry]
+    var feedDetails: [String: FfiFeedDetail]
+    var delegatedTaskIds: [String: String]
+    var workGroups: [FfiWorkGroupTiming]
+    var serverPage: Bool
+    var historyCursor: String?
+
+    init(threadId: String, merged: FfiThreadSnapshot, live: FfiThreadSnapshot) {
+        self.threadId = threadId
+        let liveIds = Set(live.entries.map(\.entryId))
+        let liveGroups = Set(live.workGroups.map(\.id))
+        entries = merged.entries.filter { !liveIds.contains($0.entryId) }
+        feedDetails = merged.feedDetails.filter { live.feedDetails[$0.key] == nil }
+        delegatedTaskIds = merged.delegatedTaskIds.filter { live.delegatedTaskIds[$0.key] == nil }
+        workGroups = merged.workGroups.filter { !liveGroups.contains($0.id) }
+        serverPage = merged.serverPage
+        historyCursor = merged.historyCursor
+    }
+
+    func join(into live: inout FfiThreadSnapshot) {
+        let liveIds = Set(live.entries.map(\.entryId))
+        live.entries.insert(contentsOf: entries.filter { !liveIds.contains($0.entryId) }, at: 0)
+        live.feedDetails.merge(feedDetails) { current, _ in current }
+        live.delegatedTaskIds.merge(delegatedTaskIds) { current, _ in current }
+        let liveGroups = Set(live.workGroups.map(\.id))
+        live.workGroups.insert(contentsOf: workGroups.filter { !liveGroups.contains($0.id) }, at: 0)
+        live.serverPage = serverPage
+        live.historyCursor = historyCursor
     }
 }

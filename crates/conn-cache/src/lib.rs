@@ -21,6 +21,10 @@ pub enum Message {
         created_by_agent: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         sender: Option<AgentMessageSender>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        delegated_completion: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notice_results: Option<Vec<conn_state::thread_feed::DelegatedResult>>,
         created_at: Option<String>,
         attachments: Vec<ChatAttachment>,
         is_steer: bool,
@@ -44,6 +48,60 @@ impl Message {
         }
     }
 
+    pub fn capture_for_feed(state: &ThreadState, entry: &TimelineEntry) -> Option<Self> {
+        if let TimelineEntry::Notice { id, text, .. } = entry
+            && let Some(results) = state.delegated_results(id)
+        {
+            return Some(Self::User {
+                id: id.clone(),
+                text: text.clone(),
+                created_by_agent: true,
+                delegated_completion: Some(true),
+                sender: None,
+                notice_results: Some(results.to_vec()),
+                created_at: None,
+                attachments: vec![],
+                is_steer: false,
+                review_comments: vec![],
+                run_id: None,
+            });
+        }
+        let mut message = Self::capture(entry)?;
+        if let Self::User {
+            delegated_completion,
+            ..
+        } = &mut message
+        {
+            *delegated_completion = Some(matches!(
+                state.feed_details.get(entry.id()),
+                Some(conn_state::thread_feed::FeedDetail::Delegated(_))
+            ));
+        }
+        Some(message)
+    }
+
+    pub fn delegated_results(&self) -> Option<Vec<conn_state::thread_feed::DelegatedResult>> {
+        let Self::User {
+            id,
+            text,
+            delegated_completion,
+            notice_results,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        if let Some(results) = notice_results {
+            return Some(results.clone());
+        }
+        if delegated_completion
+            .unwrap_or_else(|| conn_state::thread_feed::cached_completion_id(id, text))
+        {
+            return conn_state::thread_feed::completion_results(text);
+        }
+        None
+    }
+
     pub fn capture(entry: &TimelineEntry) -> Option<Self> {
         match entry {
             TimelineEntry::User {
@@ -61,6 +119,8 @@ impl Message {
                 text: text.clone(),
                 created_by_agent: *created_by_agent,
                 sender: sender.clone(),
+                delegated_completion: None,
+                notice_results: None,
                 created_at: created_at.clone(),
                 attachments: attachments.clone(),
                 is_steer: *is_steer,
@@ -138,6 +198,8 @@ impl Message {
             Self::User {
                 id,
                 text,
+                delegated_completion: _,
+                notice_results: _,
                 created_by_agent,
                 sender,
                 created_at,
@@ -352,12 +414,12 @@ pub async fn fetch_history_prefix(
         let mut state = ThreadState::new(thread);
         state.prepend_history_page(page);
         if state.has_more_history {
-            next = Some(state.history_cursor.ok_or_else(|| {
+            next = Some(state.history_cursor.take().ok_or_else(|| {
                 ClientError::Connection("missing server history cursor".to_owned())
             })?);
         }
         for entry in state.entries.iter().rev() {
-            if let Some(message) = Message::capture(entry)
+            if let Some(message) = Message::capture_for_feed(&state, entry)
                 && ids.insert(message.id().to_owned())
             {
                 messages.push_front(message);

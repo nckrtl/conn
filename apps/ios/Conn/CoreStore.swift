@@ -1,11 +1,30 @@
 import Foundation
 import Observation
+import OSLog
 import SwiftUI
 
 /// The launch path through Orbit, shown while no connection is up.
 enum OrbitConnectState: Equatable {
     case connecting(String)
     case failed(message: String, detail: String?)
+}
+
+/// All machines that finish in one display frame commit together. A slow machine joins a later frame.
+@MainActor
+final class InboxPublications {
+    private var pending: [String: () -> Void] = [:]
+
+    func submit(scope: String, publish: @escaping () -> Void) {
+        let schedule = pending.isEmpty
+        pending[scope] = publish
+        guard schedule else { return }
+        Task {
+            try? await Task.sleep(for: .milliseconds(16))
+            let batch = pending
+            pending.removeAll(keepingCapacity: true)
+            for commit in batch.values { commit() }
+        }
+    }
 }
 
 /// One environment's store: the main one (`scope` empty) or a linked one. It renders its
@@ -16,12 +35,26 @@ enum OrbitConnectState: Equatable {
 final class CoreStore {
     private(set) var state: FfiSessionState?
     private(set) var shell: FfiShellSnapshot?
-    private var shellConnection: UInt64?
-    private(set) var openThread: FfiThreadSnapshot?
+
+    /// A thread's project title as the thread list shows it, or nil when this store doesn't list it.
+    func linkProjectTitle(threadId: String) -> String? {
+        guard let shell, let thread = shell.threads.first(where: { $0.id == threadId }) else { return nil }
+        return thread.orbitProjectSlug ?? shell.projects.first(where: { $0.id == thread.projectId })?.title
+    }
+    private let publications: InboxPublications
+    private var restoringLaunchInventory = false
+    private(set) var openThread: FfiThreadSnapshot? {
+        didSet { openThreadRevision &+= 1 }
+    }
+    /// Counts `openThread` changes, so views can cache work derived from it without comparing it.
+    @ObservationIgnored private(set) var openThreadRevision = 0
+    /// The last session state lines (`logState`), newest last, for the offline pill's details.
+    private(set) var sessionHistory: [String] = []
     private(set) var openThreadId: String?
     private(set) var offlineReader: OfflineReader?
+    @ObservationIgnored let imageThumbnails = AttachmentThumbnails()
+    @ObservationIgnored let uploads = ComposerUploads()
     private var readerConnection: UInt64?
-    private(set) var isSending = false
     var lastError: String?
     /// A thread to show, set by a `conn://thread/...` URL or a push tap; the workspace consumes it.
     private(set) var pendingLink: ThreadLink?
@@ -29,10 +62,28 @@ final class CoreStore {
     var isInboxVisible = false
     /// Bumped whenever the server's provider list changes; model pickers re-read on it.
     private(set) var providersRevision = 0
-    /// Each thread's unsent composer text, by thread id (mobile's composer drafts by thread key).
-    /// It lives here, not in the view, so a failed send restores into the thread's draft even
-    /// after the user left the thread.
-    var drafts: [String: String] = [:]
+    @ObservationIgnored private var drafts: [ComposerDraftKey: ComposerDraft] = [:]
+    /// The files of replies still uploading, by their pending attachment id (`pending:<key>:<n>`),
+    /// so the pending row shows them and their copies live until the upload has read them.
+    @ObservationIgnored private(set) var pendingUploads: [String: ComposerFile] = [:]
+
+    func composerDraft(_ key: ComposerDraftKey, initialText: String = "") -> ComposerDraft {
+        if let existing = drafts[key] { return existing }
+        let draft = ComposerDraft(text: initialText)
+        draft.uploads = uploads
+        drafts[key] = draft
+        return draft
+    }
+
+    private func discardComposerDrafts() {
+        for draft in drafts.values { draft.discard() }
+        drafts.removeAll()
+    }
+
+    var composerLimits: FfiComposerLimits {
+        _ = providersRevision
+        return core?.composerLimits() ?? FfiComposerLimits(images: false, maxFileBytes: nil)
+    }
 
     @ObservationIgnored private var session: ConnSession?
     private var core: ConnCore? { session?.core() }
@@ -56,7 +107,7 @@ final class CoreStore {
     private var coldLaunchSession: FfiSavedSession?
     private var choseOffline = false
     var showsSavedConnectionAlert: Bool {
-        coldLaunchSession != nil && !choseOffline && !hasConnected && showsOffline && showsWorkspace
+        scope.isEmpty && coldLaunchSession != nil && !choseOffline && !hasConnected && showsOffline && showsWorkspace
     }
 
     func useSavedWorkspaceOffline() { choseOffline = true }
@@ -73,17 +124,31 @@ final class CoreStore {
 
     var displayName: String { fleetLabel ?? serverURL.flatMap { URL(string: $0)?.host } ?? fleetID ?? scope }
 
-    func loadOlder() async {
-        guard !loadingOlder, let core, status == .connected else { return }
+    var canLoadOlder: Bool { isPaired && !loadingOlder && (shell?.olderSettledCount ?? 0) > 0 }
+
+    func loadOlder() {
+        guard canLoadOlder, let core else { return }
         loadingOlder = true
-        defer { loadingOlder = false }
         olderError = nil
-        do { try await core.loadOlderSettled() }
-        catch { olderError = error.localizedDescription }
+        Task {
+            defer { loadingOlder = false }
+            do { try await core.loadOlderSettled() }
+            catch { olderError = error.localizedDescription }
+        }
     }
 
     let scope: String
     private(set) var linked: [String: CoreStore] = [:]
+    private var linkedOrder: [String] = []
+    var inboxOwners: [CoreStore] { [self] + linkedOrder.compactMap { linked[$0] } }
+
+    private func registerLinked(_ child: CoreStore) {
+        linked[child.scope] = child
+        if !linkedOrder.contains(child.scope) {
+            linkedOrder.append(child.scope)
+            UserDefaults.standard.set(linkedOrder, forKey: "linkedSessions")
+        }
+    }
 
     /// The connection status the workspace shows inline. Once this scope has connected, a
     /// reconnect or re-pair shows here, so the workspace and its open thread stay up.
@@ -106,17 +171,26 @@ final class CoreStore {
     /// Rust: grows when this scope connects to a different server than before.
     var identityEpoch: UInt64 { state?.identityEpoch ?? 0 }
 
-    /// The workspace, rather than the Orbit or pairing screen: connected before, or connecting to
-    /// this launch's first server (its offline history shows meanwhile). After a switch to
-    /// another server, the connecting screen shows until that one connects.
-    private(set) var showsWorkspace = false
+    private var hasPrimaryInventory = false
+
+    var showsWorkspace: Bool {
+        guard !restoringLaunchInventory else { return false }
+        if hasPrimaryInventory { return true }
+        // A saved primary can be unavailable while a linked machine already has its inventory.
+        return scope.isEmpty && (coldLaunchSession != nil || hasConnected)
+            && linked.values.contains { $0.shell != nil }
+    }
 
     private func updateWorkspaceVisibility() {
-        if shell != nil && (hasConnected || offlineReader != nil) { showsWorkspace = true }
+        guard !hasPrimaryInventory, !restoringLaunchInventory else { return }
+        if shell != nil && (hasConnected || coldLaunchSession != nil || offlineReader != nil) {
+            hasPrimaryInventory = true
+        }
     }
     var serverURL: String? { state?.serverUrl }
     /// The connected server's environment id.
     var environmentId: String? { state?.environmentId ?? coldLaunchSession?.environmentId }
+    var attachmentEnvironment: String { environmentId ?? coldLaunchSession?.orbitServerId ?? scope }
 
     var orbitConnect: OrbitConnectState? {
         var phase = state?.phase
@@ -139,7 +213,8 @@ final class CoreStore {
         }
     }
 
-    init(scope: String = "", deferOrbit: Bool = false) {
+    init(scope: String = "", deferOrbit: Bool = false, publications: InboxPublications = InboxPublications()) {
+        self.publications = publications
         self.scope = scope
         let arguments = ProcessInfo.processInfo.arguments
         if scope.isEmpty && arguments.contains("--reset-session") {
@@ -174,27 +249,58 @@ final class CoreStore {
             )
         }
         fleetID = saved?.orbitServerId
-        guard scope.isEmpty else {
-            if !deferOrbit || fleetID == nil { session?.restore(saved: saved) }
-            return
+        if scope.isEmpty {
+            guard !arguments.contains("--manual-pairing") else { return }
+            session?.launch(saved: saved)
+            linkedOrder = UserDefaults.standard.stringArray(forKey: "linkedSessions") ?? []
+            for id in linkedOrder where KeychainStore.loadSession(scope: id) != nil {
+                linked[id] = CoreStore(scope: id, deferOrbit: true, publications: publications)
+            }
+        } else {
+            // A saved linked machine reconnects at once with its saved credentials, beside the
+            // primary and inside the launch grace window. It used to sit suspended until the
+            // primary connected and discovery woke it, which showed "Not connected" and blocked
+            // sending in its threads for a long while after every cold launch. Discovery still
+            // suspends machines Orbit no longer lists or that are asleep.
+            session?.restore(saved: saved)
         }
-        guard !arguments.contains("--manual-pairing") else { return }
         coldLaunchSession = saved
-        session?.launch(saved: saved)
-        if let saved, let session {
+        if scope.isEmpty { restoreLaunchInventory() }
+        if let identity = saved?.environmentId ?? saved?.orbitServerId, let session {
             Task {
-                guard let reader = await session.savedOfflineReader(), let snapshot = await reader.savedShell(),
-                      coldLaunchSession != nil, !hasConnected, offlineReader == nil,
-                      let identity = saved.environmentId ?? saved.orbitServerId,
+                guard let reader = await session.savedOfflineReader(identity: identity),
+                      coldLaunchSession != nil, offlineReader == nil,
                       state?.environmentId.map({ $0 == identity }) ?? true else { return }
                 offlineReader = reader
-                shell = snapshot
-                updateWorkspaceVisibility()
                 if let id = openThreadId { restoreThread(id) }
             }
         }
-        for id in UserDefaults.standard.stringArray(forKey: "linkedSessions") ?? [] {
-            if KeychainStore.loadSession(scope: id) != nil { linked[id] = CoreStore(scope: id, deferOrbit: true) }
+    }
+
+    private func restoreLaunchInventory() {
+        let sources = inboxOwners.compactMap { owner -> (CoreStore, ConnSession, String)? in
+            guard let session = owner.session, let saved = owner.coldLaunchSession,
+                  let id = saved.environmentId ?? saved.orbitServerId else { return nil }
+            return (owner, session, id)
+        }
+        guard !sources.isEmpty else { return }
+        restoringLaunchInventory = true
+        Task {
+            await withTaskGroup(of: (Int, FfiShellSnapshot?).self) { group in
+                for (index, source) in sources.enumerated() {
+                    let (_, session, identity) = source
+                    group.addTask { (index, await session.cachedShell(identity: identity)) }
+                }
+                for await (index, snapshot) in group {
+                    let (owner, _, identity) = sources[index]
+                    if let snapshot, owner.shell == nil,
+                       owner.environmentId == identity || owner.coldLaunchSession?.orbitServerId == identity {
+                        owner.shell = snapshot
+                    }
+                }
+            }
+            restoringLaunchInventory = false
+            updateWorkspaceVisibility()
         }
     }
 
@@ -209,6 +315,7 @@ final class CoreStore {
         })
         let saved = credentials.values.compactMap(\.orbitServerId)
         let disabled = UserDefaults.standard.stringArray(forKey: "disabledOrbitLinks") ?? []
+        let previousLinks = linked
         do {
             let discovery = try await session.linkedNodes(primaryId: primary, saved: saved, disabled: disabled)
             guard !Task.isCancelled, generation == identityEpoch, environmentId == primary else { return }
@@ -217,10 +324,13 @@ final class CoreStore {
                 "Could not verify the server identity at " + discovery.unresolvedEndpoints.joined(separator: ", ")
             discoveredPrimary = primary
             let wanted = Set(targets.map(\.serverId))
-            for (key, child) in linked {
-                if let id = child.fleetID, !wanted.contains(id) {
-                    child.session?.connectManually()
-                    linked.removeValue(forKey: key)
+            let unresolved = Set(discovery.unresolvedServerIds)
+            for (key, child) in previousLinks {
+                guard linked[key] === child, let id = child.fleetID, !wanted.contains(id) else { continue }
+                if unresolved.contains(id) {
+                    child.suspendFleetSession()
+                } else {
+                    forgetLinked(key)
                 }
             }
             for target in targets {
@@ -228,10 +338,21 @@ final class CoreStore {
                 let existing = linked.values.first { $0.fleetID == id || $0.environmentId == id }
                 if let existing, existing.fleetID == nil { continue }
                 let key = existing?.scope ?? credentials.first { $0.value.orbitServerId == id }?.key ?? UUID().uuidString
-                let child = existing ?? CoreStore(scope: key, deferOrbit: true)
+                let child = existing ?? CoreStore(scope: key, deferOrbit: true, publications: publications)
                 child.fleetID = id
                 child.fleetLabel = target.displayTitle
-                linked[key] = child
+                registerLinked(child)
+                guard target.isAwake else {
+                    child.suspendFleetSession()
+                    continue
+                }
+                // Already live or connecting from launch (restore): leave that attempt alone.
+                switch child.state?.phase {
+                case .live?, .connecting?:
+                    if child.lastFleetAttempt == nil { child.lastFleetAttempt = Date() }
+                    continue
+                default: break
+                }
                 if let attempt = child.lastFleetAttempt {
                     guard child.showsOffline, Date().timeIntervalSince(attempt) >= 300 else { continue }
                 }
@@ -241,10 +362,15 @@ final class CoreStore {
                 }
                 child.session?.followEnvironment(environmentId: id, saved: credential)
             }
-            UserDefaults.standard.set(Array(Set(savedScopes).union(linked.keys)), forKey: "linkedSessions")
         } catch {
             if !Task.isCancelled && environmentId == primary { discoveryError = connectionMessage(error) }
         }
+    }
+
+    private func suspendFleetSession() {
+        lastFleetAttempt = nil
+        guard let session, session.state().phase != .suspended else { return }
+        session.suspend()
     }
 
     private static func cacheDirectory(_ scope: String) -> URL {
@@ -262,6 +388,7 @@ final class CoreStore {
     }
 
     func showManualPairing() {
+        discardComposerDrafts()
         session?.connectManually()
     }
 
@@ -269,6 +396,7 @@ final class CoreStore {
         lastError = nil
         do {
             let parsed = try PairingURLParser.parse(raw)
+            discardComposerDrafts()
             session?.pairManual(serverUrl: parsed.serverURL, pairingCode: parsed.pairingCode)
         } catch {
             lastError = error.localizedDescription
@@ -300,6 +428,8 @@ final class CoreStore {
 
     func openThread(_ threadId: String) {
         if openThreadId != threadId { openThread = nil }
+        Self.openLog.info("open thread=\(threadId, privacy: .public)")
+        firstSnapshotLog = threadId
         openThreadId = threadId
         // The session closes the scope's other thread, and subscribes this one now or as soon as
         // a connection attaches.
@@ -315,19 +445,46 @@ final class CoreStore {
         session?.closeThread(threadId: threadId)
     }
 
-    func sendMessage(threadId: String, text: String, mode: FfiSendMode = .auto) async -> Bool {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard status == .connected, !trimmed.isEmpty, let core else { return false }
-        isSending = true
-        lastError = nil
-        defer { isSending = false }
+    /// A reply leaves the composer at once: the core shows it as a pending row keyed by the draft's
+    /// idempotency key, and the field is free for the next message. A failed reply comes back into
+    /// the draft after anything typed since. A new thread keeps its draft until it launches.
+    func submit(_ draft: ComposerDraft, for draftKey: ComposerDraftKey, to target: FfiComposerTarget) async -> String? {
+        guard status == .connected, let core, drafts[draftKey] === draft, draft.hasContent, !draft.locked else { return nil }
+        draft.error = nil
+        let epoch = identityEpoch
+        let key = draft.key
+        let sentText = draft.text
+        let sentFiles = draft.files
+        let text = sentText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let files = sentFiles.map(\.ffi)
+        let reply: Bool = if case .reply = target { true } else { false }
+        let uploads = sentFiles.indices.map { "pending:\(key):\($0)" }
+        if reply {
+            for (id, file) in zip(uploads, sentFiles) { pendingUploads[id] = file }
+            draft.text = ""
+            draft.files = []
+        } else {
+            draft.sending = true
+        }
+        defer {
+            for id in uploads { pendingUploads[id] = nil }
+            if !reply { draft.sending = false }
+        }
         do {
-            try await core.sendMessage(threadId: threadId, text: trimmed, mode: mode)
+            let id = try await core.submitComposer(target: target, key: key, text: text, files: files)
+            guard epoch == identityEpoch, drafts[draftKey] === draft else { return nil }
+            if !reply, draft.key == key {
+                draft.text = ""
+                draft.files = []
+            }
+            if case .new = draftKey { drafts[draftKey] = nil }
             PushRegistration.shared.noteThreadActivity()
-            return true
+            return id
         } catch {
-            lastError = error.localizedDescription
-            return false
+            guard epoch == identityEpoch, drafts[draftKey] === draft else { return nil }
+            if reply { draft.restore(text: sentText, files: sentFiles, key: key) }
+            draft.error = connectionMessage(error)
+            return nil
         }
     }
 
@@ -368,8 +525,6 @@ final class CoreStore {
         return (try? await core.scanThreadWorkspaceModels(threadId: threadId)) ?? nil
     }
 
-    /// Sends the thread's draft. Like mobile, the draft clears as the message goes out; a failed
-    /// send merges the sent text back into that thread's draft, wherever the user is by then.
     func followUpSteers(_ threadId: String) -> Bool {
         UserDefaults.standard.bool(forKey: "steer.\(environmentId ?? scope).\(threadId)")
     }
@@ -378,23 +533,89 @@ final class CoreStore {
         UserDefaults.standard.set(steer, forKey: "steer.\(environmentId ?? scope).\(threadId)")
     }
 
-    func sendDraft(threadId: String) async -> Bool {
-        let message = drafts[threadId] ?? ""
-        drafts[threadId] = nil
-        let sent = await sendMessage(threadId: threadId, text: message, mode: followUpSteers(threadId) ? .steer : .queue)
-        if !sent {
-            let restored = composerRestoreDraft(current: drafts[threadId] ?? "", sent: message)
-            drafts[threadId] = restored.isEmpty ? nil : restored
-        }
-        return sent
-    }
-
     func stopThread(threadId: String) async {
         guard status == .connected, let core else { return }
         do {
             try await core.stopThread(threadId: threadId)
         } catch {
             lastError = error.localizedDescription
+        }
+    }
+
+    /// Queued runs shown hidden or with new text while their action is on its way, by run id.
+    private(set) var queuedOverrides: [String: QueuedOverride] = [:]
+    /// Queued runs whose Send now or Remove is on its way.
+    private(set) var queuedBusy: Set<String> = []
+
+    /// Send now: steers the running turn, or starts the queued run when the thread is idle.
+    /// The core picks, as desktop does. A failure shows under the composer.
+    func sendQueuedNow(threadId: String, runId: String) async {
+        guard status == .connected, let core, !queuedBusy.contains(runId) else { return }
+        queuedBusy.insert(runId)
+        defer { queuedBusy.remove(runId) }
+        do {
+            try await core.sendQueuedNow(threadId: threadId, runId: runId)
+        } catch {
+            composerDraft(.thread(threadId)).error = "Send now failed: " + connectionMessage(error)
+        }
+    }
+
+    /// Remove: the row goes at once and comes back if the server refuses.
+    func removeQueuedMessage(threadId: String, runId: String) async {
+        guard status == .connected, let core, !queuedBusy.contains(runId) else { return }
+        let draft = composerDraft(.thread(threadId))
+        if draft.queuedEdit?.runId == runId { draft.cancelQueuedEdit() }
+        queuedBusy.insert(runId)
+        queuedOverrides[runId] = .removed
+        defer { queuedBusy.remove(runId) }
+        do {
+            try await core.cancelQueuedMessage(threadId: threadId, runId: runId)
+        } catch {
+            queuedOverrides[runId] = nil
+            draft.error = "Could not remove queued message: " + connectionMessage(error)
+        }
+    }
+
+    /// Save in queued edit mode (desktop `submit` while `editing_queued`): the earlier draft comes
+    /// back at once and the row shows the new text. If the server refuses, the row shows its old
+    /// text again and, unless something new was typed, the edit reopens with what was written.
+    func saveQueuedEdit(threadId: String) async {
+        let draft = composerDraft(.thread(threadId))
+        guard status == .connected, let core, let edit = draft.queuedEdit, !draft.locked else { return }
+        let text = draft.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return }
+        let newFiles = draft.files
+        let kept = edit.keptAttachmentIds
+        draft.error = nil
+        draft.queuedEdit = nil
+        draft.text = edit.savedText
+        draft.files = edit.savedFiles
+        queuedOverrides[edit.runId] = .edited(text)
+        do {
+            try await core.editQueuedMessage(
+                threadId: threadId, runId: edit.runId, text: text, keptAttachmentIds: kept,
+                files: newFiles.map(\.ffi))
+        } catch {
+            queuedOverrides[edit.runId] = nil
+            if draft.queuedEdit == nil, draft.text == edit.savedText {
+                draft.queuedEdit = edit
+                draft.text = text
+                draft.files = newFiles
+            }
+            draft.error = "Could not update queued message: " + connectionMessage(error)
+        }
+    }
+
+    /// Drops the overrides the server's queue now agrees with: a removed run gone, an edited run
+    /// gone or showing its new text.
+    func settleQueuedOverrides(_ queue: [QueuedMessage]) {
+        let texts = Dictionary(queue.map { ($0.runId, $0.text) }, uniquingKeysWith: { first, _ in first })
+        for (runId, override) in queuedOverrides {
+            switch override {
+            case .removed where texts[runId] == nil: queuedOverrides[runId] = nil
+            case let .edited(text) where texts[runId] == nil || texts[runId] == text: queuedOverrides[runId] = nil
+            default: break
+            }
         }
     }
 
@@ -467,7 +688,7 @@ final class CoreStore {
         do {
             try await core.deleteThread(threadId: threadId)
             // `useThreadListActions`: a deleted thread's draft goes with it.
-            drafts[threadId] = nil
+            drafts[.thread(threadId)] = nil
         } catch {
             lastError = error.localizedDescription
         }
@@ -482,38 +703,6 @@ final class CoreStore {
         }
     }
 
-    func launchThread(projectId: String, text: String) async -> String? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard status == .connected, !trimmed.isEmpty, let core else { return nil }
-        isSending = true
-        lastError = nil
-        defer { isSending = false }
-        do {
-            let threadId = try await core.launchThread(projectId: projectId, text: trimmed)
-            PushRegistration.shared.noteThreadActivity()
-            return threadId
-        } catch {
-            lastError = error.localizedDescription
-            return nil
-        }
-    }
-
-    func launchGeneralThread(text: String) async -> String? {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard status == .connected, !trimmed.isEmpty, let core else { return nil }
-        isSending = true
-        lastError = nil
-        defer { isSending = false }
-        do {
-            let threadId = try await core.launchGeneralThread(text: trimmed)
-            PushRegistration.shared.noteThreadActivity()
-            return threadId
-        } catch {
-            lastError = error.localizedDescription
-            return nil
-        }
-    }
-
     func addLinked(_ raw: String) {
         do {
             let parsed = try PairingURLParser.parse(raw)
@@ -522,10 +711,9 @@ final class CoreStore {
                 return
             }
             let id = UUID().uuidString
-            let child = CoreStore(scope: id)
+            let child = CoreStore(scope: id, publications: publications)
             child.connectWithPairingURL(raw)
-            linked[id] = child
-            UserDefaults.standard.set(Array(Set(UserDefaults.standard.stringArray(forKey: "linkedSessions") ?? []).union(linked.keys)), forKey: "linkedSessions")
+            registerLinked(child)
         } catch { lastError = error.localizedDescription }
     }
 
@@ -543,9 +731,13 @@ final class CoreStore {
             let disabled = UserDefaults.standard.stringArray(forKey: "disabledOrbitLinks") ?? []
             UserDefaults.standard.set(Array(Set(disabled + [orbit])), forKey: "disabledOrbitLinks")
         }
+        forgetLinked(id)
+    }
+
+    private func forgetLinked(_ id: String) {
         linked.removeValue(forKey: id)?.disconnect()
-        let saved = UserDefaults.standard.stringArray(forKey: "linkedSessions") ?? []
-        UserDefaults.standard.set(saved.filter { $0 != id }, forKey: "linkedSessions")
+        linkedOrder.removeAll { $0 == id }
+        UserDefaults.standard.set(linkedOrder, forKey: "linkedSessions")
     }
 
     private func clearLinkedSessions() {
@@ -558,16 +750,17 @@ final class CoreStore {
             }
         }
         linked.removeAll()
+        linkedOrder.removeAll()
         UserDefaults.standard.removeObject(forKey: "linkedSessions")
     }
 
     private func restoreThread(_ id: String) {
         guard let reader = offlineReader, openThread == nil else { return }
-        let connection = state?.connectionId
         Task {
             guard let cached = try? await reader.recent(thread: id),
-                  state?.connectionId == connection, openThreadId == id,
+                  offlineReader === reader, openThreadId == id,
                   openThread == nil, !cached.entries.isEmpty else { return }
+            logFirstSnapshot(cached, source: "disk")
             openThread = cached
         }
     }
@@ -577,6 +770,8 @@ final class CoreStore {
     }
 
     func disconnect() {
+        imageThumbnails.clear()
+        discardComposerDrafts()
         coldLaunchSession = nil
         if scope.isEmpty {
             clearLinkedSessions()
@@ -587,8 +782,12 @@ final class CoreStore {
     }
 
     func handleScenePhase(_ phase: ScenePhase) {
-        guard phase == .active else { return }
-        session?.foreground()
+        switch phase {
+        case .active: session?.foreground()
+        // The core stops its warm thread streams until the app is active again.
+        case .background: session?.background()
+        default: return
+        }
         for child in linked.values { child.handleScenePhase(phase) }
     }
 
@@ -614,10 +813,9 @@ final class CoreStore {
         }
         if session?.openLink(environmentId: link.environmentId) == .here { return }
         guard scope.isEmpty else { return }
-        let child = CoreStore(scope: link.environmentId)
+        let child = CoreStore(scope: link.environmentId, publications: publications)
         child.fleetID = link.environmentId
-        linked[link.environmentId] = child
-        UserDefaults.standard.set(Array(Set(UserDefaults.standard.stringArray(forKey: "linkedSessions") ?? []).union(linked.keys)), forKey: "linkedSessions")
+        registerLinked(child)
         child.session?.connectEnvironment(environmentId: link.environmentId)
     }
 
@@ -633,25 +831,95 @@ final class CoreStore {
 
     // MARK: - Session events
 
-    fileprivate func handleState(_ newState: FfiSessionState) {
+    private static let sessionLog = Logger(subsystem: "com.nckrtl.conn.ios", category: "session")
+    /// Thread-open timing: the open, its first snapshot and its first frame.
+    static let openLog = Logger(subsystem: "com.nckrtl.conn.ios", category: "open")
+    /// The opened thread whose first snapshot is not logged yet.
+    @ObservationIgnored private var firstSnapshotLog: String?
+
+    private func logFirstSnapshot(_ snapshot: FfiThreadSnapshot, source: String) {
+        guard firstSnapshotLog == snapshot.threadId else { return }
+        firstSnapshotLog = nil
+        let agents = snapshot.entries.filter { if case .subagent = $0 { true } else { false } }.count
+        Self.openLog.info("snapshot thread=\(snapshot.threadId, privacy: .public) source=\(source, privacy: .public) entries=\(snapshot.entries.count) subagents=\(agents) synchronized=\(snapshot.synchronized)")
+    }
+
+    /// One `.info` line per published state, so a cold start can be read back from the device log.
+    /// It names the host only, and strips URLs in error text down to theirs.
+    private func logState(_ s: FfiSessionState) {
+        func text(_ value: String) -> String {
+            let line = value.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            let hostOnly = line.replacingOccurrences(
+                of: "(https?://[^/\\s\"'<>)]+)[^\\s\"'<>)]*", with: "$1/…", options: .regularExpression
+            )
+            return String(hostOnly.prefix(300))
+        }
+        var parts = ["scope=\(scope.isEmpty ? "main" : scope)", "rev=\(s.revision)", "conn=\(s.connectionId)"]
+        var errors: [String] = []
+        switch s.phase {
+        case let .idle(message):
+            parts.append("phase=idle")
+            if let message { errors.append(message) }
+        case let .connecting(target):
+            let name = switch target {
+            case .primaryAgent: "primaryAgent"
+            case .environment: "environment"
+            case .manual: "manual"
+            }
+            parts.append("phase=connecting target=\(name)")
+        case let .live(status):
+            switch status {
+            case .connecting: parts.append("phase=live status=connecting")
+            case .connected: parts.append("phase=live status=connected")
+            case let .reconnecting(attempt): parts.append("phase=live status=reconnecting(\(attempt))")
+            case let .failed(message):
+                parts.append("phase=live status=failed")
+                errors.append(message)
+            }
+        case let .failed(message, detail, _):
+            parts.append("phase=failed")
+            errors.append(message)
+            if let detail { errors.append(detail) }
+        case .suspended:
+            parts.append("phase=suspended")
+        }
+        parts.append("failed_tries=\(s.failedTries)")
+        parts.append("start_retries=\(s.startRetries)")
+        parts.append("grace=\(s.inGrace ? "on" : "off")")
+        parts.append("shows_offline=\(s.showsOffline)")
+        if let host = s.serverUrl.flatMap({ URL(string: $0)?.host }) { parts.append("host=\(host)") }
+        for (index, error) in errors.enumerated() {
+            parts.append("\(index == 0 ? "error" : "detail")=\"\(text(error))\"")
+        }
+        let line = parts.joined(separator: " ")
+        Self.sessionLog.info("\(line, privacy: .public)")
+        // The last state changes, shown when the "Not connected" pill is tapped.
+        sessionHistory.append(Date().formatted(date: .omitted, time: .standard) + "  " + line)
+        if sessionHistory.count > 15 { sessionHistory.removeFirst(sessionHistory.count - 15) }
+    }
+
+    func handleState(_ newState: FfiSessionState) {
         if let state, newState.revision <= state.revision { return }
+        logState(newState)
         // The open thread stays: the session resubscribes it on the new connection. Only a switch
         // to another server drops it, with that server's inbox.
-        if newState.connectionId != shellConnection {
-            shell?.synchronized = false
-        }
         let savedIdentity = coldLaunchSession?.environmentId ?? coldLaunchSession?.orbitServerId
         let differentPrimary = savedIdentity != nil && newState.environmentId != nil && newState.environmentId != savedIdentity
         if newState.identityEpoch != state?.identityEpoch ?? 0 || differentPrimary {
+            imageThumbnails.clear()
+            discardComposerDrafts()
             coldLaunchSession = nil
             shell = nil
             offlineReader = nil
             discoveredPrimary = nil
-            showsWorkspace = false
+            hasPrimaryInventory = false
             openThread = nil
             openThreadId = nil
         }
+        // The pump may publish its first inventory before the session attaches its core.
+        let wasAttached: Bool = if case .live = state?.phase { state?.connectionId == newState.connectionId } else { false }
         state = newState
+        if case .live = newState.phase, !wasAttached { handleShell(connectionId: newState.connectionId) }
         if newState.hasConnected { coldLaunchSession = nil }
         switch newState.phase {
         case let .idle(message):
@@ -659,16 +927,20 @@ final class CoreStore {
             else {
                 shell = nil
                 offlineReader = nil
-                showsWorkspace = false
+                hasPrimaryInventory = false
                 discoveredPrimary = nil
             }
         case let .live(status):
-            if status != .connected { shell?.synchronized = false }
             if status == .connected { lastError = nil }
         default:
             break
         }
         updateWorkspaceVisibility()
+        if case .live = newState.phase, let core {
+            uploads.use(core, connection: newState.connectionId)
+        } else {
+            uploads.use(nil, connection: nil)
+        }
         if newState.offlineReady, readerConnection != newState.connectionId, let reader = session?.offlineReader() {
             showOffline(reader, connection: newState.connectionId)
         }
@@ -681,24 +953,27 @@ final class CoreStore {
         Task {
             let saved = await reader.savedShell()
             guard state?.connectionId == connection else { return }
-            if shell?.synchronized != true, let saved { shell = saved }
+            if shell == nil, let saved { shell = saved }
             updateWorkspaceVisibility()
             if let id = openThreadId { restoreThread(id) }
         }
     }
 
-    fileprivate func handleShell(_ snapshot: FfiShellSnapshot, connectionId: UInt64) {
+    fileprivate func handleShell(connectionId: UInt64) {
         guard session?.state().connectionId == connectionId else { return }
-        if snapshot.synchronized || shell == nil {
-            shell = snapshot
-            shellConnection = connectionId
+        publications.submit(scope: scope) { [weak self] in
+            guard let self, let snapshot = session?.publishedShell(connectionId: connectionId) else { return }
+            if shell != snapshot { shell = snapshot }
+            updateWorkspaceVisibility()
         }
-        updateWorkspaceVisibility()
     }
 
     fileprivate func handleThread(_ snapshot: FfiThreadSnapshot, connectionId: UInt64) {
         guard session?.state().connectionId == connectionId else { return }
-        if openThreadId == snapshot.threadId {
+        // An equal snapshot would still re-run every view that reads the thread.
+        if openThreadId == snapshot.threadId, openThread != snapshot {
+            logFirstSnapshot(snapshot, source: "core")
+            BodyCount.tick("store.thread")
             openThread = snapshot
         }
     }
@@ -708,7 +983,7 @@ final class CoreStore {
     /// successful delete clear a draft.
     fileprivate func handleThreadDeleted(_ threadId: String, connectionId: UInt64) {
         guard session?.state().connectionId == connectionId else { return }
-        drafts[threadId] = nil
+        drafts[.thread(threadId)] = nil
     }
 
     fileprivate func handleError(_ message: String) {
@@ -749,8 +1024,8 @@ private final class SessionBridge: SessionListener, @unchecked Sendable {
         }
     }
 
-    func onShell(connectionId: UInt64, snapshot: FfiShellSnapshot) {
-        Task { @MainActor [weak store] in store?.handleShell(snapshot, connectionId: connectionId) }
+    func onShellChanged(connectionId: UInt64) {
+        Task { @MainActor [weak store] in store?.handleShell(connectionId: connectionId) }
     }
 
     func onThread(connectionId: UInt64, snapshot: FfiThreadSnapshot) {

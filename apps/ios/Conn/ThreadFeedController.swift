@@ -311,6 +311,7 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
         }
         if let anchor { restore(anchor) } else { collectionView.setNeedsLayout() }
         updateChrome()
+        DispatchQueue.main.async { [weak self] in self?.prefetchIfNearTop() }
     }
 
     func perform(_ request: FeedScrollRequest?) {
@@ -340,6 +341,11 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
             .environment(\.connTheme, theme)
             .environment(\.feedExpansion, expansion)
             .environment(\.feedWidth, measuredWidth > 0 ? measuredWidth : nil)
+            // The row's natural height for the width, whatever height the cell proposes: under an
+            // exact height, text chose fewer lines (a list item truncated) and left the row short
+            // of what the sizer measured.
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxHeight: .infinity, alignment: .top)
     }
 
     /// The row's height at the feed's width, laid out by SwiftUI as its cell will lay it out.
@@ -619,6 +625,7 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
         let bottom = max(0, view.bounds.maxY - composerHost.view.frame.minY) + capsuleInset
         let inset = UIEdgeInsets(top: view.safeAreaInsets.top, left: 0, bottom: bottom, right: 0)
         if cv.contentInset != inset {
+            layout.invalidateLayout()
             cv.contentInset = inset
             cv.verticalScrollIndicatorInsets = inset
             // Pinned: the inset change keeps the end in view (the keyboard, a growing composer).
@@ -638,6 +645,7 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
 
     func scrollViewDidScroll(_ scrollView: UIScrollView) {
         measureAhead()
+        prefetchIfNearTop()
         let y = scrollView.contentOffset.y
         if scrollView.isDragging, y < lastOffset, y + scrollView.adjustedContentInset.top < 160 {
             reachTopArmed = true
@@ -670,6 +678,16 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
             cv.layoutIfNeeded()
             cv.contentOffset.y += deltaAbove
         }
+    }
+
+    /// Older history loads well before the reader reaches the oldest row: within two and a half
+    /// screens of the top, and right after opening until about three screens are loaded. The
+    /// screen around it ignores the call while a page is on its way or none is left.
+    private func prefetchIfNearTop() {
+        let cv = collectionView
+        guard hasContent, !order.isEmpty, cv.bounds.height > 0 else { return }
+        let fromTop = cv.contentOffset.y + cv.adjustedContentInset.top
+        if fromTop < cv.bounds.height * 2.5 { onReachTop() }
     }
 
     func scrollViewDidEndDragging(_ scrollView: UIScrollView, willDecelerate decelerate: Bool) {
@@ -756,6 +774,14 @@ final class FeedLayout: UICollectionViewLayout {
             y += height
         }
         contentHeight = frames.isEmpty ? 0 : y + bottomPadding
+        // A thread shorter than the screen sits at the bottom, against the composer, so the end
+        // stays where it is as messages arrive and the thread grows upward.
+        let visible = cv.bounds.height - cv.adjustedContentInset.top - cv.adjustedContentInset.bottom
+        if !frames.isEmpty, contentHeight < visible {
+            let shift = visible - contentHeight
+            frames = frames.map { $0.offsetBy(dx: 0, dy: shift) }
+            contentHeight = visible
+        }
     }
 
     override var collectionViewContentSize: CGSize {

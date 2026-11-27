@@ -197,7 +197,8 @@ struct CodeCard: View {
         if wrap {
             source
         } else {
-            ScrollView(.horizontal) { source.fixedSize(horizontal: true, vertical: false) }
+            // Its natural size both ways: free vertically, the lines were squeezed to fewer and cut.
+            ScrollView(.horizontal) { source.fixedSize() }
         }
     }
 

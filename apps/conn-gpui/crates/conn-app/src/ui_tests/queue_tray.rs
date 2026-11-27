@@ -249,7 +249,12 @@ fn tray_layout(
 fn a_full_width_hairline_divides_each_pair_of_rows_and_none_sits_at_the_ends(
     cx: &mut TestAppContext,
 ) {
-    let texts = ["first in line", "second in line", "third in line", "fourth in line"];
+    let texts = [
+        "first in line",
+        "second in line",
+        "third in line",
+        "fourth in line",
+    ];
     let mut tray_heights = Vec::new();
     for count in 1..=texts.len() {
         let mounted = mount_with_queue(cx, &texts[..count]);
@@ -294,7 +299,12 @@ fn a_full_width_hairline_divides_each_pair_of_rows_and_none_sits_at_the_ends(
 /// bottom. Each row (its hover fill) fills its band exactly, so its content centres in it.
 #[gpui_kit::test]
 fn every_row_band_is_the_same_height_down_to_the_composer(cx: &mut TestAppContext) {
-    let texts = ["first in line", "second in line", "third in line", "fourth in line"];
+    let texts = [
+        "first in line",
+        "second in line",
+        "third in line",
+        "fourth in line",
+    ];
     for count in 1..=texts.len() {
         let mounted = mount_with_queue(cx, &texts[..count]);
         let dividers = tray_dividers(cx, mounted.window);

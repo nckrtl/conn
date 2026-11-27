@@ -587,7 +587,12 @@ impl ChatView {
     }
 
     /// Marks the row with timeline entry id `id` as under the pointer, or not.
-    pub(super) fn note_queue_row_hover(&mut self, id: &str, hovered: bool, cx: &mut Context<'_, Self>) {
+    pub(super) fn note_queue_row_hover(
+        &mut self,
+        id: &str,
+        hovered: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
         let next = if hovered {
             Some(id.to_owned())
         } else if self.queue.hovered.as_deref() == Some(id) {

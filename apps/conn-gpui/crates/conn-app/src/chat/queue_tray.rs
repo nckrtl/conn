@@ -30,10 +30,12 @@ use crate::sidebar::thread_menu::{
 };
 use crate::theme::{hsla, hsla_alpha};
 
-/// Height of one queued message row.
+/// Height of one queued message row: the band between two hairlines. The first row's band runs
+/// from the tray's top border, and the last row's down to the composer's top edge, so every band
+/// is this tall.
 pub(super) const ROW_HEIGHT_PX: f32 = 30.0;
-/// Padding between the tray's edge and its rows.
-const TRAY_PAD_PX: f32 = 2.0;
+/// The hairline between two rows, and the tray's border, are this thick.
+const LINE_PX: f32 = 1.0;
 /// The tray shows this many rows, then scrolls. The half row says there is more below.
 const MAX_VISIBLE_ROWS: f32 = 4.5;
 /// How far the tray's bottom edge runs behind the composer card. It covers the composer's
@@ -51,17 +53,16 @@ const LIGHT_FILL_MIX: f32 = 0.75;
 const DARK_FILL_COMPOSER_SHARE: f32 = 0.86;
 /// Text opacity of a queued message's preview: dimmer than the composer's text.
 const ROW_TEXT_ALPHA: f32 = 0.7;
-/// The hairline between two rows starts this far in from the rows' left edge: under the `↳`.
-const DIVIDER_LEFT_PX: f32 = 10.0;
-/// The hairline ends this far in from the rows' right edge: under the right edge of the `…` glyph
-/// (the row's 4px right padding plus the 5px between the 24px button and its 14px glyph).
-const DIVIDER_RIGHT_PX: f32 = 9.0;
+/// A row's content starts this far in from the tray's inner left edge.
+const ROW_PAD_LEFT_PX: f32 = 12.0;
+/// A row's buttons end this far in from the tray's inner right edge.
+const ROW_PAD_RIGHT_PX: f32 = 6.0;
 /// An optimistic order the server has not confirmed is dropped after this long.
 const ORDER_OVERRIDE_TTL: Duration = Duration::from_secs(5);
 
 /// The tallest the rows area gets before it scrolls.
 pub(super) const fn rows_max_height_px() -> f32 {
-    ROW_HEIGHT_PX * MAX_VISIBLE_ROWS + TRAY_PAD_PX * 2.0
+    (ROW_HEIGHT_PX + LINE_PX) * MAX_VISIBLE_ROWS
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -585,7 +586,13 @@ impl ChatView {
         }
     }
 
-    fn note_queue_row_hover(&mut self, id: &str, hovered: bool, cx: &mut Context<'_, Self>) {
+    /// Marks the row with timeline entry id `id` as under the pointer, or not.
+    pub(super) fn note_queue_row_hover(
+        &mut self,
+        id: &str,
+        hovered: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
         let next = if hovered {
             Some(id.to_owned())
         } else if self.queue.hovered.as_deref() == Some(id) {
@@ -818,7 +825,6 @@ impl ChatView {
             .flex()
             .flex_col()
             .w_full()
-            .p(px(TRAY_PAD_PX))
             .max_h(px(rows_max_height_px()))
             .overflow_y_scroll()
             .track_scroll(&self.queue.scroll);
@@ -863,7 +869,9 @@ impl ChatView {
             .mx(px(TRAY_INSET_PX))
             // Runs behind the composer card, which paints over the tucked part.
             .mb(px(-TUCK_PX))
-            .pb(px(TUCK_PX))
+            // The composer's top edge meets the last row's bottom, so the last band is as tall as
+            // the others: the tuck less the tray's bottom border.
+            .pb(px(TUCK_PX - LINE_PX))
             .rounded_t(px(TRAY_RADIUS_PX))
             .bg(fill)
             .border_1()
@@ -894,8 +902,8 @@ impl ChatView {
             .gap(px(8.0))
             .w_full()
             .h(px(ROW_HEIGHT_PX))
-            .pl(px(10.0))
-            .pr(px(10.0))
+            .pl(px(ROW_PAD_LEFT_PX))
+            .pr(px(ROW_PAD_LEFT_PX))
             .child(
                 div()
                     .flex()
@@ -952,6 +960,10 @@ impl ChatView {
         let is_editing =
             has_run_id && self.editing_queued_run_id.as_deref() == Some(run_id.as_str());
         let is_dragged = self.queue.dragging.as_deref() == Some(run_id.as_str()) && has_run_id;
+        // The hover fill follows the same state that hides the hairlines beside the row, so the
+        // two never disagree for a frame.
+        let is_hovered =
+            self.queue.dragging.is_none() && self.queue.hovered.as_deref() == Some(id.as_str());
         let menu_open = self
             .queue
             .menu
@@ -1099,13 +1111,15 @@ impl ChatView {
             .gap(px(8.0))
             .w_full()
             .h(px(ROW_HEIGHT_PX))
-            .pl(px(10.0))
-            .pr(px(4.0))
-            // Concentric with the tray: its corner radius less the padding between them, so a
-            // row's hover follows the tray's rounded corners.
-            .rounded(px(TRAY_RADIUS_PX - TRAY_PAD_PX))
+            .pl(px(ROW_PAD_LEFT_PX))
+            .pr(px(ROW_PAD_RIGHT_PX))
+            // The first row's fill meets the tray's rounded top: concentric with it, inside the
+            // border. The other rows' fills are square bands between the hairlines.
+            .when(index == 0, |el| {
+                el.rounded_t(px(TRAY_RADIUS_PX - LINE_PX))
+            })
             .when(is_editing, |el| el.bg(hsla_alpha(tokens.primary, 0.12)))
-            .when(!is_editing, |el| el.hover(move |s| s.bg(hover_bg)))
+            .when(!is_editing && is_hovered, |el| el.bg(hover_bg))
             .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
                 view.note_queue_row_hover(&id, *hovered, cx);
             }))
@@ -1166,17 +1180,15 @@ impl ChatView {
     }
 }
 
-/// The hairline between two rows. It takes no height, so rows keep their size and place; its line
-/// lies over the top pixel of the row below, inset to line up with the rows' content. A row's
-/// fill hides it (`visible` false) rather than painting over half of it.
+/// The hairline between two rows: a 1px line of its own across the tray's full inner width,
+/// like the tray's border, so each row keeps a whole band. A row's fill hides it (`visible`
+/// false), so the fill ends cleanly at its band.
 fn row_divider(index: usize, color: Hsla, visible: bool) -> AnyElement {
     let line = div()
         .id(SharedString::from(format!("chat-queue-divider-{index}")))
-        .absolute()
-        .top_0()
-        .left(px(DIVIDER_LEFT_PX))
-        .right(px(DIVIDER_RIGHT_PX))
-        .h(px(1.0))
+        .flex_none()
+        .w_full()
+        .h(px(LINE_PX))
         .when(visible, |line| line.bg(color));
     // Only tests see the hairline in the accessibility tree; it is decoration to a screen reader.
     #[cfg(test)]
@@ -1189,13 +1201,7 @@ fn row_divider(index: usize, color: Hsla, visible: bool) -> AnyElement {
             "Queued row divider (covered)"
         },
     );
-    div()
-        .relative()
-        .flex_none()
-        .w_full()
-        .h(px(0.0))
-        .child(line)
-        .into_any_element()
+    line.into_any_element()
 }
 
 /// The 2px line that marks where a dragged row would land, along the top or bottom of a row.

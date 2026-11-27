@@ -336,23 +336,32 @@ fn render_queue_tray_screenshots() {
     }
 }
 
-/// Renders one, two and three queued messages, to check the hairlines between the rows.
+/// Renders one, two and four queued messages, to check the hairlines between the rows and that
+/// every row's band is the same height.
 ///
-/// `CONN_THREAD_SHOTS_DIR=<dir> cargo test -p conn-app render_queue_tray_divider_screenshots -- --ignored`
+/// `CONN_THREAD_SHOTS_DIR=<dir> CONN_THREAD_SHOTS_PREFIX=after cargo test -p conn-app
+/// render_queue_tray_divider_screenshots -- --ignored`
 #[test]
 #[ignore = "writes PNGs; set CONN_THREAD_SHOTS_DIR"]
 fn render_queue_tray_divider_screenshots() {
     let Some(dir) = std::env::var_os("CONN_THREAD_SHOTS_DIR") else {
         return;
     };
-    for count in 1..=3 {
+    let prefix = std::env::var("CONN_THREAD_SHOTS_PREFIX").unwrap_or_else(|_| "queue".to_owned());
+    for count in [1, 2, 4] {
         render_pngs(
             Path::new(&dir),
-            &format!("queue-divider-{count}"),
+            &format!("{prefix}-rows-{count}"),
             &|| queued_thread(count, 3),
             &|_, _| {},
         );
     }
+    render_pngs(
+        Path::new(&dir),
+        &format!("{prefix}-rows-4-hover-last"),
+        &|| queued_thread(4, 3),
+        &|chat, cx| chat.note_queue_row_hover("queued-4", true, cx),
+    );
 }
 
 /// Renders two queued messages above the composer, to check the tray's fill against the

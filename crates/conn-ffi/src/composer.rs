@@ -1,12 +1,18 @@
 //! Composer draft rules from Conn mobile's `use-thread-composer-state.ts` and
 //! `use-composer-drafts.ts`.
 
-use crate::{FfiError, FfiSendMode};
-use conn_client::Connection;
-use conn_contract::{ChatAttachment, ExecutionEnvironmentCapabilities};
+use std::sync::Arc;
 
-#[derive(uniffi::Record)]
+use crate::{ConnCore, FfiError, FfiSendMode};
+use conn_client::uploads::{
+    Encoded, FileSource, ImageCodec, ImageInfo, LocalFile, ReadyUpload, UploadLimits, UploadStatus,
+};
+use conn_contract::ExecutionEnvironmentCapabilities;
+
+#[derive(Clone, uniffi::Record)]
 pub struct FfiComposerFile {
+    /// The draft's id for this file; its upload is keyed by it.
+    pub id: String,
     pub path: String,
     pub name: String,
     pub mime_type: String,
@@ -17,6 +23,19 @@ impl std::fmt::Debug for FfiComposerFile {
         f.debug_struct("FfiComposerFile")
             .field("mime_type", &self.mime_type)
             .finish_non_exhaustive()
+    }
+}
+
+impl FfiComposerFile {
+    pub(crate) fn local(&self) -> (String, LocalFile) {
+        (
+            self.id.clone(),
+            LocalFile {
+                source: FileSource::Path(self.path.clone().into()),
+                name: self.name.clone(),
+                mime_type: self.mime_type.clone(),
+            },
+        )
     }
 }
 
@@ -50,73 +69,164 @@ impl FfiComposerLimits {
                 .map(|size| size.min(conn_contract::PROVIDER_SEND_TURN_MAX_FILE_BYTES)),
         }
     }
+}
 
-    pub(crate) async fn upload(
-        self,
-        connection: &Connection,
-        files: Vec<FfiComposerFile>,
-        ready: &mut Vec<ChatAttachment>,
-        cache: Option<(
-            &std::sync::Arc<crate::OfflineReader>,
-            &str,
-            &str,
-            &tokio::runtime::Handle,
-        )>,
-    ) -> Result<(), FfiError> {
-        let invalid = |message: String| FfiError::InvalidInput { message };
-        if files.len() > 100 {
-            return Err(invalid("Attach up to 100 files per message.".into()));
+impl From<FfiComposerLimits> for UploadLimits {
+    fn from(limits: FfiComposerLimits) -> Self {
+        Self {
+            images: limits.images,
+            max_file_bytes: limits.max_file_bytes,
         }
-        let mut image_bytes = 0;
-        for file in files {
-            let image = matches!(
-                file.mime_type.as_str(),
-                "image/png" | "image/jpeg" | "image/gif" | "image/webp"
-            );
-            let limit = if image {
-                self.images.then_some(10 * 1024 * 1024)
-            } else {
-                self.max_file_bytes
-            }
-            .ok_or_else(|| invalid(format!("This server cannot upload {}.", file.name)))?;
-            let read_error =
-                |error: std::io::Error| invalid(format!("Could not read {}: {error}", file.name));
-            let size = std::fs::metadata(&file.path).map_err(read_error)?.len();
-            if size > limit {
-                return Err(invalid(format!(
-                    "{} exceeds the upload limit of {limit} bytes.",
-                    file.name
-                )));
-            }
-            if image {
-                image_bytes += size;
-                if image_bytes > 80 * 1024 * 1024 {
-                    return Err(invalid("Images can total up to 80 MiB per message.".into()));
-                }
-            }
-            // These are private, immutable copies made by the native picker.
-            let bytes = std::fs::read(&file.path).map_err(read_error)?;
-            let pick = cache.filter(|_| image).map(|cache| (cache, bytes.clone()));
-            let uploaded = connection
-                .upload_chat_attachment(file.name, file.mime_type, bytes)
-                .await?;
-            if let Some(((reader, thread, item, runtime), bytes)) = pick {
-                let (reader, thread, item, index, file) = (
-                    reader.clone(),
-                    thread.to_owned(),
-                    item.to_owned(),
-                    ready.len(),
-                    (&uploaded).into(),
-                );
-                let _ = runtime
-                    .spawn(
-                        async move { reader.seed_pick(&thread, &item, index, file, &bytes).await },
-                    )
-                    .await;
-            }
-            ready.push(uploaded);
+    }
+}
+
+/// A draft file's upload (`AttachmentUploadStatus`).
+#[derive(Clone, Debug, PartialEq, uniffi::Enum)]
+pub enum FfiUploadStatus {
+    /// `progress` is the share sent, 0 to 1 in 5% steps.
+    Uploading {
+        progress: f32,
+    },
+    Ready,
+    Failed {
+        reason: String,
+    },
+}
+
+impl From<&UploadStatus> for FfiUploadStatus {
+    fn from(status: &UploadStatus) -> Self {
+        match status {
+            UploadStatus::Uploading { progress } => Self::Uploading {
+                progress: *progress,
+            },
+            UploadStatus::Ready => Self::Ready,
+            UploadStatus::Failed { reason } => Self::Failed {
+                reason: reason.clone(),
+            },
         }
-        Ok(())
+    }
+}
+
+/// Upload status changes; `None` once the upload is gone (removed or sent).
+#[uniffi::export(with_foreign)]
+pub trait FfiUploadListener: Send + Sync {
+    fn on_upload(&self, id: String, status: Option<FfiUploadStatus>);
+}
+
+#[derive(Clone, Copy, Debug, uniffi::Record)]
+pub struct FfiImageInfo {
+    pub width: u32,
+    pub height: u32,
+    pub alpha: bool,
+}
+
+#[derive(Debug, uniffi::Record)]
+pub struct FfiEncodedImage {
+    pub jpeg: Option<Vec<u8>>,
+    pub png: Option<Vec<u8>>,
+}
+
+/// The app's image codec (ImageIO on iPhone); the core decides sizes and formats
+/// (`conn_client::uploads::prepare`).
+#[uniffi::export(with_foreign)]
+pub trait FfiImageCodec: Send + Sync {
+    /// The size once the orientation is applied, and whether the image has transparency.
+    fn inspect(&self, bytes: Vec<u8>) -> Option<FfiImageInfo>;
+    /// Scales to exactly `width`×`height` after orienting, then encodes a JPEG when
+    /// `jpeg_quality` is set and a PNG when `png` is.
+    fn encode(
+        &self,
+        bytes: Vec<u8>,
+        width: u32,
+        height: u32,
+        jpeg_quality: Option<f32>,
+        png: bool,
+    ) -> Option<FfiEncodedImage>;
+}
+
+struct ForeignCodec(Arc<dyn FfiImageCodec>);
+
+impl ImageCodec for ForeignCodec {
+    fn inspect(&self, bytes: &[u8]) -> Option<ImageInfo> {
+        self.0.inspect(bytes.to_vec()).map(|info| ImageInfo {
+            width: info.width,
+            height: info.height,
+            alpha: info.alpha,
+        })
+    }
+
+    fn encode(
+        &self,
+        bytes: &[u8],
+        width: u32,
+        height: u32,
+        jpeg_quality: Option<f32>,
+        png: bool,
+    ) -> Option<Encoded> {
+        self.0
+            .encode(bytes.to_vec(), width, height, jpeg_quality, png)
+            .map(|encoded| Encoded {
+                jpeg: encoded.jpeg,
+                png: encoded.png,
+            })
+    }
+}
+
+/// Draft files upload as soon as they are attached (`attachmentUploads.ts`).
+#[uniffi::export]
+impl ConnCore {
+    /// The listener for status changes and the codec that scales images before they upload.
+    pub fn set_upload_handlers(
+        &self,
+        listener: Arc<dyn FfiUploadListener>,
+        codec: Arc<dyn FfiImageCodec>,
+    ) {
+        self.uploads.set_listener(Arc::new(move |id, status| {
+            listener.on_upload(id.to_owned(), status.map(FfiUploadStatus::from));
+        }));
+        self.uploads.set_codec(Arc::new(ForeignCodec(codec)));
+    }
+
+    /// Starts uploading a file the draft holds, unless it already is.
+    pub fn attach_upload(&self, file: FfiComposerFile) {
+        self.uploads.set_limits(self.composer_limits().into());
+        let (id, file) = file.local();
+        self.uploads.add(&id, file);
+    }
+
+    /// The draft let go of the file: stops its upload or deletes it from the server.
+    pub fn drop_upload(&self, id: String) {
+        self.uploads.remove(&id);
+    }
+
+    pub fn retry_upload(&self, id: String) {
+        self.uploads.retry(&id);
+    }
+
+    #[must_use]
+    pub fn upload_status(&self, id: String) -> Option<FfiUploadStatus> {
+        self.uploads.status(&id).as_ref().map(FfiUploadStatus::from)
+    }
+}
+
+impl ConnCore {
+    /// The files' uploads for a send, waiting for any still running.
+    pub(crate) async fn ready_uploads(
+        &self,
+        files: &[FfiComposerFile],
+    ) -> Result<Vec<ReadyUpload>, FfiError> {
+        self.uploads.set_limits(self.composer_limits().into());
+        // Waiting needs no Tokio context; the uploads run on the connection's runtime.
+        self.uploads
+            .ready(files.iter().map(FfiComposerFile::local).collect())
+            .await
+            .map_err(|message| FfiError::InvalidInput { message })
+    }
+
+    /// A send that claimed these files' uploads went through.
+    pub(crate) fn uploads_sent(&self, files: &[FfiComposerFile]) {
+        let ids: Vec<String> = files.iter().map(|file| file.id.clone()).collect();
+        self.uploads.sent(&ids);
     }
 }
 

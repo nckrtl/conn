@@ -9,7 +9,7 @@ use std::{
     pin::Pin,
     sync::{Arc, Mutex, PoisonError, Weak},
     task::{Context, Poll},
-    time::{Duration, Instant},
+    time::{Duration, SystemTime},
 };
 
 use bytes::Bytes;
@@ -34,6 +34,12 @@ const UPLOADS_AT_ONCE: usize = 3;
 /// The server sweeps pending uploads after 24 hours; an older one uploads again before a send.
 const READY_MAX_AGE: Duration = Duration::from_secs(23 * 60 * 60);
 const CHUNK: usize = 64 * 1024;
+
+/// Whether an upload finished at `at` may be gone by `now`. Wall-clock time, as the server's
+/// sweep: `Instant` stops while the device sleeps. A clock set back counts as stale.
+fn is_stale(at: SystemTime, now: SystemTime) -> bool {
+    !now.duration_since(at).is_ok_and(|age| age <= READY_MAX_AGE)
+}
 
 /// An image's size once its orientation is applied, and whether it has transparency.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -250,7 +256,7 @@ pub struct ReadyUpload {
 
 pub type UploadListener = Arc<dyn Fn(&str, Option<&UploadStatus>) + Send + Sync>;
 
-type Outcome = Option<Result<(ReadyUpload, Instant), String>>;
+type Outcome = Option<Result<(ReadyUpload, SystemTime), String>>;
 
 struct Entry {
     file: LocalFile,
@@ -297,6 +303,12 @@ impl Uploads {
             permits: Arc::new(Semaphore::new(UPLOADS_AT_ONCE)),
             state: Mutex::default(),
         }))
+    }
+
+    /// Whether both handles are the same queue.
+    #[must_use]
+    pub fn same_queue(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
     }
 
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
@@ -392,7 +404,7 @@ impl Uploads {
                         let stale = state.entries.get(&id).is_none_or(|entry| {
                             match &*entry.done.borrow() {
                                 Some(Err(_)) => true,
-                                Some(Ok((_, at))) => at.elapsed() > READY_MAX_AGE,
+                                Some(Ok((_, at))) => is_stale(*at, SystemTime::now()),
                                 None => false,
                             }
                         });
@@ -544,7 +556,12 @@ impl Uploads {
         self.notify(vec![(id.to_owned(), Some(status))]);
     }
 
-    fn finish(&self, id: &str, generation: u64, outcome: &Result<(ReadyUpload, Instant), String>) {
+    fn finish(
+        &self,
+        id: &str,
+        generation: u64,
+        outcome: &Result<(ReadyUpload, SystemTime), String>,
+    ) {
         let status = match outcome {
             Ok(_) => UploadStatus::Ready,
             Err(reason) => UploadStatus::Failed {
@@ -562,7 +579,7 @@ async fn transfer(
     file: LocalFile,
     codec: Option<Arc<dyn ImageCodec>>,
     limits: UploadLimits,
-) -> Result<(ReadyUpload, Instant), String> {
+) -> Result<(ReadyUpload, SystemTime), String> {
     let (connection, permits) = {
         let shared = weak.upgrade().ok_or("Upload cancelled.")?;
         (shared.connection.clone(), shared.permits.clone())
@@ -600,7 +617,7 @@ async fn transfer(
             crate::ClientError::Connection(message) => message,
             other => other.to_string(),
         })?;
-    Ok((ReadyUpload { attachment, bytes }, Instant::now()))
+    Ok((ReadyUpload { attachment, bytes }, SystemTime::now()))
 }
 
 /// An upload body sent in chunks, reporting the share handed to the connection.
@@ -651,6 +668,19 @@ impl Body for ProgressBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn upload_age_uses_wall_clock_time() {
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_800_000_000);
+        assert!(!is_stale(at, at + Duration::from_secs(60)));
+        assert!(!is_stale(at, at + READY_MAX_AGE));
+        // A day asleep still counts: the server swept it.
+        assert!(is_stale(at, at + Duration::from_secs(24 * 60 * 60)));
+        assert!(
+            is_stale(at, at - Duration::from_secs(1)),
+            "a clock set back"
+        );
+    }
 
     /// Encodes to sizes chosen by the test: a JPEG of `jpeg` bytes, a PNG of `png` bytes.
     struct FakeCodec {

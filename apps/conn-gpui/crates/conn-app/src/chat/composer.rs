@@ -117,6 +117,17 @@ struct PendingAttachment {
     status: AttachmentUploadStatus,
     /// What to upload again on retry or after a reconnect; restored drafts have none.
     source: Option<LocalFile>,
+    /// The server (environment key) this file uploads to: the one its draft's thread lives
+    /// on. Its upload id is valid only there, so it never uploads anywhere else.
+    server: Option<String>,
+}
+
+/// One server's upload queue and the task that applies its progress to the composer.
+struct UploadQueue {
+    server: Option<String>,
+    connection: Connection,
+    uploads: Uploads,
+    _events: gpui_kit::Task<()>,
 }
 
 #[derive(Clone, Debug)]
@@ -303,9 +314,11 @@ pub(crate) struct Composer {
     next_attachment_id: u64,
     /// Thumbnails of staged images, by `PendingAttachment::local_id`.
     attachment_previews: HashMap<u64, Arc<gpui_kit::Image>>,
-    /// Uploads start on attach (`attachmentUploads.ts`); one queue per connection.
-    uploads: Option<Uploads>,
-    _upload_events: Option<gpui_kit::Task<()>>,
+    /// Uploads start on attach (`attachmentUploads.ts`); one queue per server. A queue stays
+    /// while the chat shows another server, so a parked draft's uploads finish on their own.
+    upload_queues: Vec<UploadQueue>,
+    /// The server `connection` belongs to (its environment key); new attachments upload there.
+    server: Option<String>,
     editing_queued: Option<EditingQueuedRun>,
     dictation: DictationState,
     dictation_error: Option<String>,
@@ -458,8 +471,8 @@ impl Composer {
             applied_placeholder: COMPOSER_PLACEHOLDER,
             next_attachment_id: 1,
             attachment_previews: HashMap::new(),
-            uploads: None,
-            _upload_events: None,
+            upload_queues: Vec::new(),
+            server: None,
             editing_queued: None,
             dictation: DictationState::Idle,
             dictation_error: None,
@@ -478,10 +491,12 @@ impl Composer {
         cx.notify();
     }
 
-    /// Updates the server connection. The catalog follows the app's config stream.
+    /// Updates the server connection and the server (environment key) it belongs to. The
+    /// catalog follows the app's config stream.
     pub(crate) fn set_connection(
         &mut self,
         connection: Option<Connection>,
+        server: Option<String>,
         cx: &mut Context<'_, Self>,
     ) {
         let same = self
@@ -491,72 +506,137 @@ impl Composer {
             .is_some_and(|(a, b)| a.same_connection(b));
         self.connection = connection;
         self.catalog_refresh_in_flight = false;
-        if !same {
+        let old_server = std::mem::replace(&mut self.server, server);
+        if same {
+            // The same connection under a new name: what it staged keeps uploading there.
+            if old_server != self.server {
+                let server = self.server.clone();
+                for attachment in self
+                    .attachments
+                    .iter_mut()
+                    .chain(self.drafts.parked_attachments_mut())
+                    .filter(|a| a.server == old_server)
+                {
+                    attachment.server.clone_from(&server);
+                }
+                for queue in self
+                    .upload_queues
+                    .iter_mut()
+                    .filter(|q| q.server == old_server)
+                {
+                    queue.server.clone_from(&server);
+                }
+            }
+        } else {
             self.restart_uploads(cx);
         }
         cx.notify();
     }
 
-    /// A new connection gets a new queue; unfinished uploads start again on it.
+    /// The connection moved: this server's unfinished or failed uploads start (again) on it.
+    /// Attachments of drafts on other servers keep their own queues and wait for their server.
     fn restart_uploads(&mut self, cx: &mut Context<'_, Self>) {
-        self.uploads = None;
-        self._upload_events = None;
         let Some(uploads) = self.upload_queue(cx) else {
             return;
         };
+        let server = self.server.clone();
         for attachment in self
             .attachments
             .iter_mut()
             .chain(self.drafts.parked_attachments_mut())
+            .filter(|a| a.server == server)
         {
-            if let (
-                AttachmentUploadStatus::Uploading(_) | AttachmentUploadStatus::Error(_),
-                Some(source),
-            ) = (&attachment.status, &attachment.source)
-            {
-                attachment.status = AttachmentUploadStatus::Uploading(0.0);
-                uploads.add(&attachment.local_id.to_string(), source.clone());
+            let Some(source) = &attachment.source else {
+                continue;
+            };
+            let id = attachment.local_id.to_string();
+            let queued = uploads.status(&id);
+            let restart = match attachment.status {
+                AttachmentUploadStatus::Uploading(_) => queued.is_none(),
+                AttachmentUploadStatus::Error(_) => true,
+                AttachmentUploadStatus::Ready(_) => false,
+            };
+            if !restart {
+                continue;
             }
+            if matches!(queued, Some(UploadStatus::Failed { .. })) {
+                uploads.retry(&id);
+            } else {
+                uploads.add(&id, source.clone());
+            }
+            attachment.status = AttachmentUploadStatus::Uploading(0.0);
         }
     }
 
+    /// The upload queue of the current server on the current connection. A queue for this
+    /// server on an older connection (a reconnect) is dropped.
     fn upload_queue(&mut self, cx: &mut Context<'_, Self>) -> Option<Uploads> {
-        if let Some(uploads) = &self.uploads {
-            return Some(uploads.clone());
+        let connection = self.connection.clone()?;
+        if let Some(queue) = self
+            .upload_queues
+            .iter()
+            .find(|q| q.server == self.server && q.connection.same_connection(&connection))
+        {
+            return Some(queue.uploads.clone());
         }
-        let uploads = Uploads::new(self.connection.clone()?);
+        let server = self.server.clone();
+        self.upload_queues.retain(|q| q.server != server);
+        let uploads = Uploads::new(connection.clone());
         uploads.set_codec(Arc::new(super::upload_codec::DesktopImageCodec));
         let (tx, mut rx) = futures::channel::mpsc::unbounded::<(String, Option<UploadStatus>)>();
         uploads.set_listener(Arc::new(move |id, status| {
             let _ = tx.unbounded_send((id.to_owned(), status.cloned()));
         }));
         let queue = uploads.clone();
-        self._upload_events = Some(cx.spawn(async move |this, cx| {
+        let events = cx.spawn(async move |this, cx| {
             use futures::StreamExt as _;
             while let Some((id, status)) = rx.next().await {
                 let ready = matches!(status, Some(UploadStatus::Ready))
                     .then(|| queue.uploaded(&id))
                     .flatten();
                 let updated = this.update(cx, |composer, cx| {
-                    composer.apply_upload(&id, status, ready.map(|r| r.attachment), cx);
+                    composer.apply_upload(&queue, &id, status, ready.map(|r| r.attachment), cx);
                 });
                 if updated.is_err() {
                     break;
                 }
             }
-        }));
-        self.uploads = Some(uploads.clone());
+        });
+        self.upload_queues.push(UploadQueue {
+            server,
+            connection,
+            uploads: uploads.clone(),
+            _events: events,
+        });
         Some(uploads)
+    }
+
+    /// The queue `server`'s attachments upload on, if it has one.
+    fn queue_of(&self, server: &Option<String>) -> Option<&Uploads> {
+        self.upload_queues
+            .iter()
+            .find(|q| q.server == *server)
+            .map(|q| &q.uploads)
     }
 
     fn apply_upload(
         &mut self,
+        queue: &Uploads,
         id: &str,
         status: Option<UploadStatus>,
         ready: Option<ChatAttachment>,
         cx: &mut Context<'_, Self>,
     ) {
         let Ok(local_id) = id.parse::<u64>() else {
+            return;
+        };
+        // Only the queue of the attachment's own server may change it; a replaced queue is gone.
+        let Some(server) = self
+            .upload_queues
+            .iter()
+            .find(|q| q.uploads.same_queue(queue))
+            .map(|q| q.server.clone())
+        else {
             return;
         };
         let next = match status {
@@ -576,7 +656,9 @@ impl Composer {
             .iter_mut()
             .chain(self.drafts.parked_attachments_mut())
             .find(|a| {
-                a.local_id == local_id && !matches!(a.status, AttachmentUploadStatus::Ready(_))
+                a.local_id == local_id
+                    && a.server == server
+                    && !matches!(a.status, AttachmentUploadStatus::Ready(_))
             })
         {
             slot.status = next;
@@ -584,17 +666,24 @@ impl Composer {
         }
     }
 
-    /// Starts a failed upload again.
+    /// Starts a failed upload again, on its own server only.
     fn retry_attachment(&mut self, local_id: u64, cx: &mut Context<'_, Self>) {
+        let server = self.server.clone();
+        if !self.attachments.iter().any(|a| {
+            a.local_id == local_id
+                && a.server == server
+                && a.source.is_some()
+                && matches!(a.status, AttachmentUploadStatus::Error(_))
+        }) {
+            return;
+        }
         let Some(uploads) = self.upload_queue(cx) else {
             return;
         };
         let Some(attachment) = self.attachments.iter_mut().find(|a| a.local_id == local_id) else {
             return;
         };
-        let (AttachmentUploadStatus::Error(_), Some(source)) =
-            (&attachment.status, &attachment.source)
-        else {
+        let Some(source) = &attachment.source else {
             return;
         };
         let id = local_id.to_string();
@@ -609,13 +698,10 @@ impl Composer {
 
     /// The sent attachments leave the queue; their ids stay valid for a restored draft.
     fn forget_uploads(&self) {
-        if let Some(uploads) = &self.uploads {
-            let ids: Vec<String> = self
-                .attachments
-                .iter()
-                .map(|a| a.local_id.to_string())
-                .collect();
-            let _ = uploads.forget(&ids);
+        for attachment in &self.attachments {
+            if let Some(uploads) = self.queue_of(&attachment.server) {
+                let _ = uploads.forget(&[attachment.local_id.to_string()]);
+            }
         }
     }
 
@@ -1305,6 +1391,7 @@ impl Composer {
                         size_bytes: 0,
                         status: AttachmentUploadStatus::Error(err.to_string()),
                         source: None,
+                        server: self.server.clone(),
                     });
                     cx.notify();
                 }
@@ -1343,6 +1430,7 @@ impl Composer {
             size_bytes,
             status: AttachmentUploadStatus::Uploading(0.0),
             source: Some(source),
+            server: self.server.clone(),
         });
         cx.notify();
     }
@@ -1360,7 +1448,20 @@ impl Composer {
 
     #[cfg(test)]
     pub(crate) fn attachment_states_for_test(&self) -> Vec<(String, String)> {
-        self.attachments
+        Self::states_for_test(&self.attachments)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parked_attachment_states_for_test(&self, key: &str) -> Vec<(String, String)> {
+        self.drafts
+            .parked_draft(key)
+            .map(|d| Self::states_for_test(&d.attachments))
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    fn states_for_test(attachments: &[PendingAttachment]) -> Vec<(String, String)> {
+        attachments
             .iter()
             .map(|a| {
                 let state = match &a.status {
@@ -1650,7 +1751,12 @@ impl Composer {
     }
 
     fn remove_attachment(&mut self, local_id: u64, cx: &mut Context<'_, Self>) {
-        if let Some(uploads) = &self.uploads {
+        if let Some(uploads) = self
+            .attachments
+            .iter()
+            .find(|a| a.local_id == local_id)
+            .and_then(|a| self.queue_of(&a.server))
+        {
             uploads.remove(&local_id.to_string());
         }
         let before = self.attachments.len();
@@ -2120,6 +2226,7 @@ impl Composer {
                     size_bytes: chat_attachment_size(&att),
                     status: AttachmentUploadStatus::Ready(att),
                     source: None,
+                    server: self.server.clone(),
                 }
             })
             .collect();

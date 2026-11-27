@@ -72,6 +72,7 @@ impl Composer {
                     size_bytes: saved.size_bytes,
                     status: AttachmentUploadStatus::Ready(saved.attachment),
                     source: None,
+                    server: None,
                 }
             })
             .collect();
@@ -110,6 +111,7 @@ mod tests {
             size_bytes: 3,
             status,
             source: None,
+            server: None,
         }
     }
 

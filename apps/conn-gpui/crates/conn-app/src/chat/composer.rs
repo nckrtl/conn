@@ -33,6 +33,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gpui_kit::TestSupportExt as _;
 
 use conn_client::Connection;
+use conn_client::uploads::{FileSource, LocalFile, UploadStatus, Uploads};
 use conn_contract::rpc::projects::search_entries;
 use conn_contract::{ChatAttachment, ProjectSearchEntriesInput};
 use conn_desktop::operator::{DictationStart, DictationWait, OperatorClient};
@@ -98,6 +99,15 @@ const PLAN_IMPLEMENTATION_PROMPT_PREFIX: &str = "PLEASE IMPLEMENT THIS PLAN:\n";
 /// `modelPicker.toggle` shortcut label.
 const MODEL_PICKER_SHORTCUT_LABEL: &str = "⌘⇧M";
 
+fn chip_upload(status: &AttachmentUploadStatus) -> super::attachment_thumb::ChipUpload {
+    use super::attachment_thumb::ChipUpload;
+    match status {
+        AttachmentUploadStatus::Uploading(p) => ChipUpload::Uploading(*p),
+        AttachmentUploadStatus::Ready(_) => ChipUpload::Ready,
+        AttachmentUploadStatus::Error(_) => ChipUpload::Failed,
+    }
+}
+
 /// State of one staged file/image attachment in the composer strip.
 #[derive(Clone, Debug)]
 struct PendingAttachment {
@@ -105,11 +115,14 @@ struct PendingAttachment {
     name: String,
     size_bytes: usize,
     status: AttachmentUploadStatus,
+    /// What to upload again on retry or after a reconnect; restored drafts have none.
+    source: Option<LocalFile>,
 }
 
 #[derive(Clone, Debug)]
 enum AttachmentUploadStatus {
-    Uploading,
+    /// The share sent, 0 to 1 (`UploadStatus::Uploading`).
+    Uploading(f32),
     Ready(ChatAttachment),
     Error(String),
 }
@@ -290,6 +303,9 @@ pub(crate) struct Composer {
     next_attachment_id: u64,
     /// Thumbnails of staged images, by `PendingAttachment::local_id`.
     attachment_previews: HashMap<u64, Arc<gpui_kit::Image>>,
+    /// Uploads start on attach (`attachmentUploads.ts`); one queue per connection.
+    uploads: Option<Uploads>,
+    _upload_events: Option<gpui_kit::Task<()>>,
     editing_queued: Option<EditingQueuedRun>,
     dictation: DictationState,
     dictation_error: Option<String>,
@@ -442,6 +458,8 @@ impl Composer {
             applied_placeholder: COMPOSER_PLACEHOLDER,
             next_attachment_id: 1,
             attachment_previews: HashMap::new(),
+            uploads: None,
+            _upload_events: None,
             editing_queued: None,
             dictation: DictationState::Idle,
             dictation_error: None,
@@ -466,9 +484,139 @@ impl Composer {
         connection: Option<Connection>,
         cx: &mut Context<'_, Self>,
     ) {
+        let same = self
+            .connection
+            .as_ref()
+            .zip(connection.as_ref())
+            .is_some_and(|(a, b)| a.same_connection(b));
         self.connection = connection;
         self.catalog_refresh_in_flight = false;
+        if !same {
+            self.restart_uploads(cx);
+        }
         cx.notify();
+    }
+
+    /// A new connection gets a new queue; unfinished uploads start again on it.
+    fn restart_uploads(&mut self, cx: &mut Context<'_, Self>) {
+        self.uploads = None;
+        self._upload_events = None;
+        let Some(uploads) = self.upload_queue(cx) else {
+            return;
+        };
+        for attachment in self
+            .attachments
+            .iter_mut()
+            .chain(self.drafts.parked_attachments_mut())
+        {
+            if let (
+                AttachmentUploadStatus::Uploading(_) | AttachmentUploadStatus::Error(_),
+                Some(source),
+            ) = (&attachment.status, &attachment.source)
+            {
+                attachment.status = AttachmentUploadStatus::Uploading(0.0);
+                uploads.add(&attachment.local_id.to_string(), source.clone());
+            }
+        }
+    }
+
+    fn upload_queue(&mut self, cx: &mut Context<'_, Self>) -> Option<Uploads> {
+        if let Some(uploads) = &self.uploads {
+            return Some(uploads.clone());
+        }
+        let uploads = Uploads::new(self.connection.clone()?);
+        uploads.set_codec(Arc::new(super::upload_codec::DesktopImageCodec));
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<(String, Option<UploadStatus>)>();
+        uploads.set_listener(Arc::new(move |id, status| {
+            let _ = tx.unbounded_send((id.to_owned(), status.cloned()));
+        }));
+        let queue = uploads.clone();
+        self._upload_events = Some(cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while let Some((id, status)) = rx.next().await {
+                let ready = matches!(status, Some(UploadStatus::Ready))
+                    .then(|| queue.uploaded(&id))
+                    .flatten();
+                let updated = this.update(cx, |composer, cx| {
+                    composer.apply_upload(&id, status, ready.map(|r| r.attachment), cx);
+                });
+                if updated.is_err() {
+                    break;
+                }
+            }
+        }));
+        self.uploads = Some(uploads.clone());
+        Some(uploads)
+    }
+
+    fn apply_upload(
+        &mut self,
+        id: &str,
+        status: Option<UploadStatus>,
+        ready: Option<ChatAttachment>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Ok(local_id) = id.parse::<u64>() else {
+            return;
+        };
+        let next = match status {
+            Some(UploadStatus::Uploading { progress }) => {
+                AttachmentUploadStatus::Uploading(progress)
+            }
+            Some(UploadStatus::Failed { reason }) => AttachmentUploadStatus::Error(reason),
+            Some(UploadStatus::Ready) => match ready {
+                Some(attachment) => AttachmentUploadStatus::Ready(attachment),
+                None => return,
+            },
+            None => return,
+        };
+        // The upload may finish after the user switched threads; its draft is parked then.
+        if let Some(slot) = self
+            .attachments
+            .iter_mut()
+            .chain(self.drafts.parked_attachments_mut())
+            .find(|a| {
+                a.local_id == local_id && !matches!(a.status, AttachmentUploadStatus::Ready(_))
+            })
+        {
+            slot.status = next;
+            cx.notify();
+        }
+    }
+
+    /// Starts a failed upload again.
+    fn retry_attachment(&mut self, local_id: u64, cx: &mut Context<'_, Self>) {
+        let Some(uploads) = self.upload_queue(cx) else {
+            return;
+        };
+        let Some(attachment) = self.attachments.iter_mut().find(|a| a.local_id == local_id) else {
+            return;
+        };
+        let (AttachmentUploadStatus::Error(_), Some(source)) =
+            (&attachment.status, &attachment.source)
+        else {
+            return;
+        };
+        let id = local_id.to_string();
+        if uploads.status(&id).is_some() {
+            uploads.retry(&id);
+        } else {
+            uploads.add(&id, source.clone());
+        }
+        attachment.status = AttachmentUploadStatus::Uploading(0.0);
+        cx.notify();
+    }
+
+    /// The sent attachments leave the queue; their ids stay valid for a restored draft.
+    fn forget_uploads(&self) {
+        if let Some(uploads) = &self.uploads {
+            let ids: Vec<String> = self
+                .attachments
+                .iter()
+                .map(|a| a.local_id.to_string())
+                .collect();
+            let _ = uploads.forget(&ids);
+        }
     }
 
     /// Sets the workspace root used for `@` file mention searches (`projects.searchEntries`).
@@ -1156,6 +1304,7 @@ impl Composer {
                         name,
                         size_bytes: 0,
                         status: AttachmentUploadStatus::Error(err.to_string()),
+                        source: None,
                     });
                     cx.notify();
                 }
@@ -1163,17 +1312,17 @@ impl Composer {
         }
     }
 
-    /// Stages in-memory bytes (such as a pasted clipboard image) and uploads via
-    /// `attachments.createUploadUrl`.
+    /// Stages in-memory bytes (such as a pasted clipboard image) and starts their upload at once;
+    /// the shared queue scales images, runs three at a time and reports progress.
     pub(super) fn stage_and_upload_bytes(
         &mut self,
         name: String,
         mime_type: String,
         bytes: Vec<u8>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        let Some(conn) = self.connection.clone() else {
+        let Some(uploads) = self.upload_queue(cx) else {
             return;
         };
         let local_id = self.next_attachment_id;
@@ -1182,33 +1331,20 @@ impl Composer {
         if let Some(image) = super::attachment_thumb::preview_image(&mime_type, bytes.clone()) {
             self.attachment_previews.insert(local_id, image);
         }
+        let source = LocalFile {
+            source: FileSource::Bytes(Arc::new(bytes)),
+            name: name.clone(),
+            mime_type,
+        };
+        uploads.add(&local_id.to_string(), source.clone());
         self.attachments.push(PendingAttachment {
             local_id,
-            name: name.clone(),
+            name,
             size_bytes,
-            status: AttachmentUploadStatus::Uploading,
+            status: AttachmentUploadStatus::Uploading(0.0),
+            source: Some(source),
         });
         cx.notify();
-
-        cx.spawn_in(window, async move |this, cx| {
-            let upload_res = conn.upload_chat_attachment(name, mime_type, bytes).await;
-            let _ = this.update(cx, |composer, cx| {
-                // The upload may finish after the user switched threads; its draft is parked then.
-                if let Some(slot) = composer
-                    .attachments
-                    .iter_mut()
-                    .chain(composer.drafts.parked_attachments_mut())
-                    .find(|a| a.local_id == local_id)
-                {
-                    slot.status = match upload_res {
-                        Ok(att) => AttachmentUploadStatus::Ready(att),
-                        Err(err) => AttachmentUploadStatus::Error(err.to_string()),
-                    };
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     #[cfg(test)]
@@ -1228,7 +1364,7 @@ impl Composer {
             .iter()
             .map(|a| {
                 let state = match &a.status {
-                    AttachmentUploadStatus::Uploading => "uploading".to_owned(),
+                    AttachmentUploadStatus::Uploading(_) => "uploading".to_owned(),
                     AttachmentUploadStatus::Ready(att) => {
                         let id = match att {
                             ChatAttachment::Image(img) => img.id.as_str(),
@@ -1514,6 +1650,9 @@ impl Composer {
     }
 
     fn remove_attachment(&mut self, local_id: u64, cx: &mut Context<'_, Self>) {
+        if let Some(uploads) = &self.uploads {
+            uploads.remove(&local_id.to_string());
+        }
         let before = self.attachments.len();
         self.attachments.retain(|a| a.local_id != local_id);
         self.attachment_previews.remove(&local_id);
@@ -1575,7 +1714,7 @@ impl Composer {
         let still_uploading = self
             .attachments
             .iter()
-            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading));
+            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading(_)));
         if still_uploading {
             return;
         }
@@ -1603,6 +1742,7 @@ impl Composer {
                 input.set_value(editing.saved_draft, window, cx);
                 input.focus(window, cx);
             });
+            self.forget_uploads();
             self.attachments.clear();
             self.active_trigger = None;
             self.dismissed_trigger_text = None;
@@ -1648,6 +1788,7 @@ impl Composer {
             self.textarea.update(cx, |input, cx| {
                 input.set_value("", window, cx);
             });
+            self.forget_uploads();
             self.attachments.clear();
             None
         };
@@ -1666,7 +1807,7 @@ impl Composer {
         let uploading = self
             .attachments
             .iter()
-            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading));
+            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading(_)));
         QuestionComposerStatus {
             typed: self.textarea.read(cx).value().to_string(),
             voice_active: matches!(self.dictation, DictationState::Recording { .. }),
@@ -1978,6 +2119,7 @@ impl Composer {
                     name: chat_attachment_name(&att).to_owned(),
                     size_bytes: chat_attachment_size(&att),
                     status: AttachmentUploadStatus::Ready(att),
+                    source: None,
                 }
             })
             .collect();
@@ -2400,7 +2542,7 @@ impl Render for Composer {
         let is_uploading = self
             .attachments
             .iter()
-            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading));
+            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading(_)));
         let has_non_empty_text = !self.textarea.read(cx).value().trim().is_empty();
         let send_action = composer_send_action(&self.pending_request, !has_non_empty_text);
         let choice_only = self
@@ -2417,7 +2559,7 @@ impl Render for Composer {
         let uploading_count = self
             .attachments
             .iter()
-            .filter(|a| matches!(a.status, AttachmentUploadStatus::Uploading))
+            .filter(|a| matches!(a.status, AttachmentUploadStatus::Uploading(_)))
             .count();
         let attachment_block_reason = match uploading_count {
             0 => None,
@@ -2811,26 +2953,54 @@ impl Render for Composer {
                         local_id,
                         &att.name,
                         image,
-                        matches!(att.status, AttachmentUploadStatus::Uploading),
-                        matches!(att.status, AttachmentUploadStatus::Error(_)),
+                        chip_upload(&att.status),
                         &tokens,
                         cx.listener(move |composer, _, _, cx| {
                             composer.remove_attachment(local_id, cx);
+                        }),
+                        cx.listener(move |composer, _, _, cx| {
+                            composer.retry_attachment(local_id, cx);
                         }),
                     ));
                     continue;
                 }
                 let file_icon = crate::file_icons::file_icon(&att.name, tokens.appearance);
                 let status_label = match &att.status {
-                    AttachmentUploadStatus::Uploading => "Uploading…".to_owned(),
+                    AttachmentUploadStatus::Uploading(p) => format!("{}%", (p * 100.0).round()),
                     AttachmentUploadStatus::Ready(_) => format_byte_size(att.size_bytes),
-                    AttachmentUploadStatus::Error(err) => err.clone(),
+                    AttachmentUploadStatus::Error(_) => "Failed · Retry".to_owned(),
                 };
                 let is_err = matches!(att.status, AttachmentUploadStatus::Error(_));
+                let leading = match &att.status {
+                    AttachmentUploadStatus::Uploading(p) => {
+                        super::attachment_thumb::progress_ring(14.0, *p, fg)
+                    }
+                    AttachmentUploadStatus::Error(_) => {
+                        icons::icon(icons::REFRESH, 14.0, hsla(tokens.destructive))
+                            .into_any_element()
+                    }
+                    AttachmentUploadStatus::Ready(_) => {
+                        crate::file_icons::icon_img(file_icon.asset, 14.0).into_any_element()
+                    }
+                };
+                let tooltip = match &att.status {
+                    AttachmentUploadStatus::Error(err) => {
+                        format!("{}: {err}. Click to retry.", att.name)
+                    }
+                    _ => att.name.clone(),
+                };
                 strip = strip.child(
                     div()
                         .id(SharedString::from(format!("composer-att-{local_id}")))
                         .a11y_group(format!("composer.attachment.{local_id}"), "Attachment")
+                        .conn_tooltip(tooltip, &tokens)
+                        .when(is_err, |chip| {
+                            chip.cursor_pointer().on_click(cx.listener(
+                                move |composer, _, _, cx| {
+                                    composer.retry_attachment(local_id, cx);
+                                },
+                            ))
+                        })
                         .flex()
                         .flex_row()
                         .items_center()
@@ -2846,7 +3016,7 @@ impl Render for Composer {
                         } else {
                             hsla(tokens.shell_inner_border)
                         })
-                        .child(crate::file_icons::icon_img(file_icon.asset, 14.0))
+                        .child(leading)
                         .child(
                             div()
                                 .flex_1()

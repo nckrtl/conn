@@ -45,6 +45,7 @@ mod thumb_cache;
 type ThumbKey = (String, thumb_cache::TargetPx);
 mod timeline_cards;
 mod toc;
+mod upload_codec;
 mod worktree_setup;
 
 use std::collections::{HashMap, HashSet};

@@ -670,3 +670,106 @@ fn the_app_points_the_terminal_at_the_threads_machine_and_folder(cx: &mut TestAp
         "and still opens in the thread's folder"
     );
 }
+
+// ------------------------------------------------ sessions that go
+
+fn key(environment: Option<&str>, thread: &str) -> SessionKey {
+    SessionKey {
+        environment: environment.map(str::to_owned),
+        thread: Some(thread.to_owned()),
+    }
+}
+
+fn session_keys(cx: &mut TestAppContext, panel: &Entity<TerminalPanel>) -> Vec<SessionKey> {
+    sessions(cx, panel)
+        .into_iter()
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// Deleting a thread frees its terminal session, emulator and scrollback, and only its own: the
+/// same thread id on another environment and other threads keep theirs.
+#[gpui_kit::test]
+fn deleting_a_thread_frees_its_terminal(cx: &mut TestAppContext) {
+    let (_window, app) = super::mount_app(cx);
+    let panel = cx.read(|cx| {
+        app.read(cx)
+            .right_panel_for_test()
+            .read(cx)
+            .terminal_entity()
+    });
+    cx.update(|cx| {
+        panel.update(cx, |panel, cx| {
+            panel.insert_session_for_test(key(None, "doomed"), false, cx);
+            panel.insert_session_for_test(key(Some("mini"), "doomed"), false, cx);
+            panel.insert_session_for_test(key(None, "other"), true, cx);
+        });
+        app.update(cx, |app, cx| app.forget_thread_terminal(None, "doomed", cx));
+    });
+    let left = session_keys(cx, &panel);
+    assert!(!left.contains(&key(None, "doomed")), "{left:?}");
+    assert!(left.contains(&key(Some("mini"), "doomed")), "{left:?}");
+    assert!(left.contains(&key(None, "other")), "{left:?}");
+}
+
+/// Past the cap, the least recently shown ended sessions go. Live local shells and the session on
+/// screen stay whatever the count.
+#[gpui_kit::test]
+fn parked_terminals_are_capped_without_ending_live_local_shells(cx: &mut TestAppContext) {
+    use crate::panels::terminal::MAX_PARKED_SESSIONS;
+
+    let panel = new_panel(cx);
+    let ended = MAX_PARKED_SESSIONS + 3;
+    cx.update(|cx| {
+        panel.update(cx, |panel, cx| {
+            for i in 0..2 {
+                panel.insert_session_for_test(key(None, &format!("live-{i}")), false, cx);
+            }
+            for i in 0..ended {
+                let id = format!("ended-{i:02}");
+                // Show each, oldest first, so the cap knows which was on screen last.
+                panel.set_target(target(None, &id, "/tmp", false), None, cx);
+                panel.insert_session_for_test(key(None, &id), true, cx);
+            }
+            panel.set_target(target(None, "current", "/tmp", false), None, cx);
+        });
+    });
+    let left = session_keys(cx, &panel);
+    assert_eq!(left.len(), MAX_PARKED_SESSIONS, "{left:?}");
+    for i in 0..2 {
+        assert!(left.contains(&key(None, &format!("live-{i}"))), "{left:?}");
+    }
+    for i in 0..ended - (MAX_PARKED_SESSIONS - 2) {
+        assert!(
+            !left.contains(&key(None, &format!("ended-{i:02}"))),
+            "the oldest ended sessions went: {left:?}"
+        );
+    }
+    assert!(left.contains(&key(None, &format!("ended-{:02}", ended - 1))));
+}
+
+/// Switching threads frees the parked ended terminals of threads that left the lists. A live
+/// local shell of such a thread stays, and so do listed threads' sessions.
+#[gpui_kit::test]
+fn switching_threads_frees_terminals_of_threads_that_are_gone(cx: &mut TestAppContext) {
+    let (_window, app) = super::mount_app(cx);
+    let panel = cx.read(|cx| {
+        app.read(cx)
+            .right_panel_for_test()
+            .read(cx)
+            .terminal_entity()
+    });
+    cx.update(|cx| {
+        app.update(cx, |app, cx| app.set_shell(super::kitchen_sink_shell(), cx));
+        panel.update(cx, |panel, cx| {
+            panel.insert_session_for_test(key(None, "gone-ended"), true, cx);
+            panel.insert_session_for_test(key(None, "gone-live"), false, cx);
+            panel.insert_session_for_test(key(None, "thread-pinned"), true, cx);
+        });
+        app.update(cx, |app, cx| app.select_thread("thread-failed", cx));
+    });
+    let left = session_keys(cx, &panel);
+    assert!(!left.contains(&key(None, "gone-ended")), "{left:?}");
+    assert!(left.contains(&key(None, "gone-live")), "{left:?}");
+    assert!(left.contains(&key(None, "thread-pinned")), "{left:?}");
+}

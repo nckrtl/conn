@@ -273,9 +273,9 @@ fn main() {
         .expect("failed to open Conn main window");
         // Become the active app with the window in front, as a launched app should.
         cx.activate(true);
-        // Chromium starts in the background once the window has painted, so the Browser tab
-        // finds it running.
-        runtime_warmup::begin_after_launch(cx);
+        // Chromium starts on its first use (a Browser tab, an agent's page, an embedded
+        // document). Only its download and helper apps are prepared now, off the main thread.
+        runtime_warmup::prepare_after_launch();
         window
             .update(cx, |_, window, cx| {
                 menus::install_main_window(window, cx);

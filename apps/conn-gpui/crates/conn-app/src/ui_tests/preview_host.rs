@@ -135,3 +135,61 @@ fn browser_tabs_register_per_thread_and_follow_the_connection(cx: &mut TestAppCo
     wait_for("the second close", || server.closed().len() == 2);
     wait_for("the last stream to end", || server.live_streams() == 0);
 }
+
+/// Chromium starts on its first use, not at launch: opening threads asks for nothing; a Browser
+/// tab asks for it; and an agent's page in a hidden tab, made with no frame drawn, asks for it too.
+#[gpui_kit::test]
+fn chromium_starts_on_the_first_browser_or_agent_page(cx: &mut TestAppContext) {
+    use crate::runtime_warmup::requests;
+
+    let (window, app) = mount_two_thread_app(cx);
+    let frames = |cx: &mut TestAppContext| {
+        for _ in 0..3 {
+            let _ = cx.update_window(window, |_, w, cx| w.render_frame(cx));
+            cx.run_until_parked();
+        }
+    };
+    let before = requests();
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-selected", cx)));
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread("thread-other", cx)));
+    frames(cx);
+    assert_eq!(requests(), before, "no browser yet: Chromium stays off");
+
+    // An agent opens a page in a background tab. Its page is made without the tab showing.
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.open_browser_tab("https://agent.example/".into(), true, cx)
+        })
+    });
+    let id = cx.update(|cx| {
+        app.read(cx)
+            .right_panel_tabs()
+            .tabs()
+            .iter()
+            .find_map(|surface| match surface {
+                PanelSurface::Browser(id) => Some(*id),
+                _ => None,
+            })
+            .expect("a browser tab")
+    });
+    let panel = cx.update(|cx| app.read(cx).right_panel_for_test().clone());
+    let _ = cx.update_window(window, |_, window, cx| {
+        panel.update(cx, |panel, cx| {
+            panel.host_browser(id, window, cx);
+        });
+    });
+    assert!(
+        requests() > before,
+        "the agent's hidden page asks Chromium to start"
+    );
+
+    // A Browser tab the user opens asks for it as well.
+    let after_agent = requests();
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.open_browser_tab("https://user.example/".into(), false, cx)
+        })
+    });
+    frames(cx);
+    assert!(requests() > after_agent, "the shown Browser tab asks too");
+}

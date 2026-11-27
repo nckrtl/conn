@@ -769,6 +769,17 @@ impl BrowserPanel {
         if self.last_bounds.get().is_none() {
             self.last_bounds.set(bounds);
         }
+        // Chromium may not run yet: an agent's page can be its first use. The page is made
+        // once it runs ([`Self::poll_runtime_ready`]).
+        if self.view.borrow().is_none() && WebRuntime::global().state() != WebRuntimeState::Running
+        {
+            runtime_warmup::begin(cx);
+            if !runtime_warmup::disabled() {
+                self.phase = runtime_phase(&WebRuntime::global().state());
+                self.poll_runtime_ready(cx);
+                return;
+            }
+        }
         self.maybe_create_view_deferred(cx);
     }
 
@@ -1981,6 +1992,8 @@ impl BrowserPanel {
             return;
         }
         if runtime_warmup::disabled() {
+            // Counted, so tests see that a load is a first use; it starts nothing here.
+            runtime_warmup::begin(cx);
             self.phase = RuntimePhase::Failed("Chromium is turned off in this run".into());
             cx.notify();
             return;

@@ -312,6 +312,10 @@ pub(crate) struct TerminalPanel {
     /// The connection of the thread's environment, for a remote shell.
     connection: Option<Connection>,
     sessions: HashMap<SessionKey, TerminalSession>,
+    /// When each session was last on screen (a tick of [`Self::shown_tick`]), so the cap on
+    /// parked sessions lets the least recently shown go first.
+    shown_at: HashMap<SessionKey, u64>,
+    shown_tick: u64,
     focus: FocusHandle,
     marked: String,
     scroll_remainder: f32,
@@ -323,6 +327,10 @@ pub(crate) struct TerminalPanel {
     blink_on: bool,
     blink_task: Option<Task<()>>,
 }
+
+/// How many sessions of threads not on screen may stay before the least recently shown remote
+/// or exited ones go. A live local shell is never dropped this way: dropping it ends its jobs.
+pub(crate) const MAX_PARKED_SESSIONS: usize = 8;
 
 /// Half a blink period: the cursor is visible for this long, then hidden for this long. The
 /// Settings example blinks on the same period (`terminal_demo`).
@@ -346,6 +354,8 @@ impl TerminalPanel {
             target: TerminalTarget::default(),
             connection: None,
             sessions: HashMap::new(),
+            shown_at: HashMap::new(),
+            shown_tick: 0,
             focus: cx.focus_handle(),
             marked: String::new(),
             scroll_remainder: 0.0,
@@ -397,14 +407,135 @@ impl TerminalPanel {
             .map(|(key, _)| key.clone())
             .collect();
         for key in stale {
-            self.sessions.remove(&key);
+            self.remove_session(&key);
         }
         if self.target == target && same_connection(self.connection.as_ref(), connection.as_ref()) {
             return;
         }
+        let moved = self.target.key != target.key;
+        self.mark_shown();
         self.target = target;
         self.connection = connection;
+        self.mark_shown();
+        if moved {
+            self.trim_parked();
+        }
         cx.notify();
+    }
+
+    /// Records that the session on screen is shown now.
+    fn mark_shown(&mut self) {
+        self.shown_tick += 1;
+        if self.sessions.contains_key(&self.target.key) {
+            self.shown_at
+                .insert(self.target.key.clone(), self.shown_tick);
+        }
+    }
+
+    /// Whether a parked session may be dropped: its shell lives on the server (it attaches
+    /// again, with its scrollback, when shown) or has ended. A live local shell may not.
+    fn droppable(session: &TerminalSession) -> bool {
+        session.remote.is_some() || session.exited
+    }
+
+    /// Drops the least recently shown droppable sessions while more than
+    /// [`MAX_PARKED_SESSIONS`] sessions are parked. Returns how many went.
+    fn trim_parked(&mut self) -> usize {
+        let parked = self
+            .sessions
+            .keys()
+            .filter(|key| **key != self.target.key)
+            .count();
+        let Some(excess) = parked.checked_sub(MAX_PARKED_SESSIONS).filter(|n| *n > 0) else {
+            return 0;
+        };
+        let mut candidates: Vec<(u64, SessionKey)> = self
+            .sessions
+            .iter()
+            .filter(|(key, session)| **key != self.target.key && Self::droppable(session))
+            .map(|(key, _)| (self.shown_at.get(key).copied().unwrap_or(0), key.clone()))
+            .collect();
+        candidates.sort_by_key(|(tick, _)| *tick);
+        let mut dropped = 0;
+        for (_, key) in candidates.into_iter().take(excess) {
+            self.remove_session(&key);
+            dropped += 1;
+        }
+        dropped
+    }
+
+    fn remove_session(&mut self, key: &SessionKey) -> Option<TerminalSession> {
+        self.shown_at.remove(key);
+        self.sessions.remove(key)
+    }
+
+    /// A deleted thread's terminal goes with it: its emulator and scrollback, and its shell (a
+    /// local shell is hung up, as closing its window would). `environment` is the thread's linked
+    /// environment, `None` for the primary one. Returns how many sessions went.
+    pub(crate) fn forget_thread(
+        &mut self,
+        environment: Option<&str>,
+        thread: &str,
+        cx: &mut Context<'_, Self>,
+    ) -> usize {
+        let keys: Vec<SessionKey> = self
+            .sessions
+            .keys()
+            .filter(|key| {
+                key.thread.as_deref() == Some(thread) && key.environment.as_deref() == environment
+            })
+            .cloned()
+            .collect();
+        for key in &keys {
+            self.remove_session(key);
+        }
+        if !keys.is_empty() {
+            cx.notify();
+        }
+        keys.len()
+    }
+
+    /// Drops the parked sessions of threads that are gone from the lists (archived, settled
+    /// away or deleted elsewhere), when they are droppable. A live local shell stays: the thread
+    /// can come back and its jobs may still run. Returns how many went.
+    pub(crate) fn release_gone(&mut self, gone: impl Fn(&SessionKey) -> bool) -> usize {
+        let keys: Vec<SessionKey> = self
+            .sessions
+            .iter()
+            .filter(|(key, session)| {
+                **key != self.target.key && Self::droppable(session) && gone(key)
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in &keys {
+            self.remove_session(key);
+        }
+        keys.len()
+    }
+
+    /// The keys of the sessions that are not on screen.
+    pub(crate) fn parked_keys(&self) -> Vec<SessionKey> {
+        self.sessions
+            .keys()
+            .filter(|key| **key != self.target.key)
+            .cloned()
+            .collect()
+    }
+
+    /// Test helper: adds a session for `key` that is not running a shell. `exited` makes it an
+    /// ended one (droppable), else it stands for a live local shell.
+    #[cfg(test)]
+    pub(crate) fn insert_session_for_test(
+        &mut self,
+        key: SessionKey,
+        exited: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let config = terminal_config(&crate::terminal_settings::current(cx));
+        let mut session = TerminalSession::empty(config, GridSize::default(), key.clone(), cx);
+        session.exited = exited;
+        self.sessions.insert(key, session);
+        self.mark_shown();
     }
 
     /// Test helper: what the panel shows now.
@@ -543,6 +674,7 @@ impl TerminalPanel {
             self.start_session(&key, cwd, cx)
         };
         self.sessions.insert(key, session);
+        self.mark_shown();
         cx.notify();
     }
 
@@ -553,7 +685,7 @@ impl TerminalPanel {
 
     /// Restarts the shell of the thread on screen in its folder.
     fn restart_session(&mut self, cx: &mut Context<'_, Self>) {
-        self.sessions.remove(&self.target.key.clone());
+        self.remove_session(&self.target.key.clone());
         self.start_current(true, cx);
     }
 

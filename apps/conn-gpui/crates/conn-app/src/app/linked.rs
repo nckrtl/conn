@@ -987,8 +987,8 @@ impl ConnApp {
         if enabled {
             self.linked.restore_cached(environment_id);
         } else {
+            self.forget_linked_environment(environment_id);
             if let Some(set) = self.linked.set.as_mut() {
-                self.offline.forget_environment(environment_id);
                 set.disconnect(environment_id);
             }
             self.linked.statuses.remove(environment_id);
@@ -1297,8 +1297,8 @@ impl ConnApp {
             if self.linked.pairing.remove(environment_id) {
                 continue;
             }
+            self.forget_linked_environment(environment_id);
             if let Some(set) = self.linked.set.as_mut() {
-                self.offline.forget_environment(environment_id);
                 set.disconnect(environment_id);
             }
             self.linked.statuses.remove(environment_id);
@@ -1324,8 +1324,8 @@ impl ConnApp {
             confirm_gone_environments(&known, &targets, &self.linked.missing_since_ms, now);
         self.linked.missing_since_ms = verdict.missing_since_ms;
         for environment_id in &verdict.gone {
+            self.forget_linked_environment(environment_id);
             if let Some(set) = self.linked.set.as_mut() {
-                self.offline.forget_environment(environment_id);
                 set.disconnect(environment_id);
             }
             changed |= self.linked.shells.remove(environment_id);
@@ -1566,8 +1566,8 @@ impl ConnApp {
                     // The stored token no longer works: the next fleet change pairs again.
                     self.orbit.sessions.remove_bearer(&environment_id);
                     self.orbit.persist_sessions();
+                    self.forget_linked_environment(&environment_id);
                     if let Some(set) = self.linked.set.as_mut() {
-                        self.offline.forget_environment(&environment_id);
                         set.disconnect(&environment_id);
                     }
                 }

@@ -192,10 +192,12 @@ pub(crate) async fn handle(
                     let exposure = crate::lock(&service.exposure);
                     catalog::list_filtered(|name| {
                         exposure.listed(&thread.provider_session_id, name)
-                            && catalog::offered_to(name, &caller, service.links_enabled(), forge)
+                            && service.offers(name, &caller, forge)
                     })
                 }
-                _ => catalog::list_for(&caller, service.links_enabled(), forge),
+                _ => catalog::list_filtered(|name| {
+                    name != "tool_search" && service.offers(name, &caller, forge)
+                }),
             }
         ),
         "tools/call" => {
@@ -254,8 +256,7 @@ async fn call(
     };
     let renamed = legacy_tool_name(name);
     let name = renamed.as_deref().unwrap_or(name);
-    let found = catalog::tool(name)
-        .filter(|_| catalog::offered_to(name, caller, service.links_enabled(), forge));
+    let found = catalog::tool(name).filter(|_| service.offers(name, caller, forge));
     let Some((tool, order)) = found else {
         return invalid(&format!("Tool '{name}' not found"));
     };

@@ -24,7 +24,13 @@ impl Exposure {
                 .is_some_and(|(_, tools)| tools.contains(tool))
     }
 
-    pub(crate) fn search(&mut self, session: &str, query: &str) -> Vec<Value> {
+    /// The best matches for `query` among the tools `held` keeps, loaded for `session`.
+    pub(crate) fn search(
+        &mut self,
+        session: &str,
+        query: &str,
+        held: impl Fn(&str) -> bool,
+    ) -> Vec<Value> {
         let query = query.to_lowercase();
         let terms: Vec<_> = query
             .split(|c: char| !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '_')
@@ -34,7 +40,7 @@ impl Exposure {
             .filter_map(|line| {
                 let tool: Value = serde_json::from_str(line).ok()?;
                 let name = tool["name"].as_str()?;
-                if name == "tool_search" {
+                if name == "tool_search" || !held(name) {
                     return None;
                 }
                 let description = tool["description"].as_str().unwrap_or_default();
@@ -108,7 +114,7 @@ mod tests {
         for case in reference["cases"].as_array().unwrap() {
             let query = case["query"].as_str().unwrap();
             let names: Vec<_> = exposure
-                .search("search-test", query)
+                .search("search-test", query, |_| true)
                 .into_iter()
                 .map(|tool| tool["name"].clone())
                 .collect();
@@ -121,14 +127,14 @@ mod tests {
         let mut exposure = Exposure::default();
         assert!(!exposure.listed("s", "conn_workflow_stop"));
         assert!(exposure.listed("s", "delegate_task"));
-        let found = exposure.search("s", "CONN_WORKFLOW_STOP");
+        let found = exposure.search("s", "CONN_WORKFLOW_STOP", |_| true);
         assert_eq!(found.first().unwrap()["name"], "conn_workflow_stop");
         assert!(exposure.listed("s", "conn_workflow_stop"));
         assert!(!exposure.listed("other", "conn_workflow_stop"));
-        assert!(exposure.search("s", "@!!").is_empty());
-        assert!(exposure.search("s", "thread").len() <= MAX_RESULTS);
+        assert!(exposure.search("s", "@!!", |_| true).is_empty());
+        assert!(exposure.search("s", "thread", |_| true).len() <= MAX_RESULTS);
         for i in 0..MAX_SESSIONS {
-            exposure.search(&i.to_string(), "conn_project_read");
+            exposure.search(&i.to_string(), "conn_project_read", |_| true);
         }
         assert!(!exposure.listed("s", "conn_workflow_stop"));
         assert_eq!(exposure.loaded.len(), MAX_SESSIONS);

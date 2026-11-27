@@ -331,6 +331,8 @@ pub struct McpService {
     forges: Mutex<std::collections::HashMap<String, (bool, std::time::Instant)>>,
     /// Followers of tasks that run in linked environments.
     remote: Arc<remote_tasks::Followers>,
+    /// The tools of parts this server leaves out ([`Self::without_tools`]).
+    withheld: Vec<&'static str>,
 }
 
 impl std::fmt::Debug for McpService {
@@ -548,6 +550,12 @@ impl McpService {
     }
 
     pub fn new(config: McpConfig) -> Arc<Self> {
+        Self::without_tools(config, Vec::new())
+    }
+
+    /// A service that leaves `withheld` out: no caller is offered those tools, a search finds
+    /// none of them and a call answers as for a tool that does not exist.
+    pub fn without_tools(config: McpConfig, withheld: Vec<&'static str>) -> Arc<Self> {
         let endpoint = endpoint(config.listen_address);
         Arc::new(Self {
             config,
@@ -560,7 +568,18 @@ impl McpService {
             handoffs: Mutex::new(std::collections::HashSet::new()),
             forges: Mutex::new(std::collections::HashMap::new()),
             remote: Arc::default(),
+            withheld,
         })
+    }
+
+    /// Whether this server holds `tool` at all.
+    pub(crate) fn serves(&self, tool: &str) -> bool {
+        !self.withheld.contains(&tool)
+    }
+
+    /// Whether `caller` is offered `tool` here: the one gate of the listing and of a call.
+    pub(crate) fn offers(&self, tool: &str, caller: &Caller, forge: bool) -> bool {
+        self.serves(tool) && catalog::offered_to(tool, caller, self.links_enabled(), forge)
     }
 
     /// A fresh credential for one provider session of a thread. The provider passes the

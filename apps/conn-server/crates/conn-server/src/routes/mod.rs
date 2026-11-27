@@ -17,7 +17,9 @@ pub(crate) mod preview_tunnel;
 mod pull_requests;
 
 pub fn router() -> Router<AppState> {
-    Router::new()
+    let modules = crate::modules::started().map(|module| (module.routes)());
+    modules
+        .fold(Router::new(), Router::merge)
         .merge(mcp::router())
         .merge(oauth_mcp::router())
         .merge(assets::router())

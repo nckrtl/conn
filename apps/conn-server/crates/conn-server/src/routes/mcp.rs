@@ -42,7 +42,7 @@ pub fn service(deps: &Deps, listen_address: SocketAddr) -> Option<Arc<McpService
     let defaults = environment.clone();
     let directory = environment.clone();
     let refresh_deps = deps.clone();
-    Some(McpService::new(McpConfig {
+    let config = McpConfig {
         listen_address,
         preview: deps.preview.clone(),
         refresh_provider: Some(Arc::new(move |id| {
@@ -93,7 +93,11 @@ pub fn service(deps: &Deps, listen_address: SocketAddr) -> Option<Arc<McpService
         devices: deps.devices.clone(),
         pull_requests: crate::methods::pull_requests::mcp_host(deps),
         clone_repository: Some(crate::methods::source_control::clone_host(deps)),
-    }))
+    };
+    Some(McpService::without_tools(
+        config,
+        crate::modules::withheld_tools(),
+    ))
 }
 
 /// The settings file as it stands (sparse: only what differs from the defaults).

@@ -345,12 +345,17 @@ pub(crate) fn descriptor(
 /// covers the descriptor's `capabilities` and the flags `ServerConfig` carries
 /// ([`config_flags`]).
 pub fn capabilities(server_restart: bool) -> ExecutionEnvironmentCapabilities {
+    capabilities_of(server_restart, crate::modules::enabled())
+}
+
+/// [`capabilities`] of a server with the modules in `modules` on.
+fn capabilities_of(server_restart: bool, modules: &[&str]) -> ExecutionEnvironmentCapabilities {
     // Every capability is optional; the test below proves this decode holds.
     let mut capabilities: ExecutionEnvironmentCapabilities =
         conn_contract::from_json(json!({})).expect("every capability is optional");
     capabilities.server_restart = server_restart.then_some(true);
     capabilities.repository_identity = Some(false);
-    capabilities.server_browser = crate::modules::on(crate::modules::BROWSER).then_some(true);
+    capabilities.server_browser = modules.contains(&crate::modules::BROWSER).then_some(true);
     // Uploads are claimed by the message that sends them (`host.rs`).
     capabilities.attachment_uploads = Some(true);
     capabilities.file_attachments = Some(ExecutionEnvironmentCapabilitiesFileAttachments {
@@ -390,6 +395,7 @@ pub fn capabilities(server_restart: bool) -> ExecutionEnvironmentCapabilities {
     if !cfg!(windows) {
         capabilities.local_server_stop = Some(true);
     }
+    crate::modules::capabilities(modules, &mut capabilities);
     capabilities
 }
 
@@ -488,6 +494,10 @@ mod tests {
                 "threadPullRequestWatch"
             ]
         );
+        // A bare server promises none of its modules.
+        let bare = conn_contract::to_json(&capabilities_of(false, &[]));
+        assert!(bare.get("serverBrowser").is_none());
+        assert_eq!(bare["pullRequests"], true);
     }
 }
 

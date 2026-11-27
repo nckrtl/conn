@@ -8,7 +8,7 @@ use conn_engine::Engine;
 
 use crate::table::MethodTable;
 
-mod annotations;
+pub(crate) mod annotations;
 pub(crate) mod devices;
 pub(crate) mod files;
 mod git;
@@ -106,10 +106,12 @@ pub fn register_all(table: &mut MethodTable, deps: &Deps) {
     secrets::register(table, deps);
     test_logins::register(table, deps);
     panels::register(table, deps);
-    annotations::register(table, deps);
     devices::register(table, deps);
     source_control::register(table, deps);
     pull_requests::register(table, deps);
     peer_links::register(table, deps);
     text_generation::register(table, deps);
+    for module in crate::modules::started() {
+        (module.methods)(table, deps);
+    }
 }

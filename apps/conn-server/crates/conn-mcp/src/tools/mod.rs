@@ -284,7 +284,7 @@ async fn call_in(cx: &Cx<'_>, name: &str, args: Args) -> ToolResult {
         "tool_search" => {
             let caller = cx.require_thread("tool_search")?;
             Ok(
-                serde_json::json!({"tools":crate::lock(&service.exposure).search(&caller.provider_session_id, args.get("query").and_then(Value::as_str).unwrap_or_default())}),
+                serde_json::json!({"tools":crate::lock(&service.exposure).search(&caller.provider_session_id, args.get("query").and_then(Value::as_str).unwrap_or_default(), |tool| service.serves(tool))}),
             )
         }
         "html_render" => html::render(cx, &args).await,

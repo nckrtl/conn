@@ -423,11 +423,6 @@ pub async fn serve_with_instances(
         test_logins: Some(conn_features::test_logins::TestLogins::new(&state_dir)),
         engine: Some(engine.clone()),
         scheduled_tasks: Some(scheduled_tasks),
-        annotations: Some(conn_features::annotations::Annotations::new(
-            &state_dir,
-            Arc::new(conn_features::clock::SystemClock),
-            Arc::new(conn_features::annotations::EngineProjects(engine.clone())),
-        )),
         providers,
         instances,
         environment: Some(environment.clone()),
@@ -455,6 +450,11 @@ pub async fn serve_with_instances(
     if let Some(devices) = &deps.devices {
         let _ = host.devices.set(devices.clone());
     }
+    let boot = crate::modules::Boot {
+        state_dir: &state_dir,
+        engine: &engine,
+    };
+    crate::modules::start(&boot, &mut deps).await;
     start_agent_tools(&mut deps, &host, &sqlite_engine, addr);
     // After the MCP service, which settled threads' cleanup uses: the first sweep may settle.
     // An inert rehearsal copy settles and compacts nothing: its threads belong to the original.

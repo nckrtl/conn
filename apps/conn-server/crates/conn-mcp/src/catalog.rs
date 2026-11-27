@@ -104,6 +104,7 @@ pub(crate) fn list_result(outside: bool, links: bool) -> String {
 }
 
 /// The `tools/list` result body for `caller`.
+#[cfg(test)]
 pub(crate) fn list_for(caller: &crate::Caller, links: bool, forge: bool) -> String {
     list_filtered(|name| offered_to(name, caller, links, forge) && name != "tool_search")
 }

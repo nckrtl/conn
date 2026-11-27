@@ -2675,6 +2675,57 @@ async fn deferred_clients_load_tools_by_provider_session_and_receive_list_change
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn a_withheld_tool_is_not_listed_found_or_searched() {
+    let mut f = fixture("withheld-tools");
+    Arc::get_mut(&mut f.service).unwrap().withheld = vec!["annotations_list"];
+    let caller = Caller::Thread(ThreadCaller {
+        thread_id: "t".into(),
+        provider_session_id: "s".into(),
+        provider_instance_id: "claudeAgent".into(),
+        subagent: false,
+        preview: true,
+        device: false,
+    });
+    let mut agent = Client::open(&f.service, caller.clone()).await;
+    let names = |tools: &Value| -> Vec<String> {
+        let tools = tools.as_array().unwrap().iter();
+        tools
+            .map(|t| t["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    let listed = agent.request("tools/list", json!({})).await;
+    let listed = names(&listed["result"]["tools"]);
+    assert!(!listed.contains(&"annotations_list".into()));
+    assert!(listed.contains(&"annotations_claim".into()));
+    not_offered(&mut agent, "annotations_list", json!({})).await;
+    // The search answers as an event stream: the list change, then the result.
+    let session = agent.session.clone().unwrap();
+    let mut pairs = POST.to_vec();
+    pairs.push(("mcp-session-id", &session));
+    let search = json!({"jsonrpc":"2.0","id":9,"method":"tools/call","params":
+        {"name":"tool_search","arguments":{"query":"annotations_list annotations_claim"}}});
+    let reply = f
+        .service
+        .handle(
+            caller,
+            &Method::POST,
+            &headers(&pairs),
+            search.to_string().as_bytes(),
+        )
+        .await;
+    let body = reply.body.unwrap();
+    let result: Value = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("data: "))
+        .map(|l| serde_json::from_str(l).unwrap())
+        .next_back()
+        .unwrap();
+    let found = names(&result["result"]["structuredContent"]["tools"]);
+    assert_eq!(found.first().map(String::as_str), Some("annotations_claim"));
+    assert!(!found.contains(&"annotations_list".into()));
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn secret_request_requires_an_active_owned_run_and_stays_hidden() {
     let f = fixture("secret-owner");
     let mut swamp = Client::open(&f.service, client(true)).await;

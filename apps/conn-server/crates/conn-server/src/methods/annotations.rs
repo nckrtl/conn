@@ -3,13 +3,43 @@
 //!
 //! Scopes: `scopes.rs` (subscribe needs `orchestration:read`, the writes `preview:operate`).
 
+use std::sync::Arc;
+
 use conn_contract::{AnnotationCreateInput, AnnotationProjectInput, AnnotationRemoveInput};
-use conn_features::annotations::{AnnotationError, Annotations, is_annotation_id};
+use conn_engine::BoxFuture;
+use conn_features::annotations::{AnnotationError, Annotations, EngineProjects, is_annotation_id};
 use serde_json::json;
 use tokio::sync::mpsc;
 
 use super::Deps;
-use crate::table::{Failure, MethodTable};
+use crate::{
+    modules::{Boot, Module},
+    table::{Failure, MethodTable},
+};
+
+/// The annotations module: the store, `annotations.*` and the agent's annotation tools.
+pub(crate) const MODULE: Module = Module {
+    name: "annotations",
+    start,
+    methods: register,
+    routes: axum::Router::new,
+    tools: &[
+        "annotations_list",
+        "annotations_claim",
+        "annotations_complete",
+        "annotations_release",
+    ],
+    capabilities: |_| {},
+};
+
+fn start<'a>(boot: &'a Boot<'a>, deps: &'a mut Deps) -> BoxFuture<'a, ()> {
+    deps.annotations = Some(Annotations::new(
+        boot.state_dir,
+        Arc::new(conn_features::clock::SystemClock),
+        Arc::new(EngineProjects(boot.engine.clone())),
+    ));
+    Box::pin(std::future::ready(()))
+}
 
 fn fail(error: &AnnotationError) -> Failure {
     Failure::Fail(error.to_contract())
@@ -25,7 +55,7 @@ fn require_ids<'a>(mut ids: impl Iterator<Item = &'a String>) -> Result<(), Fail
     }
 }
 
-pub(super) fn register(table: &mut MethodTable, deps: &Deps) {
+fn register(table: &mut MethodTable, deps: &Deps) {
     let Some(store) = deps.annotations.clone() else {
         return;
     };

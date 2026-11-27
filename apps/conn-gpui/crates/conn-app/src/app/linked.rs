@@ -1166,6 +1166,12 @@ impl ConnApp {
         );
     }
 
+    /// Test helper: whether the primary connection reports Connected.
+    #[cfg(test)]
+    pub(crate) fn connected_for_test(&self) -> bool {
+        matches!(self.status, Some(ConnectionStatus::Connected))
+    }
+
     /// Test helper: whether a linked environment's connection reports Connected.
     #[cfg(test)]
     pub(crate) fn linked_connected_for_test(&self, environment_id: &str) -> bool {

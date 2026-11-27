@@ -40,6 +40,7 @@ pub(crate) mod details_tasks;
 mod details_wakeups;
 mod floating_surfaces;
 mod hover_prefetch;
+mod image_cache;
 mod image_memory;
 mod image_viewer;
 #[cfg(feature = "memory-bench")]

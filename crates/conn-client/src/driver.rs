@@ -1709,3 +1709,53 @@ async fn handle_exit(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> DriverState {
+        let base = url::Url::parse("http://127.0.0.1:9").unwrap_or_else(|e| panic!("{e}"));
+        DriverState::new(
+            ServerConfig {
+                http_base_url: base,
+                credential: Credential::Bearer("test".into()),
+            },
+            Arc::new(RwLock::new(None)),
+            reqwest::Client::new(),
+        )
+    }
+
+    /// A store's cursor is the only one for its thread: a thread it forgot and keeps again
+    /// starts cold, never from a sequence remembered from an earlier subscription.
+    #[test]
+    fn a_store_owned_thread_never_resumes_from_a_remembered_cursor() {
+        let mut state = state();
+        state.thread_last_sequences.insert("t".into(), 7);
+        state.subscribe_from("t".into(), Some(5), 1);
+        state.set_cursor("t", 9);
+        state.handle_offline_command(Command::UnsubscribeThread("t".into()));
+        assert!(
+            !state.thread_last_sequences.contains_key("t"),
+            "no cursor kept"
+        );
+        state.subscribe_from("t".into(), None, 1);
+        assert_eq!(
+            state.thread_subs.get("t").and_then(|s| s.after_sequence),
+            None
+        );
+    }
+
+    /// A new session subscribes the store's ranks first (the open thread is 0).
+    #[test]
+    fn a_new_session_subscribes_by_rank_then_recency() {
+        let mut state = state();
+        state.subscribe_from("background".into(), None, 3);
+        state.subscribe_from("open".into(), None, 0);
+        state.handle_offline_command(Command::SubscribeThread("plain".into()));
+        assert_eq!(
+            state.thread_ids_by_recency(),
+            ["open", "background", "plain"]
+        );
+    }
+}

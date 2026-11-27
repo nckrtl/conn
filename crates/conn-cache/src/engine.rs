@@ -21,20 +21,17 @@ use tokio::sync::{mpsc, oneshot};
 use crate::db::{self, ThreadIndex, ThreadWrite, Window};
 use crate::rows::{self, Change, OWN};
 
-/// The two settings.
+/// The one setting: which threads stay on the device follows the thread list, not a setting.
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
     /// Threads kept in memory after they close; `None` keeps every kept thread.
     pub threads_in_memory: Option<usize>,
-    /// Threads updated or opened this recently stay on the device.
-    pub keep_window_ms: i64,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
             threads_in_memory: Some(3),
-            keep_window_ms: 48 * 60 * 60 * 1000,
         }
     }
 }
@@ -83,6 +80,9 @@ struct Held {
     older: Option<String>,
     /// Where its first rows came from, for the `sync.open_drawn` line.
     source: &'static str,
+    /// Changes when a fresh window replaces the rows, so an older page asked for before is
+    /// not put on top of the new window.
+    generation: u64,
 }
 
 /// Changes a catch-up may reduce in memory before the window is read again instead.
@@ -116,7 +116,10 @@ pub struct Engine {
     /// Open threads whose catch-up was too long to reduce in memory: their window is read
     /// again from the device ([`Self::take_reloads`]).
     reloads: Vec<(String, Pending)>,
-    older_in_flight: HashSet<String>,
+    /// Older pages on their way, by thread, with the window generation they were asked for.
+    older_in_flight: HashMap<String, u64>,
+    next_generation: u64,
+    runtime: tokio::runtime::Handle,
     perf: Perf,
 }
 
@@ -178,7 +181,9 @@ impl Engine {
             resetting: HashSet::new(),
             catching_up: HashMap::new(),
             reloads: vec![],
-            older_in_flight: HashSet::new(),
+            older_in_flight: HashMap::new(),
+            next_generation: 1,
+            runtime: tokio::runtime::Handle::current(),
             perf: Perf::default(),
         })
     }
@@ -266,7 +271,12 @@ impl Engine {
                         if row.kind == "runs" && row.body["status"] == "rolled_back" {
                             self.reset(thread);
                         }
-                        write.put(row);
+                        let floor = self.index.get(thread).and_then(|ix| ix.floor);
+                        let below = row.kind == OWN
+                            && floor.is_some_and(|floor| row.ord.is_some_and(|ord| ord < floor));
+                        if !below {
+                            write.put(row);
+                        }
                     }
                     Change::Delete { kind, id } => {
                         write.rows.insert((kind.to_owned(), id), None);
@@ -285,7 +295,7 @@ impl Engine {
             self.stale.remove(thread);
         }
         if forget {
-            self.forget(thread);
+            self.forget(thread, true);
         } else if !matches!(item, Item::Synchronized(_)) {
             if self.stale.contains(thread) {
                 write.seq = None;
@@ -296,6 +306,14 @@ impl Engine {
             }
             if write.reset {
                 entry.cursor = write.seq;
+                entry.floor = snapshot_floor;
+            } else if entry.floor.is_none() {
+                entry.floor = write
+                    .rows
+                    .values()
+                    .flatten()
+                    .filter_map(|row| row.ord)
+                    .reduce(f64::min);
             }
             self.write(thread, write);
         }
@@ -337,6 +355,8 @@ impl Engine {
             return false;
         }
         if let Item::Snapshot(snapshot) = &item {
+            held.generation = self.next_generation;
+            self.next_generation += 1;
             held.floor = snapshot_floor;
             held.more_local = false;
             held.older = snapshot.history_cursor.clone().flatten();
@@ -495,8 +515,11 @@ impl Engine {
                 more_local: false,
                 older: None,
                 source: "server",
+                generation: 0,
             },
         };
+        held.generation = self.next_generation;
+        self.next_generation += 1;
         for item in buffer {
             if let Item::Snapshot(snapshot) = &item {
                 let projection = serde_json::to_value(&snapshot.projection).unwrap_or(Value::Null);
@@ -541,27 +564,46 @@ impl Engine {
         }
     }
 
-    /// Asks for older rows of an open thread: from the device, else from the server through
-    /// the device. `None` when nothing older exists or a read is on its way.
+    /// Asks for older rows of an open thread: from the device while it holds them, else one
+    /// server page, fetched outside the database task and shown without being stored. `None`
+    /// when nothing older exists or a read is on its way.
     pub fn older(&mut self, id: &str) -> Option<Pending> {
         let held = self.held.get_mut(id)?;
-        if !(held.more_local || held.older.is_some()) || !self.older_in_flight.insert(id.to_owned())
-        {
+        if !(held.more_local || held.older.is_some()) || self.older_in_flight.contains_key(id) {
             return None;
         }
+        self.older_in_flight.insert(id.to_owned(), held.generation);
         held.state.loading_earlier = true;
-        let floor = held.floor;
-        Some(self.read(id, Some(floor.unwrap_or(f64::MAX))))
+        let (floor, local, cursor) = (held.floor, held.more_local, held.older.clone());
+        let device = local.then(|| self.read(id, Some(floor.unwrap_or(f64::MAX))));
+        let (reply, rx) = oneshot::channel();
+        let (connection, thread) = (self.connection.clone(), id.to_owned());
+        self.runtime.spawn(async move {
+            if let Some(device) = device
+                && let Ok(Some(window)) = device.await
+                && !window.timeline.is_empty()
+            {
+                let _ = reply.send(Some(window));
+                return;
+            }
+            let window = match cursor {
+                Some(cursor) => server_page(&connection, &thread, &cursor, floor).await,
+                None => None,
+            };
+            let _ = reply.send(window);
+        });
+        Some(rx)
     }
 
-    /// The window [`Self::older`] asked for. Returns how many rows were added on top.
+    /// The window [`Self::older`] asked for. Returns how many rows were added on top. A page
+    /// asked for before a fresh window replaced the rows is dropped.
     pub fn finish_older(&mut self, id: &str, window: Option<Window>) -> usize {
-        self.older_in_flight.remove(id);
+        let asked = self.older_in_flight.remove(id);
         let Some(held) = self.held.get_mut(id) else {
             return 0;
         };
-        let Some(window) = window else {
-            held.state.loading_earlier = false;
+        held.state.loading_earlier = false;
+        let Some(window) = window.filter(|_| asked == Some(held.generation)) else {
             return 0;
         };
         if let Some(first) = window.timeline.first().and_then(|row| row.ord) {
@@ -591,14 +633,13 @@ impl Engine {
         }
     }
 
-    /// Keeps the device in step with the shell: every unsettled thread and every thread
-    /// updated or opened within the keep window stays subscribed and stored, the open thread
-    /// first, then those that need the user, working threads, then the newest. A thread that
-    /// leaves the set is deleted from the device. Call it with a synchronized shell only: a
-    /// thread missing from a shell is judged by its stored record, never by its absence.
+    /// Keeps the device in step with the shell: the open threads and every unsettled thread
+    /// stay subscribed and stored, the open thread first, then those that need the user,
+    /// working threads, then the newest. A thread that leaves the set is deleted from the
+    /// device; a settled thread loads again when it is opened. Call it with a synchronized
+    /// shell only: a thread missing from a shell is judged by its stored record, never by its
+    /// absence.
     pub fn update_kept(&mut self, shell: &ShellState) {
-        let now = now_ms();
-        let since = now - self.settings.keep_window_ms;
         let mut want: HashMap<String, (u8, i64)> = HashMap::new();
         for thread in shell.top_level_active_threads() {
             let tier = match shell.activity(&thread.id) {
@@ -608,12 +649,6 @@ impl Engine {
             };
             let updated = parse_iso8601_epoch_ms(&thread.updated_at).unwrap_or(0);
             want.insert(thread.id.clone(), (tier, updated));
-        }
-        for thread in shell.all_settled_threads() {
-            let updated = parse_iso8601_epoch_ms(&thread.updated_at).unwrap_or(0);
-            if updated >= since {
-                want.entry(thread.id.clone()).or_insert((3, updated));
-            }
         }
         for (id, ix) in &self.index {
             let shown = shell.find_thread(id);
@@ -625,7 +660,7 @@ impl Engine {
                     .record
                     .as_ref()
                     .is_some_and(|r| r["settledAt"].is_null() && r["archivedAt"].is_null());
-            if ix.opened_at >= since || ix.active_at >= since || unsettled_record {
+            if unsettled_record {
                 want.entry(id.clone())
                     .or_insert((3, ix.active_at.max(ix.opened_at)));
             }
@@ -658,7 +693,7 @@ impl Engine {
             .cloned()
             .collect();
         for id in leaving {
-            self.forget(&id);
+            self.forget(&id, false);
         }
         if conn_client::perf::enabled() {
             self.perf.kept_ranked = true;
@@ -666,8 +701,9 @@ impl Engine {
         }
     }
 
-    /// Drops a thread from the device and from memory (unless the screen shows it).
-    fn forget(&mut self, id: &str) {
+    /// Drops a thread from the device. A deleted thread also leaves memory; a settled one may
+    /// stay among the recently closed until the memory limit drops it.
+    fn forget(&mut self, id: &str, deleted: bool) {
         if self.subscribed.remove(id).is_some() && !self.open.iter().any(|open| open == id) {
             self.connection.unsubscribe_thread(id);
         }
@@ -679,7 +715,7 @@ impl Engine {
                 ..ThreadWrite::default()
             },
         );
-        if !self.open.iter().any(|open| open == id) {
+        if deleted && !self.open.iter().any(|open| open == id) {
             self.held.remove(id);
             self.recent.retain(|recent| recent != id);
         }
@@ -716,6 +752,7 @@ fn held_from(id: &str, window: Window) -> Held {
         more_local: window.more_local,
         older: window.older,
         source,
+        generation: 0,
     }
 }
 
@@ -729,6 +766,9 @@ async fn run(
 ) {
     let mut batch: HashMap<String, ThreadWrite> = HashMap::new();
     let mut reads = vec![];
+    // Threads whose rows a failed write lost: their cursor stays until a fresh window, so a
+    // later write cannot move it past the lost change.
+    let mut frozen: HashSet<String> = HashSet::new();
     while let Some(job) = jobs.recv().await {
         let mut next = Some(job);
         while let Some(job) = next.take().or_else(|| jobs.try_recv().ok()) {
@@ -747,66 +787,66 @@ async fn run(
             }
         }
         if !batch.is_empty() {
-            match db::commit(&pool, &env, std::mem::take(&mut batch)).await {
+            let mut writes = std::mem::take(&mut batch);
+            for (thread, write) in &mut writes {
+                if write.reset || write.forget {
+                    frozen.remove(thread);
+                } else if frozen.contains(thread) {
+                    write.seq = None;
+                }
+            }
+            let threads: Vec<String> = writes.keys().cloned().collect();
+            match db::commit(&pool, &env, writes).await {
                 Ok(committed) => {
                     for (thread, seq) in committed {
                         connection.set_thread_cursor(&thread, seq);
                     }
                 }
                 // The cursors stay; the next catch-up sends these changes again.
-                Err(e) => eprintln!("conn-cache: write failed: {e}"),
+                Err(e) => {
+                    eprintln!("conn-cache: write failed: {e}");
+                    frozen.extend(threads);
+                }
             }
         }
         for (thread, before, reply) in reads.drain(..) {
-            let window = read_or_fetch(&pool, &env, &connection, &thread, before).await;
+            let window = db::read_window(&pool, &env, &thread, before)
+                .await
+                .ok()
+                .flatten();
             let _ = reply.send(window);
         }
     }
 }
 
-/// A window from the device; an older one the device does not hold comes from the server
-/// first, stored below the oldest row.
-async fn read_or_fetch(
-    pool: &SqlitePool,
-    env: &str,
+/// One older server page as a window below `floor`: own rows keep their ordinal, rows the
+/// thread does not own that lead the page go just below it.
+async fn server_page(
     connection: &Connection,
     thread: &str,
-    before: Option<f64>,
+    cursor: &str,
+    floor: Option<f64>,
 ) -> Option<Window> {
-    let window = db::read_window(pool, env, thread, before).await.ok()??;
-    if before.is_none() || !window.timeline.is_empty() {
-        return Some(window);
-    }
-    let cursor = window.older.clone()?;
-    let page = match fetch_page(connection, thread, &cursor).await {
+    let page = match fetch_page(connection, thread, cursor).await {
         Ok(page) => page,
         Err(e) => {
             eprintln!("conn-cache: older page of {thread}: {e}");
-            return Some(window);
+            return None;
         }
     };
-    // Own rows keep their ordinal, which is below every stored one; rows the thread does not
-    // own and that lead the page go just below the device's lowest place.
-    let floor = db::floor(pool, env, thread)
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or(0.0);
-    let mut write = ThreadWrite::default();
     let items = page["items"].as_array().cloned().unwrap_or_default();
-    for row in rows::timeline_rows(thread, &items, floor) {
-        write.put(row);
-    }
-    if let Some(subagents) = page["subagents"].as_array() {
-        for body in subagents {
-            write.put(rows::row("subagents", body.clone()));
-        }
-    }
-    write.older = Some(page["nextCursor"].as_str().map(str::to_owned));
-    let mut batch = HashMap::new();
-    batch.insert(thread.to_owned(), write);
-    db::commit(pool, env, batch).await.ok()?;
-    db::read_window(pool, env, thread, before).await.ok()?
+    let subagents = page["subagents"].as_array().cloned().unwrap_or_default();
+    Some(Window {
+        record: Value::Null,
+        timeline: rows::timeline_rows(thread, &items, floor.unwrap_or(0.0)),
+        control: subagents
+            .into_iter()
+            .map(|body| rows::row("subagents", body))
+            .collect(),
+        more_local: false,
+        older: page["nextCursor"].as_str().map(str::to_owned),
+        cursor: None,
+    })
 }
 
 async fn fetch_page(
@@ -983,7 +1023,7 @@ mod tests {
             last = format!("item-{n}");
             change["sequence"] = json!(9_000_000 + n);
             change["event"]["payload"]["id"] = json!(last);
-            change["event"]["payload"]["ordinal"] = json!(1_000 + n);
+            change["event"]["payload"]["ordinal"] = json!(2_000_000 + n);
             engine.handle(&thread, from_json(change).unwrap_or_else(|e| panic!("{e}")));
         }
         let drawn = |engine: &Engine| {
@@ -1008,6 +1048,156 @@ mod tests {
         );
     }
 
+    /// A failed write freezes the cursor of its threads: a later write that succeeds must not
+    /// move it past the lost change. The next fresh window moves it again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_failed_write_holds_the_cursor_until_a_fresh_window() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let path = dir.path().join("local.sqlite3");
+        let items = stream("thread_turn_stream.json");
+        let thread = items[0]["projection"]["thread"]["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        let mut engine = engine(&path, Settings::default()).await;
+        engine.handle(
+            &thread,
+            from_json(items[0].clone()).unwrap_or_else(|e| panic!("{e}")),
+        );
+        settle(&engine, &thread).await;
+        sqlx::query(
+            "CREATE TRIGGER boom BEFORE INSERT ON rows WHEN NEW.id = 'boom'
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END",
+        )
+        .execute(&engine.pool)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+        let item = items
+            .iter()
+            .find(|item| item["event"]["type"] == "turn-item.updated")
+            .cloned()
+            .unwrap_or_default();
+        let change = |id: &str, seq: i64| {
+            let mut change = item.clone();
+            change["sequence"] = json!(seq);
+            change["event"]["payload"]["id"] = json!(id);
+            from_json::<Item>(change).unwrap_or_else(|e| panic!("{e}"))
+        };
+        engine.handle(&thread, change("boom", 9_000_000));
+        settle(&engine, &thread).await;
+        engine.handle(&thread, change("fine", 9_000_001));
+        settle(&engine, &thread).await;
+        let cursor =
+            |index: HashMap<String, ThreadIndex>| index.get(&thread).and_then(|ix| ix.cursor);
+        let index = db::read_index(&engine.pool, "env")
+            .await
+            .unwrap_or_default();
+        assert_eq!(
+            cursor(index),
+            items[0]["snapshotSequence"].as_i64(),
+            "frozen"
+        );
+        let mut fresh = items[0].clone();
+        fresh["snapshotSequence"] = json!(9_000_002);
+        engine.handle(&thread, from_json(fresh).unwrap_or_else(|e| panic!("{e}")));
+        settle(&engine, &thread).await;
+        let index = db::read_index(&engine.pool, "env")
+            .await
+            .unwrap_or_default();
+        assert_eq!(cursor(index), Some(9_000_002), "a fresh window moves it");
+    }
+
+    /// An older page asked for before a fresh window replaced the rows is not put on top of
+    /// the new window.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn an_older_page_from_before_a_reset_is_dropped() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let path = dir.path().join("local.sqlite3");
+        let items = stream("thread_turn_stream.json");
+        let thread = items[0]["projection"]["thread"]["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        let mut engine = engine(&path, Settings::default()).await;
+        engine.handle(
+            &thread,
+            from_json(items[0].clone()).unwrap_or_else(|e| panic!("{e}")),
+        );
+        let item = items
+            .iter()
+            .find(|item| item["event"]["type"] == "turn-item.updated")
+            .cloned()
+            .unwrap_or_default();
+        for n in 0..400 {
+            let mut change = item.clone();
+            change["sequence"] = json!(9_000_000 + n);
+            change["event"]["payload"]["id"] = json!(format!("row-{n}"));
+            change["event"]["payload"]["ordinal"] = json!(2_000_000 + n);
+            engine.handle(&thread, from_json(change).unwrap_or_else(|e| panic!("{e}")));
+        }
+        open(&mut engine, &thread).await;
+        let pending = engine
+            .older(&thread)
+            .unwrap_or_else(|| panic!("older rows on the device"));
+        let mut fresh = items[0].clone();
+        fresh["snapshotSequence"] = json!(9_100_000);
+        engine.handle(&thread, from_json(fresh).unwrap_or_else(|e| panic!("{e}")));
+        let before = engine.thread(&thread).map_or(0, |s| s.entries.len());
+        let window = pending.await.ok().flatten();
+        assert!(
+            window.is_some_and(|w| !w.timeline.is_empty()),
+            "the page itself arrived"
+        );
+        let window = engine.read(&thread, Some(2_000_100.0)).await.ok().flatten();
+        assert_eq!(engine.finish_older(&thread, window), 0, "dropped");
+        assert_eq!(
+            engine.thread(&thread).map_or(0, |s| s.entries.len()),
+            before
+        );
+    }
+
+    /// An update of a row below the stored window is not written: on the device it would
+    /// sit directly above the window, as if the rows between were there.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn an_update_below_the_window_is_not_stored() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let path = dir.path().join("local.sqlite3");
+        let items = stream("thread_turn_stream.json");
+        let thread = items[0]["projection"]["thread"]["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        let mut engine = engine(&path, Settings::default()).await;
+        engine.handle(
+            &thread,
+            from_json(items[0].clone()).unwrap_or_else(|e| panic!("{e}")),
+        );
+        let mut old = items
+            .iter()
+            .find(|item| item["event"]["type"] == "turn-item.updated")
+            .cloned()
+            .unwrap_or_default();
+        old["sequence"] = json!(9_000_000);
+        old["event"]["payload"]["id"] = json!("old-card");
+        old["event"]["payload"]["ordinal"] = json!(5);
+        engine.handle(&thread, from_json(old).unwrap_or_else(|e| panic!("{e}")));
+        settle(&engine, &thread).await;
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT id FROM rows WHERE id = 'old-card'")
+                .fetch_optional(&engine.pool)
+                .await
+                .unwrap_or_else(|e| panic!("{e}"));
+        assert!(stored.is_none(), "not on the device");
+        let index = db::read_index(&engine.pool, "env")
+            .await
+            .unwrap_or_default();
+        assert_eq!(
+            index.get(&thread).and_then(|ix| ix.cursor),
+            Some(9_000_000),
+            "cursor moves"
+        );
+    }
+
     /// A stale thread keeps its cursor; a deleted thread leaves the device; closed threads
     /// leave memory past the setting.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -1024,7 +1214,6 @@ mod tests {
             &path,
             Settings {
                 threads_in_memory: Some(0),
-                ..Settings::default()
             },
         )
         .await;

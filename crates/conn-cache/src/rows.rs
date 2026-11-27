@@ -250,8 +250,9 @@ pub(crate) fn visible_row(thread: &str, position: usize, row: &Row) -> Value {
 }
 
 /// How many of `newest_first` rows a window takes: whole turns, so a work group, its run
-/// and its card sit together. It stops at a user message once it holds `min_turns` of them
-/// and `min_rows` rows; `max_rows` and `max_bytes` stop it anywhere.
+/// and its card sit together. It stops at a user message once it holds `min_turns` of them or
+/// at least `min_rows` rows; `max_rows` and `max_bytes` stop it anywhere. The newest row is
+/// always taken, however large.
 pub(crate) fn window_len(
     newest_first: &[(Row, usize)],
     min_rows: usize,
@@ -273,7 +274,7 @@ pub(crate) fn window_len(
         };
         if item["type"] == "user_message" {
             turns += 1;
-            if turns >= min_turns && taken >= min_rows {
+            if turns >= min_turns || taken >= min_rows {
                 return taken;
             }
         }
@@ -364,14 +365,23 @@ mod tests {
         .enumerate()
         .map(|(i, kind)| (row(OWN, item(&i.to_string(), 10 - i as i64, kind)), 10))
         .collect();
-        assert_eq!(window_len(&rows, 1, 1, 100, 1000), 3, "first user message");
         assert_eq!(
-            window_len(&rows, 4, 1, 100, 1000),
+            window_len(&rows, 100, 1, 100, 1000),
+            3,
+            "first user message"
+        );
+        assert_eq!(
+            window_len(&rows, 4, 9, 100, 1000),
             5,
             "enough rows, then a user message"
         );
-        assert_eq!(window_len(&rows, 1, 9, 100, 1000), 6, "all");
-        assert_eq!(window_len(&rows, 1, 9, 2, 1000), 2, "row cap");
-        assert_eq!(window_len(&rows, 1, 9, 100, 30), 3, "byte cap");
+        assert_eq!(window_len(&rows, 100, 9, 100, 1000), 6, "all");
+        assert_eq!(window_len(&rows, 100, 9, 2, 1000), 2, "row cap");
+        assert_eq!(window_len(&rows, 100, 9, 100, 30), 3, "byte cap");
+        assert_eq!(
+            window_len(&rows, 100, 9, 100, 1),
+            1,
+            "the newest row always"
+        );
     }
 }

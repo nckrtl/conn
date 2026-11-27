@@ -32,10 +32,10 @@ CREATE TABLE IF NOT EXISTS attachment_images (
   version TEXT NOT NULL, bytes BLOB NOT NULL, UNIQUE(environment,thread,version));
 ";
 
-/// Window bounds: whole turns, at least this many rows and user messages, never past the caps.
+/// Window bounds: whole turns, until 5 user turns or 40 rows, never past 75 rows or 1 MiB.
 const MIN_ROWS: usize = 40;
-const MIN_TURNS: usize = 2;
-const MAX_ROWS: usize = 300;
+const MIN_TURNS: usize = 5;
+const MAX_ROWS: usize = 75;
 const MAX_BYTES: usize = 1024 * 1024;
 
 /// What the device holds for one thread.
@@ -48,6 +48,9 @@ pub struct ThreadIndex {
     pub record: Option<Value>,
     pub opened_at: i64,
     pub active_at: i64,
+    /// The lowest timeline place stored: rows below it are not on the device, so an update
+    /// of one is not written (it would sit above a gap).
+    pub floor: Option<f64>,
 }
 
 /// A window of stored rows, oldest first.
@@ -177,7 +180,9 @@ pub(crate) async fn read_index(
     env: &str,
 ) -> Result<HashMap<String, ThreadIndex>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT thread, cursor, older, record, opened_at, active_at FROM threads WHERE env = ?",
+        "SELECT thread, cursor, older, record, opened_at, active_at,
+           (SELECT MIN(ord) FROM rows r WHERE r.env = t.env AND r.thread = t.thread AND r.ord IS NOT NULL)
+         FROM threads t WHERE env = ?",
     )
     .bind(env)
     .fetch_all(pool)
@@ -194,6 +199,7 @@ pub(crate) async fn read_index(
                     record: record.and_then(|text| serde_json::from_str(&text).ok()),
                     opened_at: row.get(4),
                     active_at: row.get(5),
+                    floor: row.get(6),
                 },
             )
         })
@@ -433,19 +439,6 @@ fn stored_row(row: &sqlx::sqlite::SqliteRow) -> Option<(Row, usize)> {
         },
         size,
     ))
-}
-
-/// The lowest timeline place stored for a thread, so an older server page goes below it.
-pub(crate) async fn floor(
-    pool: &SqlitePool,
-    env: &str,
-    thread: &str,
-) -> Result<Option<f64>, sqlx::Error> {
-    sqlx::query_scalar("SELECT MIN(ord) FROM rows WHERE env = ? AND thread = ? AND ord IS NOT NULL")
-        .bind(env)
-        .bind(thread)
-        .fetch_one(pool)
-        .await
 }
 
 pub(crate) async fn image(

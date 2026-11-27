@@ -2,10 +2,15 @@
 
 //! Durable conversation data shared by the desktop and iOS clients.
 
+mod db;
+mod engine;
+mod rows;
 mod store;
 use conn_client::{ClientError, Connection};
 use conn_contract::ChatAttachment;
 use conn_state::{AgentMessageSender, ItemStatus, ReviewComment, ThreadState, TimelineEntry};
+pub use db::{ThreadIndex, Window};
+pub use engine::{Engine, Images, Pending, Settings};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, VecDeque};
 pub use store::MessageCache;

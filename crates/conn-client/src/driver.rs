@@ -43,6 +43,17 @@ pub(crate) enum Command {
     },
     SubscribeServerConfig,
     SubscribeThread(String),
+    /// A thread whose rows a local store keeps: it owns the resume cursor (`wire.md`).
+    SubscribeThreadFrom {
+        thread_id: String,
+        after: Option<i64>,
+        priority: u32,
+    },
+    /// The store committed this thread's rows through `after`: resume from there.
+    SetThreadCursor {
+        thread_id: String,
+        after: i64,
+    },
     RefreshThread(String),
     UnsubscribeThread(String),
     SubscribePanelRequests(DesktopPanelSubscription),
@@ -67,6 +78,11 @@ pub(crate) enum Command {
 
 struct ThreadSubState {
     after_sequence: Option<i64>,
+    /// A local store owns `after_sequence` (it moves only after the store commits) and the
+    /// stream opens with `changesAfterSequence`.
+    store_owned: bool,
+    /// Lower goes first when a reconnect subscribes again.
+    priority: u32,
     request_id: Option<RequestId>,
     /// When the current `subscribeThread` request went out (for `CONN_GPUI_PERF_LOG`).
     subscribed_at: Option<std::time::Instant>,
@@ -198,11 +214,46 @@ impl DriverState {
                 thread_id.to_owned(),
                 ThreadSubState {
                     after_sequence: None,
+                    store_owned: false,
+                    priority: u32::MAX,
                     request_id: None,
                     subscribed_at: None,
                 },
             )
             .and_then(|sub| sub.request_id)
+    }
+
+    /// Adds or re-ranks a store-owned subscription. True when it needs a request on the wire.
+    fn subscribe_from(&mut self, thread_id: String, after: Option<i64>, priority: u32) -> bool {
+        match self.thread_subs.get_mut(&thread_id) {
+            Some(sub) if sub.store_owned => {
+                sub.priority = priority;
+                sub.request_id.is_none()
+            }
+            _ => {
+                self.thread_subs.insert(
+                    thread_id,
+                    ThreadSubState {
+                        after_sequence: after,
+                        store_owned: true,
+                        priority,
+                        request_id: None,
+                        subscribed_at: None,
+                    },
+                );
+                true
+            }
+        }
+    }
+
+    fn set_cursor(&mut self, thread_id: &str, after: i64) {
+        if let Some(sub) = self
+            .thread_subs
+            .get_mut(thread_id)
+            .filter(|s| s.store_owned)
+        {
+            sub.after_sequence = Some(sub.after_sequence.map_or(after, |seq| seq.max(after)));
+        }
     }
 
     fn handle_offline_command(&mut self, cmd: Command) {
@@ -223,9 +274,21 @@ impl DriverState {
                 let last_seq = self.thread_last_sequences.get(&thread_id).copied();
                 self.thread_subs.entry(thread_id).or_insert(ThreadSubState {
                     after_sequence: last_seq,
+                    store_owned: false,
+                    priority: u32::MAX,
                     request_id: None,
                     subscribed_at: None,
                 });
+            }
+            Command::SubscribeThreadFrom {
+                thread_id,
+                after,
+                priority,
+            } => {
+                self.subscribe_from(thread_id, after, priority);
+            }
+            Command::SetThreadCursor { thread_id, after } => {
+                self.set_cursor(&thread_id, after);
             }
             Command::UnsubscribeThread(thread_id) => {
                 if let Some(sub) = self.thread_subs.remove(&thread_id)
@@ -729,8 +792,14 @@ where
         send_server_config_subscribe(state, ws_write).await?;
     }
 
-    let thread_ids: Vec<String> = state.thread_subs.keys().cloned().collect();
-    for thread_id in thread_ids {
+    // Highest priority first (the open thread), so it catches up before the rest.
+    let mut thread_ids: Vec<(u32, String)> = state
+        .thread_subs
+        .iter()
+        .map(|(id, sub)| (sub.priority, id.clone()))
+        .collect();
+    thread_ids.sort();
+    for (_, thread_id) in thread_ids {
         send_thread_subscribe(state, &thread_id, ws_write).await?;
     }
 
@@ -804,6 +873,8 @@ where
                         thread_id.clone(),
                         ThreadSubState {
                             after_sequence: last_seq,
+                            store_owned: false,
+                            priority: u32::MAX,
                             request_id: None,
                             subscribed_at: None,
                         },
@@ -814,6 +885,18 @@ where
             if needs_send {
                 send_thread_subscribe(state, &thread_id, ws_write).await?;
             }
+        }
+        Command::SubscribeThreadFrom {
+            thread_id,
+            after,
+            priority,
+        } => {
+            if state.subscribe_from(thread_id.clone(), after, priority) {
+                send_thread_subscribe(state, &thread_id, ws_write).await?;
+            }
+        }
+        Command::SetThreadCursor { thread_id, after } => {
+            state.set_cursor(&thread_id, after);
         }
         Command::UnsubscribeThread(thread_id) => {
             if let Some(sub) = state.thread_subs.remove(&thread_id) {
@@ -952,14 +1035,24 @@ async fn send_thread_subscribe<S>(
 where
     S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
+    let store_owned = state
+        .thread_subs
+        .get(thread_id)
+        .is_some_and(|s| s.store_owned);
     let after_sequence = state
         .thread_subs
         .get(thread_id)
         .and_then(|s| s.after_sequence)
         .or_else(|| state.thread_last_sequences.get(thread_id).copied());
+    let (after_sequence, changes_after_sequence) = if store_owned {
+        (None, after_sequence)
+    } else {
+        (after_sequence, None)
+    };
     let input = OrchestrationV2SubscribeThreadInput {
         thread_id: thread_id.to_owned(),
         after_sequence,
+        changes_after_sequence,
         // T3 always asks for `synchronized`: it ends "Loading thread…" for threads whose
         // snapshot has no rows, and marks the end of an `afterSequence` replay.
         request_completion_marker: Some(true),
@@ -970,7 +1063,8 @@ where
         accept_bounded_snapshot: Some(true),
         accept_deferred_work: None,
         accept_compact_turn_items: Some(true),
-        accept_deduped_bodies: Some(true),
+        // A store keeps rows as the server sends them, so it takes whole bodies.
+        accept_deduped_bodies: (!store_owned).then_some(true),
         accept_compact_ids: None,
     };
     let payload = serde_json::to_value(&input)
@@ -1240,7 +1334,11 @@ where
                         if crate::perf::enabled() {
                             log_thread_item_decoded(state, &thread_id, &item, timing, decode_start);
                         }
-                        if let Some(seq) = extract_thread_sequence(&item) {
+                        let store_owned = state
+                            .thread_subs
+                            .get(&thread_id)
+                            .is_some_and(|s| s.store_owned);
+                        if !store_owned && let Some(seq) = extract_thread_sequence(&item) {
                             state.thread_last_sequences.insert(thread_id.clone(), seq);
                             if let Some(sub) = state.thread_subs.get_mut(&thread_id) {
                                 sub.after_sequence = Some(seq);
@@ -1262,6 +1360,20 @@ where
                             "conn-client failed to decode thread stream item ({thread_id}): {err}"
                         );
                         warn!("conn-client failed to decode thread stream item: {err}");
+                        // A store must not move its cursor past a change it never saw.
+                        if state
+                            .thread_subs
+                            .get(&thread_id)
+                            .is_some_and(|s| s.store_owned)
+                            && events_tx
+                                .send(ClientEvent::ThreadStale {
+                                    thread_id: thread_id.clone(),
+                                })
+                                .await
+                                .is_err()
+                        {
+                            return Err(SessionOutcome::Closed);
+                        }
                     }
                 }
             }

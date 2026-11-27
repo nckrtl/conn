@@ -13,10 +13,12 @@ conn-contract.workspace = true
 conn-state.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokio.workspace = true
 sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "sqlite-bundled", "json"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+url.workspace = true
 tokio.workspace = true
 
 [lints]

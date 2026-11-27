@@ -198,7 +198,11 @@ impl ConnApp {
 
     /// Saves the primary environment's own thread list on the device for the next launch, at
     /// most every [`SHELL_SAVE_EVERY`] unless `now`. Only a synchronized list is saved.
-    pub(super) fn save_primary_shell(&mut self, now: bool) {
+    /// Saves the primary thread list; the future resolves once it is written (for quitting).
+    pub(super) fn save_primary_shell(
+        &mut self,
+        now: bool,
+    ) -> Option<impl std::future::Future<Output = ()> + Send + 'static + use<>> {
         if !self.shell.synchronized
             || (!now
                 && self
@@ -206,15 +210,12 @@ impl ConnApp {
                     .shell_saved_at
                     .is_some_and(|at| at.elapsed() < SHELL_SAVE_EVERY))
         {
-            return;
+            return None;
         }
-        let Some(slot) = self
+        let slot = self
             .server_url
             .as_deref()
-            .and_then(|env| self.threads.engines.get_mut(env))
-        else {
-            return;
-        };
+            .and_then(|env| self.threads.engines.get_mut(env))?;
         self.threads.shell_saved_at = Some(Instant::now());
         // Throttled here so the merged list is copied only when a save is due.
         let origins = self.linked.origins();
@@ -225,6 +226,7 @@ impl ConnApp {
             origins.strip_from(&mut own);
             slot.engine.save_shell(&own, true);
         }
+        Some(slot.engine.flush())
     }
 
     /// Drops the engine of an environment whose connection went away. Its rows stay on the

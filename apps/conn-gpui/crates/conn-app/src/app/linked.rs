@@ -913,11 +913,16 @@ impl ConnApp {
         &mut self,
         cx: &mut Context<'_, Self>,
     ) -> impl std::future::Future<Output = ()> + use<> {
-        self.save_primary_shell(true);
+        let primary = self.save_primary_shell(true);
         let linked = self.linked_on_quit();
         let panels = self.thread_panels_on_quit(cx);
         async move {
-            futures::future::join(linked, panels).await;
+            let primary = async move {
+                if let Some(written) = primary {
+                    written.await;
+                }
+            };
+            futures::future::join3(primary, linked, panels).await;
         }
     }
 

@@ -634,6 +634,15 @@ impl Engine {
         }
     }
 
+    /// Resolves once everything queued before this call is written, for a quit that must not
+    /// lose the last save.
+    pub fn flush(&self) -> impl std::future::Future<Output = ()> + Send + 'static + use<> {
+        let pending = self.read("", None);
+        async move {
+            let _ = pending.await;
+        }
+    }
+
     /// Keeps the device in step with the shell: the open threads and every unsettled thread
     /// stay subscribed and stored, the open thread first, then those that need the user,
     /// working threads, then the newest. A thread that leaves the set is deleted from the

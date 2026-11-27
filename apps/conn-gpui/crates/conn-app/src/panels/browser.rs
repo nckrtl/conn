@@ -55,6 +55,14 @@ use super::header::superhero_icon;
 use super::laravel_toolbar::{LaravelToolbar, host_script};
 use crate::preview_host::{BrowserHandle, PageFacts};
 
+mod favicons;
+mod history;
+mod recent_page;
+mod visits;
+
+use self::history::{BrowserHistory, same_page};
+use self::visits::{Visit, VisitTracker, now_ms};
+
 const UI_TEXT_PX: f32 = 13.0;
 const UI_LINE_HEIGHT_PX: f32 = 20.0;
 const TOOLBAR_PAD_Y_PX: f32 = 7.5;
@@ -156,9 +164,24 @@ enum BrowserOverlayEvent {
         value: serde_json::Value,
         error: Option<String>,
     },
-    LoadEnd,
+    /// The main frame finished a document: its address and CEF's status code.
+    LoadEnd {
+        url: String,
+        status: i32,
+    },
     ContextMenu(ContextMenuEvent),
     OpenTab(NewTabRequest),
+}
+
+/// Why a browser is told to load an address.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Navigation {
+    /// The user opened it: the address bar, a link in chat, a Recently used row, an Open URL route.
+    /// It goes into the history.
+    User,
+    /// A tab came back with the address it had: restored at startup, or made again after its
+    /// browser was closed. It never goes into the history.
+    Restore,
 }
 
 /// What a browser tab tells its host.
@@ -255,6 +278,13 @@ pub(crate) struct BrowserPanel {
     /// The user has asked for a page (typed an address, used back, forward or reload, or clicked
     /// in the page), so a load is theirs and the reload button may spin.
     user_load: bool,
+    /// The project history this panel feeds: the addresses it opens, and their titles.
+    visits: VisitTracker,
+    /// Redraws the new-tab page when any panel changes the app's history. Dropping it stops it.
+    _history_changes: Task<()>,
+    /// The history revision the new-tab page last drew, so a change this panel already shows does
+    /// not draw it twice.
+    shown_history_revision: Cell<u64>,
     /// What agents read of this page (`preview_status`): thread-safe, and the same handle across
     /// the browsers the panel closes and makes again for this tab.
     host_handle: Arc<BrowserHandle>,
@@ -350,6 +380,26 @@ impl BrowserPanel {
         let laravel_toolbar =
             cx.new(|cx| LaravelToolbar::new(tokens.clone(), view.clone(), last_bounds.clone(), cx));
 
+        // The history is shared by every panel and window: a page another panel records, titles
+        // or removes shows here as soon as it changes, with no polling. A panel that does not show
+        // the new-tab page has nothing to redraw.
+        let mut history_changes = BrowserHistory::global().subscribe();
+        let history_task = cx.spawn(async move |this, cx| {
+            while history_changes.changed().await.is_ok() {
+                let alive = this.update(cx, |panel, cx| {
+                    if panel.visible.get()
+                        && panel.recent_page_visible()
+                        && panel.shown_history_revision.get() != BrowserHistory::global().revision()
+                    {
+                        cx.notify();
+                    }
+                });
+                if alive.is_err() {
+                    break;
+                }
+            }
+        });
+
         Self {
             tokens,
             connection,
@@ -387,6 +437,9 @@ impl BrowserPanel {
             polling_runtime: false,
             context_menu: None,
             user_load: false,
+            visits: VisitTracker::default(),
+            _history_changes: history_task,
+            shown_history_revision: Cell::new(0),
             host_handle: Arc::new(BrowserHandle::default()),
             reported_title: String::new(),
             reported_url: String::new(),
@@ -427,6 +480,91 @@ impl BrowserPanel {
     fn with_reported_title(mut self) -> Self {
         self.reported_title = self.tab_title();
         self
+    }
+
+    /// Names the project whose history this panel reads and feeds, and the host its environment
+    /// runs on (so a page on that host is the page on `localhost`). An absent or empty key means
+    /// the context is still loading: addresses opened meanwhile wait and are recorded once it is
+    /// known. The history is the app's own, so this is also where the new-tab rows come from.
+    pub(crate) fn set_history_context(
+        &mut self,
+        project_key: Option<String>,
+        environment_hostname: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        for visit in self.visits.set_context(project_key, environment_hostname) {
+            self.record_visit(&visit);
+        }
+        self.sync_history_title();
+        cx.notify();
+    }
+
+    fn record_visit(&self, visit: &Visit) {
+        if let Some(key) = self.visits.project_key() {
+            BrowserHistory::global().record_visit(
+                key,
+                &visit.url,
+                visit.at_ms,
+                self.visits.environment_hostname(),
+            );
+        }
+    }
+
+    /// Gives the history the title of the opened page, once Chromium has settled on that address.
+    /// It never adds a page, so a page removed from the history stays out.
+    fn sync_history_title(&mut self) {
+        if !self.visits.is_watching() {
+            return;
+        }
+        let (url, title) = {
+            let guard = self.view.borrow();
+            let Some(view) = guard.as_ref() else {
+                return;
+            };
+            (view.url(), view.title())
+        };
+        if let Some((opened, title)) = self.visits.title_for(&url, &title)
+            && let Some(key) = self.visits.project_key()
+        {
+            BrowserHistory::global().set_title(
+                key,
+                &opened,
+                &title,
+                self.visits.environment_hostname(),
+            );
+        }
+    }
+
+    /// The main frame settled on `url`. This never records a visit: it only lets the title of the
+    /// address the user opened follow, when this is that page and it loaded.
+    fn page_settled(&mut self, url: &str, status: i32) {
+        let failed = self
+            .view
+            .borrow()
+            .as_ref()
+            .is_some_and(|view| view.load_error().is_some());
+        let host = self.visits.environment_hostname().map(str::to_owned);
+        self.visits
+            .load_finished(url, status, failed, |opened, page| {
+                same_page(opened, page, host.as_deref())
+            });
+        self.sync_history_title();
+    }
+
+    /// The project key this panel keeps its history under, once the app named it.
+    #[cfg(test)]
+    pub(crate) fn history_context_for_test(&self) -> Option<String> {
+        self.visits.project_key().map(str::to_owned)
+    }
+
+    /// `(address, title)` of the pages the app's history holds under `key`, newest first.
+    #[cfg(test)]
+    pub(crate) fn history_for_test(key: &str) -> Vec<(String, Option<String>)> {
+        BrowserHistory::global()
+            .recent(key, history::MAX_ENTRIES_PER_PROJECT)
+            .into_iter()
+            .map(|entry| (entry.url, entry.title))
+            .collect()
     }
 
     #[cfg(test)]
@@ -519,6 +657,8 @@ impl BrowserPanel {
         if self.host_handle.set_facts(self.page_facts()) {
             cx.emit(BrowserTabEvent::NavChanged);
         }
+        // A title can arrive after the page settles.
+        self.sync_history_title();
     }
 
     /// What agents read of the page now.
@@ -629,6 +769,17 @@ impl BrowserPanel {
         if self.last_bounds.get().is_none() {
             self.last_bounds.set(bounds);
         }
+        // Chromium may not run yet: an agent's page can be its first use. The page is made
+        // once it runs ([`Self::poll_runtime_ready`]).
+        if self.view.borrow().is_none() && WebRuntime::global().state() != WebRuntimeState::Running
+        {
+            runtime_warmup::begin(cx);
+            if !runtime_warmup::disabled() {
+                self.phase = runtime_phase(&WebRuntime::global().state());
+                self.poll_runtime_ready(cx);
+                return;
+            }
+        }
         self.maybe_create_view_deferred(cx);
     }
 
@@ -699,6 +850,7 @@ impl BrowserPanel {
     fn on_load_start(&mut self, cx: &mut Context<'_, Self>) {
         // A new document has no focused field yet; its watcher reports one once the bridge is in.
         self.inline_logins.reset();
+        self.visits.load_started();
         // The page that asked for a passkey is gone: end its ceremony and close the pipe to Vault.
         self.cancel_passkey(cx);
         if self.visible.get() {
@@ -1704,9 +1856,19 @@ impl BrowserPanel {
     /// Navigates the embedded browser to `url`, lazily installing and starting
     /// the CEF runtime on first use.
     pub(crate) fn navigate(&mut self, url: impl Into<String>, cx: &mut Context<'_, Self>) {
+        self.load(url, Navigation::User, cx);
+    }
+
+    /// Loads the address of a tab that comes back: restored at startup, or made again after its
+    /// browser was closed. The user opened nothing, so this records no visit and follows no title.
+    pub(crate) fn restore(&mut self, url: impl Into<String>, cx: &mut Context<'_, Self>) {
+        self.load(url, Navigation::Restore, cx);
+    }
+
+    fn load(&mut self, url: impl Into<String>, source: Navigation, cx: &mut Context<'_, Self>) {
         let target = normalize_url(&url.into());
         trace_browser(&format!(
-            "navigate to {target} (runtime {:?}, view {})",
+            "navigate to {target} ({source:?}, runtime {:?}, view {})",
             WebRuntime::global().state(),
             if self.view.borrow().is_some() {
                 "ready"
@@ -1714,6 +1876,19 @@ impl BrowserPanel {
                 "not yet"
             }
         ));
+        match source {
+            // The address bar, a Recently used row and an Open URL route all arrive here: the
+            // address is recorded now, so a dev server that is down is still one click away.
+            // Back, forward, reload and the warm start do not pass through here.
+            Navigation::User => {
+                if let Some(visit) = self.visits.opened(&target, now_ms()) {
+                    self.record_visit(&visit);
+                }
+            }
+            // A restored tab's address is Chromium's final URL (a redirect, an auth callback), so
+            // it is neither a visit nor an address whose title follows.
+            Navigation::Restore => self.visits.restored(),
+        }
         self.url = target;
         self.user_load = true;
         self.context_menu = None;
@@ -1817,6 +1992,8 @@ impl BrowserPanel {
             return;
         }
         if runtime_warmup::disabled() {
+            // Counted, so tests see that a load is a first use; it starts nothing here.
+            runtime_warmup::begin(cx);
             self.phase = RuntimePhase::Failed("Chromium is turned off in this run".into());
             cx.notify();
             return;
@@ -2042,8 +2219,11 @@ impl BrowserPanel {
                             png,
                         });
                     });
-                    browser_view.on_load_end(move |_url, _status| {
-                        let _ = overlay_tx.send(BrowserOverlayEvent::LoadEnd);
+                    browser_view.on_load_end(move |url, status| {
+                        let _ = overlay_tx.send(BrowserOverlayEvent::LoadEnd {
+                            url: url.to_owned(),
+                            status,
+                        });
                     });
 
                     let hidden = !visible.get();
@@ -2072,7 +2252,9 @@ impl BrowserPanel {
                                             panel.on_inline_event(event, cx);
                                         }
                                         BrowserOverlayEvent::Favicon { page, png } => {
-                                            if panel.inline_logins.set_icon(&page, png) {
+                                            // The same icon tiles the page in Recently used.
+                                            let kept = favicons::global().set(&page, &png);
+                                            if panel.inline_logins.set_icon(&page, png) || kept {
                                                 cx.notify();
                                             }
                                         }
@@ -2161,7 +2343,8 @@ impl BrowserPanel {
                                         BrowserOverlayEvent::OpenTab(request) => {
                                             cx.emit(BrowserTabEvent::OpenTab(request));
                                         }
-                                        BrowserOverlayEvent::LoadEnd => {
+                                        BrowserOverlayEvent::LoadEnd { url, status } => {
+                                            panel.page_settled(&url, status);
                                             panel.on_load_end(cx);
                                         }
                                     });
@@ -3355,7 +3538,12 @@ impl Render for BrowserPanel {
                 );
             }
 
-            if let Some(message) = status_message {
+            if self.recent_page_visible() {
+                // The new-tab page replaces the blank page. Its rows open pages even while
+                // Chromium starts, so the warm-up or a failed start shows as a line under them.
+                let notice = status_message.filter(|_| !matches!(self.phase, RuntimePhase::Idle));
+                container = container.child(self.render_recent_page(notice, cx));
+            } else if let Some(message) = status_message {
                 container = container.child(
                     v_flex()
                         .absolute()

@@ -402,6 +402,7 @@ pub fn query_policy(policy: &PolicyInput<'_>, availability: BypassAvailability) 
     let allowed_tools = (read_only && policy.read_only_global_reads)
         .then(|| READ_ONLY_TOOLS.iter().map(|s| s.to_string()).collect());
     let install_permission_callback = downgraded
+        || permission_mode == "auto"
         || match policy.approval_policy {
             None => matches!(
                 policy.runtime_mode,
@@ -999,6 +1000,7 @@ mod tests {
         assert_eq!(policy("full-access").permission_mode, "bypassPermissions");
         assert_eq!(policy("approval-required").permission_mode, "default");
         assert_eq!(policy("auto-accept-edits").permission_mode, "acceptEdits");
+        assert!(asks_user(&policy("auto")));
         assert_eq!(policy("auto").permission_mode, "auto");
         let plan = query_policy(
             &PolicyInput {

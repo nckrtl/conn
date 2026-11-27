@@ -89,6 +89,8 @@ zed-files = ["dep:zed_util", "dep:zed_editor", "dep:zed_language", "dep:zed_sett
 automation = ["gpui-kit/test-support"]
 # In-process Rust hot-patching via GPUI's built-in Subsecond integration (`dx serve --hot-patch`).
 hot-reload = ["dep:gpui-pre"]
+# A counting global allocator for the retained-memory bench (`ui_tests/memory_bench.rs`).
+memory-bench = []
 
 [lints]
 workspace = true

@@ -128,6 +128,8 @@ gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
 # face and never applies a variation axis, so a variable font drew at its default weight whatever
 # was asked. A face with a `wght` axis now gets one CoreText variation per requested weight; static
 # faces are untouched.
+# The shadow fragment also dithers its 8-bit output (vendor/gpui-pre-apple/src/shaders.metal,
+# `interleaved_gradient_noise`), so a soft shadow over a dark background shows no grey bands.
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 
 # Unify `tree_sitter_language::LanguageFn` between crates.io grammar crates and

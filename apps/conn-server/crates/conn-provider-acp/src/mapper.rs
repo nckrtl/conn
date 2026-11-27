@@ -1537,6 +1537,18 @@ impl<E: Env> Mapper<E> {
     }
 
     /// `withTrackedPermissionToolCall`: fills title, kind and input from the tracked call.
+    pub(crate) fn permission_paths(&self, call: &Value) -> Option<Vec<String>> {
+        let mut paths = super::policy::changed_paths(call)?;
+        if let Some(tracked) = call["toolCallId"]
+            .as_str()
+            .and_then(|id| self.turn.as_ref()?.tools.get(id))
+        {
+            let previous = Value::Object(tracked.data.clone());
+            paths.extend(super::policy::changed_paths(&previous)?);
+        }
+        Some(paths)
+    }
+
     pub(crate) fn with_tracked_tool(&self, params: &Value) -> Value {
         let mut params = params.clone();
         let Some(turn) = self.turn.as_ref() else {

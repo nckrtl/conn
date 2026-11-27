@@ -106,10 +106,11 @@ impl RightPanelTab {
     ];
 
     /// Whether the surface belongs to a project, so a thread without one never offers it
-    /// (`needsProject` in the lab's `Panel.tsx`): Files (and the files it opens), MCP and API.
+    /// (`needsProject` in the lab's `Panel.tsx`): the Files tree, MCP and API. A single file
+    /// opened from a chat link shows on any thread, as in Conn's web app.
     #[must_use]
     pub const fn needs_project(self) -> bool {
-        matches!(self, Self::Files | Self::File | Self::Mcp | Self::Api)
+        matches!(self, Self::Files | Self::Mcp | Self::Api)
     }
 
     /// The kind that shows in place of this one on a thread without a project: Tasks.

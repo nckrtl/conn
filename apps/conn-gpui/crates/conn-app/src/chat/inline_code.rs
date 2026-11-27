@@ -70,6 +70,10 @@ pub(super) struct ChipPlan {
     pub(super) shaped: ShapedLine,
     pub(super) color: Hsla,
     pub(super) code_px: f32,
+    /// The font the text is shaped in, to shape it again when the chip wraps across lines.
+    pub(super) font_family: &'static str,
+    /// The chip's own background; the paragraph's inline code background when `None`.
+    pub(super) background: Option<Hsla>,
 }
 
 /// What [`InlineCodeText`] paints: the paragraph element, its text layout and its chips.
@@ -237,7 +241,7 @@ impl InlineCodeText {
                             origin: point(x, y + px(baseline - ascent - chip_pad_y(chip.code_px))),
                             size: size(px(width), px(box_height)),
                         },
-                        self.background,
+                        chip.background.unwrap_or(self.background),
                     )
                     .corner_radii(px(RADIUS_PX)),
                 );
@@ -270,7 +274,7 @@ impl InlineCodeText {
                         window,
                         piece,
                         gpui_kit::Font {
-                            family: crate::theme::MONO_FONT.into(),
+                            family: chip.font_family.into(),
                             features: gpui_kit::FontFeatures::default(),
                             fallbacks: None,
                             weight: gpui_kit::FontWeight::NORMAL,

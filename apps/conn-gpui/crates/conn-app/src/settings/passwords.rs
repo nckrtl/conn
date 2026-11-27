@@ -1965,8 +1965,14 @@ fn busy_button(
     busy: bool,
     on_click: Option<impl Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
 ) -> AnyElement {
+    let disabled_primary = primary && on_click.is_none();
+    let (primary_bg, primary_fg) = if disabled_primary {
+        crate::theme::disabled_primary(tokens)
+    } else {
+        (hsla(tokens.primary), hsla(tokens.primary_foreground))
+    };
     let fg = if primary {
-        hsla(tokens.primary_foreground)
+        primary_fg
     } else {
         hsla(tokens.foreground)
     };
@@ -1990,7 +1996,7 @@ fn busy_button(
         .rounded(px(6.0))
         .text_size(px(12.0))
         .text_color(fg)
-        .when(primary, |el| el.bg(hsla(tokens.primary)))
+        .when(primary, |el| el.bg(primary_bg))
         .when(!primary, |el| {
             el.border_1().border_color(hsla_alpha(tokens.border, 0.8))
         })
@@ -2003,7 +2009,11 @@ fn busy_button(
             .on_click(on_click)
             .test_support()
             .into_any_element(),
-        None => base.opacity(0.5).test_support().into_any_element(),
+        // A disabled primary button keeps its muted primary fill instead of fading.
+        None => base
+            .when(!primary, |el| el.opacity(0.5))
+            .test_support()
+            .into_any_element(),
     }
 }
 

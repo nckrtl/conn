@@ -75,7 +75,7 @@ fn thread() -> ThreadState {
 /// Renders `thread` offscreen to `<prefix>-dark.png` and `<prefix>-light.png` in `dir`, after
 /// calling `setup` on the chat view. It opens no window on screen and takes no focus: GPUI's
 /// headless renderer draws into a texture.
-fn render_pngs(
+pub(super) fn render_pngs(
     dir: &Path,
     prefix: &str,
     thread: &dyn Fn() -> ThreadState,
@@ -244,4 +244,185 @@ fn render_timeline_warning_screenshots() {
         chat.toggle_expanded("warn-1", cx);
         chat.toggle_expanded("work-group-tool-1", cx);
     });
+}
+
+/// A live turn (a settled thought and tool, then a running tool) with two messages queued behind
+/// it.
+pub(super) fn queued_thread(count: u32, first: usize) -> ThreadState {
+    let mut thread = ThreadState::new("thread-selected");
+    thread.synchronized = true;
+    thread.working = true;
+    let user = |id: &str, text: &str| TimelineEntry::User {
+        id: id.to_owned(),
+        text: text.to_owned(),
+        created_by_agent: false,
+        sender: None,
+        created_at: None,
+        attachments: Vec::new(),
+        is_steer: false,
+        review_comments: Vec::new(),
+        run_id: Some("run-1".to_owned()),
+    };
+    let tool = |id: &str, title: &str, status: ItemStatus| TimelineEntry::Tool {
+        id: id.to_owned(),
+        kind: "command".to_owned(),
+        title: title.to_owned(),
+        detail: None,
+        status,
+        output_omitted: false,
+    };
+    let queued = |n: u32, text: &str| TimelineEntry::QueuedUser {
+        id: format!("queued-{n}"),
+        run_id: format!("run-q-{n}"),
+        message_id: format!("msg-q-{n}"),
+        text: text.to_owned(),
+        attachments: Vec::new(),
+        created_at: "2026-11-26T08:08:00.000Z".to_owned(),
+        created_by_agent: false,
+    };
+    thread.entries = vec![
+        user("u-1", "Run the whole test suite and fix what breaks."),
+        TimelineEntry::Thinking {
+            id: "think-1".to_owned(),
+            text: "Starting with the crate that changed.".to_owned(),
+            streaming: false,
+        },
+        tool("tool-1", "cargo test -p conn-state", ItemStatus::Completed),
+        tool("tool-2", "cargo test -p conn-app", ItemStatus::Running),
+    ];
+    const QUEUED: [&str; 6] = [
+        "After that, also run clippy with warnings denied.",
+        "Then open a PR with screenshots.",
+        "Check that the light theme shows the tray clearly, with the same width as the composer and a tucked bottom edge, and tell me what you see",
+        "Rename the helper so it says what it does",
+        "Add a test for the empty queue",
+        "Last one: delete the scratch files",
+    ];
+    for n in 1..=count {
+        thread
+            .entries
+            .push(queued(n, QUEUED[(n as usize - 1 + first) % QUEUED.len()]));
+    }
+    for (id, start) in [("think-1", 0), ("tool-1", 3_000), ("tool-2", 9_000)] {
+        thread.entry_timings.insert(
+            id.to_owned(),
+            EntryTiming {
+                run_id: Some("run-1".to_owned()),
+                started_at_ms: Some(start),
+                completed_at_ms: (id != "tool-2").then_some(start + 3_000),
+            },
+        );
+    }
+    thread
+}
+
+/// Renders a live work group with queued messages in the tray: one short, three (one of them
+/// long), and one long.
+///
+/// `CONN_THREAD_SHOTS_DIR=<dir> cargo test -p conn-app render_queue_tray_screenshots -- --ignored`
+#[test]
+#[ignore = "writes PNGs; set CONN_THREAD_SHOTS_DIR"]
+fn render_queue_tray_screenshots() {
+    let Some(dir) = std::env::var_os("CONN_THREAD_SHOTS_DIR") else {
+        return;
+    };
+    for (name, count, first) in [("queue-1", 1, 0), ("queue-3", 3, 0), ("queue-1-long", 1, 2)] {
+        render_pngs(
+            Path::new(&dir),
+            name,
+            &|| queued_thread(count, first),
+            &|_, _| {},
+        );
+    }
+}
+
+/// Renders one, two and four queued messages, to check the hairlines between the rows and that
+/// every row's band is the same height.
+///
+/// `CONN_THREAD_SHOTS_DIR=<dir> CONN_THREAD_SHOTS_PREFIX=after cargo test -p conn-app
+/// render_queue_tray_divider_screenshots -- --ignored`
+#[test]
+#[ignore = "writes PNGs; set CONN_THREAD_SHOTS_DIR"]
+fn render_queue_tray_divider_screenshots() {
+    let Some(dir) = std::env::var_os("CONN_THREAD_SHOTS_DIR") else {
+        return;
+    };
+    let prefix = std::env::var("CONN_THREAD_SHOTS_PREFIX").unwrap_or_else(|_| "queue".to_owned());
+    for count in [1, 2, 4] {
+        render_pngs(
+            Path::new(&dir),
+            &format!("{prefix}-rows-{count}"),
+            &|| queued_thread(count, 3),
+            &|_, _| {},
+        );
+    }
+    render_pngs(
+        Path::new(&dir),
+        &format!("{prefix}-rows-4-hover-last"),
+        &|| queued_thread(4, 3),
+        &|chat, cx| chat.note_queue_row_hover("queued-4", true, cx),
+    );
+}
+
+/// Renders two queued messages above the composer, to check the tray's fill against the
+/// composer's.
+///
+/// `CONN_THREAD_SHOTS_DIR=<dir> cargo test -p conn-app render_queue_tray_fill_screenshots -- --ignored`
+#[test]
+#[ignore = "writes PNGs; set CONN_THREAD_SHOTS_DIR"]
+fn render_queue_tray_fill_screenshots() {
+    let Some(dir) = std::env::var_os("CONN_THREAD_SHOTS_DIR") else {
+        return;
+    };
+    render_pngs(
+        Path::new(&dir),
+        "queue-2",
+        &|| queued_thread(2, 0),
+        &|_, _| {},
+    );
+}
+
+/// Renders messages on their way to the server in the tray: one waiting for the connection
+/// below a queued message, and one alone that is slow to send.
+///
+/// `CONN_THREAD_SHOTS_DIR=<dir> cargo test -p conn-app render_pending_send_screenshots -- --ignored`
+#[test]
+#[ignore = "writes PNGs; set CONN_THREAD_SHOTS_DIR"]
+fn render_pending_send_screenshots() {
+    let Some(dir) = std::env::var_os("CONN_THREAD_SHOTS_DIR") else {
+        return;
+    };
+    let dir = Path::new(&dir);
+    render_pngs(
+        dir,
+        "pending-waiting",
+        &|| queued_thread(1, 0),
+        &|chat, cx| {
+            chat.set_pending_sends(
+                vec![crate::chat::PendingSendRow::new(
+                    1,
+                    "Can you also check the light theme before you push?",
+                    0,
+                    true,
+                )],
+                cx,
+            );
+        },
+    );
+    render_pngs(
+        dir,
+        "pending-sending",
+        &|| queued_thread(0, 0),
+        &|chat, cx| {
+            chat.set_pending_sends(
+                vec![crate::chat::PendingSendRow::new(
+                    2,
+                    "Run the reconnect tests again",
+                    1,
+                    false,
+                )],
+                cx,
+            );
+        },
+    );
 }

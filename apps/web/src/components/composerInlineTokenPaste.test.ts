@@ -50,6 +50,14 @@ describe("importPastedComposerText", () => {
     expect(text).toBe(chip("Login"));
   });
 
+  it("makes a chip of a conn://thread link pasted without T3's clipboard format", () => {
+    const text = importPastedComposerText(
+      clipboard({ "text/plain": "[Login](conn://thread/env-1/thread-1)" }),
+      importAll([]),
+    );
+    expect(text).toBe(chip("Login"));
+  });
+
   it("keeps the link when the composer cannot take the thread", () => {
     const pasted = "https://app.t3.codes/threads/env-1/thread-1";
     expect(importPastedComposerText(clipboard({ "text/plain": pasted }), () => new Map())).toBe(

@@ -9,6 +9,11 @@ Conn depends on it. Since 2026-11-16 one Orbit Project runs it in its new contai
 "Released and running in Orbit"); the web and iOS clients were tested against it in a VM
 (see "Client parity, wave 1").
 
+Provider replay coverage now includes Claude Auto approvals and late background task
+notifications, router cooldowns, Codex prompt delivery on interruption, and context
+restoration across the Codex 0.171 boundary. ACP approval checks use the changed paths
+from the tool call and its permission request. Handoffs budget serialized history in bytes.
+
 PR checks now include GitHub’s start and completion timestamps when available. Clients can show elapsed time for completed runs.
 
 **Effect outbox (2026-11-23):** effects commit with their command in `effect_outbox` and one
@@ -657,8 +662,12 @@ itself, so nothing new is advertised.
 - **Known differences:** a call that names a server tab stays on the server's browser while
   a desktop tab is current (T3 sends it to the desktop, which refuses it). A desktop cannot
   restore an unknown tab id from this server's own allocator. `preview.list` gives no
-  `host`/`hostedHere` (as T3's `preview.list`); `fill_credential` reads the server browser
-  only. Bounds T3 does not have: 64 registered desktop tabs, 128 desktop tab
+  `host`/`hostedHere` (as T3's `preview.list`). A fill (`credentialFill`, from
+  `fill_credential`) goes only to a desktop whose session holds `settings:write`, the scope
+  that reads test logins; T3 sends it to any `preview:operate` host. Other hosts still serve
+  every other call, and `fill_credential` refuses with `capability_denied` before it reads the
+  secret (2026-11-26; tests in `relay/tests.rs`, `conn-mcp` and `methods/preview/tests.rs`).
+  Bounds T3 does not have: 64 registered desktop tabs, 128 desktop tab
   records, 256 pending requests, 256 agent assignments, 64 queued requests per desktop (a
   full queue answers `RequestQueueClosedError`). `preview_status` reads the desktop tabs one
   after another (T3: four at a time). `preview_act` input is not decoded per action before it
@@ -1468,6 +1477,9 @@ builder with a test that fails without the fix.
 - **Release `conn-server-v0.5.1`**: existing peer links extend themselves to until-revoked, with no re-pair (#338); the version bump is its own PR.
 - **Release `conn-server-v0.5.2`**: filing General threads under Orbit projects (#351), native thread-card server support (#352), Zed PHP navigation (#343), and upload and recording fixes (#331, #346); the version bump is its own PR.
 - **Release `conn-server-v0.5.3`**: Claude Code, Codex, Grok and Antigravity aligned with upstream T3, including the Codex MCP sign-in fixes (#358); the version bump is its own PR.
+- **Release `conn-server-v0.5.4`**: the desktop preview relay for agent browser tabs (#380), `conn://thread/…` thread links (#395), and the Gateway thread outbox (#383); the version bump is its own PR.
+- **Release `conn-server-v0.5.5`**: agents on linked environments drive the GPUI integrated browser and panels (#423), and linked-environment thread details list scheduled tasks (#426); the version bump is its own PR.
+- **Release `conn-server-v0.5.6`**: stricter provider approval checks and turn recovery after wakes and prompt-delivery failures (#438); the version bump is its own PR.
 
 ## Partly followed to Conn `444f032be7` (the 2026-11-18 sync)
 

@@ -103,7 +103,12 @@ describe("Enriched link presentation", () => {
   });
 
   it("presents thread links as thread chips and leaves other links alone", () => {
-    for (const href of ["t3-thread://v1/thread%3Aproject%3A1", "t3-thread://v2/env/thread_1"]) {
+    for (const href of [
+      "t3-thread://v1/thread%3Aproject%3A1",
+      "t3-thread://v2/env/thread_1",
+      "conn://thread/env/thread_1",
+      "conn-dev://thread/env/thread_1",
+    ]) {
       expect(enrichedThreadLinkPresentation(href), href).toEqual({
         accent: "#009c96",
         icon: { kind: "chip", name: "messages-square" },
@@ -113,6 +118,8 @@ describe("Enriched link presentation", () => {
       "https://github.com/example/repo/pull/7",
       "https://example.com",
       "t3-context://v1/thread/thread_1",
+      "conn://thread/thread_1",
+      "conn://workspace/env/thread_1",
     ]) {
       expect(enrichedThreadLinkPresentation(href), href).toBeUndefined();
     }
@@ -163,6 +170,36 @@ describe("Enriched link presentation", () => {
         href: "t3-thread://v2/env-here/thread_a",
         environmentId: here,
         threadId: "thread_a",
+        link: true,
+      },
+    ]);
+  });
+
+  it("finds conn://thread links as chips, beside t3-thread links, each once", () => {
+    const here = "env-here" as EnvironmentId;
+    const there = "env-there" as EnvironmentId;
+    expect(
+      threadChipTargets(
+        here,
+        "[A](conn://thread/env-there/thread_a), [A again](conn://thread/env-there/thread_a), [B](<conn://thread/env-here/thread_b>), [C](t3-thread://v2/env-there/thread_c) and [D](conn://thread/thread_d).",
+      ),
+    ).toEqual([
+      {
+        href: "conn://thread/env-there/thread_a",
+        environmentId: there,
+        threadId: "thread_a",
+        link: true,
+      },
+      {
+        href: "conn://thread/env-here/thread_b",
+        environmentId: here,
+        threadId: "thread_b",
+        link: true,
+      },
+      {
+        href: "t3-thread://v2/env-there/thread_c",
+        environmentId: there,
+        threadId: "thread_c",
         link: true,
       },
     ]);

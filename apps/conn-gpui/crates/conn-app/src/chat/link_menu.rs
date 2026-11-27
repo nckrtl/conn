@@ -342,13 +342,8 @@ impl ChatView {
         cx: &mut Context<'_, Self>,
     ) {
         let has_thread = self.has_thread && self.thread_id.is_some();
-        let local = self.workspace_root.as_deref().is_some_and(|root| {
-            std::path::Path::new(&file_path::absolute_path(
-                root,
-                file_path::split_line_suffix(path).0,
-            ))
-            .exists()
-        });
+        let local = (path.starts_with('/') || self.workspace_root.is_some())
+            && std::path::Path::new(&self.absolute_file_path(path, false)).exists();
         let facts = FileMenuFacts {
             has_thread,
             browser_ready: has_thread && self.connection.is_some(),
@@ -426,9 +421,9 @@ impl ChatView {
         cx.notify();
     }
 
-    /// Whether a link or message menu is open.
+    /// Whether a link, message or queued-message menu is open.
     pub(crate) fn has_open_menu(&self) -> bool {
-        self.link_menu.is_some()
+        self.link_menu.is_some() || self.queue.has_open_menu()
     }
 
     /// Closes the menu and hands the keyboard back.
@@ -542,9 +537,10 @@ impl ChatView {
         } else {
             file_path::split_line_suffix(path).0
         };
+        // A link to a file outside the workspace already carries its host path.
         match self.workspace_root.as_deref() {
-            Some(root) => file_path::absolute_path(root, target),
-            None => target.to_owned(),
+            Some(root) if !target.starts_with('/') => file_path::absolute_path(root, target),
+            _ => target.to_owned(),
         }
     }
 

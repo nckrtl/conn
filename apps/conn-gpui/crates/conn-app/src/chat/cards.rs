@@ -33,9 +33,9 @@ use gpui_kit::{
 
 use super::card_face::{
     CARD_ACTION_BOX_PX, CARD_ACTION_ICON_PX, CARD_BODY_RADIUS_PX, CARD_CHEVRON_ROOM_PX,
-    CARD_ICON_PX, CARD_LINE_PX, CARD_META_LINE_PX, CARD_PREVIEW_LINES, CARD_TEXT_PX, CHECKLIST,
-    CardFace, DOWNLOAD, card_body, card_colors, card_header, card_hover_surface, card_shell,
-    disclosure_chevron, icon_with_dot, one_line_preview,
+    CARD_ICON_PX, CARD_INSET_PX, CARD_LINE_PX, CARD_META_LINE_PX, CARD_PREVIEW_LINES, CARD_TEXT_PX,
+    CHECKLIST, CardFace, DOWNLOAD, card_body, card_body_hover, card_colors, card_header,
+    card_hover_surface, card_shell, disclosure_chevron, icon_with_dot, one_line_preview,
 };
 use super::color::{hsla, hsla_alpha, muted_icon, prose_foreground};
 use super::composer_state::{ComposerPendingRequest, PendingQuestion};
@@ -86,7 +86,7 @@ impl UserInputCardState {
 
 /// Local state of one pending secret form.
 pub(super) struct SecretFormState {
-    input: Entity<InputState>,
+    pub(super) input: Entity<InputState>,
     pub(super) submitting: bool,
     pub(super) error: Option<String>,
     _subscription: Subscription,
@@ -377,6 +377,10 @@ impl ChatView {
         cx: &mut Context<'_, Self>,
     ) -> Vec<AnyElement> {
         use super::attachment_thumb::{AttachmentKind, attachment_kind, gallery_columns, runs_by};
+        // Every image of the message, in attach order: a tile opens the viewer on its own place.
+        let gallery: std::rc::Rc<[super::image_viewer::ViewerItem]> =
+            super::image_viewer::gallery_items(attachments).into();
+        let mut images_before = 0;
         // One column count for the whole message, so every run's tiles are the same size.
         let columns = gallery_columns(
             attachments
@@ -391,7 +395,16 @@ impl ChatView {
                 let run = &attachments[range];
                 match kind {
                     AttachmentKind::Image => {
-                        self.render_image_gallery(key, start, run, columns, cx)
+                        let first_image = images_before;
+                        images_before += run.len();
+                        self.render_image_gallery(
+                            key,
+                            (start, first_image),
+                            run,
+                            columns,
+                            &gallery,
+                            cx,
+                        )
                     }
                     AttachmentKind::Video => self.render_video_run(key, start, run),
                     AttachmentKind::File => self.render_file_rows(key, start, run, cx),
@@ -410,14 +423,20 @@ impl ChatView {
     /// is still being fitted to its caption, so it reserved tile heights for the cap width and
     /// left a blank band under tiles that then painted narrower. A flex cell gets its width first
     /// and its 4:3 height from that width.
+    ///
+    /// `place` is where the run starts: its index among the message's attachments, and among
+    /// its images. A tile is a button that opens the full-image viewer on its own image of
+    /// `viewer_items`.
     fn render_image_gallery(
         &self,
         key: &str,
-        start: usize,
+        place: (usize, usize),
         run: &[conn_contract::ChatAttachment],
         columns: usize,
+        viewer_items: &std::rc::Rc<[super::image_viewer::ViewerItem]>,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
+        let (start, first_image) = place;
         use super::attachment_thumb::{
             GALLERY_INSET_PX, gallery_cell, gallery_tile, gallery_tile_target, tile_radii,
         };
@@ -438,10 +457,30 @@ impl ChatView {
                 let idx = start + offset;
                 let loaded = self.attachment_image(image, target, cx);
                 let radii = tile_radii(offset, run.len(), columns);
+                let (open_gallery, ordinal) = (viewer_items.clone(), first_image + offset);
+                // Focusable, so Tab reaches it and Enter or Space opens it (a keyboard click).
+                let open = div()
+                    .id((SharedString::from(format!("att-open-{key}")), idx))
+                    .a11y_button(
+                        format!("chat.attachment.{key}.{idx}.open"),
+                        format!("Preview {}", image.name),
+                    )
+                    .tab_index(0)
+                    .absolute()
+                    .inset_0()
+                    .cursor_pointer()
+                    .on_click(
+                        cx.listener(move |this, _: &gpui_kit::ClickEvent, _window, cx| {
+                            this.open_image_viewer(&open_gallery, ordinal, cx);
+                        }),
+                    );
+                #[cfg(test)]
+                let open = gpui_kit::TestSupportExt::test_support(open);
                 let cell = gallery_cell((SharedString::from(format!("att-{key}")), idx))
                     .flex_1()
                     .conn_tooltip(image.name.clone(), &self.tokens)
-                    .child(gallery_tile(loaded, &self.tokens, radii));
+                    .child(gallery_tile(loaded, &self.tokens, radii))
+                    .child(open);
                 let cell = cell.a11y_group(
                     format!("chat.attachment.{key}.{idx}"),
                     format!("Attachment {}", image.name),
@@ -763,10 +802,28 @@ impl ChatView {
 
     /// Conn `UserMessageIntentMarker`: `Redo2` + `Steer` above a steering bubble.
     pub(super) fn render_steer_marker(&self, id: &str) -> AnyElement {
+        self.render_intent_marker(
+            format!("steer-{id}"),
+            format!("chat.steer.{id}"),
+            icons::REDO,
+            "Steer",
+            "Steered the active turn",
+        )
+    }
+
+    /// A small muted icon + label right-aligned above a user bubble (`Steer`, `Queued`).
+    fn render_intent_marker(
+        &self,
+        element_id: String,
+        a11y_id: String,
+        icon: &'static str,
+        label: &'static str,
+        tooltip: &'static str,
+    ) -> AnyElement {
         let muted = hsla(self.tokens.muted_foreground);
-        div()
-            .id(SharedString::from(format!("steer-{id}")))
-            .a11y_group(format!("chat.steer.{id}"), "Steered the active turn")
+        let marker = div()
+            .id(SharedString::from(element_id))
+            .a11y_group(a11y_id, tooltip)
             .mr(px(4.0))
             .mb(px(4.0))
             .flex()
@@ -777,10 +834,12 @@ impl ChatView {
             .text_size(px(12.0))
             .line_height(px(12.0))
             .text_color(muted)
-            .conn_tooltip("Steered the active turn", &self.tokens)
-            .child(icons::icon(icons::REDO, 12.0, muted))
-            .child("Steer")
-            .into_any_element()
+            .conn_tooltip(tooltip, &self.tokens)
+            .child(icons::icon(icon, 12.0, muted))
+            .child(label);
+        #[cfg(test)]
+        let marker = gpui_kit::TestSupportExt::test_support(marker);
+        marker.into_any_element()
     }
 
     /// Conn `messageActions` under a user bubble: timestamp + Copy, revealed on row hover.
@@ -813,6 +872,8 @@ impl ChatView {
                 cx,
             ));
         }
+        #[cfg(test)]
+        let actions = gpui_kit::TestSupportExt::test_support(actions);
         actions.into_any_element()
     }
 
@@ -838,7 +899,7 @@ impl ChatView {
         let mut meta = div()
             .id(SharedString::from(format!("assistant-actions-{id}")))
             .a11y_group(format!("chat.assistant.{id}.actions"), "Message actions")
-            .mt(px(6.0))
+            .mt(px(super::ASSISTANT_META_GAP_PX))
             .flex()
             .flex_row()
             .items_center()
@@ -911,6 +972,8 @@ impl ChatView {
         if let Some(ts) = self.render_timestamp(&format!("assistant-{id}"), created_at) {
             meta = meta.child(ts);
         }
+        #[cfg(test)]
+        let meta = gpui_kit::TestSupportExt::test_support(meta);
         meta.into_any_element()
     }
 
@@ -1301,13 +1364,7 @@ impl ChatView {
                 d.on_click(cx.listener(move |view, _, _, cx| view.toggle_expanded(&toggle, cx)))
             });
         line = line.text_color(muted);
-        let mut col = div()
-            .flex()
-            .flex_col()
-            .w_full()
-            .min_w_0()
-            .pb(px(8.0))
-            .child(line);
+        let mut col = div().flex().flex_col().w_full().min_w_0().child(line);
         if expanded {
             let mut list = div()
                 .ml(px(28.0))
@@ -1478,7 +1535,6 @@ impl ChatView {
         div()
             .w_full()
             .min_w_0()
-            .pb(px(8.0))
             .child(
                 self.work_log_line(
                     &format!("secret-{id}"),
@@ -1779,12 +1835,7 @@ impl ChatView {
             )
             .child(header)
             .child(body);
-        div()
-            .w_full()
-            .min_w_0()
-            .pb(px(16.0))
-            .child(card)
-            .into_any_element()
+        card.into_any_element()
     }
 
     /// A 24px header button that saves `contents` to a file the user names.
@@ -1896,21 +1947,45 @@ impl ChatView {
 
         // Lab `SubagentCard`: `<model> · <effort>` (and the state while no time shows), the run
         // time at the right.
-        let model_text = self
-            .subagent_models
-            .get(id)
-            .and_then(|model| subagent_model_text(self.server_config.catalog(), model));
+        let model = subagent_card_model(
+            self.subagent_child_models.get(id),
+            self.subagent_models.get(id),
+        );
+        let model_text =
+            model.and_then(|model| subagent_model_text(self.server_config.catalog(), model));
         let mut meta_parts: Vec<String> = Vec::new();
         if let Some(remote) = remote_child {
             meta_parts.push(format!("on {}", remote.label));
         }
         meta_parts.extend(model_text);
+        // A task on another machine has the driver `remote` here, a label and not a provider, so the
+        // mark comes from the instance and model it runs.
+        let (provider_key, provider_label) =
+            subagent_provider(role, model, self.server_config.catalog());
+        let provider_mark = div()
+            .id(SharedString::from(format!("subagent-provider-{id}")))
+            .a11y(
+                gpui_kit::Role::Image,
+                format!("chat.subagent.{id}.provider"),
+                provider_label,
+            )
+            .flex()
+            .flex_none()
+            .items_center()
+            .justify_center()
+            .child(crate::icons::provider_mark(
+                &provider_key,
+                CARD_ICON_PX,
+                muted,
+            ));
+        #[cfg(test)]
+        let provider_mark = gpui_kit::TestSupportExt::test_support(provider_mark);
         if elapsed.is_none() {
             meta_parts.push(status_label.to_owned());
         }
         let mut header = card_header(false)
             .child(icon_with_dot(
-                crate::icons::provider_mark(role, CARD_ICON_PX, muted),
+                provider_mark.into_any_element(),
                 dot.map(|core| (core, colors.surface())),
             ))
             .child(
@@ -1937,6 +2012,17 @@ impl ChatView {
 
         let summary = summary.map(str::trim).filter(|s| !s.is_empty());
         let expanded = self.expanded_ids.contains(&subagent_summary_key(id));
+        let open = remote_child
+            .map(|remote| {
+                (
+                    remote.thread_id.clone(),
+                    Some(remote.environment_id.clone()),
+                )
+            })
+            .or_else(|| child_thread_id.map(|child| (child.to_owned(), None)));
+        // Only the body lightens under the pointer; the frame and its header keep the surface.
+        let body_hover = card_body_hover(colors, &self.tokens);
+        let group = SharedString::from(format!("subagent-group-{id}"));
         let mut title_row = div()
             .relative()
             .text_size(px(CARD_TEXT_PX))
@@ -1999,6 +2085,7 @@ impl ChatView {
                     },
                 )
                 .cursor_pointer()
+                .hover(move |s| s.bg(body_hover))
                 .on_click(cx.listener(move |view, _, _, cx| {
                     view.toggle_subagent_summary(&entry_id, cx);
                 }));
@@ -2009,20 +2096,18 @@ impl ChatView {
                 toggle.test_support()
             };
             toggle.into_any_element()
+        } else if open.is_some() {
+            // No report: the whole card is the button for the thread, and this body shows it.
+            card_body(colors)
+                .group_hover(group.clone(), move |s| s.bg(body_hover))
+                .child(title_row)
+                .into_any_element()
         } else {
             card_body(colors).child(title_row).into_any_element()
         };
         let card = card_shell(colors).id(SharedString::from(format!("subagent-{id}")));
-        let open = remote_child
-            .map(|remote| {
-                (
-                    remote.thread_id.clone(),
-                    Some(remote.environment_id.clone()),
-                )
-            })
-            .or_else(|| child_thread_id.map(|child| (child.to_owned(), None)));
         let a11y_label = format!("Subagent {title}, {status_label}");
-        // A card that opens a thread lightens under the pointer, as the subagent card always did.
+        // A header that opens a thread lightens under the pointer: it is a button of its own.
         let hover = card_hover_surface(colors, &self.tokens);
         let card = match (open, summary.is_some()) {
             // The header opens the thread; the body opens and closes the report.
@@ -2050,9 +2135,9 @@ impl ChatView {
             }
             // No report: the whole card is the button for the thread.
             (Some((thread_id, environment_id)), false) => card
+                .group(group)
                 .a11y_button(format!("chat.subagent.{id}"), format!("Open {title}"))
                 .cursor_pointer()
-                .hover(move |s| s.bg(hover))
                 .on_click(cx.listener(move |_, _, _, cx| {
                     cx.emit(ChatEvent::OpenThread {
                         thread_id: thread_id.clone(),
@@ -2072,12 +2157,7 @@ impl ChatView {
             use gpui_kit::TestSupportExt as _;
             card.test_support()
         };
-        div()
-            .w_full()
-            .min_w_0()
-            .pb(px(8.0))
-            .child(card)
-            .into_any_element()
+        card.into_any_element()
     }
 
     // -----------------------------------------------------------------------------------------
@@ -2230,10 +2310,10 @@ impl ChatView {
             .a11y_group(format!("chat.changed-files.group.{run_id}"), label)
             .flex()
             .flex_col()
-            .w_full()
+            .mx(px(-CARD_INSET_PX))
             .min_w_0()
-            .gap(px(3.0))
-            .p(px(3.0))
+            .gap(px(CARD_INSET_PX))
+            .p(px(CARD_INSET_PX))
             .rounded(px(14.0))
             .bg(surface)
             .child(
@@ -2392,11 +2472,7 @@ impl ChatView {
             );
         }
 
-        div()
-            .pt(px(16.0))
-            .pb(px(4.0))
-            .child(card)
-            .into_any_element()
+        card.into_any_element()
     }
 
     // -----------------------------------------------------------------------------------------
@@ -2604,10 +2680,100 @@ pub(super) fn outline_button_surface(
         .hover(move |s| s.bg(hover_bg))
 }
 
+/// The provider id the subagent card's mark is drawn from, and the mark's accessibility label
+/// (`Agent` for a provider with no mark of its own).
+///
+/// The subagent's driver names the provider, except for a task on another machine: its driver is
+/// `remote`. Then the provider comes from the model catalog, the instance id, or the model slug,
+/// in that order.
+fn subagent_provider(
+    role: &str,
+    model: Option<&conn_state::SubagentModel>,
+    catalog: &conn_state::providers::ModelCatalog,
+) -> (String, &'static str) {
+    let catalog_driver = model.and_then(|model| {
+        let slug = model.model.as_deref()?;
+        catalog
+            .find_model(model.instance_id.as_deref(), slug)
+            .map(|found| found.driver.as_str())
+    });
+    let candidates = [
+        Some(role),
+        catalog_driver,
+        model.and_then(|model| model.instance_id.as_deref()),
+        model.and_then(|model| model.model.as_deref()),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .find_map(|candidate| {
+            crate::icons::provider_brand(candidate)
+                .map(|brand| (candidate.to_owned(), brand.label()))
+        })
+        .unwrap_or_else(|| (role.to_owned(), "Agent"))
+}
+
+/// The model a subagent card shows: the child thread's own selection (`child`, from the shell)
+/// when known, else the parent's subagent record (the delegate call's `target`). The record can
+/// lack the options the child runs with, so the child wins.
+pub(crate) fn subagent_card_model<'a>(
+    child: Option<&'a conn_state::SubagentModel>,
+    record: Option<&'a conn_state::SubagentModel>,
+) -> Option<&'a conn_state::SubagentModel> {
+    child.filter(|model| model.model.is_some()).or(record)
+}
+
+/// The child thread's own model of each subagent entry of `thread`, by entry id. `child_shell`
+/// finds a child thread in the shell: its id and, for a child on another linked environment, that
+/// environment (`None`: the parent's own environment). Children the shell lacks are left out.
+pub(crate) fn subagent_child_models<'a>(
+    thread: &conn_state::ThreadState,
+    child_shell: impl Fn(&str, Option<&str>) -> Option<&'a conn_state::ThreadShell>,
+) -> HashMap<String, conn_state::SubagentModel> {
+    thread
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            let TimelineEntry::Subagent {
+                id,
+                child_thread_id,
+                remote_child,
+                ..
+            } = entry
+            else {
+                return None;
+            };
+            let child = match (remote_child, child_thread_id) {
+                (Some(remote), _) => {
+                    child_shell(&remote.thread_id, Some(remote.environment_id.as_str()))
+                }
+                (None, Some(child)) => child_shell(child, None),
+                (None, None) => None,
+            }?;
+            let model = conn_state::SubagentModel::from_selection(
+                &child.provider_instance_id,
+                &child.model_selection,
+            );
+            model.model.is_some().then(|| (id.clone(), model))
+        })
+        .collect()
+}
+
+/// Option ids that carry a provider's effort: Codex and Grok `reasoningEffort`, Claude `effort`,
+/// Antigravity `thought_level`.
+const EFFORT_OPTION_IDS: [&str; 6] = [
+    "reasoningEffort",
+    "effort",
+    "thought_level",
+    "reasoning_effort",
+    "thinking_level",
+    "reasoning",
+];
+
 /// `<model> · <effort>` for a subagent card, for example `Opus 5.5 · medium`. The model name is the
 /// composer's trigger label; the effort is the composer's effort label, lowercased. A model the
 /// catalog does not list shows its slug and the raw reasoning option.
-fn subagent_model_text(
+pub(crate) fn subagent_model_text(
     catalog: &conn_state::providers::ModelCatalog,
     model: &conn_state::SubagentModel,
 ) -> Option<String> {
@@ -2632,7 +2798,7 @@ fn subagent_model_text(
     let effort = found
         .and_then(|found| found.effort_summary(Some(&options)).word)
         .or_else(|| {
-            ["reasoningEffort", "effort", "reasoning"]
+            EFFORT_OPTION_IDS
                 .iter()
                 .find_map(|key| model.options.get(*key).cloned())
         })
@@ -2645,10 +2811,197 @@ fn subagent_model_text(
 
 #[cfg(test)]
 mod subagent_model_tests {
-    use super::subagent_model_text;
-    use conn_state::SubagentModel;
+    use super::{
+        subagent_card_model, subagent_child_models, subagent_model_text, subagent_provider,
+    };
     use conn_state::providers::ModelCatalog;
+    use conn_state::{SubagentModel, ThreadShell, ThreadState, TimelineEntry, TurnItemStatus};
+    use serde_json::{Value, json};
     use std::collections::HashMap;
+
+    /// A provider whose one model has an effort select `option` (default `low`) with choices.
+    fn provider(instance: &str, driver: &str, slug: &str, name: &str, option: &str) -> Value {
+        json!({
+            "instanceId": instance, "driver": driver, "displayName": name, "enabled": true,
+            "installed": true, "status": "ready", "auth": {"status": "authenticated"},
+            "checkedAt": "2026-11-27T00:00:00Z",
+            "models": [{
+                "slug": slug, "name": name, "isCustom": false,
+                "capabilities": { "optionDescriptors": [{
+                    "id": option, "label": "Effort", "type": "select",
+                    "options": [
+                        { "id": "low", "label": "Low", "isDefault": true },
+                        { "id": "medium", "label": "Medium" },
+                        { "id": "high", "label": "High" } ],
+                    "currentValue": "low",
+                }] },
+            }],
+        })
+    }
+
+    fn catalog() -> ModelCatalog {
+        let providers = [
+            provider(
+                "codex",
+                "codex",
+                "gpt-6.2-astra",
+                "GPT-6.2 Astra",
+                "reasoningEffort",
+            ),
+            provider(
+                "claudeAgent",
+                "claudeAgent",
+                "claude-opus-5-5",
+                "Claude Opus 5.5",
+                "effort",
+            ),
+            provider(
+                "antigravity",
+                "antigravity",
+                "gemini-4-pro",
+                "Gemini 4 Pro",
+                "thought_level",
+            ),
+        ]
+        .map(|value| Some(conn_contract::from_json(value).expect("a provider")));
+        ModelCatalog::from_providers(&providers)
+    }
+
+    fn with_option(instance: &str, slug: &str, option: &str, value: &str) -> SubagentModel {
+        SubagentModel {
+            options: HashMap::from([(option.to_owned(), value.to_owned())]),
+            ..model(instance, slug)
+        }
+    }
+
+    fn effort_of(text: Option<String>) -> String {
+        let text = text.expect("a model text");
+        text.rsplit(" · ").next().unwrap_or_default().to_owned()
+    }
+
+    #[test]
+    fn each_provider_shows_the_effort_it_runs_at() {
+        let catalog = catalog();
+        let codex = with_option("codex", "gpt-6.2-astra", "reasoningEffort", "high");
+        assert_eq!(effort_of(subagent_model_text(&catalog, &codex)), "high");
+        let claude = with_option("claudeAgent", "claude-opus-5-5", "effort", "medium");
+        assert_eq!(effort_of(subagent_model_text(&catalog, &claude)), "medium");
+        let gemini = with_option("antigravity", "gemini-4-pro", "thought_level", "high");
+        assert_eq!(effort_of(subagent_model_text(&catalog, &gemini)), "high");
+    }
+
+    #[test]
+    fn no_options_shows_the_model_default() {
+        let catalog = catalog();
+        let bare = model("codex", "gpt-6.2-astra");
+        assert_eq!(effort_of(subagent_model_text(&catalog, &bare)), "low");
+    }
+
+    #[test]
+    fn an_uncatalogued_antigravity_model_shows_its_raw_thought_level() {
+        let model = with_option("antigravity", "gemini-9", "thought_level", "High");
+        assert_eq!(
+            subagent_model_text(&ModelCatalog::default(), &model).as_deref(),
+            Some("gemini-9 · high")
+        );
+    }
+
+    #[test]
+    fn the_child_thread_selection_wins_over_the_subagent_record() {
+        let catalog = catalog();
+        // The Conn Server's record names the model but not the options it was started with.
+        let record = model("codex", "gpt-6.2-astra");
+        let child = with_option("codex", "gpt-6.2-astra", "reasoningEffort", "high");
+        let shown = subagent_card_model(Some(&child), Some(&record)).expect("a model");
+        assert_eq!(effort_of(subagent_model_text(&catalog, shown)), "high");
+        // Without the child, the record (the delegate call's target) shows.
+        let record = with_option("codex", "gpt-6.2-astra", "reasoningEffort", "medium");
+        let shown = subagent_card_model(None, Some(&record)).expect("a model");
+        assert_eq!(effort_of(subagent_model_text(&catalog, shown)), "medium");
+        // A child shell with no model says nothing.
+        let empty = SubagentModel::default();
+        assert_eq!(
+            subagent_card_model(Some(&empty), Some(&record)),
+            Some(&record)
+        );
+    }
+
+    fn child_shell(id: &str, effort: &str) -> ThreadShell {
+        conn_contract::from_json(json!({
+            "createdBy": "agent", "creationSource": "mcp", "id": id, "projectId": "p",
+            "title": "Child", "providerInstanceId": "codex",
+            "modelSelection": { "instanceId": "codex", "model": "gpt-6.2-astra",
+                "options": [{ "id": "reasoningEffort", "value": effort }] },
+            "runtimeMode": "full-access", "interactionMode": "default", "branch": null,
+            "worktreePath": null,
+            "lineage": { "rootThreadId": id, "parentThreadId": "parent", "relationshipToParent": null },
+            "forkedFrom": null, "activeProviderThreadId": null, "latestRunId": null,
+            "activeRunId": null, "status": "running", "pendingRuntimeRequest": null,
+            "latestVisibleMessage": null, "latestUserMessageAt": null,
+            "hasActionableProposedPlan": false, "itemCount": 0, "visibleItemCount": 0,
+            "createdAt": "2026-11-27T09:00:00.000Z", "updatedAt": "2026-11-27T09:00:00.000Z",
+            "archivedAt": null, "settledOverride": null, "settledAt": null, "deletedAt": null
+        }))
+        .expect("thread decodes")
+    }
+
+    fn subagent_entry(
+        id: &str,
+        child: Option<&str>,
+        remote: Option<conn_contract::OrchestrationV2RemoteTaskChild>,
+    ) -> TimelineEntry {
+        TimelineEntry::Subagent {
+            id: id.to_owned(),
+            child_thread_id: child.map(str::to_owned),
+            title: "Review".to_owned(),
+            role: "codex".to_owned(),
+            status: TurnItemStatus::Running,
+            summary: None,
+            remote_child: remote,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn local_and_linked_environment_children_read_their_own_shells() {
+        let local = child_shell("child-local", "high");
+        let remote = child_shell("child-remote", "medium");
+        let mut thread = ThreadState::new("parent");
+        thread.entries = vec![
+            subagent_entry("card-local", Some("child-local"), None),
+            subagent_entry(
+                "card-remote",
+                None,
+                Some(conn_contract::OrchestrationV2RemoteTaskChild {
+                    environment_id: "mini".to_owned(),
+                    thread_id: "child-remote".to_owned(),
+                    label: "Mac mini".to_owned(),
+                    title: None,
+                    run_id: None,
+                    stopped_there: None,
+                    stop_count: None,
+                }),
+            ),
+            subagent_entry("card-unknown", Some("child-missing"), None),
+        ];
+        let models = subagent_child_models(&thread, |id, environment| match (id, environment) {
+            ("child-local", None) => Some(&local),
+            ("child-remote", Some("mini")) => Some(&remote),
+            _ => None,
+        });
+        let catalog = catalog();
+        assert_eq!(
+            effort_of(subagent_model_text(&catalog, &models["card-local"])),
+            "high"
+        );
+        assert_eq!(
+            effort_of(subagent_model_text(&catalog, &models["card-remote"])),
+            "medium"
+        );
+        assert!(!models.contains_key("card-unknown"));
+    }
 
     #[test]
     fn a_model_the_catalog_lacks_shows_its_slug_and_raw_effort() {
@@ -2673,6 +3026,56 @@ mod subagent_model_tests {
         assert_eq!(
             subagent_model_text(&catalog, &SubagentModel::default()),
             None
+        );
+    }
+
+    fn model(instance: &str, slug: &str) -> SubagentModel {
+        SubagentModel {
+            model: Some(slug.to_owned()),
+            instance_id: Some(instance.to_owned()),
+            options: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn the_driver_names_the_provider_mark() {
+        let catalog = ModelCatalog::default();
+        assert_eq!(subagent_provider("claudeAgent", None, &catalog).1, "Claude");
+        assert_eq!(subagent_provider("codex", None, &catalog).1, "OpenAI");
+        assert_eq!(subagent_provider("grok", None, &catalog).1, "Grok");
+        assert_eq!(
+            subagent_provider("antigravity", None, &catalog).1,
+            "Antigravity"
+        );
+    }
+
+    #[test]
+    fn a_remote_task_takes_its_provider_from_the_instance_and_model() {
+        let catalog = ModelCatalog::default();
+        let claude = model("claudeAgent", "claude-opus-5-5");
+        assert_eq!(
+            subagent_provider("remote", Some(&claude), &catalog),
+            ("claudeAgent".to_owned(), "Claude")
+        );
+        // A custom instance id says nothing; the model slug does.
+        let codex = model("work-box", "gpt-5.5");
+        assert_eq!(
+            subagent_provider("remote", Some(&codex), &catalog).1,
+            "OpenAI"
+        );
+    }
+
+    #[test]
+    fn an_unknown_provider_keeps_the_agent_glyph() {
+        let catalog = ModelCatalog::default();
+        let unknown = model("mystery", "mystery-1");
+        assert_eq!(
+            subagent_provider("remote", Some(&unknown), &catalog),
+            ("remote".to_owned(), "Agent")
+        );
+        assert_eq!(
+            subagent_provider("remote", None, &catalog),
+            ("remote".to_owned(), "Agent")
         );
     }
 }

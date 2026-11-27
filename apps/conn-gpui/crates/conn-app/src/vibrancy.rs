@@ -83,6 +83,62 @@ pub(crate) fn sync_appearance(appearance: Appearance) {
 #[cfg(not(target_os = "macos"))]
 pub(crate) fn sync_appearance(_appearance: Appearance) {}
 
+/// The macOS system appearance (`AppleInterfaceStyle` in the global defaults domain).
+///
+/// Read from the defaults, not `NSApp.effectiveAppearance`, so it is the system's choice even
+/// after [`sync_appearance`] has pinned the app's own appearance to the theme.
+#[cfg(target_os = "macos")]
+pub(crate) fn system_appearance() -> Option<Appearance> {
+    use objc2::rc::Retained;
+    use objc2::runtime::{AnyClass, AnyObject};
+
+    let (Some(ns_string_cls), Some(defaults_cls)) =
+        (AnyClass::get(c"NSString"), AnyClass::get(c"NSUserDefaults"))
+    else {
+        return None;
+    };
+    // SAFETY: Standard Foundation calls:
+    // - `[[NSString alloc] initWithUTF8String:]` takes a NUL-terminated static C string and
+    //   returns a +1 owned `NSString` wrapped in `Retained`.
+    // - `+[NSUserDefaults standardUserDefaults]` returns the shared defaults object.
+    // - `-[NSUserDefaults stringForKey:]` returns an autoreleased `NSString` or `nil`.
+    // - `-[NSString UTF8String]` returns a NUL-terminated buffer that lives while the string does;
+    //   it is copied before the string is dropped.
+    unsafe {
+        let allocated: *mut AnyObject = objc2::msg_send![ns_string_cls, alloc];
+        let key: Option<Retained<AnyObject>> = Retained::from_raw(objc2::msg_send![
+            allocated,
+            initWithUTF8String: c"AppleInterfaceStyle".as_ptr()
+        ]);
+        let key = key?;
+        let defaults: Option<Retained<AnyObject>> =
+            objc2::msg_send![defaults_cls, standardUserDefaults];
+        let defaults = defaults?;
+        let style: Option<Retained<AnyObject>> = objc2::msg_send![&*defaults, stringForKey: &*key];
+        // No key: the system is in light mode.
+        let Some(style) = style else {
+            return Some(Appearance::Light);
+        };
+        let utf8: *const std::ffi::c_char = objc2::msg_send![&*style, UTF8String];
+        if utf8.is_null() {
+            return None;
+        }
+        let dark = std::ffi::CStr::from_ptr(utf8)
+            .to_string_lossy()
+            .eq_ignore_ascii_case("dark");
+        Some(if dark {
+            Appearance::Dark
+        } else {
+            Appearance::Light
+        })
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn system_appearance() -> Option<Appearance> {
+    None
+}
+
 #[cfg(target_os = "macos")]
 fn add_vibrancy(window: &Window) {
     use objc2::rc::Retained;

@@ -43,6 +43,12 @@ pub(super) const REFRESH: &str = "superhero/refresh.svg";
 // Card and hover-action glyphs (Lucide name -> superheroicons concept via manifest.json).
 /// `Redo2` (Conn's `Steer` marker).
 pub(super) const REDO: &str = "superhero/redo.svg";
+/// `CornerDownRight`, the arrow into a reply: a queued message's glyph and the `Steer` button.
+pub(super) const REPLY_INDENT: &str = "superhero/reply-indent.svg";
+/// `Trash2` (remove a queued message).
+pub(super) const DELETE: &str = "superhero/delete.svg";
+/// `Ellipsis` (a queued message's `…` menu).
+pub(super) const MORE_HORIZONTAL: &str = "superhero/more-horizontal.svg";
 /// `GitFork` (`Fork from this response`).
 pub(super) const FORK: &str = "superhero/fork.svg";
 /// `Minus` (declined secret request).

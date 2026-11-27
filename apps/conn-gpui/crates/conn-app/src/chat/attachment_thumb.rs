@@ -36,12 +36,6 @@ pub(super) fn image_format_for_mime(mime_type: &str) -> Option<ImageFormat> {
     }
 }
 
-/// An image GPUI can paint from `bytes`, or `None` for a non-image or unsupported type.
-pub(super) fn preview_image(mime_type: &str, bytes: Vec<u8>) -> Option<Arc<Image>> {
-    let format = image_format_for_mime(mime_type)?;
-    Some(Arc::new(Image::from_bytes(format, bytes)))
-}
-
 /// A sent image in the chat's thumbnail cache.
 pub(super) enum SentImage {
     /// The download or decode with this request number is waiting or running.
@@ -87,16 +81,7 @@ pub(super) fn load_sent_image(
     cancel: &AtomicBool,
 ) -> (SentImage, usize) {
     let thumb = thumbnail_for(mime_type, bytes, target, cancel, |bytes| {
-        let format = image_format_for_mime(mime_type)?;
-        let decoded = Image::from_bytes(format, bytes)
-            .to_image_data(svg_renderer)
-            .ok()?;
-        let size = decoded.size(0);
-        image::RgbaImage::from_raw(
-            u32::try_from(size.width.0).ok()?,
-            u32::try_from(size.height.0).ok()?,
-            decoded.as_bytes(0)?.to_vec(),
-        )
+        gpui_first_frame(mime_type, bytes, svg_renderer)
     });
     match thumb {
         Some(thumb) => {
@@ -106,6 +91,44 @@ pub(super) fn load_sent_image(
         }
         None => (SentImage::Failed, 0),
     }
+}
+
+/// The first frame of `bytes` through GPUI's own decoder, in GPUI's pixel order (BGRA). Only SVG,
+/// BMP and TIFF need it: the `image` build here reads the other formats itself.
+pub(super) fn gpui_first_frame(
+    mime_type: &str,
+    bytes: Vec<u8>,
+    svg_renderer: SvgRenderer,
+) -> Option<image::RgbaImage> {
+    let format = image_format_for_mime(mime_type)?;
+    let decoded = Image::from_bytes(format, bytes)
+        .to_image_data(svg_renderer)
+        .ok()?;
+    let size = decoded.size(0);
+    image::RgbaImage::from_raw(
+        u32::try_from(size.width.0).ok()?,
+        u32::try_from(size.height.0).ok()?,
+        decoded.as_bytes(0)?.to_vec(),
+    )
+}
+
+/// Decodes the whole picture of a downloaded attachment for the full-image viewer, within
+/// `max_bytes` of pixels. The result is `Ready` with its pixel size, or `Failed`.
+pub(super) fn load_viewer_image(
+    mime_type: &str,
+    bytes: Vec<u8>,
+    max_bytes: usize,
+    svg_renderer: SvgRenderer,
+    cancel: &AtomicBool,
+) -> Option<(Arc<RenderImage>, (u32, u32), usize)> {
+    let picture =
+        super::thumb_cache::viewer_picture_for(mime_type, bytes, max_bytes, cancel, |bytes| {
+            gpui_first_frame(mime_type, bytes, svg_renderer)
+        })?;
+    let size = (picture.pixels.width(), picture.pixels.height());
+    let cost = picture.byte_len();
+    let image = RenderImage::new(vec![image::Frame::new(picture.pixels)]);
+    Some((Arc::new(image), size, cost))
 }
 
 /// The widest a sent bubble gets: 80% of the capped chat column. Thumbnails decode for this
@@ -499,11 +522,11 @@ fn paint_ring(bounds: Bounds<Pixels>, progress: f32, color: Hsla, window: &mut W
 /// A staged image in the composer strip (`ComposerAttachmentStrip.tsx`): a `64px` square,
 /// `rounded-lg`, `border-border/80`, `object-cover`, with the remove button on its corner. While
 /// it uploads a scrim and a progress ring cover it; a failed one shows the retry glyph and a red
-/// border, and a click retries.
+/// border, and a click retries. `image` is the chip-sized thumbnail, or `None` while it decodes.
 pub(super) fn staged_image_chip(
     local_id: u64,
     name: &str,
-    image: Arc<Image>,
+    image: Option<ImageSource>,
     upload: ChipUpload,
     tokens: &Tokens,
     on_remove: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -534,21 +557,26 @@ pub(super) fn staged_image_chip(
             hsla_alpha(tokens.border, 0.80)
         })
         // 8px outer radius, so the picture inside the 1px border takes 7px.
-        .child(
-            img(ImageSource::Image(image))
-                .size_full()
-                .rounded(px(7.0))
-                .object_fit(ObjectFit::Cover)
-                .with_fallback(move || {
-                    div()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(icons::icon(icons::IMAGE, 16.0, muted))
-                        .into_any_element()
-                }),
-        );
+        .child({
+            let placeholder = move || {
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icons::icon(icons::IMAGE, 16.0, muted))
+                    .into_any_element()
+            };
+            match image {
+                Some(image) => img(image)
+                    .size_full()
+                    .rounded(px(7.0))
+                    .object_fit(ObjectFit::Cover)
+                    .with_fallback(placeholder)
+                    .into_any_element(),
+                None => placeholder(),
+            }
+        });
     let overlay = || {
         div()
             .absolute()
@@ -611,8 +639,6 @@ mod tests {
         assert_eq!(image_format_for_mime("IMAGE/JPG"), Some(ImageFormat::Jpeg));
         assert_eq!(image_format_for_mime("image/webp"), Some(ImageFormat::Webp));
         assert_eq!(image_format_for_mime("application/pdf"), None);
-        assert!(preview_image("text/plain", vec![1, 2, 3]).is_none());
-        assert!(preview_image("image/png", vec![1, 2, 3]).is_some());
     }
 
     #[test]

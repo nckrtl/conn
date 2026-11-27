@@ -74,7 +74,9 @@ for (const [usage, nativeEstimate, modelWindow, userText, attachments] of [
 ]) {
   for (const tokenCap of [16_000, 1_024, 64_000]) {
     const input = { tokenCap, userText, attachments, usage, nativeEstimate, ...(modelWindow === undefined ? {} : { modelWindow }) };
-    add("budget", input, handoffBudget({ tokenCap, userText, attachments, providerThread: thread(usage), nativeContextEstimate: nativeEstimate, modelContextWindow: modelWindow }));
+    // This reference accepts a byte limit. Conn configuration is in estimated tokens.
+    const byteCap = Math.min(64_000, tokenCap * 4);
+    add("budget", input, handoffBudget({ tokenCap: byteCap, userText, attachments, providerThread: thread(usage), nativeContextEstimate: nativeEstimate, modelContextWindow: modelWindow }));
   }
 }
 for (const value of [null, "100", "2000", "999999", "abc", " 5000 "]) {

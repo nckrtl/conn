@@ -661,7 +661,7 @@ pub(super) fn render_card(
         .a11y_group(ax_id, format!("{} template", template.display_name))
         .flex()
         .flex_col()
-        .w_full()
+        .mx(px(-CARD_INSET_PX))
         .min_w_0()
         .gap(px(CARD_INSET_PX))
         .p(px(CARD_INSET_PX))

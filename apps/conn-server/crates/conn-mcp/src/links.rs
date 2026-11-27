@@ -1,6 +1,6 @@
-//! Thread links in tool results (`packages/shared/src/threadLinks.ts`). T3 Code renders
-//! `t3-thread://` links as thread chips; outside callers get the hosted link Copy thread makes,
-//! except another environment's peer link, which renders chips as T3 Code does.
+//! Thread links in tool results. Conn renders `conn://thread/<environmentId>/<threadId>` links as
+//! thread chips (it still reads the older `t3-thread://v2/…` form); outside callers get the
+//! hosted link, except another environment's peer link, which renders as a chip.
 
 use crate::{Caller, McpConfig};
 
@@ -11,7 +11,7 @@ pub(crate) fn thread_link(
     title: &str,
 ) -> String {
     match caller {
-        // A peer link is another T3 Code environment: it renders thread chips too.
+        // A peer link is another Conn environment: it renders thread chips too.
         Caller::Thread(_) | Caller::Client(crate::ClientCaller { linked: true, .. }) => {
             chip(&config.environment_id, thread_id, title)
         }
@@ -24,9 +24,10 @@ pub(crate) fn thread_link(
     }
 }
 
-/// `formatThreadLink`: a `t3-thread://` chip for a thread in `environment_id`.
+/// A `conn://thread/<environmentId>/<threadId>` chip for a thread in `environment_id`: a Markdown
+/// link labelled with the title, or an autolink when the title is blank.
 pub(crate) fn chip(environment_id: &str, thread_id: &str, title: &str) -> String {
-    let href = format!("t3-thread://v2/{environment_id}/{thread_id}");
+    let href = format!("conn://thread/{environment_id}/{thread_id}");
     let destination = if href.contains(['(', ')']) {
         format!("<{href}>")
     } else {
@@ -59,7 +60,45 @@ fn segment(id: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::segment;
+    use super::{chip, segment};
+
+    #[test]
+    fn chip_is_a_conn_thread_link_labelled_with_the_title() {
+        assert_eq!(
+            chip("env-1", "thr-1", "Fix the build"),
+            "[Fix the build](conn://thread/env-1/thr-1)"
+        );
+    }
+
+    #[test]
+    fn chip_label_drops_brackets_backslashes_and_line_breaks() {
+        assert_eq!(
+            chip("env-1", "thr-1", "  a [b]\\c\r\nd\t e  "),
+            "[a b c d e](conn://thread/env-1/thr-1)"
+        );
+    }
+
+    #[test]
+    fn chip_without_a_title_is_an_autolink() {
+        assert_eq!(
+            chip("env-1", "thr-1", " \n "),
+            "<conn://thread/env-1/thr-1>"
+        );
+    }
+
+    #[test]
+    fn chip_wraps_a_destination_with_parentheses_in_angle_brackets() {
+        assert_eq!(
+            chip("env-1", "thr(1)", "T"),
+            "[T](<conn://thread/env-1/thr(1)>)"
+        );
+        assert_eq!(chip("env-1", "thr(1)", ""), "<conn://thread/env-1/thr(1)>");
+    }
+
+    #[test]
+    fn chip_never_uses_the_old_t3_scheme() {
+        assert!(!chip("e", "t", "T").contains("t3-thread"));
+    }
 
     #[test]
     fn hosted_segments_escape_punctuation() {

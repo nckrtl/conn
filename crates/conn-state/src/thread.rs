@@ -50,6 +50,7 @@ pub use conn_contract::{
     OrchestrationV2TurnItemStatus as TurnItemStatus,
 };
 
+use crate::agent_wakeups::{ScheduleCall, ScheduleLedger};
 use crate::review_comment::{ReviewComment, review_comments_for_message};
 use crate::timeline::{
     TurnCheckpointFile, UserInputAnswer, UserInputOption, UserInputQuestion,
@@ -249,6 +250,90 @@ pub enum TimelineEntry {
         text: String,
         level: NoticeLevel,
     },
+    /// A background command that ended: the `notification` a provider's wake carries for one
+    /// command (Claude's `task-notification` for a Bash `run_in_background` task).
+    BackgroundCommand {
+        id: String,
+        /// The server's own summary, whole: `Command "npm test" failed (exit 2)`. The card's
+        /// expand panel and the iOS bridge show it as it came.
+        summary: String,
+        /// The task's description, else its command, as the provider named it.
+        label: Option<String>,
+        outcome: BackgroundCommandOutcome,
+        /// The command's exit code, when the provider reported one.
+        exit_code: Option<i64>,
+        /// The provider's own summary or output, shown on expand.
+        detail: Option<String>,
+    },
+    /// Several pieces of background work that ended in one wake: the server joins them into one
+    /// summary with one shared outcome (`Command "a", command "b" and command "c" failed`).
+    BackgroundWork {
+        id: String,
+        /// The server's own summary, whole. The card's expand panel and the iOS bridge show it.
+        summary: String,
+        /// The shared outcome. The server says `failed` when any one failed, `were stopped` when
+        /// any one was stopped and none failed, and `finished` only when all of them finished.
+        outcome: BackgroundCommandOutcome,
+        /// How many pieces of work ended.
+        count: usize,
+        /// The one kind they all share; `None` when kinds mix.
+        kind: Option<BackgroundWorkKind>,
+        /// Each piece of work in the server's order, duplicates kept. Empty when the server only
+        /// counted them (`4 commands failed`).
+        items: Vec<BackgroundWorkItem>,
+        /// The provider's own summary or output, shown on expand.
+        detail: Option<String>,
+    },
+}
+
+/// The kind of one piece of background work in a notification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BackgroundWorkKind {
+    Command,
+    Monitor,
+    Subagent,
+    BackgroundTask,
+}
+
+impl BackgroundWorkKind {
+    const ALL: [Self; 4] = [
+        Self::Command,
+        Self::Monitor,
+        Self::Subagent,
+        Self::BackgroundTask,
+    ];
+
+    /// The server's noun for one and for several (`Command`, `commands`).
+    #[must_use]
+    pub fn noun(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Command => ("Command", "commands"),
+            Self::Monitor => ("Monitor", "monitors"),
+            Self::Subagent => ("Subagent", "subagents"),
+            Self::BackgroundTask => ("Background task", "background tasks"),
+        }
+    }
+}
+
+/// One piece of work a `BackgroundWork` summary names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackgroundWorkItem {
+    pub kind: BackgroundWorkKind,
+    /// The first line of its description or command, as the server cut it.
+    pub label: Option<String>,
+    /// A command's exit code, when the provider reported one.
+    pub exit_code: Option<i64>,
+}
+
+/// How a background command ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BackgroundCommandOutcome {
+    /// It ran to the end (exit 0, or no exit code reported).
+    Finished,
+    /// It failed, or exited with a non-zero code.
+    Failed,
+    /// Someone stopped it.
+    Stopped,
 }
 
 impl TimelineEntry {
@@ -268,7 +353,9 @@ impl TimelineEntry {
             | Self::SecretRequest { id, .. }
             | Self::ProposedPlan { id, .. }
             | Self::Subagent { id, .. }
-            | Self::Notice { id, .. } => id,
+            | Self::Notice { id, .. }
+            | Self::BackgroundCommand { id, .. }
+            | Self::BackgroundWork { id, .. } => id,
         }
     }
 }
@@ -499,28 +586,24 @@ pub struct SubagentModel {
 }
 
 impl SubagentModel {
-    /// A thread's model from its selection, for labels like a subagent card's.
+    /// The model of a thread that runs on `instance_id` with `selection` (a thread shell's
+    /// `modelSelection`), for rows that have no subagent record.
     #[must_use]
-    pub fn from_selection(
-        selection: &conn_contract::ModelSelection,
-        fallback_instance: &str,
-    ) -> Self {
-        let instance = selection
-            .instance_id
-            .clone()
-            .flatten()
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .filter(|id| !id.trim().is_empty())
-            .unwrap_or_else(|| fallback_instance.to_owned());
+    pub fn from_selection(instance_id: &str, selection: &conn_contract::ModelSelection) -> Self {
+        let options = selection
+            .options
+            .as_ref()
+            .and_then(Option::as_ref)
+            .map(model_option_strings)
+            .unwrap_or_default();
         Self {
-            model: non_empty(selection.model.as_str().map(str::to_owned)),
-            instance_id: non_empty(Some(instance)),
-            options: selection
-                .options
-                .as_ref()
-                .and_then(Option::as_ref)
-                .map(model_option_strings)
-                .unwrap_or_default(),
+            model: selection
+                .model
+                .as_str()
+                .map(str::to_owned)
+                .and_then(|m| non_empty(Some(m))),
+            instance_id: non_empty(Some(instance_id.to_owned())),
+            options,
         }
     }
 
@@ -694,6 +777,10 @@ pub struct ThreadState {
     pub subagent_of_entry: HashMap<String, String>,
     /// Every subagent of the thread, by subagent id, whether or not its turn item is loaded.
     pub subagents: HashMap<String, SubagentRecord>,
+    /// What [`Self::agent_wakeups`] keeps of the agent's scheduling tool calls (`ScheduleWakeup`,
+    /// `CronCreate`, `CronDelete`). A timeline row drops the call's input, so the calls are read
+    /// as they arrive, and the ledger drops the ones that no longer matter.
+    pub(crate) schedule_calls: ScheduleLedger,
     /// Changes whenever [`Self::apply`], [`Self::apply_projection`], or
     /// [`Self::prepend_history_page`] runs, and is unique across all thread states,
     /// so views can skip re-syncing a timeline that did not change.
@@ -1188,6 +1275,7 @@ impl ThreadState {
         self.approval_requests.clear();
         self.approval_details.clear();
         self.feed_details.clear();
+        self.schedule_calls.clear();
         self.pending_requests = projection
             .runtime_requests
             .iter()
@@ -1233,6 +1321,11 @@ impl ThreadState {
             hydrate_deduped_projection_item(&mut item, &message_texts, &subagent_bodies);
             if let Some((id, detail)) = projection_feed_detail(&item) {
                 self.feed_details.insert(id, detail);
+            }
+            if let ProjectionTurnItem::DynamicTool(tool) = &item
+                && let Some(call) = ScheduleCall::from_item(tool)
+            {
+                self.schedule_calls.observe(&tool.id, Some(call));
             }
             if let ProjectionTurnItem::Subagent(sub) = &item {
                 self.subagent_of_entry
@@ -1283,7 +1376,15 @@ impl ThreadState {
         self.history_cursor = cursor;
         self.has_more_history = false;
         self.loading_earlier = false;
+        // The caller may still set `has_more_history`: keep the deletes an older page needs.
+        self.schedule_calls.prune(&self.run_timings, true);
         self.reconcile_queued_runs(true);
+    }
+
+    /// Drops the scheduling calls that no longer matter (see [`ScheduleLedger`]).
+    fn prune_schedule_calls(&mut self) {
+        self.schedule_calls
+            .prune(&self.run_timings, self.has_more_history);
     }
 
     /// Replaces this thread's timeline from an [`conn_contract::OrchestrationV2ThreadDetailSnapshot`],
@@ -1299,6 +1400,7 @@ impl ThreadState {
         );
         self.has_more_history = snapshot.has_more_history.unwrap_or(false);
         self.loading_earlier = false;
+        self.prune_schedule_calls();
     }
 
     /// Prepends one older history page returned by `GET /api/orchestration/threads/:id/history`
@@ -1321,6 +1423,7 @@ impl ThreadState {
 
         let mut prepended = Vec::with_capacity(rows.len());
         let mut prepended_index: HashMap<String, usize> = HashMap::with_capacity(rows.len());
+        let mut older_calls: Vec<(String, ScheduleCall)> = Vec::new();
 
         for row in rows {
             let item = row.item;
@@ -1330,6 +1433,12 @@ impl ThreadState {
                     .or_insert_with(|| sub.subagent_id.clone());
             }
             let feed_detail = projection_feed_detail(&item);
+            let schedule_call = match &item {
+                ProjectionTurnItem::DynamicTool(tool) => {
+                    ScheduleCall::from_item(tool).map(|call| (tool.id.clone(), call))
+                }
+                _ => None,
+            };
             let approval_pair = match &item {
                 ProjectionTurnItem::ApprovalRequest(i) => Some((
                     i.id.clone(),
@@ -1353,6 +1462,9 @@ impl ThreadState {
             if let Some((id, detail)) = feed_detail {
                 self.feed_details.entry(id).or_insert(detail);
             }
+            if let Some(call) = schedule_call {
+                older_calls.push(call);
+            }
             if let Some((id, request_id, details)) = approval_pair {
                 self.approval_details.entry(id.clone()).or_insert(details);
                 self.approval_requests.entry(id).or_insert(request_id);
@@ -1372,6 +1484,7 @@ impl ThreadState {
             }
         }
 
+        self.schedule_calls.observe_older(older_calls);
         let prepended_count = prepended.len();
         if prepended_count > 0 {
             self.history_prefix_len += prepended_count;
@@ -1382,6 +1495,7 @@ impl ThreadState {
         self.history_cursor = page.next_cursor;
         self.has_more_history = page.has_more_history;
         self.loading_earlier = false;
+        self.prune_schedule_calls();
         self.revision = next_revision();
         prepended_count
     }
@@ -1440,6 +1554,7 @@ impl ThreadState {
                 );
                 self.has_more_history = snapshot.has_more_history.unwrap_or(false);
                 self.loading_earlier = false;
+                self.prune_schedule_calls();
                 true
             }
             ThreadStreamItem::Event(event_item) => {
@@ -1695,6 +1810,7 @@ impl ThreadState {
             DomainEvent::RunCreated(ev) => {
                 let run_changed = self.record_run(&ev.payload);
                 let timing_changed = self.record_run_timing(&ev.payload);
+                self.prune_schedule_calls();
                 let next_working = self.runs.values().any(is_tracked_run_working);
                 let working_changed = self.working != next_working;
                 self.working = next_working;
@@ -1704,6 +1820,7 @@ impl ThreadState {
             DomainEvent::RunUpdated(ev) => {
                 let run_changed = self.record_run(&ev.payload);
                 let timing_changed = self.record_run_timing(&ev.payload);
+                self.prune_schedule_calls();
                 let next_working = self.runs.values().any(is_tracked_run_working);
                 let working_changed = self.working != next_working;
                 self.working = next_working;
@@ -1752,6 +1869,14 @@ impl ThreadState {
                     self.subagent_of_entry
                         .insert(i.id.clone(), i.subagent_id.clone());
                 }
+                if let TurnItem::DynamicTool(tool) = &ev.payload
+                    && let Some(call) = ScheduleCall::from_item(tool)
+                {
+                    self.schedule_calls.observe(&tool.id, Some(call));
+                    self.prune_schedule_calls();
+                } else if matches!(&ev.payload, TurnItem::DynamicTool(_)) {
+                    self.schedule_calls.forget(&item_id);
+                }
                 let timing = extract_turn_item_timing(&ev.payload);
                 self.entry_timings.insert(item_id.clone(), timing);
                 if let Some((id, place)) = place_of_turn_item(&ev.payload) {
@@ -1784,6 +1909,7 @@ impl ThreadState {
                     changed |= upsert_entry(&mut self.entries, entry);
                     changed
                 } else {
+                    self.schedule_calls.forget(&item_id);
                     remove_entry(&mut self.entries, &item_id) || compaction_changed
                 }
             }
@@ -2664,7 +2790,300 @@ fn map_system_notice(item: SystemNoticeItem) -> Option<TimelineEntry> {
     })
 }
 
+/// The card for a notification about one background command; `None` for any other notification,
+/// or a command notice that names several commands, which stays a plain notice.
+fn background_command_entry(item: &NotificationItem) -> Option<TimelineEntry> {
+    use conn_contract::OrchestrationV2NotificationSource as Source;
+    use conn_contract::OrchestrationV2NotificationSourceMonitorPullRequestSectionOutcome as Outcome;
+
+    if !matches!(
+        item.source,
+        Source::Command(_) | Source::BackgroundCommand(_)
+    ) {
+        return None;
+    }
+    let (label, exit_code) = parse_command_summary(&item.summary)?;
+    let detail = item
+        .detail
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty() && *d != item.summary.trim())
+        .map(str::to_owned);
+    // The status is the server's `outcome`. Only the server's own `(exit N)` suffix, never the
+    // provider's free-text detail, can turn a completed command into a failed one.
+    let outcome = match item.outcome {
+        Outcome::Completed if exit_code.is_some_and(|code| code != 0) => {
+            BackgroundCommandOutcome::Failed
+        }
+        Outcome::Completed => BackgroundCommandOutcome::Finished,
+        Outcome::Failed => BackgroundCommandOutcome::Failed,
+        Outcome::Cancelled => BackgroundCommandOutcome::Stopped,
+        Outcome::Updated | Outcome::Unknown => return None,
+    };
+    Some(TimelineEntry::BackgroundCommand {
+        id: item.id.clone(),
+        summary: item.summary.clone(),
+        label,
+        outcome,
+        exit_code,
+        detail,
+    })
+}
+
+/// Reads the label and exit code out of the one-command summary the server writes
+/// (`Command "<label>" finished`, `… failed (exit 2)`, `… was stopped`, or `Command finished` with
+/// no label). `None` for a summary of several commands. The contract has no structured label yet.
+fn parse_command_summary(summary: &str) -> Option<(Option<String>, Option<i64>)> {
+    const VERBS: [&str; 4] = [" finished", " failed", " was stopped", " updated"];
+    let mut rest = summary.trim();
+    // The server writes the exit suffix after the verb: `Command "x" failed (exit 2)`.
+    let mut exit_code = None;
+    if let Some(open) = rest.rfind(" (exit ")
+        && let Some(code) = rest[open + " (exit ".len()..].strip_suffix(')')
+        && is_exit_code(code)
+        && let Ok(code) = code.parse::<i64>()
+    {
+        exit_code = Some(code);
+        rest = &rest[..open];
+    }
+    let head = VERBS.iter().find_map(|verb| rest.strip_suffix(verb))?;
+    if head == "Command" {
+        return Some((None, exit_code));
+    }
+    let label = head.strip_prefix("Command \"")?.strip_suffix('"')?;
+    // Several commands join as `Command "a" (exit 0) and command "b"`, or with other kinds.
+    if label.contains("\" (exit ") || reads_as_a_join(label) {
+        return None;
+    }
+    let label = label.trim();
+    Some(((!label.is_empty()).then(|| label.to_owned()), exit_code))
+}
+
+/// The server writes the code as plain decimal digits, with a `-` for a signal-style negative.
+fn is_exit_code(code: &str) -> bool {
+    let digits = code.strip_prefix('-').unwrap_or(code);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The card for a notification about several commands or monitors (or a mix); `None` for one
+/// piece of work, for subagents only, or for a summary the server does not write.
+fn background_work_entry(item: &NotificationItem) -> Option<TimelineEntry> {
+    use BackgroundWorkKind as Kind;
+    use conn_contract::OrchestrationV2NotificationSource as Source;
+    use conn_contract::OrchestrationV2NotificationSourceMonitorPullRequestSectionOutcome as Outcome;
+
+    let (verb, work) = parse_several_summary(&item.summary)?;
+    let (count, items, kind) = match work {
+        SeveralWork::Named(items) => {
+            let first = items[0].kind;
+            let same = items.iter().all(|i| i.kind == first);
+            (items.len(), items, same.then_some(first))
+        }
+        SeveralWork::Counted(count, kind) => (count, Vec::new(), kind),
+    };
+    // The server's `source` names the shared kind, or `background_task` when kinds mix.
+    let source_fits = match &item.source {
+        Source::Command(_) | Source::BackgroundCommand(_) => kind == Some(Kind::Command),
+        Source::Monitor(_) => kind == Some(Kind::Monitor),
+        Source::BackgroundTask(_) | Source::BackgroundTask2(_) => {
+            matches!(kind, None | Some(Kind::BackgroundTask))
+        }
+        _ => false,
+    };
+    if !source_fits {
+        return None;
+    }
+    let any_bad_exit = items.iter().any(|i| i.exit_code.is_some_and(|c| c != 0));
+    let outcome = match (item.outcome, verb) {
+        (Outcome::Completed, "finished") if any_bad_exit => BackgroundCommandOutcome::Failed,
+        (Outcome::Completed, "finished") => BackgroundCommandOutcome::Finished,
+        (Outcome::Failed, "failed") => BackgroundCommandOutcome::Failed,
+        (Outcome::Cancelled, "were stopped") => BackgroundCommandOutcome::Stopped,
+        _ => return None,
+    };
+    let detail = item
+        .detail
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty() && *d != item.summary.trim())
+        .map(str::to_owned);
+    Some(TimelineEntry::BackgroundWork {
+        id: item.id.clone(),
+        summary: item.summary.clone(),
+        outcome,
+        count,
+        kind,
+        items,
+        detail,
+    })
+}
+
+/// What a summary of several pieces of work says about them.
+#[derive(Debug, PartialEq)]
+enum SeveralWork {
+    /// `Command "a" and monitor "b" failed`: each one, in order.
+    Named(Vec<BackgroundWorkItem>),
+    /// `4 commands failed`: only how many, and their kind (`None` for `background tasks`).
+    Counted(usize, Option<BackgroundWorkKind>),
+}
+
+/// Reads the server's summary of several pieces of work (`reportsSummary` in
+/// `conn-provider-support/src/notification.rs`): two or three names joined by `, ` and ` and `,
+/// or a count past three, then one shared verb. `None` unless exactly one reading fits, so a
+/// label that itself looks like a join never splits wrongly.
+fn parse_several_summary(summary: &str) -> Option<(&'static str, SeveralWork)> {
+    const VERBS: [&str; 3] = ["failed", "were stopped", "finished"];
+    let summary = summary.trim();
+    let (head, verb) = VERBS.iter().find_map(|verb| {
+        let head = summary.strip_suffix(verb)?.strip_suffix(' ')?;
+        Some((head, *verb))
+    })?;
+    if let Some(counted) = parse_counted_work(head) {
+        return Some((verb, counted));
+    }
+    let mut readings: Vec<Vec<BackgroundWorkItem>> = Vec::new();
+    for (items, seps) in name_readings(head, true, 3) {
+        // A label that itself reads as a join (`a", command "b`) is the wrong split.
+        if items
+            .iter()
+            .filter_map(|i| i.label.as_deref())
+            .any(|label| label.contains("\" (exit ") || reads_as_a_join(label))
+        {
+            continue;
+        }
+        // The server joins all but the last name with `, ` and the last with ` and `.
+        let joined = seps
+            .split_last()
+            .is_some_and(|(last, rest)| *last == " and " && rest.iter().all(|sep| *sep == ", "));
+        if (2..=3).contains(&items.len())
+            && joined
+            && items.iter().any(|i| i.label.is_some())
+            && !readings.contains(&items)
+        {
+            readings.push(items);
+        }
+    }
+    match <[_; 1]>::try_from(readings) {
+        Ok([items]) => Some((verb, SeveralWork::Named(items))),
+        Err(_) => None,
+    }
+}
+
+/// True when `label` holds the server's join between two names: `", monitor "` or `" and command`.
+fn reads_as_a_join(label: &str) -> bool {
+    BackgroundWorkKind::ALL.into_iter().any(|kind| {
+        let noun = kind.noun().0.to_lowercase();
+        [", ", " and "].into_iter().any(|sep| {
+            label.contains(&format!("\"{sep}{noun} \""))
+                || label.ends_with(&format!("\"{sep}{noun}"))
+                || label.contains(&format!("\"{sep}{noun}, "))
+                || label.contains(&format!("\"{sep}{noun} and "))
+        })
+    })
+}
+
+/// `4 commands`, `5 background tasks`.
+fn parse_counted_work(head: &str) -> Option<SeveralWork> {
+    let (count, noun) = head.split_once(' ')?;
+    if count.is_empty() || count.starts_with('0') || !count.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let count: usize = count.parse().ok()?;
+    if count < 2 {
+        return None;
+    }
+    let kind = match noun {
+        "background tasks" => None,
+        noun => Some(
+            BackgroundWorkKind::ALL
+                .into_iter()
+                .find(|kind| kind.noun().1 == noun)?,
+        ),
+    };
+    Some(SeveralWork::Counted(count, kind))
+}
+
+/// Every way `text` reads as a run of at most `left` names (`Command "x" (exit 2)`, `monitor`),
+/// each with the separators between them.
+fn name_readings(
+    text: &str,
+    first: bool,
+    left: usize,
+) -> Vec<(Vec<BackgroundWorkItem>, Vec<&'static str>)> {
+    let mut readings = Vec::new();
+    if left == 0 {
+        return readings;
+    }
+    for kind in BackgroundWorkKind::ALL {
+        let noun = kind.noun().0;
+        let noun = if first {
+            noun.to_owned()
+        } else {
+            noun.to_lowercase()
+        };
+        let Some(rest) = text.strip_prefix(noun.as_str()) else {
+            continue;
+        };
+        // The name has no label, or a quoted one that may hold quotes of its own: try each
+        // closing quote.
+        let mut labelled: Vec<(Option<&str>, &str)> = vec![(None, rest)];
+        if let Some(quoted) = rest.strip_prefix(" \"") {
+            for (at, _) in quoted.match_indices('"') {
+                let label = &quoted[..at];
+                if !label.trim().is_empty() {
+                    labelled.push((Some(label), &quoted[at + 1..]));
+                }
+            }
+        }
+        for (label, after) in labelled {
+            let (exit_code, after) = match kind {
+                BackgroundWorkKind::Command => strip_exit_suffix(after),
+                _ => (None, after),
+            };
+            let item = BackgroundWorkItem {
+                kind,
+                label: label.map(str::to_owned),
+                exit_code,
+            };
+            if after.is_empty() {
+                readings.push((vec![item.clone()], Vec::new()));
+            }
+            for sep in [", ", " and "] {
+                let Some(next) = after.strip_prefix(sep) else {
+                    continue;
+                };
+                for (mut items, mut seps) in name_readings(next, false, left - 1) {
+                    items.insert(0, item.clone());
+                    seps.insert(0, sep);
+                    readings.push((items, seps));
+                }
+            }
+        }
+    }
+    readings
+}
+
+/// A leading ` (exit N)`, as the server writes it after a command's name.
+fn strip_exit_suffix(text: &str) -> (Option<i64>, &str) {
+    let Some(rest) = text.strip_prefix(" (exit ") else {
+        return (None, text);
+    };
+    let Some((code, after)) = rest.split_once(')') else {
+        return (None, text);
+    };
+    match code.parse::<i64>() {
+        Ok(code_value) if is_exit_code(code) => (Some(code_value), after),
+        _ => (None, text),
+    }
+}
+
 fn map_notification(item: NotificationItem) -> Option<TimelineEntry> {
+    if let Some(entry) = background_command_entry(&item) {
+        return Some(entry);
+    }
+    if let Some(entry) = background_work_entry(&item) {
+        return Some(entry);
+    }
     Some(TimelineEntry::Notice {
         id: item.id,
         text: item.summary,

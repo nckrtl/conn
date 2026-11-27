@@ -1392,3 +1392,26 @@ fn retry_notices_share_a_deadline_while_output_clears_it() {
         )
     );
 }
+
+#[test]
+fn early_stop_marks_an_unacknowledged_prompt() {
+    let dir = env!("CARGO_MANIFEST_DIR");
+    let ts: Value = serde_json::from_str(&read(format!("{dir}/testdata/ts/simple.json"))).unwrap();
+    let input = turn_input(&ts["startTurn"][0]);
+    let mut m = Mapper::new(FixedEnv::default());
+    m.begin_turn("th", &input);
+    m.mark_prompt_sent("th");
+    let _ = m.turn_start_result("th", &json!({"turn":{"id":"tu","startedAt":null}}));
+    m.mark_interrupting("tu");
+    let outs=m.handle(Inbound::from_value(json!({"method":"turn/completed","params":{"threadId":"th","turn":{"id":"tu","items":[],"status":"interrupted","completedAt":3}}})));
+    let row = outs
+        .into_iter()
+        .find_map(|out| match out {
+            Out::Event(conn_provider::ProviderEvent::ProviderTurnUpdated {
+                provider_turn, ..
+            }) => Some(provider_turn),
+            _ => None,
+        })
+        .expect("ended provider turn");
+    assert_eq!(row.prompt_dropped, Some(true));
+}

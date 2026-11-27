@@ -11,6 +11,7 @@
 //!   into [`TimelineEntry`] view models so views never touch raw contract events.
 //! - [`LayoutState`]: sidebar, right panel, and tab layout.
 
+mod agent_wakeups;
 mod annotations;
 pub mod conn_tools;
 pub mod custom_model_editor;
@@ -61,6 +62,7 @@ pub use conn_contract::{
     ScheduledTaskWebhookSignatureEncoding,
 };
 
+pub use crate::agent_wakeups::{AgentWakeup, CLAUDE_WAKEUP_TASK_ID, WakeupContext, WakeupKind};
 pub use crate::annotations::{
     AnnotationPinPoint, AnnotationQueueCounts, AnnotationQueueState, DetectedDomElement,
     DetectedPoint, DetectedRect, annotation_state, build_annotation_prompt,
@@ -131,11 +133,11 @@ pub use crate::sidebar_nav::{
     thread_traversal_key, traversal_order, tree_key, tree_step,
 };
 pub use crate::thread::{
-    AgentMessageSender, ApprovalDetails, ChildApproval, EntryTiming, ItemStatus, NoticeLevel,
-    PendingApproval, PendingRequest, RunStatus, RunTiming, SecretRequestStatus, SubagentModel,
-    SubagentRecord, ThreadContextWindowSnapshot, ThreadState, TimelineEntry, TurnAgents,
-    TurnCheckpointSummary, TurnItemStatus, child_approvals, parse_iso8601_epoch_ms,
-    request_kind_label, turn_item_detail,
+    AgentMessageSender, ApprovalDetails, BackgroundCommandOutcome, BackgroundWorkItem,
+    BackgroundWorkKind, ChildApproval, EntryTiming, ItemStatus, NoticeLevel, PendingApproval,
+    PendingRequest, RunStatus, RunTiming, SecretRequestStatus, SubagentModel, SubagentRecord,
+    ThreadContextWindowSnapshot, ThreadState, TimelineEntry, TurnAgents, TurnCheckpointSummary,
+    TurnItemStatus, child_approvals, parse_iso8601_epoch_ms, request_kind_label, turn_item_detail,
 };
 pub use crate::timeline::{
     LocalDateTime, PLAN_PREVIEW_MAX_LINES, SubagentTone, TurnCheckpointFile, TurnDiffRow,

@@ -26,6 +26,8 @@ const LINK_CAP: usize = 64;
 pub(crate) struct Roster {
     /// `OrchestrationV2PendingBackgroundTask` values, in arrival order.
     tasks: Vec<Value>,
+    /// Completed tasks whose notification may reach Claude after its final reply.
+    held_notifications: VecDeque<Value>,
     /// `toolUseIdsByTaskId`.
     task_tools: VecDeque<(String, String)>,
     /// Monitor calls with no task yet (`claudeMonitors.calls`).
@@ -56,7 +58,20 @@ fn add_id(set: &mut VecDeque<String>, id: &str) {
 
 impl Roster {
     pub(crate) fn is_empty(&self) -> bool {
-        self.tasks.is_empty()
+        self.tasks.is_empty() && self.held_notifications.is_empty()
+    }
+
+    pub(crate) fn hold_notification(&mut self, task: &Value) {
+        self.held_notifications
+            .retain(|old| old["taskId"] != task["taskId"]);
+        if self.held_notifications.len() == LINK_CAP {
+            self.held_notifications.pop_front();
+        }
+        self.held_notifications.push_back(task.clone());
+    }
+
+    pub(crate) fn release_notifications(&mut self) {
+        self.held_notifications.clear();
     }
 
     /// A Monitor's task is running.
@@ -89,6 +104,7 @@ impl Roster {
 
     /// A stopped or failed turn takes the owed wakes with it.
     pub(crate) fn forget_wakes(&mut self) {
+        self.release_notifications();
         self.wake_eligible.clear();
         self.tombstones.clear();
     }
@@ -151,6 +167,14 @@ impl Roster {
             tasks.push(super::wakes::scheduled_wakeup_task());
         }
         tasks.extend(self.owed(previous));
+        for held in &self.held_notifications {
+            if !tasks
+                .iter()
+                .any(|listed| listed["taskId"] == held["taskId"])
+            {
+                tasks.push(held.clone());
+            }
+        }
         json!(tasks)
     }
 
@@ -177,6 +201,7 @@ impl Roster {
     #[cfg(test)]
     pub(crate) fn sizes(&self) -> usize {
         self.known.len()
+            + self.held_notifications.len()
             + self.awaited.len()
             + self.wake_eligible.len()
             + self.tombstones.len()

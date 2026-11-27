@@ -292,6 +292,7 @@ impl<E: Env> Mapper<E> {
         self.goals.seq = self.goals.seq.wrapping_add(1);
         let seq = self.goals.seq;
         let next = PendingTurn {
+            has_prompt: false,
             thread_id: turn.thread_id.clone(),
             run_id,
             run_ordinal: turn.run_ordinal,

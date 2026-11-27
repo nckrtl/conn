@@ -983,7 +983,7 @@ fn is_delta(frame: &Inbound) -> bool {
 }
 
 /// Whether `version` has a higher major or minor than `tested`.
-fn newer_minor(version: &str, tested: &str) -> bool {
+pub(crate) fn newer_minor(version: &str, tested: &str) -> bool {
     let parse = |v: &str| -> (u64, u64) {
         let mut parts = v.split('.').map(|p| p.parse().unwrap_or(0));
         (parts.next().unwrap_or(0), parts.next().unwrap_or(0))

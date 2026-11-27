@@ -825,8 +825,8 @@ fn map_thread_summary(shell: &ShellState, thread: &ThreadShell, settled: bool) -
     let order = conn_state::SidebarOrder::for_thread(thread, settled);
     // The shell has no catalog: the label falls back to the prettified slug and raw effort.
     let model_label = conn_state::SubagentModel::from_selection(
-        &thread.model_selection,
         &thread.provider_instance_id,
+        &thread.model_selection,
     )
     .label(&conn_state::providers::ModelCatalog::default());
     FfiThreadSummary {
@@ -1458,6 +1458,14 @@ pub(crate) fn map_timeline_entry_with_context(
             text: text.clone(),
             is_error: !matches!(level, conn_state::NoticeLevel::Info),
         },
+        // iOS has no command card: it keeps showing finished background work as the plain notice
+        // it always did, with the server's own summary text.
+        TimelineEntry::BackgroundCommand { id, summary, .. }
+        | TimelineEntry::BackgroundWork { id, summary, .. } => FfiTimelineEntry::Notice {
+            id: id.clone(),
+            text: summary.clone(),
+            is_error: false,
+        },
     }
 }
 
@@ -1878,6 +1886,68 @@ mod tests {
     }
 
     #[test]
+    fn a_background_command_card_reaches_ios_as_the_plain_notice_it_was() {
+        use conn_state::BackgroundCommandOutcome::{Failed, Finished};
+        let approvals = HashMap::new();
+        let timings = HashMap::new();
+        for (outcome, exit_code, summary) in [
+            (
+                Finished,
+                None,
+                "Command \"Wait for dev app rebuild\" finished",
+            ),
+            (Failed, Some(2), "Command \"npm test\" failed (exit 2)"),
+        ] {
+            let card = TimelineEntry::BackgroundCommand {
+                id: "wake-1".to_owned(),
+                summary: summary.to_owned(),
+                label: Some("label".to_owned()),
+                outcome,
+                exit_code,
+                detail: Some("output the iOS notice never showed".to_owned()),
+            };
+            assert_eq!(
+                map_timeline_entry_with_context(&card, &approvals, &timings),
+                FfiTimelineEntry::Notice {
+                    id: "wake-1".to_owned(),
+                    text: summary.to_owned(),
+                    is_error: false,
+                },
+                "{summary}: the same Info notice iOS drew before the card"
+            );
+        }
+    }
+
+    #[test]
+    fn a_several_commands_card_reaches_ios_as_the_plain_notice_it_was() {
+        use conn_state::BackgroundCommandOutcome::Failed;
+        use conn_state::{BackgroundWorkItem, BackgroundWorkKind::Command};
+        let summary = "Command \"Build\", command \"Build\" and command \"Check\" failed";
+        let item = |label: &str| BackgroundWorkItem {
+            kind: Command,
+            label: Some(label.to_owned()),
+            exit_code: None,
+        };
+        let card = TimelineEntry::BackgroundWork {
+            id: "wake-3".to_owned(),
+            summary: summary.to_owned(),
+            outcome: Failed,
+            count: 3,
+            kind: Some(Command),
+            items: vec![item("Build"), item("Build"), item("Check")],
+            detail: Some("output the iOS notice never showed".to_owned()),
+        };
+        assert_eq!(
+            map_timeline_entry_with_context(&card, &HashMap::new(), &HashMap::new()),
+            FfiTimelineEntry::Notice {
+                id: "wake-3".to_owned(),
+                text: summary.to_owned(),
+                is_error: false,
+            }
+        );
+    }
+
+    #[test]
     fn builds_thread_snapshot_with_checkpoints_work_groups_queued_count_and_meta() {
         let mut state = ThreadState::new("thread-rich");
         state.synchronized = true;
@@ -2043,7 +2113,7 @@ mod tests {
         assert!(!snap.work_groups[0].has_active);
         assert!(!snap.work_groups[0].continues_steer);
         assert_eq!(snap.work_groups[0].duration_ms, Some(7_500));
-        assert_eq!(snap.work_groups[0].duration_label.as_deref(), Some("7.5s"));
+        assert_eq!(snap.work_groups[0].duration_label.as_deref(), Some("8s"));
 
         assert_eq!(snap.work_groups[1].id, "work-group-tool2");
         assert_eq!(snap.work_groups[1].entry_ids, vec!["tool2"]);

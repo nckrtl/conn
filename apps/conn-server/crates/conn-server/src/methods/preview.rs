@@ -7,6 +7,7 @@ use conn_contract::{
     PreviewClearProfileInput, PreviewCloseInput, PreviewOpenInput, PreviewReportProfilesInput,
     PreviewReportStatusInput, PreviewResizeInput, to_json,
 };
+use conn_preview::relay::SecretAccess;
 use conn_preview::tabs::Preview;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
@@ -152,7 +153,12 @@ fn desktop_relay(table: &mut MethodTable, preview: &Preview, environment_id: &st
             let (browser, environment) = (browser.clone(), environment.clone());
             async move {
                 browser
-                    .desktop_register(&session(&ctx), &environment, &to_json(&input))
+                    .desktop_register(
+                        &session(&ctx),
+                        &environment,
+                        &to_json(&input),
+                        secret_access(&ctx),
+                    )
                     .map(|connection_id| json!({"connectionId": connection_id}))
                     .map_err(relay_error)
             }
@@ -204,6 +210,24 @@ fn session(ctx: &CallContext) -> String {
         || format!("connection-{}", ctx.connection_id),
         |principal| principal.session_id.clone(),
     )
+}
+
+/// The scope that reads saved test logins (`testLogins.reveal`). Hosting a tab takes only
+/// `preview:operate`, so the relay sends a fill only to a host whose session holds this one.
+const SECRETS_SCOPE: &str = "settings:write";
+
+/// What the registering session may receive. A call without a session (tests, fixtures)
+/// passes, as scope checks do (`crate::scopes::check`).
+fn secret_access(ctx: &CallContext) -> SecretAccess {
+    if ctx
+        .principal
+        .as_ref()
+        .is_none_or(|principal| principal.has_scope(SECRETS_SCOPE))
+    {
+        SecretAccess::Allowed
+    } else {
+        SecretAccess::Withheld
+    }
 }
 
 fn lookup(thread: &str, tab: &str) -> Failure {

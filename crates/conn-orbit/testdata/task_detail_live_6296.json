@@ -1,0 +1,88 @@
+{
+  "data": {
+    "id": 6296,
+    "title": "Stabilise flaky browser tests",
+    "status": "running",
+    "attention": null,
+    "project": {
+      "id": 14,
+      "slug": "dlf-leden",
+      "name": "dlf-leden",
+      "code": "AAB"
+    },
+    "workspace": {
+      "instance_id": 4044,
+      "name": "task-6296",
+      "status": "active",
+      "power_state": "running",
+      "node": {
+        "id": 9,
+        "name": "beast"
+      },
+      "branch": "task-6296",
+      "conn_environment_id": "env-00000000"
+    },
+    "pull_request": null,
+    "subtask_counts": {
+      "total": 0,
+      "todo": 0,
+      "running": 0,
+      "completed": 0,
+      "failed": 0,
+      "cancelled": 0
+    },
+    "created_at": "2026-11-26T09:07:07+00:00",
+    "updated_at": "2026-11-26T09:09:57+00:00",
+    "last_activity_at": "2026-11-26T09:10:04+00:00",
+    "deployed_at": null,
+    "pr_opened_at": null,
+    "work_status": "running",
+    "brief": "Two browser tests fail intermittently on main. Find the root cause and fix it.",
+    "execution": {
+      "implementer_mode": "task"
+    },
+    "metrics": {
+      "duration_ms": 2035787,
+      "tokens": null,
+      "lines_added": null,
+      "lines_deleted": null
+    },
+    "subtasks": [],
+    "agents": [
+      {
+        "id": 3171,
+        "role": "implementer",
+        "subtask_ids": [],
+        "current": true,
+        "attempt": 1,
+        "provider": "claude",
+        "model": "claude-opus-5-5",
+        "effort": "medium",
+        "state": null,
+        "needs_input": false,
+        "created_at": "2026-11-26T09:10:04+00:00",
+        "observed_at": null,
+        "conn": {
+          "environment_id": "env-00000000",
+          "thread_id": "thread-00000000"
+        }
+      }
+    ],
+    "work": {
+      "status": "running",
+      "review": "not_approved",
+      "deliverables": [
+        {
+          "id": "flake-fixed",
+          "type": "review",
+          "description": "Both tests pass in five consecutive runs."
+        }
+      ],
+      "current_implementer_agent_id": 3171,
+      "check": null
+    }
+  },
+  "meta": {
+    "request_id": "00000000-0000-0000-0000-000000000000"
+  }
+}

@@ -16,7 +16,11 @@
 //! Servers, workflow rows, remote delegated rows, and the context meter.
 
 use conn_contract::{ScheduledTaskRunStatus, VcsStatusResult};
-use conn_state::{ScheduledTask, ShellState, ThreadShell, schedule_label};
+use conn_state::providers::ModelCatalog;
+use conn_state::{
+    AgentWakeup, ScheduledTask, ShellState, ThreadShell, ThreadState, TimelineEntry, WakeupContext,
+    WakeupKind, schedule_label,
+};
 use conn_theme::Tokens;
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{
@@ -30,9 +34,7 @@ use crate::app::ConnApp;
 use crate::icons;
 use crate::panels::chrome::{ConnTooltipExt as _, FloatingSurfaceExt as _};
 use crate::panels::header::dropdown_glass_shadow;
-use crate::sidebar::thread_list::{
-    current_unix_secs, format_working_duration, middle_truncate, parse_iso8601_unix_secs,
-};
+use crate::sidebar::thread_list::{current_unix_secs, middle_truncate};
 use crate::theme::{hsla, hsla_alpha};
 
 /// `--thread-details-panel-width`.
@@ -144,6 +146,8 @@ pub(crate) struct ThreadDetailsState {
     pub(crate) tasks: Vec<ScheduledTask>,
     pub(crate) tasks_error: Option<String>,
     pub(crate) task_history: Option<crate::app::details_tasks::TaskHistoryRead>,
+    /// The live scheduled-tasks stream of the open thread's environment.
+    pub(crate) schedules: Option<crate::app::details_schedules::ScheduleSubscription>,
     pub(crate) busy_task_id: Option<String>,
     pub(crate) git_init_pending: bool,
     pub(crate) prs_expanded: bool,
@@ -190,13 +194,105 @@ pub(crate) fn thread_cwd(shell: &ShellState, thread: &ThreadShell) -> Option<Str
         })
 }
 
-/// Lineage rows derived from the shell (`ThreadRelationshipsControl.tsx`).
+/// Where a child agent is in its run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AgentState {
+    Running,
+    Waiting,
+    Done,
+    Failed,
+    Stopped,
+    Idle,
+}
+
+impl AgentState {
+    fn is_live(self) -> bool {
+        matches!(self, Self::Running | Self::Waiting)
+    }
+
+    fn text(self) -> &'static str {
+        match self {
+            Self::Running => "Running",
+            Self::Waiting => "Waiting",
+            Self::Done => "Done",
+            Self::Failed => "Failed",
+            Self::Stopped => "Stopped",
+            Self::Idle => "Idle",
+        }
+    }
+
+    fn dot(self, tokens: &Tokens) -> Hsla {
+        match self {
+            Self::Running | Self::Waiting => hsla(tokens.info),
+            Self::Failed => hsla(tokens.destructive),
+            Self::Done => hsla(tokens.success),
+            Self::Stopped | Self::Idle => hsla_alpha(tokens.muted_foreground, 0.45),
+        }
+    }
+
+    fn from_shell(status: conn_contract::OrchestrationV2ShellThreadStatus) -> Self {
+        use conn_contract::OrchestrationV2ShellThreadStatus as S;
+        match status {
+            S::Preparing | S::Queued | S::Starting | S::Running => Self::Running,
+            S::Waiting => Self::Waiting,
+            S::Completed => Self::Done,
+            S::Failed => Self::Failed,
+            S::Interrupted | S::Cancelled | S::RolledBack => Self::Stopped,
+            S::Idle => Self::Idle,
+        }
+    }
+
+    fn from_item(status: conn_state::TurnItemStatus) -> Self {
+        use conn_state::TurnItemStatus as S;
+        match status {
+            S::Pending | S::Running => Self::Running,
+            S::Waiting => Self::Waiting,
+            S::Completed => Self::Done,
+            S::Failed => Self::Failed,
+            S::Cancelled | S::Interrupted => Self::Stopped,
+            S::Idle => Self::Idle,
+        }
+    }
+}
+
+/// One child of the thread: a native subagent, a `delegate_task` child, or a child that runs on
+/// another linked environment (`ThreadRelationshipsControl.tsx`, `SubagentTimelineLink`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AgentRow {
+    /// Stable id for element ids: the child thread, else the timeline entry.
+    pub(crate) key: String,
+    /// The thread a click opens; empty when the child has none yet.
+    pub(crate) thread_id: String,
+    /// The linked environment the child runs on; `None` is the thread's own environment.
+    pub(crate) environment_id: Option<String>,
+    /// `on <label>` for a child on another environment.
+    pub(crate) environment_label: Option<String>,
+    pub(crate) title: String,
+    /// Provider driver or instance id, for the provider mark.
+    pub(crate) provider: String,
+    /// `<model> · <effort>`.
+    pub(crate) model: Option<String>,
+    pub(crate) state: AgentState,
+    pub(crate) elapsed: Option<String>,
+}
+
+impl AgentRow {
+    /// `on nick · Opus 5.5 · medium`.
+    pub(crate) fn meta(&self) -> Option<String> {
+        let mut parts: Vec<String> = Vec::new();
+        parts.extend(self.environment_label.as_ref().map(|l| format!("on {l}")));
+        parts.extend(self.model.clone());
+        (!parts.is_empty()).then(|| parts.join(" · "))
+    }
+}
+
+/// Lineage rows derived from the shell and the thread's timeline.
 #[derive(Debug, Default)]
 pub(crate) struct Lineage<'a> {
     pub(crate) parent: Option<&'a ThreadShell>,
     pub(crate) is_fork: bool,
-    pub(crate) running: Vec<&'a ThreadShell>,
-    pub(crate) previous: Vec<&'a ThreadShell>,
+    pub(crate) running: Vec<AgentRow>,
+    pub(crate) previous: Vec<AgentRow>,
 }
 
 impl Lineage<'_> {
@@ -204,7 +300,7 @@ impl Lineage<'_> {
     pub(crate) fn failed_count(&self) -> usize {
         self.previous
             .iter()
-            .filter(|t| t.status == conn_contract::OrchestrationV2ShellThreadStatus::Failed)
+            .filter(|t| t.state == AgentState::Failed)
             .count()
     }
 
@@ -224,9 +320,205 @@ impl Lineage<'_> {
     }
 }
 
-/// Collects parent/fork and child subagent threads for `thread`.
+/// The model text of the subagent behind timeline entry `entry_id`.
+fn entry_model(
+    timeline: Option<&ThreadState>,
+    entry_id: &str,
+    catalog: &ModelCatalog,
+) -> Option<String> {
+    let timeline = timeline?;
+    let model = timeline
+        .subagent_of_entry
+        .get(entry_id)
+        .and_then(|subagent| timeline.subagent_models.get(subagent))
+        .or_else(|| timeline.subagent_models.get(entry_id))?;
+    crate::chat::subagent_model_text(catalog, model)
+}
+
+/// `13s`, `2m 4s`: how long a child ran, or has run, from its ISO-8601 start and end.
+fn agent_elapsed(
+    live: bool,
+    started_at: Option<&str>,
+    completed_at: Option<&str>,
+    now_secs: i64,
+) -> Option<String> {
+    let start = started_at.and_then(conn_state::parse_iso8601_epoch_ms)?;
+    let end = if live {
+        now_secs.saturating_mul(1000)
+    } else {
+        conn_state::parse_iso8601_epoch_ms(completed_at?)?
+    };
+    u64::try_from(end - start)
+        .ok()
+        .map(conn_state::format_duration)
+}
+
+/// A child that has a thread in the shell.
+fn shell_agent(
+    child: &ThreadShell,
+    timeline: Option<&ThreadState>,
+    catalog: &ModelCatalog,
+    now_secs: i64,
+) -> AgentRow {
+    let entry = timeline.and_then(|t| {
+        t.entries.iter().find_map(|e| match e {
+            TimelineEntry::Subagent {
+                id,
+                child_thread_id,
+                started_at,
+                completed_at,
+                ..
+            } if child_thread_id.as_deref() == Some(child.id.as_str()) => {
+                Some((id.as_str(), started_at.as_deref(), completed_at.as_deref()))
+            }
+            _ => None,
+        })
+    });
+    let live = crate::sidebar::thread_list::resolve_row_status(child).is_some_and(|s| {
+        matches!(
+            s,
+            crate::sidebar::thread_list::RowStatus::Working
+                | crate::sidebar::thread_list::RowStatus::Goal
+                | crate::sidebar::thread_list::RowStatus::Waiting
+        )
+    });
+    let state = match AgentState::from_shell(child.status) {
+        // A row the sidebar shows as working is running, whatever its last run says.
+        s if live && !s.is_live() => AgentState::Running,
+        s => s,
+    };
+    let run_started = child
+        .activity_run_started_at
+        .as_ref()
+        .and_then(Option::as_deref)
+        .or_else(|| {
+            child
+                .latest_run_started_at
+                .as_ref()
+                .and_then(Option::as_deref)
+        });
+    let run_completed = child
+        .latest_run_completed_at
+        .as_ref()
+        .and_then(Option::as_deref);
+    let elapsed = if state.is_live() {
+        agent_elapsed(true, run_started, None, now_secs)
+    } else {
+        agent_elapsed(false, run_started, run_completed, now_secs)
+            .or_else(|| entry.and_then(|(_, s, c)| agent_elapsed(false, s, c, now_secs)))
+    };
+    // The child's own selection first: the parent's subagent record can lack its options.
+    let model = crate::chat::subagent_model_text(
+        catalog,
+        &conn_state::SubagentModel::from_selection(
+            &child.provider_instance_id,
+            &child.model_selection,
+        ),
+    )
+    .or_else(|| entry.and_then(|(id, ..)| entry_model(timeline, id, catalog)));
+    AgentRow {
+        key: child.id.clone(),
+        thread_id: child.id.clone(),
+        environment_id: None,
+        environment_label: None,
+        title: child.title.clone(),
+        provider: child.provider_instance_id.clone(),
+        model,
+        state,
+        elapsed,
+    }
+}
+
+/// Children the timeline lists but the shell does not: `delegate_task` children on another
+/// linked environment (`remote_child`), and native subagents whose thread is not loaded.
+fn timeline_agents(
+    shell: &ShellState,
+    timeline: Option<&ThreadState>,
+    catalog: &ModelCatalog,
+    now_secs: i64,
+    seen: &mut std::collections::HashSet<String>,
+) -> Vec<AgentRow> {
+    let mut rows = Vec::new();
+    for entry in timeline.into_iter().flat_map(|t| &t.entries) {
+        let TimelineEntry::Subagent {
+            id,
+            child_thread_id,
+            title,
+            role,
+            status,
+            remote_child,
+            started_at,
+            completed_at,
+            ..
+        } = entry
+        else {
+            continue;
+        };
+        let (thread_id, environment_id, environment_label, title) = match remote_child {
+            Some(remote) => (
+                remote.thread_id.clone(),
+                Some(remote.environment_id.clone()),
+                Some(remote.label.clone()),
+                remote
+                    .title
+                    .clone()
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or_else(|| title.clone()),
+            ),
+            None => {
+                let thread_id = child_thread_id.clone().unwrap_or_default();
+                // A child the shell lists is a shell row, unless the card hides it on purpose.
+                if let Some(child) = shell.find_thread(&thread_id) {
+                    if child.deleted_at.is_none()
+                        && child.lineage.side_chat != Some(true)
+                        && seen.insert(child.id.clone())
+                    {
+                        rows.push(shell_agent(child, timeline, catalog, now_secs));
+                    }
+                    continue;
+                }
+                (thread_id, None, None, title.clone())
+            }
+        };
+        let key = if thread_id.is_empty() {
+            id.clone()
+        } else {
+            thread_id.clone()
+        };
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        let state = AgentState::from_item(*status);
+        rows.push(AgentRow {
+            key,
+            thread_id,
+            environment_id,
+            environment_label,
+            title,
+            provider: role.clone(),
+            model: entry_model(timeline, id, catalog),
+            state,
+            elapsed: agent_elapsed(
+                !conn_state::subagent_settled(*status),
+                started_at.as_deref(),
+                completed_at.as_deref(),
+                now_secs,
+            ),
+        });
+    }
+    rows
+}
+
+/// Collects parent/fork and child agents for `thread`: the shell's children, then the children
+/// only its timeline lists (the ones on another environment).
 #[must_use]
-pub(crate) fn resolve_lineage<'a>(shell: &'a ShellState, thread: &ThreadShell) -> Lineage<'a> {
+pub(crate) fn resolve_lineage<'a>(
+    shell: &'a ShellState,
+    thread: &ThreadShell,
+    timeline: Option<&ThreadState>,
+    catalog: &ModelCatalog,
+    now_secs: i64,
+) -> Lineage<'a> {
     use conn_contract::OrchestrationV2AppThreadLineageRelationshipToParent as Rel;
     let fork_source = match &thread.forked_from {
         Some(conn_contract::OrchestrationV2TurnItemForkSource::Run(run)) => {
@@ -242,24 +534,26 @@ pub(crate) fn resolve_lineage<'a>(shell: &'a ShellState, thread: &ThreadShell) -
         is_fork,
         ..Lineage::default()
     };
+    let mut seen = std::collections::HashSet::new();
+    let mut rows = Vec::new();
     for child in shell.threads.iter().chain(shell.archived_threads.iter()) {
         if child.deleted_at.is_some()
             || child.lineage.parent_thread_id.as_deref() != Some(thread.id.as_str())
             || child.lineage.side_chat == Some(true)
+            || !seen.insert(child.id.clone())
         {
             continue;
         }
-        if crate::sidebar::thread_list::resolve_row_status(child).is_some_and(|s| {
-            matches!(
-                s,
-                crate::sidebar::thread_list::RowStatus::Working
-                    | crate::sidebar::thread_list::RowStatus::Goal
-                    | crate::sidebar::thread_list::RowStatus::Waiting
-            )
-        }) {
-            lineage.running.push(child);
+        rows.push(shell_agent(child, timeline, catalog, now_secs));
+    }
+    rows.extend(timeline_agents(
+        shell, timeline, catalog, now_secs, &mut seen,
+    ));
+    for row in rows {
+        if row.state.is_live() {
+            lineage.running.push(row);
         } else {
-            lineage.previous.push(child);
+            lineage.previous.push(row);
         }
     }
     lineage
@@ -296,6 +590,10 @@ pub(crate) struct DetailsCardProps<'a> {
     pub(crate) shell: &'a ShellState,
     pub(crate) thread: &'a ThreadShell,
     pub(crate) task_links: Option<&'a conn_state::ThreadTaskLinks>,
+    /// The thread's timeline: its `subagent` rows list the children on other environments.
+    pub(crate) timeline: Option<&'a ThreadState>,
+    /// Names the models of child agents.
+    pub(crate) catalog: &'a ModelCatalog,
     pub(crate) state: &'a ThreadDetailsState,
     pub(crate) environment_label: &'a str,
     pub(crate) max_height: f32,
@@ -506,18 +804,25 @@ pub(crate) fn render_thread_details_card(
     body = body.when_some(tasks_section, |el, rows| el.child(rows));
 
     // Automations section (auto-hidden when nothing is bound and there is no error).
-    let bound: Vec<&ScheduledTask> = props
-        .state
-        .tasks
-        .iter()
-        .filter(|t| t.thread_id.as_deref() == Some(thread.id.as_str()))
-        .collect();
+    let bound = bound_tasks(&props.state.tasks, &thread.id);
     if !bound.is_empty() || props.state.tasks_error.is_some() {
         body = body.child(render_automations_section(props, &bound, cx));
     }
 
+    // Agent wakeups: what the agent set to wake itself, which no Conn scheduled task lists.
+    let wakeups = thread_wakeups(props, current_unix_secs());
+    if !wakeups.is_empty() {
+        body = body.child(render_agent_wakeups_section(&wakeups, tokens));
+    }
+
     // Lineage section.
-    let lineage = resolve_lineage(props.shell, thread);
+    let lineage = resolve_lineage(
+        props.shell,
+        thread,
+        props.timeline,
+        props.catalog,
+        current_unix_secs(),
+    );
     if !lineage.is_empty() {
         body = body.child(render_lineage_section(props, &lineage, cx));
     }
@@ -1056,6 +1361,89 @@ fn render_version_control_section(
     })
 }
 
+/// The tasks bound to `thread_id` (`ThreadAutomationsPanel`: `task.threadId === threadId`).
+#[must_use]
+pub(crate) fn bound_tasks<'a>(
+    tasks: &'a [ScheduledTask],
+    thread_id: &str,
+) -> Vec<&'a ScheduledTask> {
+    tasks
+        .iter()
+        .filter(|task| task.thread_id.as_deref() == Some(thread_id))
+        .collect()
+}
+
+/// Conn's `relativeLabel` for a time `diff_secs` from now: `in 5m`, `in 3h`, `2h ago`.
+fn relative_label(diff_secs: i64) -> String {
+    if diff_secs <= 0 {
+        let elapsed = diff_secs.saturating_neg();
+        return match elapsed {
+            0..60 => "just now".to_owned(),
+            60..3_600 => format!("{}m ago", elapsed / 60),
+            3_600..86_400 => format!("{}h ago", elapsed / 3_600),
+            _ => format!("{}d ago", elapsed / 86_400),
+        };
+    }
+    let minutes = diff_secs.saturating_add(59) / 60;
+    if minutes < 2 {
+        return "in under a minute".to_owned();
+    }
+    if minutes < 60 {
+        return format!("in {minutes}m");
+    }
+    let hours = (minutes + 30) / 60;
+    if hours < 24 {
+        return format!("in {hours}h");
+    }
+    format!("in {}d", (hours + 12) / 24)
+}
+
+/// The schedule line of a task row (`taskScheduleLine`): the schedule, then the policy that
+/// blocks it, else `next in 3h`, else `paused`.
+#[must_use]
+pub(crate) fn task_schedule_line(task: &ScheduledTask, now_secs: i64) -> String {
+    let mut line = schedule_label(&task.schedule);
+    if let Some(reason) = &task.blocked_by_policy {
+        line.push_str(&format!(" · {reason}"));
+    } else if task.enabled {
+        let next = task
+            .next_run_at
+            .as_deref()
+            .and_then(crate::sidebar::thread_list::parse_iso8601_unix_secs);
+        if let Some(next) = next {
+            line.push_str(&format!(" · next {}", relative_label(next - now_secs)));
+        }
+    } else {
+        line.push_str(" · paused");
+    }
+    line
+}
+
+/// The last run of a task in words (`RUN_STATUS_LABELS`), with its age and error.
+#[must_use]
+pub(crate) fn task_last_run_text(task: &ScheduledTask, now_secs: i64) -> String {
+    let status = match task.last_run_status {
+        ScheduledTaskRunStatus::Never => return "Never run".to_owned(),
+        ScheduledTaskRunStatus::Running => "Running",
+        ScheduledTaskRunStatus::Succeeded => "Last run succeeded",
+        ScheduledTaskRunStatus::Failed => "Last run failed",
+    };
+    let mut text = status.to_owned();
+    let at = task
+        .last_run_at
+        .as_deref()
+        .and_then(crate::sidebar::thread_list::parse_iso8601_unix_secs);
+    if let Some(at) = at
+        && task.last_run_status != ScheduledTaskRunStatus::Running
+    {
+        text.push_str(&format!(" {}", relative_label(at - now_secs)));
+    }
+    if let Some(error) = task.last_run_error.as_deref().filter(|e| !e.is_empty()) {
+        text.push_str(&format!(": {error}"));
+    }
+    text
+}
+
 fn status_dot_color(status: ScheduledTaskRunStatus, tokens: &Tokens) -> Hsla {
     match status {
         ScheduledTaskRunStatus::Never => hsla_alpha(tokens.muted_foreground, 0.40),
@@ -1069,7 +1457,7 @@ fn render_automations_section(
     props: &DetailsCardProps<'_>,
     tasks: &[&ScheduledTask],
     cx: &mut Context<'_, ConnApp>,
-) -> gpui_kit::Stateful<gpui_kit::Div> {
+) -> AnyElement {
     let tokens = props.tokens;
     let muted = hsla(tokens.muted_foreground);
     let highlight = hsla(tokens.shell_highlight);
@@ -1095,16 +1483,14 @@ fn render_automations_section(
         }))
         .conn_tooltip("Manage scheduled tasks", tokens)
         .child(icons::concept("superhero/adjust.svg", ICON_PX, muted))
+        .test_support()
         .into_any_element();
     let mut list = div().flex().flex_col();
     for task in tasks {
         let dot = status_dot_color(task.last_run_status, tokens);
-        let mut schedule = schedule_label(&task.schedule);
-        if !task.enabled {
-            schedule.push_str(" · paused");
-        } else if let Some(reason) = &task.blocked_by_policy {
-            schedule.push_str(&format!(" · {reason}"));
-        }
+        let now = current_unix_secs();
+        let schedule = task_schedule_line(task, now);
+        let last_run = task_last_run_text(task, now);
         let busy = props.state.busy_task_id.as_deref() == Some(task.id.as_str());
         let running = task.last_run_status == ScheduledTaskRunStatus::Running;
         let is_webhook = matches!(task.schedule, conn_state::ScheduledTaskSchedule::Webhook(_));
@@ -1118,8 +1504,9 @@ fn render_automations_section(
             )))
             .a11y_group(
                 format!("thread-details.task.{}", task.id),
-                format!("Scheduled task {}, {schedule}", task.title),
+                format!("Scheduled task {}, {schedule}, {last_run}", task.title),
             )
+            .test_support()
             .flex()
             .flex_row()
             .items_center()
@@ -1129,7 +1516,7 @@ fn render_automations_section(
             .py(px(6.0))
             .rounded(px(ROW_RADIUS_PX))
             .hover(move |s| s.bg(highlight))
-            .conn_tooltip(format!("{}\n{schedule}", task.title), tokens)
+            .conn_tooltip(format!("{}\n{schedule}\n{last_run}", task.title), tokens)
             .child(
                 div()
                     .relative()
@@ -1177,6 +1564,7 @@ fn render_automations_section(
                         format!("thread-details.task.{}.run", task.id),
                         format!("Run {} now", task.title),
                     )
+                    .test_support()
                     .flex()
                     .items_center()
                     .justify_center()
@@ -1211,6 +1599,7 @@ fn render_automations_section(
                     switch_label,
                     enabled,
                 )
+                .test_support()
                 .child(crate::settings::controls::pill_switch(
                     SharedString::from(format!("thread-details-task-switch-{}", task.id)),
                     enabled,
@@ -1235,6 +1624,7 @@ fn render_automations_section(
         Some(manage),
         tokens,
     )
+    .test_support()
     .child(div().max_h(px(216.0)).child(list));
     if let Some(error) = &props.state.tasks_error {
         s = s.child(
@@ -1251,7 +1641,149 @@ fn render_automations_section(
                 .child(error.clone()),
         );
     }
-    s
+    s.into_any_element()
+}
+
+/// The wakeups the agent set for itself on this thread: from its own timeline and the shell's
+/// background roster, so a linked-environment thread reads its own environment's.
+#[must_use]
+pub(crate) fn thread_wakeups(props: &DetailsCardProps<'_>, now_secs: i64) -> Vec<AgentWakeup> {
+    let Some(timeline) = props.timeline else {
+        return Vec::new();
+    };
+    let pending = props
+        .thread
+        .pending_background_tasks
+        .as_ref()
+        .and_then(Option::as_ref)
+        .map_or(&[][..], Vec::as_slice);
+    timeline.agent_wakeups(&WakeupContext {
+        now_ms: now_secs.saturating_mul(1_000),
+        pending,
+        provider: &props.thread.provider_instance_id,
+        driver: props
+            .catalog
+            .driver_for_instance(&props.thread.provider_instance_id),
+    })
+}
+
+/// `Wakeup`, `Loop`, `Cron` or `Timer`.
+fn wakeup_kind_label(kind: WakeupKind) -> &'static str {
+    match kind {
+        WakeupKind::Wakeup => "Wakeup",
+        WakeupKind::Loop => "Loop",
+        WakeupKind::Cron => "Cron",
+        WakeupKind::Timer => "Timer",
+    }
+}
+
+/// When the next wake is: `next in 12m`, `next in 3h (est.)`, `due now`, else the cron schedule.
+fn wakeup_when(wakeup: &AgentWakeup, now_secs: i64) -> String {
+    let Some(due_ms) = wakeup.due_ms else {
+        return wakeup
+            .schedule
+            .clone()
+            .unwrap_or_else(|| "time unknown".to_owned());
+    };
+    let diff = due_ms.div_euclid(1_000).saturating_sub(now_secs);
+    let mut when = if diff <= 0 {
+        "due now".to_owned()
+    } else {
+        format!("next {}", relative_label(diff))
+    };
+    if wakeup.estimated {
+        when.push_str(" (est.)");
+    }
+    when
+}
+
+/// The second line of a wakeup row: what it is, whether it recurs, and when it wakes:
+/// `Wakeup · one-off · next in 12m (est.)`, `Cron · recurring · Every 5 minutes`.
+#[must_use]
+pub(crate) fn wakeup_line(wakeup: &AgentWakeup, now_secs: i64) -> String {
+    let repeats = if wakeup.recurring {
+        "recurring"
+    } else {
+        "one-off"
+    };
+    format!(
+        "{} · {repeats} · {}",
+        wakeup_kind_label(wakeup.kind),
+        wakeup_when(wakeup, now_secs)
+    )
+}
+
+/// The `Agent wakeups` section. The rows are read-only: the server cannot cancel a wakeup the
+/// agent's own tools set.
+fn render_agent_wakeups_section(wakeups: &[AgentWakeup], tokens: &Tokens) -> AnyElement {
+    let muted = hsla(tokens.muted_foreground);
+    let highlight = hsla(tokens.shell_highlight);
+    let now = current_unix_secs();
+    let mut list = div().flex().flex_col();
+    for wakeup in wakeups {
+        let line = wakeup_line(wakeup, now);
+        let note = if wakeup.estimated {
+            "\nThe time is an estimate. Conn cannot cancel this wakeup."
+        } else {
+            "\nConn cannot cancel this wakeup."
+        };
+        list = list.child(
+            div()
+                .id(SharedString::from(format!(
+                    "thread-details-wakeup-{}",
+                    wakeup.key
+                )))
+                .a11y_group(
+                    format!("thread-details.agent-wakeup.{}", wakeup.key),
+                    format!("Agent wakeup {}, {line}", wakeup.title),
+                )
+                .test_support()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(ROW_GAP_PX))
+                .w_full()
+                .px(px(ROW_PAD_X_PX))
+                .py(px(6.0))
+                .rounded(px(ROW_RADIUS_PX))
+                .hover(move |s| s.bg(highlight))
+                .conn_tooltip(format!("{}\n{line}{note}", wakeup.title), tokens)
+                .child(icons::concept("superhero/scheduled.svg", ICON_PX, muted))
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(14.0))
+                                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                .text_color(hsla_alpha(tokens.foreground, 0.80))
+                                .child(wakeup.title.clone()),
+                        )
+                        .child(
+                            div()
+                                .truncate()
+                                .text_size(px(11.0))
+                                .text_color(muted)
+                                .child(line),
+                        ),
+                ),
+        );
+    }
+    section(
+        "thread-details.agent-wakeups",
+        "Agent wakeups",
+        Some("Agent wakeups".to_owned()),
+        true,
+        None,
+        tokens,
+    )
+    .test_support()
+    .child(div().max_h(px(216.0)).child(list))
+    .into_any_element()
 }
 
 fn lineage_row(
@@ -1290,18 +1822,21 @@ fn lineage_row(
 }
 
 /// Provider icon with the `6px` status dot + `2px` cutout ring (`ThreadRelationshipIcon`).
-fn relationship_icon(child: &ThreadShell, dot: Hsla, tokens: &Tokens) -> AnyElement {
+/// A provider the app has no mark for shows the robot (`superhero/agent.svg`).
+fn agent_icon(provider: &str, state: AgentState, tokens: &Tokens) -> AnyElement {
+    let muted = hsla(tokens.muted_foreground);
+    let mark = if provider.is_empty() {
+        icons::concept("superhero/agent.svg", ICON_PX, muted).into_any_element()
+    } else {
+        icons::provider_mark(provider, ICON_PX, muted)
+    };
     div()
         .relative()
         .flex_shrink_0()
-        .child(icons::provider_mark(
-            &child.provider_instance_id,
-            ICON_PX,
-            hsla(tokens.muted_foreground),
-        ))
+        .child(mark)
         // Top right, as on the sidebar rows and subagent cards (Nick, #314).
         .child(crate::panels::chrome::status_dot_cutout(
-            dot,
+            state.dot(tokens),
             hsla(tokens.popover),
             None,
             false,
@@ -1309,28 +1844,73 @@ fn relationship_icon(child: &ThreadShell, dot: Hsla, tokens: &Tokens) -> AnyElem
         .into_any_element()
 }
 
-fn child_status_dot(child: &ThreadShell, tokens: &Tokens) -> Hsla {
-    use conn_contract::OrchestrationV2ShellThreadStatus as S;
-    match child.status {
-        S::Preparing | S::Queued | S::Starting | S::Running | S::Waiting => hsla(tokens.info),
-        S::Failed => hsla(tokens.destructive),
-        S::Completed => hsla(tokens.success),
-        _ => hsla_alpha(tokens.muted_foreground, 0.45),
+/// A child agent row: provider mark with status dot, the title over `on <env> · <model> ·
+/// <effort>`, and the run time (else the state) at the right. A click opens the child's
+/// thread, on its own environment when it runs on another one.
+fn agent_row(
+    id: SharedString,
+    ax_id: String,
+    agent: &AgentRow,
+    props: &DetailsCardProps<'_>,
+    cx: &mut Context<'_, ConnApp>,
+) -> AnyElement {
+    let tokens = props.tokens;
+    let muted = hsla(tokens.muted_foreground);
+    let highlight = hsla(tokens.shell_highlight);
+    let mut text = div().flex().flex_col().flex_1().min_w_0().child(
+        div()
+            .min_w_0()
+            .truncate()
+            .text_color(hsla_alpha(tokens.foreground, 0.80))
+            .child(agent.title.clone()),
+    );
+    if let Some(meta) = agent.meta() {
+        text = text.child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(12.0))
+                .line_height(px(16.0))
+                .font_weight(gpui_kit::FontWeight::NORMAL)
+                .text_color(muted)
+                .child(meta),
+        );
     }
-}
-
-fn child_status_text(child: &ThreadShell) -> &'static str {
-    use conn_contract::OrchestrationV2ShellThreadStatus as S;
-    match child.status {
-        S::Preparing | S::Starting => "Starting",
-        S::Running => "Running",
-        S::Queued => "Queued",
-        S::Waiting => "Waiting",
-        S::Completed => "Done",
-        S::Failed => "Failed",
-        S::Interrupted | S::Cancelled | S::RolledBack => "Stopped",
-        S::Idle => "Idle",
+    let trailing = agent
+        .elapsed
+        .clone()
+        .unwrap_or_else(|| agent.state.text().to_owned());
+    let row = row_base(id, tokens)
+        .h_auto()
+        .min_h(px(ROW_HEIGHT_PX))
+        .py(px(4.0))
+        .conn_tooltip(agent.title.clone(), tokens)
+        .child(agent_icon(&agent.provider, agent.state, tokens))
+        .child(text)
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_color(muted)
+                .font_weight(gpui_kit::FontWeight::NORMAL)
+                .child(trailing),
+        );
+    if agent.thread_id.is_empty() {
+        // No thread to open yet.
+        return row
+            .a11y_group(ax_id, format!("Agent {}", agent.title))
+            .test_support()
+            .into_any_element();
     }
+    let (thread_id, environment_id) = (agent.thread_id.clone(), agent.environment_id.clone());
+    row.a11y_button(ax_id, format!("Open thread {}", agent.title))
+        .cursor_pointer()
+        .hover(move |s| s.bg(highlight))
+        .on_click(cx.listener(move |app, _, _, cx| match &environment_id {
+            Some(environment) => app.open_remote_child(environment, &thread_id, cx),
+            None => app.select_thread(thread_id.clone(), cx),
+        }))
+        .test_support()
+        .into_any_element()
 }
 
 fn render_lineage_section(
@@ -1341,7 +1921,6 @@ fn render_lineage_section(
     let tokens = props.tokens;
     let muted = hsla(tokens.muted_foreground);
     let highlight = hsla(tokens.shell_highlight);
-    let now = current_unix_secs();
     let mut list = div().flex().flex_col();
 
     if let Some(parent) = lineage.parent {
@@ -1360,28 +1939,11 @@ fn render_lineage_section(
             cx,
         ));
     }
-    for (idx, child) in lineage.running.iter().enumerate() {
-        let elapsed = child
-            .activity_run_started_at
-            .as_ref()
-            .and_then(Option::as_deref)
-            .or_else(|| {
-                child
-                    .latest_run_started_at
-                    .as_ref()
-                    .and_then(Option::as_deref)
-            })
-            .and_then(parse_iso8601_unix_secs)
-            .map_or_else(
-                || child_status_text(child).to_owned(),
-                |started| format_working_duration(now - started),
-            );
-        list = list.child(lineage_row(
+    for (idx, agent) in lineage.running.iter().enumerate() {
+        list = list.child(agent_row(
             SharedString::from(format!("thread-details-running-{idx}")),
-            format!("thread-details.lineage.running.{}", child.id),
-            child,
-            relationship_icon(child, child_status_dot(child, tokens), tokens),
-            Some(elapsed),
+            format!("thread-details.lineage.running.{}", agent.key),
+            agent,
             props,
             cx,
         ));
@@ -1423,20 +1985,18 @@ fn render_lineage_section(
             ICON_PX,
             muted,
         ));
-        list = list.child(trigger);
+        list = list.child(trigger.test_support());
         if expanded {
-            for (idx, child) in lineage
+            for (idx, agent) in lineage
                 .previous
                 .iter()
                 .take(LINEAGE_INITIAL_COUNT * 4)
                 .enumerate()
             {
-                list = list.child(lineage_row(
+                list = list.child(agent_row(
                     SharedString::from(format!("thread-details-previous-{idx}")),
-                    format!("thread-details.lineage.previous.{}", child.id),
-                    child,
-                    relationship_icon(child, child_status_dot(child, tokens), tokens),
-                    Some(child_status_text(child).to_owned()),
+                    format!("thread-details.lineage.previous.{}", agent.key),
+                    agent,
                     props,
                     cx,
                 ));

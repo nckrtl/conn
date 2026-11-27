@@ -102,6 +102,39 @@ impl ChatView {
             back_layers(self.request_stack.len()),
         )
     }
+
+    /// Types `value` into the masked field of the pending secret request `id`.
+    pub(crate) fn set_secret_input_for_test(
+        &mut self,
+        id: &str,
+        value: &str,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if let Some(form) = self.secret_forms.get(id) {
+            form.input.update(cx, |input, cx| {
+                input.set_value(value.to_owned(), window, cx);
+            });
+        }
+        cx.notify();
+    }
+}
+
+/// The fill and label colour of a decision pill. A disabled `accept` pill is the primary
+/// button muted (`theme::disabled_primary`), never a grey ghost.
+pub(super) fn request_pill_colors(tokens: &Tokens, decision: &str, enabled: bool) -> (Hsla, Hsla) {
+    match decision {
+        "decline" => (
+            hsla(composite_over(
+                tokens.diff_removed_background,
+                chat_page(tokens),
+            )),
+            hsla(tokens.destructive_foreground),
+        ),
+        "accept" if !enabled => crate::theme::disabled_primary(tokens),
+        "accept" => (hsla(tokens.primary), hsla(tokens.primary_foreground)),
+        _ => (hsla(tokens.secondary), hsla(tokens.secondary_foreground)),
+    }
 }
 
 /// The surfaces of a panel.
@@ -397,19 +430,7 @@ impl ChatView {
         decision: &str,
         enabled: bool,
     ) -> gpui_kit::Stateful<gpui_kit::Div> {
-        let tokens = &self.tokens;
-        let (bg, text) = match decision {
-            "decline" => (
-                hsla(composite_over(
-                    tokens.diff_removed_background,
-                    chat_page(tokens),
-                )),
-                hsla(tokens.destructive_foreground),
-            ),
-            "accept" if !enabled => (hsla(tokens.shell_control), hsla(tokens.muted_foreground)),
-            "accept" => (hsla(tokens.primary), hsla(tokens.primary_foreground)),
-            _ => (hsla(tokens.secondary), hsla(tokens.secondary_foreground)),
-        };
+        let (bg, text) = request_pill_colors(&self.tokens, decision, enabled);
         div()
             .id(SharedString::from(key))
             .a11y_button(SharedString::from(ax_id), label.to_owned())
@@ -795,6 +816,39 @@ mod tests {
         // The panel never takes more than 65% of the window while there is room.
         let viewport = 800.0;
         assert!(body_max_for(viewport) + PANEL_CHROME_PX <= viewport * 0.65 + 0.01);
+    }
+
+    #[test]
+    fn a_disabled_accept_pill_keeps_a_muted_primary_fill() {
+        for theme_id in ["dark-ocean", "t3-code-light"] {
+            let theme = conn_theme::theme_by_id(theme_id).expect("a built-in theme");
+            let tokens = Tokens::derive(&theme);
+            let (on_bg, on_text) = request_pill_colors(&tokens, "accept", true);
+            let (off_bg, off_text) = request_pill_colors(&tokens, "accept", false);
+            assert_eq!(on_bg, hsla(tokens.primary), "{theme_id}: enabled fill");
+            assert_eq!(on_text, hsla(tokens.primary_foreground));
+            // Same hue and saturation as the primary colour, lower opacity, never transparent.
+            let primary = hsla(tokens.primary);
+            assert!(off_bg.a > 0.0 && off_bg.a < 1.0, "{theme_id}: {off_bg:?}");
+            assert_eq!(
+                (off_bg.h, off_bg.s, off_bg.l),
+                (primary.h, primary.s, primary.l)
+            );
+            assert_ne!(
+                off_bg,
+                hsla(tokens.shell_control),
+                "{theme_id}: not a grey ghost"
+            );
+            let foreground = hsla(tokens.primary_foreground);
+            assert!(
+                off_text.a > 0.0 && off_text.a < 1.0,
+                "{theme_id}: {off_text:?}"
+            );
+            assert_eq!(
+                (off_text.h, off_text.s, off_text.l),
+                (foreground.h, foreground.s, foreground.l)
+            );
+        }
     }
 
     #[test]

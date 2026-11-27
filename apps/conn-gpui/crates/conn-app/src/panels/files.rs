@@ -27,7 +27,7 @@ use gpui_kit::{
     IntoElement, MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, SharedString,
     Styled, Subscription, Task, Transformation, Window, anchored, deferred, div, percentage, px,
 };
-use gpui_kit::{Image, ImageFormat, ImageSource, ObjectFit, img};
+use gpui_kit::{Image, ImageFormat, ImageSource, ObjectFit, RenderImage, img};
 use std::sync::Arc;
 
 use crate::chat::markdown::{MarkdownOptions, render_markdown};
@@ -46,6 +46,8 @@ use gpui_kit::component::input::{
 
 /// Space above the first source line in the preview.
 const PREVIEW_TOP_PAD_PX: f32 = 12.0;
+/// What the preview says when a linked file is not on the thread's machine.
+const FILE_NOT_FOUND: &str = "This file does not exist.";
 /// Width of the fade at a breadcrumb trail edge that has more crumbs beyond it.
 const CRUMB_FADE_PX: f32 = 14.0;
 const TREE_ROW_HEIGHT_PX: f32 = 28.0;
@@ -83,10 +85,11 @@ enum PreviewState {
         path: String,
         message: String,
     },
-    /// An image the server sent as bytes.
+    /// An image the server sent as bytes, decoded by the panel. The panel frees its pixels and
+    /// window texture when the preview changes or the panel closes.
     Image {
         path: String,
-        image: Arc<Image>,
+        image: Arc<RenderImage>,
     },
     /// A file the Browser panel shows (a PDF): nothing is read here.
     Document {
@@ -283,6 +286,12 @@ impl FilesPanel {
             }
         });
         let prefs_path = view_prefs::ViewPrefs::path();
+        // A closed panel frees the image it showed.
+        cx.on_release(|this: &mut Self, cx| {
+            let preview = std::mem::replace(&mut this.preview, PreviewState::Empty);
+            release_preview_image(preview, cx);
+        })
+        .detach();
         Self {
             showing_preview: false,
             prefs: view_prefs::ViewPrefs::load(prefs_path.as_deref()),
@@ -353,6 +362,20 @@ impl FilesPanel {
         cx.notify();
     }
 
+    /// The connection the panel reads files over.
+    pub(super) fn connection(&self) -> Option<&Connection> {
+        self.connection.as_ref()
+    }
+
+    /// Test helper: the error the preview shows, with its path.
+    #[cfg(test)]
+    pub(crate) fn preview_error_for_test(&self) -> Option<(String, String)> {
+        match &self.preview {
+            PreviewState::Error { path, message } => Some((path.clone(), message.clone())),
+            _ => None,
+        }
+    }
+
     pub(super) fn set_thread(&mut self, thread: Option<String>, cx: &mut Context<'_, Self>) {
         self.thread = thread;
         self.reset_preview(cx);
@@ -371,7 +394,8 @@ impl FilesPanel {
 
     pub(crate) fn reset_preview(&mut self, cx: &mut Context<'_, Self>) {
         self.preview_generation = self.preview_generation.wrapping_add(1);
-        self.preview = PreviewState::Empty;
+        let previous = std::mem::replace(&mut self.preview, PreviewState::Empty);
+        release_preview_image(previous, cx);
         self.recent_text.clear();
         self.pending_path = None;
         self.editor = None;
@@ -510,7 +534,7 @@ impl FilesPanel {
     }
 
     /// Shows the Files tree with `folder` expanded and selected (a folder crumb was clicked).
-    fn reveal_folder(&mut self, folder: String, cx: &mut Context<'_, Self>) {
+    pub(super) fn reveal_folder(&mut self, folder: String, cx: &mut Context<'_, Self>) {
         self.crumb_menu = None;
         for directory in self.tree.reveal_folder(&folder) {
             self.load_directory(directory, cx);
@@ -913,8 +937,12 @@ impl FilesPanel {
         }
         let previous = std::mem::replace(&mut self.preview, next);
         if switched {
-            self.remember_text(previous);
             cx.emit(FilesEvent::DisplayedFileChanged);
+        }
+        if let PreviewState::Image { .. } = previous {
+            release_preview_image(previous, cx);
+        } else if switched {
+            self.remember_text(previous);
         }
         cx.notify();
     }
@@ -930,7 +958,10 @@ impl FilesPanel {
         }
         self.reveal = None;
         self.range_error = None;
-        if let Some(parent) = std::path::Path::new(&path).parent() {
+        // A file outside the workspace (a link to `/abs/file` or `~/file`) has no row in the
+        // workspace tree, so only its preview opens.
+        let host_path = path.starts_with('/') || path.starts_with("~/");
+        if !host_path && let Some(parent) = std::path::Path::new(&path).parent() {
             for dir in parent
                 .ancestors()
                 .filter_map(|p| p.to_str())
@@ -941,7 +972,7 @@ impl FilesPanel {
                 }
             }
         }
-        self.tree.select(Some(path.clone()));
+        self.tree.select((!host_path).then(|| path.clone()));
         let (Some(conn), Some(cwd)) = (self.connection.clone(), self.workspace_root.clone()) else {
             self.present(
                 PreviewState::Error {
@@ -1036,6 +1067,18 @@ impl FilesPanel {
                 }
                 panel.pending_path = None;
                 match res {
+                    Ok(result) if result.exists == Some(false) => {
+                        if let Some(reveal) = panel.reveal.take() {
+                            let _ = reveal.done.send(Err(FILE_NOT_FOUND.to_owned()));
+                        }
+                        panel.present(
+                            PreviewState::Error {
+                                path,
+                                message: FILE_NOT_FOUND.to_owned(),
+                            },
+                            cx,
+                        );
+                    }
                     Ok(result) => {
                         panel.present(
                             PreviewState::Loaded {
@@ -1086,28 +1129,32 @@ impl FilesPanel {
             );
             return;
         };
+        let svg_renderer = cx.svg_renderer();
+        let executor = cx.background_executor().clone();
         cx.spawn(async move |this, cx| {
             let res = conn.fetch_workspace_file_bytes(&thread_id, &path).await;
+            // GPUI's own decoder, off the UI thread, so GIFs still animate and SVGs draw as before.
+            let decoded = match res {
+                Ok(bytes) => match image_format(mime) {
+                    Some(format) => executor
+                        .spawn(async move { decode_preview_image(format, bytes, svg_renderer) })
+                        .await
+                        .ok_or_else(|| "This image could not be decoded.".to_owned()),
+                    None => Err("This image type cannot be shown.".to_owned()),
+                },
+                Err(err) => Err(err.to_string()),
+            };
             let _ = this.update(cx, |panel, cx| {
                 if panel.preview_generation != generation {
+                    if let Ok(image) = decoded {
+                        release_preview_image(PreviewState::Image { path, image }, cx);
+                    }
                     return;
                 }
                 panel.pending_path = None;
-                let preview = match res {
-                    Ok(bytes) => match image_format(mime) {
-                        Some(format) => PreviewState::Image {
-                            path,
-                            image: Arc::new(Image::from_bytes(format, bytes)),
-                        },
-                        None => PreviewState::Error {
-                            path,
-                            message: "This image type cannot be shown.".to_owned(),
-                        },
-                    },
-                    Err(err) => PreviewState::Error {
-                        path,
-                        message: err.to_string(),
-                    },
+                let preview = match decoded {
+                    Ok(image) => PreviewState::Image { path, image },
+                    Err(message) => PreviewState::Error { path, message },
                 };
                 panel.present(preview, cx);
             });
@@ -1764,7 +1811,7 @@ impl FilesPanel {
                 .justify_center()
                 .p(px(12.0))
                 .child(
-                    img(ImageSource::Image(image.clone()))
+                    img(ImageSource::Render(image.clone()))
                         .object_fit(ObjectFit::Contain)
                         .max_w_full()
                         .max_h_full(),
@@ -2118,6 +2165,54 @@ impl FilesPanel {
 }
 
 /// The GPUI image format for a MIME type the file preview offers.
+/// The most pixels a still preview keeps: a 4K screen's worth (33 MB of BGRA). A bigger picture
+/// is scaled down to fit, which the pane, at most a window wide, never shows past anyway.
+/// Animated images keep their size and frames.
+const MAX_PREVIEW_PIXELS: u64 = 3840 * 2160;
+
+/// Decodes `bytes` with GPUI's own decoder, as `img(ImageSource::Image)` would, and scales a
+/// still picture past [`MAX_PREVIEW_PIXELS`] down. Slow: run it off the UI thread.
+fn decode_preview_image(
+    format: ImageFormat,
+    bytes: Vec<u8>,
+    svg_renderer: gpui_kit::SvgRenderer,
+) -> Option<Arc<RenderImage>> {
+    let decoded = Image::from_bytes(format, bytes)
+        .to_image_data(svg_renderer)
+        .ok()?;
+    if decoded.frame_count() != 1 {
+        return Some(decoded);
+    }
+    let size = decoded.size(0);
+    let (width, height) = (
+        u32::try_from(size.width.0).ok()?,
+        u32::try_from(size.height.0).ok()?,
+    );
+    let pixels = u64::from(width) * u64::from(height);
+    if pixels <= MAX_PREVIEW_PIXELS {
+        return Some(decoded);
+    }
+    let scale = (MAX_PREVIEW_PIXELS as f64 / pixels as f64).sqrt();
+    let fit = |side: u32| ((f64::from(side) * scale).floor() as u32).max(1);
+    // Channel order does not matter to the resize, so the BGRA pixels stay BGRA.
+    let frame = image::RgbaImage::from_raw(width, height, decoded.as_bytes(0)?.to_vec())?;
+    let scaled = image::imageops::resize(
+        &frame,
+        fit(width),
+        fit(height),
+        image::imageops::FilterType::Triangle,
+    );
+    Some(Arc::new(RenderImage::new(vec![image::Frame::new(scaled)])))
+}
+
+/// Frees an image preview's window texture once it leaves the screen. Deferred, so a window
+/// painting right now is back in the app and loses the texture too.
+fn release_preview_image(preview: PreviewState, cx: &mut gpui_kit::App) {
+    if let PreviewState::Image { image, .. } = preview {
+        cx.defer(move |cx| cx.drop_image(image, None));
+    }
+}
+
 fn image_format(mime: &str) -> Option<ImageFormat> {
     match mime {
         "image/png" => Some(ImageFormat::Png),
@@ -3316,3 +3411,46 @@ mod tests {
 #[cfg(test)]
 #[path = "file_icon_shots.rs"]
 mod file_icon_shots;
+
+#[cfg(test)]
+mod preview_image_tests {
+    use super::*;
+
+    fn encode(picture: &image::RgbaImage, format: image::ImageFormat) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        picture
+            .write_to(&mut std::io::Cursor::new(&mut bytes), format)
+            .expect("encode");
+        bytes
+    }
+
+    /// A still picture past 4K is kept at 4K's pixel count, aspect intact; a smaller one keeps
+    /// its size; an animated GIF keeps every frame.
+    #[gpui_kit::test]
+    fn previews_cap_huge_stills_and_keep_animation(cx: &mut gpui_kit::TestAppContext) {
+        let svg = cx.update(|cx| cx.svg_renderer());
+        let huge = encode(&image::RgbaImage::new(5120, 2880), image::ImageFormat::Png);
+        let image = decode_preview_image(ImageFormat::Png, huge, svg.clone()).expect("decodes");
+        let size = image.size(0);
+        let (w, h) = (size.width.0 as u64, size.height.0 as u64);
+        assert!(w * h <= MAX_PREVIEW_PIXELS, "{w}×{h}");
+        assert_eq!((w, h), (3840, 2160));
+
+        let small = encode(&image::RgbaImage::new(800, 600), image::ImageFormat::Png);
+        let image = decode_preview_image(ImageFormat::Png, small, svg.clone()).expect("decodes");
+        assert_eq!((image.size(0).width.0, image.size(0).height.0), (800, 600));
+
+        let mut gif = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut gif);
+            for shade in [0_u8, 255] {
+                let frame = image::RgbaImage::from_pixel(4, 4, image::Rgba([shade, 0, 0, 255]));
+                encoder
+                    .encode_frame(image::Frame::new(frame))
+                    .expect("gif frame");
+            }
+        }
+        let image = decode_preview_image(ImageFormat::Gif, gif, svg).expect("decodes");
+        assert_eq!(image.frame_count(), 2, "an animated GIF still animates");
+    }
+}

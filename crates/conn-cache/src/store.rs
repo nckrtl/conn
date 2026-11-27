@@ -309,6 +309,9 @@ impl MessageCache {
     }
 
     /// Applies a chronological tail from the live reducer, keeping older rows up to the cap.
+    /// Every row of `messages` is written again and moves to the end, in the given order.
+    ///
+    /// Returns the number of rows written.
     ///
     /// # Errors
     /// Returns the database write error. The merge and eviction commit together.
@@ -317,13 +320,52 @@ impl MessageCache {
         env: &str,
         thread: &str,
         messages: &[(&str, &T)],
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<u64, sqlx::Error> {
         if messages.is_empty() {
-            return Ok(());
+            return Ok(0);
         }
         let mut tx = self.0.begin().await?;
-        Self::write_tail(&mut tx, env, thread, messages).await?;
-        tx.commit().await
+        let written = Self::write_tail(&mut tx, env, thread, messages).await?;
+        tx.commit().await?;
+        Ok(written)
+    }
+
+    /// Writes only the rows of a tail that changed since it was last merged or upserted.
+    ///
+    /// A row already stored keeps its place and changes its body; a new row goes after every
+    /// stored one, in the given order. A caller that merged the tail before, and sees its rows
+    /// in the same order with new ones only at the end, gets the stored order [`Self::merge`]
+    /// would have made of the whole tail.
+    ///
+    /// Returns the number of rows inserted or changed.
+    ///
+    /// # Errors
+    /// Returns the database write error. The write and eviction commit together.
+    pub async fn upsert<T: serde::Serialize + Sync>(
+        &self,
+        env: &str,
+        thread: &str,
+        messages: &[(&str, &T)],
+    ) -> Result<u64, sqlx::Error> {
+        if messages.is_empty() {
+            return Ok(0);
+        }
+        let mut tx = self.0.begin().await?;
+        let written = sqlx::query(
+            "INSERT INTO messages(environment,thread,id,body)
+             SELECT ?,?,value ->> 0,value -> 1 FROM json_each(?) WHERE true ORDER BY key
+             ON CONFLICT(environment,thread,id) DO UPDATE SET body=excluded.body
+             WHERE body != excluded.body",
+        )
+        .bind(env)
+        .bind(thread)
+        .bind(sqlx::types::Json(messages))
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        Self::trim(&mut tx, env, thread).await?;
+        tx.commit().await?;
+        Ok(written)
     }
 
     async fn write_tail<T: serde::Serialize + Sync>(
@@ -331,10 +373,10 @@ impl MessageCache {
         env: &str,
         thread: &str,
         messages: &[(&str, &T)],
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<u64, sqlx::Error> {
         // Assign the incoming tail consecutive rowids. IDs absent from a bounded snapshot
         // can still be valid older history, so only the cap evicts them.
-        sqlx::query(
+        let written = sqlx::query(
             "INSERT OR REPLACE INTO messages(environment,thread,id,body)
             SELECT ?,?,value ->> 0,value -> 1 FROM json_each(?) ORDER BY key",
         )
@@ -342,8 +384,10 @@ impl MessageCache {
         .bind(thread)
         .bind(sqlx::types::Json(messages))
         .execute(&mut **tx)
-        .await?;
-        Self::trim(tx, env, thread).await
+        .await?
+        .rows_affected();
+        Self::trim(tx, env, thread).await?;
+        Ok(written)
     }
 
     async fn trim(
@@ -550,6 +594,223 @@ mod tests {
         db.remove("e", "t").await?;
         assert!(!db.merge_prefix("e", "t", first.id(), &prefix, &[]).await?);
         assert!(db.recent("e", "t").await?.is_empty());
+        Ok(())
+    }
+
+    /// What a streaming thread costs the cache per flush. `cargo test -p conn-cache --release --
+    /// --ignored --nocapture flush_costs` prints the rows and bytes written, and the file growth.
+    #[tokio::test]
+    #[ignore = "a measurement, not a check"]
+    async fn flush_costs() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{Message, TailChange, TailMarks};
+        use std::time::Instant;
+
+        let entries = |streamed: usize| -> Vec<conn_state::TimelineEntry> {
+            (0..1000)
+                .map(|n| {
+                    let body = if n == 999 {
+                        "streamed ".repeat(streamed)
+                    } else {
+                        format!("{n}: {}", "an earlier answer of the thread. ".repeat(120))
+                    };
+                    conn_state::TimelineEntry::Assistant {
+                        id: format!("m{n}"),
+                        markdown: body,
+                        streaming: false,
+                        created_at: None,
+                        run_id: None,
+                        status: conn_state::ItemStatus::Completed,
+                    }
+                })
+                .collect()
+        };
+        let sizes = |label: &str, dir: &std::path::Path| {
+            let total: u64 = ["messages.sqlite3", "messages.sqlite3-wal"]
+                .iter()
+                .filter_map(|f| std::fs::metadata(dir.join(f)).ok())
+                .map(|m| m.len())
+                .sum();
+            println!("{label}: database + wal on disk {total} bytes");
+        };
+        for whole in [true, false] {
+            let dir = tempfile::tempdir()?;
+            let db = MessageCache::open(&dir.path().join("messages.sqlite3")).await?;
+            let mut marks: Option<TailMarks> = None;
+            let (mut rows_written, mut body_bytes, mut capture_ms) = (0_u64, 0_usize, 0.0);
+            for flush in 0..100 {
+                let tail = entries(10 + flush);
+                let start = Instant::now();
+                let prints: Vec<(&str, u64)> =
+                    tail.iter().filter_map(Message::fingerprint).collect();
+                let change = match (&marks, whole) {
+                    (Some(marks), false) => marks.diff(&prints),
+                    _ => TailChange::Whole,
+                };
+                let picked: Vec<Message> = match &change {
+                    TailChange::Nothing => Vec::new(),
+                    TailChange::Rows(rows) => rows
+                        .iter()
+                        .filter_map(|&i| Message::capture(&tail[i]))
+                        .collect(),
+                    TailChange::Whole => tail.iter().filter_map(Message::capture).collect(),
+                };
+                capture_ms += start.elapsed().as_secs_f64() * 1000.0;
+                let rows: Vec<(&str, &Message)> = picked.iter().map(|m| (m.id(), m)).collect();
+                body_bytes += serde_json::to_vec(&rows)?.len();
+                rows_written += if matches!(change, TailChange::Whole) {
+                    db.merge("e", "t", &rows).await?
+                } else {
+                    db.upsert("e", "t", &rows).await?
+                };
+                marks = Some(TailMarks::new(&prints));
+            }
+            let label = if whole {
+                "before (whole tail)"
+            } else {
+                "after (changed rows)"
+            };
+            println!(
+                "{label}: per flush {:.1} rows written, {:.0} KiB serialized, capture {:.3} ms (main thread)",
+                rows_written as f64 / 100.0,
+                body_bytes as f64 / 100.0 / 1024.0,
+                capture_ms / 100.0,
+            );
+            sizes(label, dir.path());
+        }
+        Ok(())
+    }
+
+    async fn stored(db: &MessageCache, thread: &str) -> Vec<(String, String)> {
+        sqlx::query_as("SELECT id, body FROM messages WHERE thread=? ORDER BY position")
+            .bind(thread)
+            .fetch_all(&db.0)
+            .await
+            .expect("stored rows")
+    }
+
+    /// Writing only the changed rows leaves the cache as writing the whole tail every time does,
+    /// through appends, edits, a window that slides at the cap, reorders and removals.
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "compare both caches after each step and propagate database setup failures"
+    )]
+    async fn changed_rows_leave_the_cache_as_whole_tail_writes_do()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::{TailChange, TailMarks};
+        use std::hash::{Hash as _, Hasher as _};
+
+        let dir = tempfile::tempdir()?;
+        let whole = MessageCache::open(&dir.path().join("whole.sqlite3")).await?;
+        let delta = MessageCache::open(&dir.path().join("delta.sqlite3")).await?;
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            usize::try_from(seed % bound as u64).expect("a small number")
+        };
+        let mut counter = 0_usize;
+        let mut window: Vec<(String, String)> = Vec::new();
+        let mut marks: Option<TailMarks> = None;
+        let (mut whole_rows, mut delta_rows) = (0, 0);
+        for step in 0..600 {
+            match next(8) {
+                0..=2 => {
+                    for _ in 0..=next(3) {
+                        counter += 1;
+                        window.push((format!("m{counter}"), format!("body {counter}")));
+                    }
+                }
+                3 | 4 if !window.is_empty() => {
+                    let at = next(window.len());
+                    window[at].1 = format!("edited at step {step}");
+                }
+                5 if window.len() > 1 => {
+                    let drop = 1 + next(3).min(window.len() - 1);
+                    window.drain(..drop);
+                }
+                6 if window.len() > 2 => {
+                    let (a, b) = (next(window.len()), next(window.len()));
+                    window.swap(a, b);
+                }
+                7 if !window.is_empty() => {
+                    if next(2) == 0 {
+                        window.pop();
+                    } else {
+                        counter += 1;
+                        let at = next(window.len());
+                        window.insert(at, (format!("m{counter}"), "inserted".to_owned()));
+                    }
+                }
+                _ => {}
+            }
+            // The live window never holds more than the cap.
+            let cap = 40;
+            window.drain(..window.len().saturating_sub(cap));
+            let rows: Vec<(&str, &String)> =
+                window.iter().map(|(id, body)| (&**id, body)).collect();
+            let tail: Vec<(&str, u64)> = window
+                .iter()
+                .map(|(id, body)| {
+                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                    body.hash(&mut hasher);
+                    (&**id, hasher.finish())
+                })
+                .collect();
+            whole_rows += whole.merge("e", "t", &rows).await?;
+            let change = marks.as_ref().map_or(TailChange::Whole, |m| m.diff(&tail));
+            match change {
+                TailChange::Nothing => {}
+                TailChange::Rows(changed) => {
+                    let rows: Vec<_> = changed.iter().map(|&i| rows[i]).collect();
+                    delta_rows += delta.upsert("e", "t", &rows).await?;
+                }
+                TailChange::Whole => delta_rows += delta.merge("e", "t", &rows).await?,
+            }
+            marks = Some(TailMarks::new(&tail));
+            assert_eq!(
+                stored(&whole, "t").await,
+                stored(&delta, "t").await,
+                "step {step}"
+            );
+        }
+        assert!(
+            delta_rows * 3 < whole_rows,
+            "{delta_rows} rows written, against {whole_rows} for whole tails"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "assert the stored rows and propagate database setup failures"
+    )]
+    async fn upsert_writes_only_new_and_changed_rows_and_keeps_places()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let db = MessageCache::open(&dir.path().join("messages.sqlite3")).await?;
+        let rows = |texts: &[(&'static str, &str)]| -> Vec<(&'static str, String)> {
+            texts
+                .iter()
+                .map(|&(id, text)| (id, text.to_owned()))
+                .collect()
+        };
+        let first = rows(&[("a", "one"), ("b", "two")]);
+        let refs: Vec<(&str, &String)> = first.iter().map(|(id, text)| (*id, text)).collect();
+        assert_eq!(db.merge("e", "t", &refs).await?, 2);
+        let next = rows(&[("b", "two, edited"), ("c", "three"), ("a", "one")]);
+        let refs: Vec<(&str, &String)> = next.iter().map(|(id, text)| (*id, text)).collect();
+        // `a` is unchanged and stays first; `b` keeps its place; `c` goes last.
+        assert_eq!(db.upsert("e", "t", &refs).await?, 2);
+        assert_eq!(db.upsert("e", "t", &refs).await?, 0, "nothing changed");
+        let ids: Vec<_> = stored(&db, "t")
+            .await
+            .into_iter()
+            .map(|row| row.0)
+            .collect();
+        assert_eq!(ids, ["a", "b", "c"]);
         Ok(())
     }
 

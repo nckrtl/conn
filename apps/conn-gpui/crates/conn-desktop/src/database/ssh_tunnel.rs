@@ -14,6 +14,8 @@ use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use crate::child_reaper::OwnedChild;
+
 /// The system `ssh`.
 pub const SSH_BINARY: &str = "/usr/bin/ssh";
 
@@ -55,7 +57,8 @@ pub enum SshTunnelError {
 #[derive(Debug)]
 pub struct SshTunnel {
     local_port: u16,
-    child: Child,
+    /// Dropping it kills `ssh` and leaves its exit to the background reaper.
+    child: OwnedChild,
 }
 
 impl SshTunnel {
@@ -67,7 +70,7 @@ impl SshTunnel {
     /// Stops `ssh`.
     pub fn close(&mut self) {
         // The process may have exited already; there is nothing to do then.
-        let _ = self.child.start_kill();
+        let _ = self.child.child().start_kill();
     }
 }
 
@@ -218,11 +221,14 @@ pub async fn open_ssh_tunnel(
     }
     let mut child = command.spawn().map_err(SshTunnelError::Spawn)?;
     let stderr = collect_stderr(&mut child);
-    let mut tunnel = SshTunnel { local_port, child };
+    let mut tunnel = SshTunnel {
+        local_port,
+        child: OwnedChild::new(child),
+    };
 
     let deadline = Instant::now() + READY_TIMEOUT;
     while Instant::now() < deadline {
-        if let Ok(Some(status)) = tunnel.child.try_wait() {
+        if let Ok(Some(status)) = tunnel.child.child().try_wait() {
             let exited = match status.code() {
                 Some(code) => format!("exit code {code}"),
                 None => "signal".to_owned(),
@@ -243,7 +249,7 @@ pub async fn open_ssh_tunnel(
         // exits (`ExitOnForwardFailure`). So a listener only counts while ssh still runs.
         if accepts(local_port).await {
             tokio::time::sleep(Duration::from_millis(150)).await;
-            if matches!(tunnel.child.try_wait(), Ok(None)) {
+            if matches!(tunnel.child.child().try_wait(), Ok(None)) {
                 return Ok(tunnel);
             }
             continue;

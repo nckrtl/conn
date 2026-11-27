@@ -46,16 +46,16 @@ fn grouping_display_name(identity: &RepositoryIdentity) -> Option<&str> {
 }
 
 /// `normalizeProjectPathForComparison` for POSIX paths: trimmed, without trailing separators.
-fn normalize_path(path: &str) -> String {
+fn normalize_path(path: &str) -> &str {
     let trimmed = path.trim();
     if trimmed == "/" {
-        return trimmed.to_owned();
+        return trimmed;
     }
     let stripped = trimmed.trim_end_matches(['/', '\\']);
     if stripped.is_empty() {
-        trimmed.to_owned()
+        trimmed
     } else {
-        stripped.to_owned()
+        stripped
     }
 }
 
@@ -126,7 +126,9 @@ fn group_label(
 /// The label each project's threads carry in the sidebar, by project id.
 #[must_use]
 pub fn project_group_labels(projects: &[ProjectShell]) -> HashMap<String, String> {
-    group_labels(projects, |project| normalize_path(&project.workspace_root))
+    group_labels(projects, |project| {
+        normalize_path(&project.workspace_root).to_owned()
+    })
 }
 
 /// [`project_group_labels`] for projects of several environments listed together
@@ -145,6 +147,31 @@ pub fn project_group_labels_across_environments(
             normalize_path(&project.workspace_root)
         )
     })
+}
+
+/// The key for data shared by a logical project's threads. Git clones share the repository key.
+/// A plain folder needs its server's environment ID because the same path can exist elsewhere.
+#[must_use]
+pub fn project_group_key<'a>(
+    project: &ProjectShell,
+    environment_id: Option<&str>,
+    environment_projects: impl Iterator<Item = &'a ProjectShell>,
+) -> Option<String> {
+    let path = normalize_path(&project.workspace_root);
+    let same_folder = environment_projects.filter(|p| normalize_path(&p.workspace_root) == path);
+    repository_key(same_folder)
+        .map(str::to_owned)
+        .or_else(|| environment_id.map(|id| format!("{id}:{path}")))
+}
+
+/// The freshest project at a physical path with a repository identity determines its group.
+fn repository_key<'a>(candidates: impl Iterator<Item = &'a ProjectShell>) -> Option<&'a str> {
+    let source = candidates
+        .filter(|p| identity(p).is_some())
+        .reduce(|best, next| if replaces(best, next) { next } else { best })?;
+    identity(source)
+        .map(grouping_key)
+        .filter(|key| !key.contains('\0'))
 }
 
 fn group_labels(
@@ -176,24 +203,7 @@ fn group_labels(
             .fold(candidates[0], |best, next| {
                 if replaces(best, next) { next } else { best }
             });
-        // The winner names the repository; failing that, the freshest project that has one.
-        let source = if identity(winner).is_some() {
-            winner
-        } else {
-            candidates
-                .iter()
-                .copied()
-                .filter(|p| identity(p).is_some())
-                .fold(None::<&ProjectShell>, |best, next| match best {
-                    Some(best) if !replaces(best, next) => Some(best),
-                    _ => Some(next),
-                })
-                .unwrap_or(winner)
-        };
-        // A NUL reserves the scratch key namespace outside valid repository identities.
-        let logical = identity(source)
-            .map(grouping_key)
-            .filter(|key| !key.contains('\0'))
+        let logical = repository_key(candidates.iter().copied())
             .map_or_else(|| physical.clone(), str::to_owned);
         group_of_physical.insert(physical.as_str(), logical.clone());
         groups
@@ -259,6 +269,23 @@ mod tests {
 
     fn conn() -> Value {
         identity_json("github.com/nckrtl/conn", "nckrtl/conn", "conn")
+    }
+
+    #[test]
+    fn history_shares_a_repository_across_clones_and_scopes_plain_folders_to_the_server() {
+        let a = project("a", "Checkout", "/w/a", Some(conn()));
+        let b = project("b", "Other clone", "/w/b", Some(conn()));
+        let old = project("old", "Earlier registration", "/w/b/", None);
+        let c = project("c", "Plain", "/w/c/", None);
+        let projects = [a, b, old, c];
+        let key = |index: usize, environment: Option<&str>| {
+            project_group_key(&projects[index], environment, projects.iter())
+        };
+        assert_eq!(key(0, Some("one")), key(1, Some("two")));
+        assert_eq!(key(2, None).as_deref(), Some("github.com/nckrtl/conn"));
+        assert_eq!(key(3, None), None);
+        assert_eq!(key(3, Some("one")).as_deref(), Some("one:/w/c"));
+        assert_ne!(key(3, Some("one")), key(3, Some("two")));
     }
 
     #[test]

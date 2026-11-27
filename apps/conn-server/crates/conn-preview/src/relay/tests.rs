@@ -34,9 +34,11 @@ fn answer(relay: &Relay, session: &str, event: &Value, response: Value) {
 #[tokio::test]
 async fn a_tab_has_one_host_and_its_stream_belongs_to_the_registering_session() {
     let relay = Relay::default();
-    let id = relay.register("s1", "env", "thread", "tab", "Mac").unwrap();
+    let id = relay
+        .register("s1", "env", "thread", "tab", "Mac", SecretAccess::Allowed)
+        .unwrap();
     assert_eq!(
-        relay.register("s2", "env", "thread", "tab", "Mac"),
+        relay.register("s2", "env", "thread", "tab", "Mac", SecretAccess::Allowed),
         Err("conflict")
     );
     assert_eq!(relay.requests("s2", &id).err(), Some("session"));
@@ -46,13 +48,19 @@ async fn a_tab_has_one_host_and_its_stream_belongs_to_the_registering_session() 
     assert_eq!(connected, json!({"type":"connected","connectionId":id}));
     drop(feed);
     // The stream's end frees the tab for the next registration.
-    assert!(relay.register("s2", "env", "thread", "tab", "Mac").is_ok());
+    assert!(
+        relay
+            .register("s2", "env", "thread", "tab", "Mac", SecretAccess::Allowed)
+            .is_ok()
+    );
 }
 
 #[tokio::test(start_paused = true)]
 async fn a_registration_without_its_stream_expires() {
     let relay = Relay::default();
-    let id = relay.register("s", "env", "thread", "tab", "Mac").unwrap();
+    let id = relay
+        .register("s", "env", "thread", "tab", "Mac", SecretAccess::Allowed)
+        .unwrap();
     tokio::time::sleep(REGISTRATION_GRACE + Duration::from_secs(1)).await;
     assert_eq!(relay.requests("s", &id).err(), Some("session"));
     assert!(relay.tabs("env", "thread").is_empty());
@@ -61,7 +69,9 @@ async fn a_registration_without_its_stream_expires() {
 #[tokio::test]
 async fn calls_follow_an_explicit_desktop_tab_until_an_open() {
     let relay = Relay::default();
-    let id = relay.register("s", "env", "thread", "tab", "Mac").unwrap();
+    let id = relay
+        .register("s", "env", "thread", "tab", "Mac", SecretAccess::Allowed)
+        .unwrap();
     let mut feed = relay.requests("s", &id).unwrap();
     let worker = relay.clone();
     let named =
@@ -124,13 +134,24 @@ async fn a_call_without_a_tab_defaults_to_the_threads_desktop_tab() {
     assert!(relay.invoke(call("snapshot", None, true)).await.is_none());
     assert_eq!(relay.default_tab("env", "thread", "agent"), None);
 
-    let first = relay.register("s", "env", "thread", "one", "Mac").unwrap();
+    let first = relay
+        .register("s", "env", "thread", "one", "Mac", SecretAccess::Allowed)
+        .unwrap();
     let mut first_feed = relay.requests("s", &first).unwrap();
-    let second = relay.register("s", "env", "thread", "two", "Mac").unwrap();
+    let second = relay
+        .register("s", "env", "thread", "two", "Mac", SecretAccess::Allowed)
+        .unwrap();
     let mut second_feed = relay.requests("s", &second).unwrap();
     // Another thread's and another environment's tabs are not this thread's.
     let other = relay
-        .register("s", "env", "other-thread", "three", "Mac")
+        .register(
+            "s",
+            "env",
+            "other-thread",
+            "three",
+            "Mac",
+            SecretAccess::Allowed,
+        )
         .unwrap();
     let _other_feed = relay.requests("s", &other).unwrap();
 
@@ -191,7 +212,9 @@ async fn a_call_without_a_tab_defaults_to_the_threads_desktop_tab() {
 #[tokio::test]
 async fn an_explicit_server_tab_and_server_only_calls_never_default_to_the_desktop() {
     let relay = Relay::default();
-    let id = relay.register("s", "env", "thread", "tab", "Mac").unwrap();
+    let id = relay
+        .register("s", "env", "thread", "tab", "Mac", SecretAccess::Allowed)
+        .unwrap();
     let _feed = relay.requests("s", &id).unwrap();
     // A tab no desktop hosts is the server's own, even with a desktop tab on the thread.
     assert!(
@@ -211,7 +234,9 @@ async fn an_explicit_server_tab_and_server_only_calls_never_default_to_the_deskt
 #[tokio::test]
 async fn a_recording_does_not_follow_the_agents_current_desktop_tab() {
     let relay = Relay::default();
-    let id = relay.register("s", "env", "thread", "tab", "Mac").unwrap();
+    let id = relay
+        .register("s", "env", "thread", "tab", "Mac", SecretAccess::Allowed)
+        .unwrap();
     let mut feed = relay.requests("s", &id).unwrap();
     let worker = relay.clone();
     let task = tokio::spawn(async move { worker.invoke(call("snapshot", None, true)).await });
@@ -239,7 +264,9 @@ async fn a_recording_does_not_follow_the_agents_current_desktop_tab() {
 #[tokio::test]
 async fn recordings_and_cdp_endpoints_without_a_tab_stay_on_the_server_whatever_the_caller_says() {
     let relay = Relay::default();
-    let id = relay.register("s", "env", "thread", "tab", "Mac").unwrap();
+    let id = relay
+        .register("s", "env", "thread", "tab", "Mac", SecretAccess::Allowed)
+        .unwrap();
     let mut feed = relay.requests("s", &id).unwrap();
     // A current desktop tab exists, and the thread's newest tab is this one.
     let worker = relay.clone();
@@ -268,7 +295,9 @@ async fn recordings_and_cdp_endpoints_without_a_tab_stay_on_the_server_whatever_
 #[tokio::test]
 async fn recordings_stay_off_desktop_tabs() {
     let relay = Relay::default();
-    let id = relay.register("s", "env", "thread", "tab", "Mac").unwrap();
+    let id = relay
+        .register("s", "env", "thread", "tab", "Mac", SecretAccess::Allowed)
+        .unwrap();
     let _feed = relay.requests("s", &id).unwrap();
     let failure = relay
         .invoke(call("recordingStart", Some("tab"), true))
@@ -284,7 +313,9 @@ async fn recordings_stay_off_desktop_tabs() {
 #[tokio::test(start_paused = true)]
 async fn a_silent_desktop_times_out_and_is_released_but_a_slow_read_is_not() {
     let relay = Relay::default();
-    let id = relay.register("s", "env", "thread", "tab", "Mac").unwrap();
+    let id = relay
+        .register("s", "env", "thread", "tab", "Mac", SecretAccess::Allowed)
+        .unwrap();
     let mut feed = relay.requests("s", &id).unwrap();
     let read = relay
         .invoke(call("status", Some("tab"), false))
@@ -310,7 +341,9 @@ async fn a_silent_desktop_times_out_and_is_released_but_a_slow_read_is_not() {
 #[tokio::test]
 async fn a_host_that_leaves_fails_its_pending_requests() {
     let relay = Relay::default();
-    let id = relay.register("s", "env", "thread", "tab", "Mac").unwrap();
+    let id = relay
+        .register("s", "env", "thread", "tab", "Mac", SecretAccess::Allowed)
+        .unwrap();
     let mut feed = relay.requests("s", &id).unwrap();
     let worker = relay.clone();
     let pending = tokio::spawn(async move {
@@ -365,7 +398,9 @@ fn remote_errors_read_as_t3_reports_them() {
 #[tokio::test]
 async fn a_cancelled_call_leaves_no_pending_request() {
     let relay = Relay::default();
-    let id = relay.register("s", "env", "thread", "tab", "Mac").unwrap();
+    let id = relay
+        .register("s", "env", "thread", "tab", "Mac", SecretAccess::Allowed)
+        .unwrap();
     let mut feed = relay.requests("s", &id).unwrap();
     let worker = relay.clone();
     let call_task = tokio::spawn(async move {
@@ -383,7 +418,9 @@ async fn a_cancelled_call_leaves_no_pending_request() {
 #[tokio::test]
 async fn an_explicit_server_tab_stays_on_the_server_while_a_desktop_tab_is_current() {
     let relay = Relay::default();
-    let id = relay.register("s", "env", "thread", "tab", "Mac").unwrap();
+    let id = relay
+        .register("s", "env", "thread", "tab", "Mac", SecretAccess::Allowed)
+        .unwrap();
     let mut feed = relay.requests("s", &id).unwrap();
     let worker = relay.clone();
     let first = tokio::spawn(async move { worker.invoke(call("click", Some("tab"), true)).await });
@@ -396,4 +433,75 @@ async fn an_explicit_server_tab_stays_on_the_server_while_a_desktop_tab_is_curre
             .await
             .is_none()
     );
+}
+
+/// A host whose session may not read test logins serves every call but a fill: the fill fails
+/// with a clear reason and nothing reaches its stream. A host that may read them gets the fill.
+#[tokio::test]
+async fn a_fill_reaches_only_a_host_whose_session_may_read_secrets() {
+    let relay = Relay::default();
+    let id = relay
+        .register(
+            "s",
+            "env",
+            "thread",
+            "tab",
+            "Guest Mac",
+            SecretAccess::Withheld,
+        )
+        .unwrap();
+    let mut feed = relay.requests("s", &id).unwrap();
+    assert_eq!(
+        relay.tab("env", "thread", "tab").map(|t| t.secrets),
+        Some(SecretAccess::Withheld)
+    );
+    let _connected = feed.receiver.recv().await.unwrap();
+    // The host drives the tab as before.
+    let worker = relay.clone();
+    let task = tokio::spawn(async move { worker.invoke(call("snapshot", None, true)).await });
+    let event = request(&mut feed).await;
+    answer(
+        &relay,
+        "s",
+        &event,
+        json!({"ok":true,"result":{"tabId":"tab"}}),
+    );
+    assert!(task.await.unwrap().unwrap().is_ok());
+    // A fill, by default or naming the tab, never goes out.
+    for tab in [None, Some("tab")] {
+        let mut fill = call("credentialFill", tab, true);
+        fill.input = json!({"field":"password","value":"fixture-only"});
+        let failure = relay.invoke(fill).await.unwrap().unwrap_err();
+        assert_eq!(failure.tag, SECRETS_WITHHELD);
+        assert!(
+            failure.message.contains("settings:write"),
+            "{}",
+            failure.message
+        );
+        assert!(failure.message.contains("Guest Mac"), "{}", failure.message);
+        assert!(!failure.message.contains("fixture-only"));
+    }
+    assert!(feed.receiver.try_recv().is_err(), "a fill reached the host");
+    drop(feed);
+
+    let id = relay
+        .register("s", "env", "thread", "tab", "Mac", SecretAccess::Allowed)
+        .unwrap();
+    let mut feed = relay.requests("s", &id).unwrap();
+    let worker = relay.clone();
+    let task = tokio::spawn(async move {
+        let mut fill = call("credentialFill", Some("tab"), true);
+        fill.input = json!({"field":"password","value":"fixture-only"});
+        worker.invoke(fill).await
+    });
+    let event = request(&mut feed).await;
+    assert_eq!(event["request"]["operation"], "credentialFill");
+    assert_eq!(event["request"]["input"]["value"], "fixture-only");
+    answer(
+        &relay,
+        "s",
+        &event,
+        json!({"ok":true,"result":{"status":"filled"}}),
+    );
+    assert!(task.await.unwrap().unwrap().is_ok());
 }

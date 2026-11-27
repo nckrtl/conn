@@ -31,13 +31,27 @@ use crate::live::RT;
 use crate::theme::apply_kit_theme;
 
 mod annotations_popover;
+mod browser_history;
 mod browser_inline_logins;
 mod browser_passkeys;
+mod details_agents;
+mod details_schedules;
 pub(crate) mod details_tasks;
+mod details_wakeups;
 mod floating_surfaces;
+mod hover_prefetch;
+mod image_memory;
+mod image_viewer;
+#[cfg(feature = "memory-bench")]
+mod memory_bench;
 mod preview_host;
+mod queue_tray;
+#[cfg(target_os = "macos")]
+mod render_redraws;
 #[cfg(target_os = "macos")]
 mod selection_perf;
+mod terminal_environment;
+mod theme_boot;
 
 const TEST_WINDOW_WIDTH: f32 = 1440.0;
 const TEST_WINDOW_HEIGHT: f32 = 900.0;
@@ -49,7 +63,7 @@ pub(crate) fn mount_app(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<Con
 }
 
 /// [`mount_app`] that connects at launch to `server`, as the live app does to a saved server.
-fn mount_app_with_server(
+pub(crate) fn mount_app_with_server(
     cx: &mut TestAppContext,
     server: Option<crate::live::StartupServer>,
 ) -> (AnyWindowHandle, Entity<ConnApp>) {
@@ -825,6 +839,24 @@ fn spawn_scratch_server(
                                     ))
                                     .await
                                     .expect("send scratch project");
+                                } else if req.tag == "projects.readFile" {
+                                    // Every file is missing here, as a link to a deleted file.
+                                    let path = req.payload["relativePath"].clone();
+                                    let reply = conn_wire::FromServer::Exit {
+                                        request_id: req.id,
+                                        exit: conn_wire::Exit::success(json!({
+                                            "relativePath": path,
+                                            "contents": "",
+                                            "byteLength": 0,
+                                            "truncated": false,
+                                            "exists": false,
+                                        })),
+                                    };
+                                    ws.send(Message::Text(
+                                        conn_wire::encode_server_frame(&reply).into(),
+                                    ))
+                                    .await
+                                    .expect("send missing file");
                                 } else if req.tag == "orchestration.launchThread" {
                                     let _ = launch_tx.send(req.payload);
                                     let reply = conn_wire::FromServer::Exit {
@@ -1662,6 +1694,8 @@ fn thread_hover_card_opens_for_the_hovered_row_and_closes_for_menus(cx: &mut Tes
 fn hover_card_model_lists_only_the_fields_the_thread_has() {
     use conn_contract::OrchestrationV2ProviderFailureClass as FailureClass;
 
+    use conn_state::providers::ModelCatalog;
+
     use crate::sidebar::hover_card_state::{HoverError, hover_card_model};
 
     let shell = kitchen_sink_shell();
@@ -1673,8 +1707,8 @@ fn hover_card_model_lists_only_the_fields_the_thread_has() {
         .expect("kitchen-sink thread");
     let project = shell.project("proj-parity");
 
-    let plain = hover_card_model(&thread, project, None);
-    assert_eq!(plain.project.as_deref(), Some("conn-gpui"));
+    let plain = hover_card_model(&thread, project, None, &ModelCatalog::default());
+    assert_eq!(plain.project, "conn-gpui");
     assert_eq!(plain.branch.as_deref(), Some("feat/parity-check"));
     assert_eq!(plain.model, "claude-sonnet-4-6");
     assert_eq!(plain.environment, None);
@@ -1690,7 +1724,7 @@ fn hover_card_model_lists_only_the_fields_the_thread_has() {
     ]));
     thread.last_error = Some(Some("boom".to_owned()));
     thread.last_error_class = Some(Some(FailureClass::UsageLimit));
-    let rich = hover_card_model(&thread, project, Some("Mac mini"));
+    let rich = hover_card_model(&thread, project, Some("Mac mini"), &ModelCatalog::default());
     assert_eq!(rich.environment.as_deref(), Some("Mac mini"));
     assert_eq!(rich.subagents, Some(2));
     assert_eq!(rich.handed_off_from.as_deref(), Some("Codex"));
@@ -1698,15 +1732,194 @@ fn hover_card_model_lists_only_the_fields_the_thread_has() {
 
     thread.last_error_class = Some(Some(FailureClass::ProviderError));
     assert_eq!(
-        hover_card_model(&thread, project, None).error,
+        hover_card_model(&thread, project, None, &ModelCatalog::default()).error,
         Some(HoverError::Failed)
     );
     thread.last_error = Some(Some("  ".to_owned()));
-    assert_eq!(hover_card_model(&thread, project, None).error, None);
+    assert_eq!(
+        hover_card_model(&thread, project, None, &ModelCatalog::default()).error,
+        None
+    );
+}
+
+/// One Claude provider whose models the hover card names the way the composer does.
+fn claude_catalog() -> conn_state::providers::ModelCatalog {
+    let provider = from_json(json!({
+        "instanceId": "claude-default",
+        "driver": "claudeAgent",
+        "displayName": "Claude",
+        "enabled": true,
+        "installed": true,
+        "status": "ready",
+        "auth": {"status": "authenticated"},
+        "checkedAt": "2026-11-21T00:00:00Z",
+        "models": [{
+            "slug": "claude-opus-5-5",
+            "name": "Claude Opus 5.5",
+            "isCustom": false,
+            "capabilities": null
+        }],
+    }))
+    .expect("a provider");
+    conn_state::providers::ModelCatalog::from_providers(&[Some(provider)])
+}
+
+#[test]
+fn hover_card_names_the_model_like_the_composer() {
+    use conn_state::providers::ModelCatalog;
+
+    use crate::sidebar::hover_card_state::hover_card_model;
+
+    let mut thread = kitchen_sink_shell()
+        .threads
+        .iter()
+        .find(|t| t.id == "thread-selected")
+        .cloned()
+        .expect("kitchen-sink thread");
+    thread.model_selection.model = serde_json::Value::String("claude-opus-5-5".to_owned());
+    let named = hover_card_model(&thread, None, None, &claude_catalog());
+    assert_eq!(named.model, "Opus 5.5");
+    // A model the catalog lacks keeps its slug.
+    let unknown = hover_card_model(&thread, None, None, &ModelCatalog::default());
+    assert_eq!(unknown.model, "claude-opus-5-5");
+}
+
+/// The row and the hover card show the same project: an Orbit filing (`orbitProject` metadata)
+/// first, then the Conn project, else `No project`.
+#[gpui_kit::test]
+fn hover_card_shows_the_project_the_row_shows(cx: &mut TestAppContext) {
+    use crate::sidebar::ThreadProject;
+    use crate::sidebar::hover_card_state::hover_card_model;
+
+    let spec = |id: &'static str, project_id: &'static str| ThreadSeedSpec {
+        id,
+        project_id,
+        title: id,
+        status: "completed",
+        activity_run_status: None,
+        pinned_at: None,
+        settled_at: None,
+        pending_kind: None,
+    };
+    // A short list, so every row is on screen.
+    let parity = kitchen_sink_shell();
+    let mut shell = ShellState::from_parts(parity.projects, Vec::new(), Vec::new(), Some(1));
+    // Filed in Orbit only: the thread's Conn project is gone, as for a scratch thread.
+    let mut orbit_only = make_thread_shell(spec("thread-orbit-only", "proj-gone"));
+    orbit_only.orbit_project = Some(Some(conn_contract::OrbitProjectRef {
+        id: 12,
+        slug: "orbit".to_owned(),
+    }));
+    // Filed in Orbit and also in a Conn project: the filing wins, as on the row.
+    let mut both = make_thread_shell(spec("thread-orbit-both", "proj-parity"));
+    both.orbit_project = Some(Some(conn_contract::OrbitProjectRef {
+        id: 12,
+        slug: "orbit".to_owned(),
+    }));
+    let conn_only = make_thread_shell(spec("thread-conn-only", "proj-parity"));
+    let neither = make_thread_shell(spec("thread-neither", "proj-gone"));
+    shell.threads.extend([orbit_only, both, conn_only, neither]);
+
+    let expected = [
+        ("thread-orbit-only", "orbit"),
+        ("thread-orbit-both", "orbit"),
+        ("thread-conn-only", "conn-gpui"),
+        ("thread-neither", "No project"),
+    ];
+    let (window, app) = mount_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(shell.clone(), cx);
+            app.set_thread_for_test("thread-conn-only".to_owned(), kitchen_sink_thread(), cx);
+        })
+    });
+    for (id, name) in expected {
+        let thread = shell.find_thread(id).expect("thread");
+        let project = shell.project(&thread.project_id);
+        assert_eq!(ThreadProject::of(thread, project).name(), name, "{id}");
+        let catalog = conn_state::providers::ModelCatalog::default();
+        assert_eq!(
+            hover_card_model(thread, project, None, &catalog).project,
+            name,
+            "{id}: the card model"
+        );
+        cx.update(|cx| app.update(cx, |app, cx| app.open_thread_hover_for_test(id, cx)));
+        // The row is measured, then the card is laid out beside it.
+        for _ in 0..3 {
+            let _ = cx.update_window(window, |_, w, cx| w.render_frame(cx));
+            cx.run_until_parked();
+        }
+        assert!(
+            labelled(cx, window, &format!("Project {name}")),
+            "{id}: the card names the project {name}"
+        );
+    }
+}
+
+/// The server config of a machine with Claude and Codex: `claude-opus-5-5` is `Opus 5.5`.
+fn fixture_server_config() -> std::sync::Arc<conn_state::providers::ServerConfigState> {
+    let snapshot: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../../../crates/conn-state/tests/fixtures/server-config-snapshot.json"
+    ))
+    .expect("fixture is JSON");
+    let mut state = conn_state::providers::ServerConfigState::new();
+    state.apply(serde_json::from_value(snapshot).expect("snapshot event"));
+    std::sync::Arc::new(state)
+}
+
+/// A thread filed in Orbit only (`orbitProject` metadata): it has no Conn project.
+fn orbit_filed_thread() -> ThreadShell {
+    let mut thread = make_thread_shell(ThreadSeedSpec {
+        id: "thread-orbit-filed",
+        project_id: "proj-gone",
+        title: "Orbit Actions Migration Status",
+        status: "completed",
+        activity_run_status: None,
+        pinned_at: None,
+        settled_at: None,
+        pending_kind: None,
+    });
+    thread.orbit_project = Some(Some(conn_contract::OrbitProjectRef {
+        id: 12,
+        slug: "orbit".to_owned(),
+    }));
+    thread.provider_instance_id = "claudeAgent".to_owned();
+    thread.model_selection.model = serde_json::Value::String("claude-opus-5-5".to_owned());
+    thread
+}
+
+#[gpui_kit::test]
+fn hover_card_shows_the_orbit_project_and_the_model_name_the_composer_shows(
+    cx: &mut TestAppContext,
+) {
+    let (window, app) = mount_app(cx);
+    let parity = kitchen_sink_shell();
+    let shell = ShellState::from_parts(
+        parity.projects,
+        vec![orbit_filed_thread()],
+        Vec::new(),
+        Some(1),
+    );
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(shell, cx);
+            app.set_server_config_for_test(fixture_server_config(), cx);
+            app.open_thread_hover_for_test("thread-orbit-filed", cx);
+        })
+    });
+    for _ in 0..3 {
+        let _ = cx.update_window(window, |_, w, cx| w.render_frame(cx));
+        cx.run_until_parked();
+    }
+    assert!(labelled(cx, window, "Project orbit"));
+    assert!(!labelled(cx, window, "Project No project"));
+    assert!(labelled(cx, window, "Model Opus 5.5"));
 }
 
 #[gpui_kit::test]
 fn thread_hover_card_top_is_level_with_the_hovered_row(cx: &mut TestAppContext) {
+    use conn_state::providers::ModelCatalog;
+
     use crate::sidebar::hover_card_state::{card_height, hover_card_model};
 
     let (window, app) = mount_app(cx);
@@ -1730,7 +1943,12 @@ fn thread_hover_card_top_is_level_with_the_hovered_row(cx: &mut TestAppContext) 
         .find(|t| t.id == "thread-failed")
         .cloned()
         .expect("thread");
-    let model = hover_card_model(&thread, shell.project("proj-parity"), None);
+    let model = hover_card_model(
+        &thread,
+        shell.project("proj-parity"),
+        None,
+        &ModelCatalog::default(),
+    );
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.set_shell(shell, cx);
@@ -4813,7 +5031,8 @@ fn a_background_database_query_waits_for_its_thread_and_connections(cx: &mut Tes
 }
 
 /// A thread without a project (General) has no Files, MCP or API: the `+` menu and the tab strip
-/// leave them out, Database stays, and a request to open one opens Tasks instead.
+/// leave them out, Database stays, and a request to open one opens Tasks instead. A single file
+/// (a chat link) still opens, as in Conn's web app.
 #[gpui_kit::test]
 fn a_thread_without_a_project_offers_no_files_mcp_or_api_and_opens_tasks_instead(
     cx: &mut TestAppContext,
@@ -4847,15 +5066,14 @@ fn a_thread_without_a_project_offers_no_files_mcp_or_api_and_opens_tasks_instead
         assert!(offered.contains(&RightPanelTab::Database));
         assert!(offered.contains(&RightPanelTab::Tasks));
     });
-    // Every way in: the menu and its keys, the palette and agent requests (select), the
-    // panel's own events (select) and a file.
-    for open in 0..4 {
+    // Every way in: the menu and its keys, the palette and agent requests (select), and the
+    // panel's own events (select).
+    for open in 0..3 {
         cx.update(|cx| {
             app.update(cx, |app, cx| match open {
                 0 => app.add_right_panel_tab(RightPanelTab::Files, cx),
                 1 => app.select_right_panel_tab(RightPanelTab::Mcp, cx),
-                2 => app.select_right_panel_tab(RightPanelTab::Api, cx),
-                _ => app.select_right_panel_surface(PanelSurface::File("a.rs".into()), cx),
+                _ => app.select_right_panel_tab(RightPanelTab::Api, cx),
             })
         });
         render_frames(cx, window);
@@ -4880,6 +5098,14 @@ fn a_thread_without_a_project_offers_no_files_mcp_or_api_and_opens_tasks_instead
             Some(&PanelSurface::Kind(RightPanelTab::Database))
         );
     });
+    let file = PanelSurface::File("a.rs".into());
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_right_panel_surface(file.clone(), cx)
+        })
+    });
+    render_frames(cx, window);
+    cx.update(|cx| assert_eq!(app.read(cx).right_panel_tabs().active(), Some(&file)));
 }
 
 /// An agent's `files_reveal` and `files_selection` on a thread without a project get an error at
@@ -5091,6 +5317,185 @@ fn render_no_project_panel_screenshots() {
                 .save(dir.join(format!("menu-{label}-{theme_label}.png")))
                 .expect("a saved PNG");
         }
+    }
+}
+
+/// Renders the hover card of an Orbit-filed thread offscreen, in Dark Ocean and Light. It opens
+/// no window on screen and takes no focus.
+///
+/// `CONN_HOVERCARD_SHOTS_DIR=<dir> cargo test -p conn-app render_hover_card_orbit_project_screenshots -- --ignored`
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "writes PNGs; set CONN_HOVERCARD_SHOTS_DIR"]
+fn render_hover_card_orbit_project_screenshots() {
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, Bounds, Point, WindowBounds, WindowOptions, px, size};
+    let Some(dir) = std::env::var_os("CONN_HOVERCARD_SHOTS_DIR") else {
+        return;
+    };
+    let dir = std::path::Path::new(&dir);
+    std::fs::create_dir_all(dir).expect("an output folder");
+    let mut ctx = headless_shot_context();
+    for (theme_id, theme_label) in [("dark-ocean", "dark"), ("t3-code-light", "light")] {
+        let theme = conn_theme::theme_by_id(theme_id).expect("a built-in theme");
+        let tokens = conn_theme::Tokens::derive(&theme);
+        let (window, app) = ctx.update(|cx| {
+            gpui_kit::init(cx);
+            crate::fonts::register(cx);
+            crate::theme::apply_kit_theme(&tokens, cx);
+            crate::app::register_keybindings(cx);
+            gpui_kit::open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        Point::default(),
+                        size(px(900.0), px(380.0)),
+                    ))),
+                    focus: false,
+                    show: false,
+                    ..Default::default()
+                },
+                cx,
+                |window, cx| {
+                    let tokens = tokens.clone();
+                    cx.new(|cx| ConnApp::new(theme.id, tokens, None, window, cx))
+                },
+            )
+            .expect("a window")
+        });
+        ctx.update(|cx| {
+            app.update(cx, |app, cx| {
+                let parity = two_project_shell();
+                let mut shell = ShellState::from_parts(
+                    parity.projects,
+                    vec![orbit_filed_thread()],
+                    Vec::new(),
+                    Some(1),
+                );
+                shell.synchronized = true;
+                app.set_shell(shell, cx);
+                app.set_server_config_for_test(fixture_server_config(), cx);
+                app.learn_primary_environment_for_test("env-a", cx);
+                app.open_thread_hover_for_test("thread-orbit-filed", cx);
+            });
+        });
+        for _ in 0..5 {
+            ctx.update_window(window, |_, w, c| w.render_frame(c))
+                .expect("a frame");
+            ctx.run_until_parked();
+        }
+        let image = ctx.capture_screenshot(window).expect("a screenshot");
+        image
+            .save(dir.join(format!("hover-card-orbit-{theme_label}.png")))
+            .expect("a saved PNG");
+    }
+}
+
+/// Renders the pending secret request card offscreen with Save disabled (empty field) and enabled
+/// (a value typed), in Dark Ocean and Light. In each shot the disabled Save keeps a visible,
+/// non-transparent primary-tinted fill that differs from both the card and the enabled fill. It
+/// opens no window on screen and takes no focus.
+///
+/// `CONN_DISABLED_PRIMARY_SHOTS_DIR=<dir> cargo test -p conn-app render_disabled_primary_secret_card_screenshots -- --ignored`
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "writes PNGs; set CONN_DISABLED_PRIMARY_SHOTS_DIR"]
+fn render_disabled_primary_secret_card_screenshots() {
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{AppContext as _, Bounds, Point, WindowBounds, WindowOptions, px, size};
+    let Some(dir) = std::env::var_os("CONN_DISABLED_PRIMARY_SHOTS_DIR") else {
+        return;
+    };
+    let dir = std::path::Path::new(&dir);
+    std::fs::create_dir_all(dir).expect("an output folder");
+    let mut ctx = headless_shot_context();
+    for (theme_id, theme_label) in [("dark-ocean", "dark"), ("t3-code-light", "light")] {
+        let mut save_pixels = Vec::new();
+        for (typed, state_label) in [("", "disabled"), ("sk-live-1234", "enabled")] {
+            let theme = conn_theme::theme_by_id(theme_id).expect("a built-in theme");
+            let tokens = conn_theme::Tokens::derive(&theme);
+            let (window, app) = ctx.update(|cx| {
+                gpui_kit::init(cx);
+                crate::fonts::register(cx);
+                crate::theme::apply_kit_theme(&tokens, cx);
+                crate::app::register_keybindings(cx);
+                gpui_kit::open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                            Point::default(),
+                            size(px(900.0), px(640.0)),
+                        ))),
+                        focus: false,
+                        show: false,
+                        ..Default::default()
+                    },
+                    cx,
+                    |window, cx| {
+                        let tokens = tokens.clone();
+                        cx.new(|cx| ConnApp::new(theme.id, tokens, None, window, cx))
+                    },
+                )
+                .expect("a window")
+            });
+            let chat = ctx.update(|cx| app.read(cx).chat_for_test());
+            let mut thread = kitchen_sink_thread();
+            thread
+                .entries
+                .retain(|entry| !matches!(entry, TimelineEntry::UserInputRequest { .. }));
+            for entry in &mut thread.entries {
+                if let TimelineEntry::SecretRequest { url, .. } = entry {
+                    *url = Some("https://example.com/sign-in".to_owned());
+                }
+            }
+            ctx.update(|cx| {
+                app.update(cx, |app, cx| {
+                    app.set_shell(kitchen_sink_shell(), cx);
+                    app.set_thread_for_test("thread-selected".to_owned(), thread, cx);
+                });
+            });
+            for _ in 0..3 {
+                ctx.update_window(window, |_, w, c| w.render_frame(c))
+                    .expect("a frame");
+                ctx.run_until_parked();
+            }
+            if !typed.is_empty() {
+                ctx.update_window(window, |_, w, c| {
+                    chat.update(c, |chat, cx| {
+                        chat.set_secret_input_for_test("secret-1", typed, w, cx);
+                    });
+                })
+                .expect("typed");
+                for _ in 0..3 {
+                    ctx.update_window(window, |_, w, c| w.render_frame(c))
+                        .expect("a frame");
+                    ctx.run_until_parked();
+                }
+            }
+            let (save, gap, scale) = ctx
+                .update_window(window, |_, w, _| {
+                    let save = w.find_by_label("Save").bounds();
+                    let decline = w.find_by_label("Decline").bounds();
+                    (save, decline.right(), w.scale_factor())
+                })
+                .expect("bounds");
+            let image = ctx.capture_screenshot(window).expect("a screenshot");
+            let at = |x: f32, y: f32| *image.get_pixel((x * scale) as u32, (y * scale) as u32);
+            let y = f32::from(save.center().y);
+            // Inside the pill's left end, and in the card between Decline and Save.
+            let in_save = at(f32::from(save.left()) + 8.0, y);
+            let between = at((f32::from(gap) + f32::from(save.left())) / 2.0, y);
+            assert_ne!(
+                in_save, between,
+                "{theme_label} {state_label}: Save has a fill of its own"
+            );
+            save_pixels.push(in_save);
+            image
+                .save(dir.join(format!("secret-card-{state_label}-{theme_label}.png")))
+                .expect("a saved PNG");
+        }
+        assert_ne!(
+            save_pixels[0], save_pixels[1],
+            "{theme_label}: disabled Save is muted against the enabled one"
+        );
     }
 }
 
@@ -6530,7 +6935,7 @@ fn threads_of_a_linked_environment_are_listed_and_name_their_environment_in_the_
     });
 }
 
-fn linked_mini_shell(project_root: &str, thread_title: &str) -> ShellState {
+pub(crate) fn linked_mini_shell(project_root: &str, thread_title: &str) -> ShellState {
     let project: ProjectShell = match from_json(json!({
         "id": "proj-mini",
         "title": "No project",
@@ -7181,4 +7586,154 @@ fn a_letter_an_icon_and_an_image_workspace_tile_have_the_same_size_and_shape(
             (38.0, 38.0)
         );
     });
+}
+
+/// Lays out the virtualized timeline until the rows below the first are measured and painted.
+fn settle_timeline(cx: &mut TestAppContext, window: AnyWindowHandle) {
+    for _ in 0..6 {
+        cx.update_window(window, |_, window, cx| window.render_frame(cx))
+            .expect("mounted window");
+        cx.run_until_parked();
+    }
+}
+
+/// A Markdown link to a file opens it in the right panel on any thread, as in Conn's web app.
+/// A General thread (no project of its own) shows the file too, not Tasks, and a link to a
+/// workspace folder opens the Files tree.
+#[gpui_kit::test]
+fn a_file_link_opens_the_file_on_a_thread_without_a_project(cx: &mut TestAppContext) {
+    use conn_contract::source::{SourceLines, SourceLocation};
+    let (window, app) = mount_two_thread_app(cx);
+    let file = "/Users/me/scratch/review-astra.md";
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_scratch_project_for_test(Some("proj-other"));
+            app.select_thread("thread-other", cx);
+            app.show_source_location(
+                &SourceLocation {
+                    path: file.to_owned(),
+                    lines: Some(SourceLines {
+                        start_line: 42,
+                        end_line: 42,
+                    }),
+                },
+                cx,
+            );
+        })
+    });
+    render_frames(cx, window);
+    cx.update(|cx| {
+        assert_eq!(
+            app.read(cx).right_panel_tabs().active(),
+            Some(&conn_state::PanelSurface::File(file.to_owned()))
+        );
+    });
+
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.select_thread("thread-selected", cx);
+            app.show_source_location(
+                &SourceLocation {
+                    path: "src/".to_owned(),
+                    lines: None,
+                },
+                cx,
+            );
+        })
+    });
+    render_frames(cx, window);
+    cx.update(|cx| {
+        assert_eq!(
+            app.read(cx).right_panel_tabs().active(),
+            Some(&conn_state::PanelSurface::Kind(
+                conn_state::RightPanelTab::Files
+            ))
+        );
+    });
+}
+
+/// A file link in a linked thread opens on that thread's own machine: the Files panel reads it
+/// over the linked connection, never over this Mac's server. The file is missing there, so the
+/// preview says so in place of any system dialog.
+#[gpui_kit::test]
+async fn a_file_link_in_a_linked_thread_reads_on_its_own_environment(cx: &mut TestAppContext) {
+    use conn_contract::source::SourceLocation;
+    cx.executor().allow_parking();
+    let (primary_url, primary_tags, _primary_launch) = spawn_scratch_server("nick-scratch");
+    let (agent_url, agent_tags, _agent_launch) = spawn_scratch_server("agent-scratch");
+    let (window, app) = mount_with_agent_node(cx, primary_url, &primary_tags, agent_url);
+    wait_for_tag(&agent_tags, "subscribeServerConfig");
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if cx.read(|cx| app.read(cx).linked_connected_for_test("agent")) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.add_linked_shell_for_test(
+                "agent",
+                "agent",
+                linked_mini_shell("/work/mini", "Mini diagnostics"),
+                cx,
+            );
+        })
+    });
+    render_frames(cx, window);
+    let linked_thread = cx.update(|cx| {
+        app.read(cx)
+            .shell()
+            .threads
+            .iter()
+            .find(|t| t.title == "Mini diagnostics")
+            .map(|t| t.id.clone())
+            .expect("the linked thread is listed")
+    });
+    cx.update(|cx| app.update(cx, |app, cx| app.select_thread(&linked_thread, cx)));
+    render_frames(cx, window);
+    while primary_tags.try_recv().is_ok() {}
+
+    let file = "/work/notes/plan.md";
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.show_source_location(
+                &SourceLocation {
+                    path: file.to_owned(),
+                    lines: None,
+                },
+                cx,
+            );
+        })
+    });
+    let mut read_on_agent = false;
+    let mut error = None;
+    for _ in 0..300 {
+        cx.run_until_parked();
+        let _ = cx.update_window(window, |_, w, cx| w.render_frame(cx));
+        read_on_agent |= agent_tags.try_iter().any(|tag| tag == "projects.readFile");
+        error = cx.read(|cx| {
+            app.read(cx)
+                .right_panel_for_test()
+                .read(cx)
+                .files_for_test()
+                .read(cx)
+                .preview_error_for_test()
+        });
+        if read_on_agent && error.is_some() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(read_on_agent, "the linked machine reads the file");
+    assert!(
+        primary_tags
+            .try_iter()
+            .all(|tag| tag != "projects.readFile"),
+        "this Mac's server never reads it"
+    );
+    assert_eq!(
+        error,
+        Some((file.to_owned(), "This file does not exist.".to_owned()))
+    );
 }

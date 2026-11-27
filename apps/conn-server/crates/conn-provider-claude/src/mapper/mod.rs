@@ -568,6 +568,7 @@ impl<E: Env> Mapper<E> {
         self.continuation_requested = false;
         self.subagents.prune_settled();
         self.plan_ids.clear();
+        self.roster.release_notifications();
         let selection = conn_contract::to_json(&input.model_selection);
         let native_turn_id = format!("turn:{}", input.attempt_id.as_str());
         let mut provider_thread = conn_contract::to_json(&input.provider_thread);
@@ -969,6 +970,9 @@ impl<E: Env> Mapper<E> {
                 _ => None,
             })
             .collect();
+        if msg.parent_tool_use_id.is_none() && !results.is_empty() {
+            self.roster.release_notifications();
+        }
         let single = results.len() == 1;
         let mut task_updates = Vec::new();
         for (tool_use_id, content, is_error) in results {
@@ -1360,7 +1364,16 @@ impl<E: Env> Mapper<E> {
                 let mut failure = notices::result_failure(&msg, hint.as_deref(), usage_limited)
                     .unwrap_or_else(|| notices::failure("provider_error", "", None, None));
                 if failure["class"] == "usage_limit" {
-                    failure["resetAt"] = json!(usage_reset_at(&turn.limits));
+                    failure["resetAt"] = usage_reset_at(&turn.limits);
+                    if failure["resetAt"].is_null()
+                        && msg.api_error_status == Some(429)
+                        && let Some(seconds) =
+                            msg.result.as_deref().and_then(router_cooldown_seconds)
+                        && let Some(at) = conn_support::time::millis_from_iso(&now)
+                            .and_then(|t| t.checked_add(seconds.checked_mul(1000)?))
+                    {
+                        failure["resetAt"] = json!(conn_support::time::iso_from_millis(at));
+                    }
                 }
                 failure
             });
@@ -3097,6 +3110,50 @@ fn turn_token_usage(
 const AUTH_FAILED_TEXT: &str = "Claude could not authenticate. For subscription login, run `claude auth login` on this environment's machine, then start a new thread. For API-key authentication, check this instance's configured credentials.";
 
 /// The latest reset among the blocked windows, or null if any is unknown.
+/// A CLIProxyAPI direct 429 may carry the reset only in the gateway message.
+fn router_cooldown_seconds(message: &str) -> Option<i64> {
+    let body =
+        message.strip_prefix("API Error: Request rejected (429) · All credentials for model ")?;
+    let (model, rest) = body.split_once(" are cooling down")?;
+    if model.is_empty() || model.contains(char::is_whitespace) {
+        return None;
+    }
+    let rest = if let Some(via) = rest.strip_prefix(" via provider ") {
+        let (provider, rest) = via.split_once(' ')?;
+        if provider.is_empty() {
+            return None;
+        }
+        rest
+    } else {
+        rest.trim_start()
+    };
+    let duration = if let Some(first) = rest.strip_prefix("(reset after ") {
+        first.split_once(')')?.0
+    } else {
+        rest.strip_prefix("(last error: ")?
+            .rsplit_once(") (reset after ")?
+            .1
+            .strip_suffix(')')?
+    };
+    let mut rest = duration;
+    let mut seconds = 0_i64;
+    for (unit, multiplier) in [('h', 3600), ('m', 60), ('s', 1)] {
+        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0
+            && let Some(next) = rest[digits..].strip_prefix(unit)
+        {
+            seconds = seconds.checked_add(
+                rest[..digits]
+                    .parse::<i64>()
+                    .ok()?
+                    .checked_mul(multiplier)?,
+            )?;
+            rest = next.trim_start();
+        }
+    }
+    (rest.is_empty() && seconds > 0).then_some(seconds)
+}
+
 fn usage_reset_at(limits: &LimitState) -> Value {
     let mut resets: Vec<&Option<String>> = limits.rejected.iter().map(|(_, r)| r).collect();
     if let Some((kind, reset)) = &limits.assistant
@@ -3472,6 +3529,7 @@ impl<E: Env> Mapper<E> {
         let outcome = wakes::task_outcome(msg.status.as_ref().and_then(Value::as_str));
         if self.roster.is_known(task_id) {
             if let Some(task) = self.roster.wake_task(task_id) {
+                self.roster.hold_notification(&task);
                 self.wakes.record(
                     task_id,
                     wakes::Report {

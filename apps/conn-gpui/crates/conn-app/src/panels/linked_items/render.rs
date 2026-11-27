@@ -1102,8 +1102,11 @@ pub(super) fn render_link_dialog(
 
     let on_cancel_backdrop = Rc::clone(&on_cancel);
     let on_cancel_btn = Rc::clone(&on_cancel);
-    let primary_bg = to_hsla(tokens.primary);
-    let primary_fg = to_hsla(tokens.primary_foreground);
+    let (primary_bg, primary_fg) = if can_submit {
+        (to_hsla(tokens.primary), to_hsla(tokens.primary_foreground))
+    } else {
+        crate::theme::disabled_primary(tokens)
+    };
     let primary_hover = to_hsla(tokens.primary.with_alpha(0.90));
 
     let submit_btn = {
@@ -1129,7 +1132,7 @@ pub(super) fn render_link_dialog(
                     on_submit(window, cx);
                 })
         } else {
-            base.opacity(0.64)
+            base
         }
     };
 

@@ -1705,19 +1705,70 @@ impl McpPanel {
             return cached.clone();
         }
         let decoded = decode_base64(base64_data).and_then(|bytes| {
-            let mut rgba = image::load_from_memory(&bytes).ok()?.to_rgba8();
+            let mut rgba = fit_result_image(image::load_from_memory(&bytes).ok()?.to_rgba8());
             // GPUI `RenderImage` expects premultiplied BGRA pixel order inside `RgbaImage`.
             for pixel in rgba.as_chunks_mut::<4>().0 {
                 pixel.swap(0, 2);
             }
             Some(Arc::new(RenderImage::new(vec![image::Frame::new(rgba)])))
         });
-        if self.image_cache.len() >= 16 {
-            self.image_cache.clear();
+        if self.image_cache.len() >= RESULT_IMAGE_CACHE {
+            self.retire_cached_images();
         }
         self.image_cache.insert(key, decoded.clone());
         decoded
     }
+
+    /// Moves every cached image out of the cache. [`Self::free_retired_images`] frees their
+    /// window textures on the next render: a new decode gets a new GPUI image id, so clearing
+    /// the map alone left each old texture in the atlas.
+    pub(super) fn retire_cached_images(&mut self) {
+        self.retired_images
+            .extend(self.image_cache.drain().filter_map(|(_, image)| image));
+    }
+
+    /// Frees the window textures of retired images. Deferred, so a window painting right now is
+    /// back in the app and loses the texture too.
+    pub(super) fn free_retired_images(&mut self, cx: &mut gpui_kit::App) {
+        for image in self.retired_images.drain(..) {
+            cx.defer(move |cx| cx.drop_image(image, None));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn image_cache_for_test(&self) -> (usize, usize) {
+        (self.image_cache.len(), self.retired_images.len())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn cached_image_for_test(&mut self, base64_data: &str) -> Option<Arc<RenderImage>> {
+        self.cached_image(base64_data)
+    }
+}
+
+/// How many decoded result images the MCP panel keeps.
+const RESULT_IMAGE_CACHE: usize = 16;
+/// The largest result image kept, in device pixels: the pane draws at most 384 pt tall, at up
+/// to 2× scale, and no wider than a wide panel.
+const RESULT_IMAGE_MAX_WIDTH_PX: u32 = 2048;
+const RESULT_IMAGE_MAX_HEIGHT_PX: u32 = 768;
+
+/// Scales a decoded result image down to what the pane can show, keeping its aspect ratio. A
+/// 1920×1080 screenshot keeps 1365×768 (4.0 MiB) instead of 7.9 MiB.
+pub(super) fn fit_result_image(picture: image::RgbaImage) -> image::RgbaImage {
+    let (width, height) = picture.dimensions();
+    let scale = (f64::from(RESULT_IMAGE_MAX_WIDTH_PX) / f64::from(width.max(1)))
+        .min(f64::from(RESULT_IMAGE_MAX_HEIGHT_PX) / f64::from(height.max(1)));
+    if scale >= 1.0 {
+        return picture;
+    }
+    let fit = |side: u32| ((f64::from(side) * scale).round() as u32).max(1);
+    image::imageops::resize(
+        &picture,
+        fit(width),
+        fit(height),
+        image::imageops::FilterType::Triangle,
+    )
 }
 
 fn block_text_or_resource<'a>(block: &'a Value, resource: &'a Value) -> Option<&'a str> {
@@ -1747,4 +1798,88 @@ fn tool_title(tool: &McpTool) -> &str {
 /// Placeholder for a catalog search input (`"Tools"`, `"Resources"`, `"Prompts"`).
 pub(super) fn filter_placeholder(noun: &str) -> String {
     capitalize(noun)
+}
+
+#[cfg(test)]
+mod image_tests {
+    use super::super::McpPanel;
+    use gpui_kit::TestAppContext;
+
+    fn encode_base64(input: &[u8]) -> String {
+        const TABLE: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+        for chunk in input.chunks(3) {
+            let b = [
+                chunk[0],
+                *chunk.get(1).unwrap_or(&0),
+                *chunk.get(2).unwrap_or(&0),
+            ];
+            let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
+            for i in 0..4 {
+                if i <= chunk.len() {
+                    out.push(TABLE[((n >> (18 - 6 * i)) & 63) as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        out
+    }
+
+    fn png(seed: u8) -> Vec<u8> {
+        let picture = image::RgbaImage::from_fn(1920, 1080, |x, y| {
+            image::Rgba([x as u8, y as u8, seed, 255])
+        });
+        let mut bytes = Vec::new();
+        picture
+            .write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .expect("encode PNG");
+        bytes
+    }
+
+    /// A full cache retires its images for the next render to free, instead of dropping them
+    /// with their textures still in the atlas. An evicted image decodes again when it shows.
+    #[gpui_kit::test]
+    fn result_images_are_freed_on_eviction_and_decode_again_when_shown(cx: &mut TestAppContext) {
+        let theme = conn_theme::theme_by_id("dark-ocean").expect("dark-ocean is built in");
+        let tokens = conn_theme::Tokens::derive(&theme);
+        let window = cx.add_window(|window, cx| McpPanel::new(tokens, window, cx));
+        let first = encode_base64(&png(0));
+        let others: Vec<String> = (1..=16).map(|seed| encode_base64(&png(seed))).collect();
+
+        let _ = window.update(cx, |panel, _window, cx| {
+            let shown = panel.cached_image_for_test(&first).expect("decodes");
+            let size = shown.size(0);
+            assert_eq!(
+                (size.width.0, size.height.0),
+                (1365, 768),
+                "kept at the pane's size"
+            );
+            for other in &others {
+                panel.cached_image_for_test(other);
+            }
+            let (cached, retired) = panel.image_cache_for_test();
+            assert!(
+                retired >= 16,
+                "the full cache was retired, not just cleared"
+            );
+            assert!(cached <= 1);
+            let again = panel.cached_image_for_test(&first).expect("decodes again");
+            assert_ne!(shown.id, again.id, "decoded again");
+            panel.free_retired_images(cx);
+            assert_eq!(panel.image_cache_for_test().1, 0, "retired images freed");
+        });
+    }
+
+    #[test]
+    fn small_result_images_keep_their_size() {
+        let small = image::RgbaImage::new(640, 480);
+        assert_eq!(super::fit_result_image(small).dimensions(), (640, 480));
+        let tall = image::RgbaImage::new(800, 4000);
+        assert_eq!(super::fit_result_image(tall).dimensions(), (154, 768));
+    }
 }

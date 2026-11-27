@@ -29,6 +29,9 @@ use super::icons;
 use super::inline_code::{self, Built, ChipPlan, InlineCodeText};
 use super::link_preview::{LinkHoverEvent, Rect, is_previewable, link_anchor};
 use super::selection::{FlowInfo, FlowProbe, PressSlot, SelectableFlow, SelectionScope};
+use super::thread_links::{
+    ProsePart, ThreadDirectory, ThreadLink, chip_label, parse_thread_link, split_bare_links,
+};
 use crate::a11y::ConnA11yExt as _;
 
 /// Body text size matching Conn's `text-sm` (`14px`) with relaxed (`1.625`) leading.
@@ -44,6 +47,9 @@ const CODE_WRAP_GLYPH_PX: f32 = 16.0;
 const CODE_FONT_PX: f32 = 13.0;
 const CODE_LINE_HEIGHT_PX: f32 = 13.0 * 1.625;
 const MONO_FONT_FAMILY: &str = crate::theme::MONO_FONT;
+const SANS_FONT_FAMILY: &str = ".SystemUIFont";
+/// A thread link chip's text size in em of the body's: a little under the body, as the code chip is.
+const THREAD_CHIP_EM: f32 = 0.92;
 
 mod files;
 #[cfg(all(test, target_os = "macos"))]
@@ -144,11 +150,20 @@ pub(crate) struct MarkdownOptions<'a> {
     /// Optional callback invoked when an artifact template card's "Use template" button is
     /// clicked. Without it the card has no button.
     pub(crate) on_use_artifact_template: Option<UseArtifactTemplateCallback>,
+    /// The threads a thread link chip looks its title up in. Without it a chip shows the link's
+    /// own text, or a short id.
+    pub(crate) thread_directory: Option<Rc<ThreadDirectory>>,
+    /// Optional callback invoked when a thread link chip is clicked. Without it the chip does
+    /// nothing.
+    pub(crate) on_open_thread: Option<OpenThreadCallback>,
     /// Makes the prose and code of the message selectable (drag, double and triple click, Cmd+C).
     /// The scope orders the message among the others in the window. Without it the text is not
     /// selectable, as in the panels that show Markdown.
     pub(crate) selection: Option<SelectionScope>,
 }
+
+/// Opens the thread a clicked thread link chip names.
+pub(crate) type OpenThreadCallback = Rc<dyn Fn(ThreadLink, &mut Window, &mut App)>;
 
 /// Tells the chat where the pointer is relative to the preview-able links of a paragraph.
 pub(crate) type LinkHoverCallback = Rc<dyn Fn(LinkHoverEvent, &mut Window, &mut App)>;
@@ -159,6 +174,8 @@ pub(crate) type LinkHoverCallback = Rc<dyn Fn(LinkHoverEvent, &mut Window, &mut 
 pub(crate) enum LinkMenuTarget {
     Web(String),
     File(String),
+    /// A thread link chip (its link). It has no menu, but the right-click must not open it.
+    Thread(String),
 }
 
 /// Opens the context menu for `target` at the window position.
@@ -222,6 +239,8 @@ impl fmt::Debug for MarkdownOptions<'_> {
                 "has_on_use_artifact_template",
                 &self.on_use_artifact_template.is_some(),
             )
+            .field("has_thread_directory", &self.thread_directory.is_some())
+            .field("has_on_open_thread", &self.on_open_thread.is_some())
             .finish()
     }
 }
@@ -409,7 +428,7 @@ fn collect_inlines(nodes: &[Node], style: InlineStyle, link: Option<&str>) -> Ve
 
 fn collect_inline(node: &Node, style: InlineStyle, link: Option<&str>, out: &mut Vec<InlineSpan>) {
     match node {
-        Node::Text(t) => push_span(out, &t.value, style, link),
+        Node::Text(t) => push_text(out, &t.value, style, link),
         Node::InlineCode(c) => {
             let mut code_style = style;
             code_style.code = true;
@@ -470,6 +489,52 @@ fn collect_inline(node: &Node, style: InlineStyle, link: Option<&str>, out: &mut
             }
         }
     }
+}
+
+/// Prose text. A thread link written out in it (`conn://thread/<env>/<thread>`) becomes a link
+/// span of its own, so it renders as a chip like a Markdown link to the thread does.
+fn push_text(out: &mut Vec<InlineSpan>, text: &str, style: InlineStyle, link: Option<&str>) {
+    if link.is_some() {
+        return push_span(out, text, style, link);
+    }
+    for part in split_bare_links(text) {
+        match part {
+            ProsePart::Text(text) => push_span(out, &text, style, None),
+            ProsePart::ThreadLink(url) => push_span(out, &url, style, Some(&url)),
+        }
+    }
+}
+
+/// Whether `span` links to a thread, so it renders as a chip.
+fn is_thread_span(span: &InlineSpan) -> bool {
+    !span.style.code
+        && span
+            .link
+            .as_deref()
+            .is_some_and(|url| parse_thread_link(url).is_some())
+}
+
+/// `spans` with each thread link's text in one span: a link whose label is bold in part reads as
+/// one chip.
+fn merge_thread_link_spans(spans: &[InlineSpan]) -> std::borrow::Cow<'_, [InlineSpan]> {
+    let adjacent = |pair: &[InlineSpan]| {
+        pair[0].link == pair[1].link && is_thread_span(&pair[0]) && is_thread_span(&pair[1])
+    };
+    if !spans.windows(2).any(adjacent) {
+        return std::borrow::Cow::Borrowed(spans);
+    }
+    let mut merged: Vec<InlineSpan> = Vec::with_capacity(spans.len());
+    for span in spans {
+        match merged.last_mut() {
+            Some(last)
+                if last.link == span.link && is_thread_span(last) && is_thread_span(span) =>
+            {
+                last.text.push_str(&span.text);
+            }
+            _ => merged.push(span.clone()),
+        }
+    }
+    std::borrow::Cow::Owned(merged)
 }
 
 fn push_span(out: &mut Vec<InlineSpan>, text: &str, style: InlineStyle, link: Option<&str>) {
@@ -1117,8 +1182,40 @@ fn render_code_block(
     }
     header_actions = header_actions.child(copy_btn);
 
+    let code_surface = div()
+        .id(SharedString::from(format!("code-body-{block_id}")))
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
+        .rounded(px(CARD_BODY_RADIUS_PX))
+        // Lab `.lf-markdown .m-code-body`: the panel's own background, ink text.
+        .bg(if files {
+            files::code_body_background(tokens)
+        } else {
+            hsla(tokens.code_background)
+        })
+        .child(
+            div()
+                .id(SharedString::from(format!("code-scroll-{block_id}")))
+                .w_full()
+                .min_w_0()
+                .px(px(14.4))
+                .py(px(12.8))
+                .font_family(MONO_FONT_FAMILY)
+                .text_size(px(CODE_FONT_PX))
+                .line_height(px(CODE_LINE_HEIGHT_PX))
+                .text_color(if files {
+                    hsla(tokens.foreground)
+                } else {
+                    hsla(tokens.code_foreground)
+                })
+                .when(!is_wrapped, |el| el.overflow_x_scroll().whitespace_nowrap())
+                .child(code_body),
+        );
+    #[cfg(test)]
+    let code_surface = gpui_kit::TestSupportExt::test_support(code_surface);
     // Lab `.m-code`: the card's frame around a header and the code on its own darker surface.
-    card_shell(card)
+    let frame = card_shell(card)
         .id(md_element_id(block_id, "code"))
         .a11y(
             Role::Code,
@@ -1134,38 +1231,11 @@ fn render_code_block(
                 .child(lang_header)
                 .child(header_actions),
         )
-        .child(
-            div()
-                .w_full()
-                .min_w_0()
-                .overflow_hidden()
-                .rounded(px(CARD_BODY_RADIUS_PX))
-                // Lab `.lf-markdown .m-code-body`: the panel's own background, ink text.
-                .bg(if files {
-                    files::code_body_background(tokens)
-                } else {
-                    hsla(tokens.code_background)
-                })
-                .child(
-                    div()
-                        .id(SharedString::from(format!("code-scroll-{block_id}")))
-                        .w_full()
-                        .min_w_0()
-                        .px(px(14.4))
-                        .py(px(12.8))
-                        .font_family(MONO_FONT_FAMILY)
-                        .text_size(px(CODE_FONT_PX))
-                        .line_height(px(CODE_LINE_HEIGHT_PX))
-                        .text_color(if files {
-                            hsla(tokens.foreground)
-                        } else {
-                            hsla(tokens.code_foreground)
-                        })
-                        .when(!is_wrapped, |el| el.overflow_x_scroll().whitespace_nowrap())
-                        .child(code_body),
-                ),
-        )
-        .into_any_element()
+        .child(code_surface);
+    // Tests measure the frame by its label.
+    #[cfg(test)]
+    let frame = gpui_kit::TestSupportExt::test_support(frame);
+    frame.into_any_element()
 }
 
 /// Maps a fenced code block language tag to a synthetic filename for `file_icons::file_icon`.
@@ -1324,6 +1394,8 @@ fn render_table(
 enum ClickTarget {
     Url(String),
     WorkspaceFile(conn_contract::source::SourceLocation),
+    /// A thread link chip: clicking opens the thread.
+    Thread(ThreadLink),
 }
 
 /// Renders inline spans as a single continuously flowing `StyledText` (or `InteractiveText` when
@@ -1357,10 +1429,12 @@ fn render_inline_spans_weighted(
     let look = InlineLook { files, base_weight };
     let workspace_root = options.workspace_root.map(str::to_owned);
     let on_open_file = options.on_open_file.clone();
+    let directory = options.thread_directory.clone();
     let callbacks = LinkCallbacks {
         on_open_file: options.on_open_file.clone(),
         on_link_menu: options.on_link_menu.clone(),
         on_link_hover: options.on_link_hover.clone(),
+        on_open_thread: options.on_open_thread.clone(),
     };
     let selectable = options.selection.as_ref().map(|scope| {
         (
@@ -1371,7 +1445,10 @@ fn render_inline_spans_weighted(
     });
     let probe = FlowProbe::default();
     let press = PressSlot::default();
-    let inner = if spans.iter().any(|span| span.style.code) {
+    let inner = if spans
+        .iter()
+        .any(|span| span.style.code || is_thread_span(span))
+    {
         let spans = spans.to_vec();
         let owned_tokens = tokens.clone();
         let owned_id = span_id.to_owned();
@@ -1395,6 +1472,7 @@ fn render_inline_spans_weighted(
                 prose,
                 workspace_root.as_deref(),
                 on_open_file.is_some(),
+                directory.as_deref(),
                 Some(window),
                 look,
             );
@@ -1437,6 +1515,7 @@ fn render_inline_spans_weighted(
             options.workspace_root,
             on_open_file.is_some(),
             None,
+            None,
             look,
         );
         let layout = styled.layout().clone();
@@ -1469,6 +1548,7 @@ struct LinkCallbacks {
     on_open_file: Option<Rc<dyn Fn(conn_contract::source::SourceLocation, &mut Window, &mut App)>>,
     on_link_menu: Option<LinkMenuCallback>,
     on_link_hover: Option<LinkHoverCallback>,
+    on_open_thread: Option<OpenThreadCallback>,
 }
 
 /// `styled`, made clickable over `ranges` (URLs and workspace file paths) when there are any. A
@@ -1490,6 +1570,7 @@ fn interactive_inline_text(
         on_open_file,
         on_link_menu,
         on_link_hover,
+        on_open_thread,
     } = callbacks;
     let menu_targets = menu_targets(&ranges, &targets);
     let hover_links: Rc<Vec<(Range<usize>, String)>> = Rc::new(if on_link_hover.is_some() {
@@ -1512,10 +1593,18 @@ fn interactive_inline_text(
                 return;
             };
             match target {
-                ClickTarget::Url(url) => cx.open_url(url),
+                // A path the panel cannot open (no thread, a relative path with no workspace)
+                // does nothing rather than reach the system's URL handler.
+                ClickTarget::Url(url) if opens_externally(url) => cx.open_url(url),
+                ClickTarget::Url(_) => {}
                 ClickTarget::WorkspaceFile(path) => {
                     if let Some(cb) = &on_open_file {
                         cb(path.clone(), window, cx);
+                    }
+                }
+                ClickTarget::Thread(link) => {
+                    if let Some(cb) = &on_open_thread {
+                        cb(link.clone(), window, cx);
                     }
                 }
             }
@@ -1636,7 +1725,7 @@ fn hover_targets(ranges: &[Range<usize>], targets: &[ClickTarget]) -> Vec<(Range
         .zip(targets)
         .filter_map(|(range, target)| match target {
             ClickTarget::Url(url) if is_previewable(url) => Some((range.clone(), url.clone())),
-            ClickTarget::Url(_) | ClickTarget::WorkspaceFile(_) => None,
+            ClickTarget::Url(_) | ClickTarget::WorkspaceFile(_) | ClickTarget::Thread(_) => None,
         })
         .collect()
 }
@@ -1661,6 +1750,14 @@ fn menu_targets(
         .map(|(range, target)| {
             let target = match target {
                 ClickTarget::Url(url) => LinkMenuTarget::Web(url.clone()),
+                ClickTarget::Thread(link) => {
+                    LinkMenuTarget::Thread(link.environment_id.as_deref().map_or_else(
+                        || link.thread_id.clone(),
+                        |environment| {
+                            super::thread_links::format_thread_link(environment, &link.thread_id)
+                        },
+                    ))
+                }
                 ClickTarget::WorkspaceFile(location) => {
                     LinkMenuTarget::File(match location.lines {
                         Some(lines) => format!("{}:{}", location.path, lines.start_line),
@@ -1693,12 +1790,21 @@ struct InlineLook {
 /// code; without one, the code stays in the text as a mono run on a flat background. `files` sets
 /// the Files preview's inline type: medium-weight strong text, struck text in the muted colour,
 /// and links in the text colour with a 40% underline.
+///
+/// A thread link span becomes a chip the same way, labelled with the thread's title from
+/// `directory`, and a click target that opens the thread. Without a `chip_window` it is a link
+/// run with the same label.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "builds one paragraph from its spans, theme, link settings, thread directory, chip window, and look"
+)]
 fn build_styled_text_with_targets(
     spans: &[InlineSpan],
     tokens: &Tokens,
     prose_override: Option<Hsla>,
     workspace_root: Option<&str>,
     file_links_enabled: bool,
+    directory: Option<&ThreadDirectory>,
     chip_window: Option<&Window>,
     look: InlineLook,
 ) -> StyledFlow {
@@ -1747,12 +1853,26 @@ fn build_styled_text_with_targets(
         (body_px, f32::from(space.width()) / 16.0)
     });
 
-    for span in spans {
-        let target = if let Some(url) = &span.link {
+    let spans = merge_thread_link_spans(spans);
+    for span in spans.iter() {
+        let thread = if is_thread_span(span) {
+            span.link.as_deref().and_then(parse_thread_link)
+        } else {
+            None
+        };
+        // The link's own text is a title only when it is not the link spelled out (an autolink).
+        let thread_label = thread.as_ref().map(|link| {
+            let written = (span.link.as_deref().map(str::trim) != Some(span.text.trim()))
+                .then_some(span.text.as_str());
+            chip_label(directory, link, written)
+        });
+        let target = if let Some(link) = &thread {
+            Some(ClickTarget::Thread(link.clone()))
+        } else if let Some(url) = &span.link {
             if file_links_enabled
-                && let Some(rel) = resolve_clickable_file_path(url, workspace_root)
+                && let Some(location) = resolve_markdown_file_link(url, workspace_root)
             {
-                Some(ClickTarget::WorkspaceFile(rel))
+                Some(ClickTarget::WorkspaceFile(location))
             } else {
                 Some(ClickTarget::Url(url.clone()))
             }
@@ -1770,7 +1890,30 @@ fn build_styled_text_with_targets(
 
         let start = text.len();
         let mut is_chip = false;
-        if span.style.code {
+        if let Some(label) = &thread_label {
+            if let (Some(window), Some((body_px, space_px))) = (chip_window, body) {
+                is_chip = true;
+                let chip_px = f32::from(body_px) * THREAD_CHIP_EM;
+                let color = hsla(tokens.info_foreground);
+                let shaped =
+                    inline_code::shape(window, label, sans(false, false), px(chip_px), color);
+                let room = f32::from(shaped.width()) + 2.0 * inline_code::chip_pad_x(chip_px);
+                let nbsp = inline_code::nbsp_count(room, space_px);
+                text.push_str(&"\u{a0}".repeat(nbsp));
+                chips.push(ChipPlan {
+                    range: start..text.len(),
+                    nbsp,
+                    space_px,
+                    shaped,
+                    color,
+                    code_px: chip_px,
+                    font_family: SANS_FONT_FAMILY,
+                    background: Some(hsla(tokens.info_foreground.with_alpha(0.14))),
+                });
+            } else {
+                text.push_str(label);
+            }
+        } else if span.style.code {
             if let (Some(window), Some((body_px, space_px))) = (chip_window, body) {
                 is_chip = true;
                 let code_px = f32::from(body_px) * inline_code::CODE_EM;
@@ -1797,6 +1940,8 @@ fn build_styled_text_with_targets(
                     shaped,
                     color: code_color,
                     code_px,
+                    font_family: MONO_FONT_FAMILY,
+                    background: None,
                 });
             } else {
                 // Thin padding inside the inline-code chip background.
@@ -1985,6 +2130,282 @@ fn resolve_clickable_file_path(
 
     let rel = candidate.strip_prefix("./").unwrap_or(candidate);
     location(rel)
+}
+
+/// File names without an extension that still name a file (`EXTENSIONLESS_FILE_NAMES`).
+const EXTENSIONLESS_FILE_NAMES: [&str; 20] = [
+    "Makefile",
+    "makefile",
+    "GNUmakefile",
+    "Dockerfile",
+    "Containerfile",
+    "Justfile",
+    "justfile",
+    "Rakefile",
+    "Gemfile",
+    "Procfile",
+    "Brewfile",
+    "Caddyfile",
+    "Vagrantfile",
+    "Jenkinsfile",
+    "Podfile",
+    "Fastfile",
+    "BUILD",
+    "WORKSPACE",
+    "LICENSE",
+    "LICENCE",
+];
+
+/// Roots under which an absolute path is a file even without an extension
+/// (`POSIX_FILE_ROOT_PREFIXES`).
+const POSIX_FILE_ROOT_PREFIXES: [&str; 23] = [
+    "/Users/",
+    "/home/",
+    "/tmp/",
+    "/var/",
+    "/etc/",
+    "/opt/",
+    "/mnt/",
+    "/Volumes/",
+    "/private/",
+    "/root/",
+    "/usr/",
+    "/bin/",
+    "/sbin/",
+    "/lib/",
+    "/lib64/",
+    "/srv/",
+    "/dev/",
+    "/proc/",
+    "/sys/",
+    "/run/",
+    "/boot/",
+    "/media/",
+    "/Library/",
+];
+
+/// The `scheme:` of a link that leaves Conn (`hasExternalScheme`). `src/a.rs:12` is not one: what
+/// follows the colon is a position.
+fn has_external_scheme(path: &str) -> bool {
+    let Some((scheme, rest)) = path.split_once(':') else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    let valid = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'));
+    if !valid {
+        return false;
+    }
+    rest.starts_with("//") || !is_position(rest)
+}
+
+/// `42`, `42:7` or `42-50`.
+fn is_position(text: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    match text.split_once([':', '-']) {
+        Some((line, rest)) => digits(line) && digits(rest),
+        None => digits(text),
+    }
+}
+
+/// `%20` and friends decoded. A sequence that is not valid UTF-8 keeps the text as written.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(hex) = text.get(i + 1..i + 3)
+            && let Ok(byte) = u8::from_str_radix(hex, 16)
+        {
+            out.push(byte);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| text.to_owned())
+}
+
+/// The path of a `file:` URL: `file:///a`, `file://localhost/a` and `file:/a` name `/a`. A file
+/// on another host is not one this Mac can show.
+fn file_url_path(rest: &str) -> Option<&str> {
+    match rest.strip_prefix("//") {
+        Some(authority) if authority.starts_with('/') => Some(authority),
+        Some(authority) => {
+            let (host, path) = authority.split_at(authority.find('/')?);
+            host.eq_ignore_ascii_case("localhost").then_some(path)
+        }
+        None => Some(rest),
+    }
+}
+
+/// `path` with `.` and `..` segments folded in. `None` when `..` climbs above the start.
+fn normalize_path(path: &str) -> Option<String> {
+    let absolute = path.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    let joined = parts.join("/");
+    Some(if absolute {
+        format!("/{joined}")
+    } else {
+        joined
+    })
+}
+
+/// Whether a link's path names a file or folder and not a web route (`looksLikeFilePath`).
+fn looks_like_link_path(path: &str, has_position: bool) -> bool {
+    if path.starts_with("~/") || path.starts_with("./") || path.starts_with("../") {
+        return true;
+    }
+    let trimmed = path.trim_end_matches('/');
+    let basename = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    let has_extension = basename.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty()
+            && !ext.is_empty()
+            && ext
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    });
+    if path.starts_with('/') {
+        return POSIX_FILE_ROOT_PREFIXES
+            .iter()
+            .any(|root| path.starts_with(root))
+            || has_position
+            || EXTENSIONLESS_FILE_NAMES.contains(&basename)
+            || has_extension;
+    }
+    if EXTENSIONLESS_FILE_NAMES.contains(&path) {
+        return true;
+    }
+    // `src/lib.rs`, `docs/` or `notes.md`; never `me@example.com`.
+    path.contains('/') || (has_extension && !path.contains('@'))
+}
+
+/// A Markdown link's destination as a file the Files panel opens (`parseMarkdownFileLink` and
+/// `resolveMarkdownFileLinkTarget`): an absolute path, a `file://` URL, a `~/` path, or a path
+/// relative to the thread's workspace, each with an optional `:line[:column]` suffix or `#L10`
+/// fragment. A file in the workspace comes back workspace-relative; any other file keeps its host
+/// path, which the server reads on the thread's own machine. A folder ends in `/`. A web link
+/// (any other scheme) is `None`.
+fn resolve_markdown_file_link(
+    href: &str,
+    workspace_root: Option<&str>,
+) -> Option<conn_contract::source::SourceLocation> {
+    use conn_contract::source::{SourceLines, SourceLocation};
+
+    let trimmed = href.trim();
+    let trimmed = trimmed
+        .strip_prefix('<')
+        .and_then(|inner| inner.strip_suffix('>'))
+        .unwrap_or(trimmed);
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+        return None;
+    }
+    let source = match trimmed.get(..5) {
+        Some(scheme) if scheme.eq_ignore_ascii_case("file:") => file_url_path(&trimmed[5..])?,
+        _ => trimmed,
+    };
+    let (before_hash, hash) = source.split_once('#').unwrap_or((source, ""));
+    let raw_path = before_hash.split('?').next().unwrap_or(before_hash);
+    let path = percent_decode(raw_path.trim());
+    let hash = percent_decode(hash.trim());
+    // A Windows drive (`C:\a`) is not a path on this Mac.
+    let windows_drive = path.len() >= 3
+        && path.as_bytes()[0].is_ascii_alphabetic()
+        && path.as_bytes()[1] == b':'
+        && matches!(path.as_bytes()[2], b'/' | b'\\');
+    if path.is_empty() || windows_drive || has_external_scheme(&path) {
+        return None;
+    }
+    if path
+        .split('/')
+        .any(|part| part == "…" || (part.len() >= 3 && part.bytes().all(|b| b == b'.')))
+    {
+        return None;
+    }
+
+    let file = strip_line_col_suffix(&path);
+    let line_span = |first: &str, last: &str| {
+        let start_line: usize = first.parse().ok()?;
+        let end_line: usize = last.parse().ok()?;
+        (start_line > 0 && end_line >= start_line).then_some(SourceLines {
+            start_line,
+            end_line,
+        })
+    };
+    let from_suffix = path[file.len()..]
+        .strip_prefix(':')
+        .and_then(|suffix| suffix.split(':').next())
+        .and_then(|line| line_span(line, line));
+    let from_hash = hash.strip_prefix('L').and_then(|anchor| {
+        let line_of = |s: &str| {
+            s.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+        };
+        let (start, end) = anchor.split_once("-L").unwrap_or((anchor, anchor));
+        line_span(&line_of(start), &line_of(end))
+    });
+    let lines = from_suffix.or(from_hash);
+    if file.is_empty() || !looks_like_link_path(file, lines.is_some()) {
+        return None;
+    }
+    let folder = file.ends_with('/');
+    let finish = |path: String| {
+        let path = if folder && !path.ends_with('/') {
+            format!("{path}/")
+        } else {
+            path
+        };
+        SourceLocation { path, lines }
+    };
+
+    if file.starts_with("~/") {
+        return Some(finish(file.to_owned()));
+    }
+    let root = workspace_root
+        .map(|root| root.trim_end_matches('/'))
+        .filter(|root| !root.is_empty());
+    let absolute = if file.starts_with('/') {
+        normalize_path(file)?
+    } else {
+        normalize_path(&format!("{}/{file}", root?))?
+    };
+    if let Some(root) = root {
+        let private_root = format!("/private{root}");
+        let relative = [root, private_root.as_str()].into_iter().find_map(|root| {
+            absolute
+                .strip_prefix(root)
+                .and_then(|rest| rest.strip_prefix('/'))
+        });
+        if let Some(relative) = relative
+            && conn_contract::source::workspace_relative(relative)
+        {
+            return Some(finish(relative.to_owned()));
+        }
+    }
+    Some(finish(absolute))
+}
+
+/// Whether a clicked link may go to the system's URL handler: it has a scheme, and that scheme
+/// is not `file:` or one that runs code. A bare path never does, or macOS answers with
+/// "The application can't be opened. -50".
+fn opens_externally(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url.trim()) else {
+        return false;
+    };
+    parsed.scheme().len() > 1
+        && !matches!(parsed.scheme(), "file" | "javascript" | "data" | "vbscript")
 }
 
 /// Like [`resolve_clickable_file_path`], but keeps where the link points: `path:line` when the
@@ -2376,6 +2797,7 @@ mod tests {
                     None,
                     None,
                     false,
+                    None,
                     Some(window),
                     InlineLook::default(),
                 );
@@ -2411,5 +2833,347 @@ mod tests {
         for _ in 0..2 {
             vcx.update(|window, cx| window.render_frame(cx));
         }
+    }
+
+    fn paragraph_spans(src: &str) -> Vec<InlineSpan> {
+        match parse_markdown(src).into_iter().next() {
+            Some(MarkdownBlock::Paragraph(spans)) => spans,
+            other => panic!("expected a paragraph, got {other:?}"),
+        }
+    }
+
+    fn thread_link(environment: &str, thread: &str) -> ThreadLink {
+        ThreadLink {
+            environment_id: Some(environment.to_owned()),
+            thread_id: thread.to_owned(),
+        }
+    }
+
+    fn linked(spans: &[InlineSpan]) -> Vec<(&str, &str)> {
+        spans
+            .iter()
+            .filter_map(|span| Some((span.text.as_str(), span.link.as_deref()?)))
+            .collect()
+    }
+
+    #[test]
+    fn a_markdown_link_to_a_thread_keeps_its_label_and_link() {
+        let spans = paragraph_spans("Open [Fix the build](conn://thread/env-1/thr-1) now.");
+        assert_eq!(
+            linked(&spans),
+            vec![("Fix the build", "conn://thread/env-1/thr-1")]
+        );
+        assert!(spans.iter().all(is_thread_span_or_plain));
+    }
+
+    fn is_thread_span_or_plain(span: &InlineSpan) -> bool {
+        span.link.is_none() || is_thread_span(span)
+    }
+
+    #[test]
+    fn the_older_t3_scheme_still_makes_a_thread_link() {
+        let spans =
+            paragraph_spans("[Old](t3-thread://v2/env-1/thr-1) and <t3-thread://v2/env-1/thr-2>");
+        assert_eq!(
+            linked(&spans),
+            vec![
+                ("Old", "t3-thread://v2/env-1/thr-1"),
+                ("t3-thread://v2/env-1/thr-2", "t3-thread://v2/env-1/thr-2"),
+            ]
+        );
+        assert!(spans.iter().all(is_thread_span_or_plain));
+    }
+
+    #[test]
+    fn a_bare_thread_link_in_prose_becomes_a_link_span() {
+        let spans =
+            paragraph_spans("See conn://thread/env-1/thr-1, then t3-thread://v2/env-1/thr-2.");
+        assert_eq!(
+            linked(&spans),
+            vec![
+                ("conn://thread/env-1/thr-1", "conn://thread/env-1/thr-1"),
+                ("t3-thread://v2/env-1/thr-2", "t3-thread://v2/env-1/thr-2"),
+            ]
+        );
+        let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(
+            text,
+            "See conn://thread/env-1/thr-1, then t3-thread://v2/env-1/thr-2."
+        );
+    }
+
+    #[test]
+    fn a_thread_link_in_inline_code_is_not_a_chip() {
+        let spans = paragraph_spans("Run `conn://thread/env-1/thr-1` to see.");
+        assert!(linked(&spans).is_empty());
+        assert!(!spans.iter().any(is_thread_span));
+    }
+
+    #[test]
+    fn a_thread_link_chip_clicks_through_to_its_thread() {
+        let tokens = Tokens::derive(&conn_theme::theme_by_id("dark-ocean").unwrap());
+        let spans = paragraph_spans(
+            "[A](conn://thread/env-1/thr-1) [B](t3-thread://v2/env-2/thr-2) [web](https://a.test)",
+        );
+        let StyledFlow {
+            ranges,
+            targets,
+            chips,
+            ..
+        } = build_styled_text_with_targets(
+            &spans,
+            &tokens,
+            None,
+            None,
+            false,
+            None,
+            None,
+            InlineLook::default(),
+        );
+        assert!(chips.is_empty(), "no window, no painted chips");
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(
+            targets,
+            vec![
+                ClickTarget::Thread(thread_link("env-1", "thr-1")),
+                ClickTarget::Thread(thread_link("env-2", "thr-2")),
+                ClickTarget::Url("https://a.test".to_owned()),
+            ]
+        );
+    }
+
+    /// A Markdown link's target as the Files panel gets it: its path and line span.
+    fn file_link(href: &str, root: Option<&str>) -> Option<(String, Option<(usize, usize)>)> {
+        resolve_markdown_file_link(href, root).map(|location| {
+            (
+                location.path,
+                location
+                    .lines
+                    .map(|lines| (lines.start_line, lines.end_line)),
+            )
+        })
+    }
+
+    #[test]
+    fn a_markdown_file_link_opens_its_file_in_the_files_panel() {
+        let root = Some("/Users/me/scratch");
+        let at = |path: &str, lines: Option<(usize, usize)>| Some((path.to_owned(), lines));
+        // An absolute path in the workspace becomes workspace-relative; any other keeps its host
+        // path, whatever its extension.
+        assert_eq!(
+            file_link("/Users/me/scratch/2026-11/review-astra.md", root),
+            at("2026-11/review-astra.md", None)
+        );
+        assert_eq!(
+            file_link("/private/Users/me/scratch/a.md", root),
+            at("a.md", None)
+        );
+        assert_eq!(
+            file_link("/Users/me/notes/plan.txt", root),
+            at("/Users/me/notes/plan.txt", None)
+        );
+        assert_eq!(
+            file_link("/Users/me/notes/LICENSE", root),
+            at("/Users/me/notes/LICENSE", None)
+        );
+        // `path:line[:col]` and `#L` set the line.
+        assert_eq!(
+            file_link("/Users/me/notes/plan.md:42", root),
+            at("/Users/me/notes/plan.md", Some((42, 42)))
+        );
+        assert_eq!(
+            file_link("src/lib.rs:42:7", root),
+            at("src/lib.rs", Some((42, 42)))
+        );
+        assert_eq!(
+            file_link("<src/lib.rs#L10-L20>", root),
+            at("src/lib.rs", Some((10, 20)))
+        );
+        // A relative path resolves against the workspace.
+        assert_eq!(
+            file_link("docs/review.md", root),
+            at("docs/review.md", None)
+        );
+        assert_eq!(file_link("./review.md", root), at("review.md", None));
+        assert_eq!(file_link("notes.md?raw=1", root), at("notes.md", None));
+        assert_eq!(
+            file_link("../other/x.txt", root),
+            at("/Users/me/other/x.txt", None)
+        );
+        // `file://` URLs, decoded.
+        assert_eq!(
+            file_link("file:///Users/me/scratch/a%20b.md#L3", root),
+            at("a b.md", Some((3, 3)))
+        );
+        assert_eq!(
+            file_link("file://localhost/tmp/x.log", root),
+            at("/tmp/x.log", None)
+        );
+        // Home paths and folders.
+        assert_eq!(file_link("~/notes.md", root), at("~/notes.md", None));
+        assert_eq!(file_link("docs/", root), at("docs/", None));
+        // No workspace: an absolute path still opens, a relative one cannot resolve.
+        assert_eq!(file_link("/tmp/a.md", None), at("/tmp/a.md", None));
+        assert_eq!(file_link("docs/a.md", None), None);
+        // Web links, other schemes, anchors and routes are not files.
+        for href in [
+            "https://example.com/a.md",
+            "http://localhost:3000/x",
+            "mailto:me@example.com",
+            "conn://thread/env-1/thr-1",
+            "#heading",
+            "//cdn.example.com/a.js",
+            "file://server/share/a.md",
+            "C:\\work\\a.md",
+            "/api/users",
+            "me@example.com",
+            "docs/.../a.md",
+        ] {
+            assert_eq!(file_link(href, root), None, "{href}");
+        }
+    }
+
+    #[test]
+    fn only_a_link_with_a_web_scheme_reaches_the_system() {
+        for url in [
+            "https://a.test/x",
+            "http://localhost:3000",
+            "mailto:me@a.test",
+        ] {
+            assert!(opens_externally(url), "{url}");
+        }
+        for bare in [
+            "/Users/me/scratch/review-astra.md",
+            "review-astra.md",
+            "src/a.rs:4",
+            "file:///tmp/a.md",
+            "javascript:alert(1)",
+            "C:\\a.md",
+            "",
+        ] {
+            assert!(!opens_externally(bare), "{bare}");
+        }
+    }
+
+    /// Absolute, relative, `file://` and `path:line` links click through to the Files panel;
+    /// `https://` stays a web link.
+    #[test]
+    fn markdown_file_links_click_through_to_the_files_panel() {
+        use conn_contract::source::{SourceLines, SourceLocation};
+        let tokens = Tokens::derive(&conn_theme::theme_by_id("dark-ocean").unwrap());
+        let spans = paragraph_spans(
+            "[a](/Users/me/scratch/review-astra.md) [b](/srv/notes/plan.md:42) \
+             [c](docs/a.md) [d](file:///Users/me/scratch/x.rs) [web](https://a.test/x.md)",
+        );
+        let StyledFlow { targets, .. } = build_styled_text_with_targets(
+            &spans,
+            &tokens,
+            None,
+            Some("/Users/me/scratch"),
+            true,
+            None,
+            None,
+            InlineLook::default(),
+        );
+        let file = |path: &str, line: Option<usize>| {
+            ClickTarget::WorkspaceFile(SourceLocation {
+                path: path.to_owned(),
+                lines: line.map(|line| SourceLines {
+                    start_line: line,
+                    end_line: line,
+                }),
+            })
+        };
+        assert_eq!(
+            targets,
+            vec![
+                file("review-astra.md", None),
+                file("/srv/notes/plan.md", Some(42)),
+                file("docs/a.md", None),
+                file("x.rs", None),
+                ClickTarget::Url("https://a.test/x.md".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_right_click_on_a_thread_chip_gets_a_menu_target_so_it_never_opens() {
+        let ranges = [Range { start: 0, end: 4 }];
+        let targets = [ClickTarget::Thread(thread_link("env-1", "thr-1"))];
+        assert_eq!(
+            menu_targets(&ranges, &targets),
+            vec![(
+                0..4,
+                LinkMenuTarget::Thread("conn://thread/env-1/thr-1".to_owned())
+            )]
+        );
+    }
+
+    #[test]
+    fn a_label_split_by_bold_reads_as_one_chip() {
+        let spans = paragraph_spans("[Fix **the** build](conn://thread/env-1/thr-1)");
+        assert!(spans.len() > 1, "bold splits the label");
+        let merged = merge_thread_link_spans(&spans);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].text, "Fix the build");
+    }
+
+    /// A chip shows the thread's current title, from the directory, whichever scheme wrote the
+    /// link and whatever the link's own text says; a thread nobody knows shows a short id.
+    #[gpui_kit::test]
+    fn a_thread_link_is_planned_as_a_chip_with_the_threads_title(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use gpui_kit::test::TestWindowExt as _;
+        use gpui_kit::{Context, IntoElement, Render};
+
+        struct Probe;
+        impl Render for Probe {
+            fn render(
+                &mut self,
+                window: &mut Window,
+                _cx: &mut Context<'_, Self>,
+            ) -> impl IntoElement {
+                let tokens = Tokens::derive(&conn_theme::theme_by_id("dark-ocean").unwrap());
+                let directory = ThreadDirectory::new(
+                    vec!["env-1".to_owned()],
+                    [
+                        ("thr-1", None, "Fix the build"),
+                        ("thr-2", None, "Port the parser"),
+                    ],
+                );
+                let spans = paragraph_spans(
+                    "[An old title](conn://thread/env-1/thr-1) <t3-thread://v2/env-1/thr-2> conn://thread/env-1/0123456789abcdef",
+                );
+                let StyledFlow {
+                    styled,
+                    targets,
+                    chips,
+                    ..
+                } = build_styled_text_with_targets(
+                    &spans,
+                    &tokens,
+                    None,
+                    None,
+                    false,
+                    Some(&directory),
+                    Some(window),
+                    InlineLook::default(),
+                );
+                let titles: Vec<&str> =
+                    chips.iter().map(|chip| chip.shaped.text.as_ref()).collect();
+                assert_eq!(
+                    titles,
+                    vec!["Fix the build", "Port the parser", "Thread 01234567"]
+                );
+                assert_eq!(targets.len(), 3);
+                assert!(chips.iter().all(|chip| chip.background.is_some()));
+                let _ = styled;
+                gpui_kit::div()
+            }
+        }
+
+        let (_, vcx) = cx.add_window_view(|_, _| Probe);
+        vcx.update(|window, cx| window.render_frame(cx));
     }
 }

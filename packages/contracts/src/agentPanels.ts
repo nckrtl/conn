@@ -9,7 +9,7 @@ import { PreviewTabId } from "./preview.ts";
 // panel. Each panel kind may carry its own arguments (the browser a URL, the database
 // panel a query), so panel-specific actions grow from here.
 
-const AGENT_PANEL_KINDS = ["browser", "database", "mcp", "diff", "files"] as const;
+const AGENT_PANEL_KINDS = ["browser", "database", "mcp", "diff", "files", "terminal"] as const;
 export const AgentPanelKind = Schema.Literals(AGENT_PANEL_KINDS);
 export type AgentPanelKind = typeof AgentPanelKind.Type;
 
@@ -132,7 +132,7 @@ export type AgentPanelSubscribeInput = typeof AgentPanelSubscribeInput.Type;
 export const PanelOpenToolInput = Schema.Struct({
   panel: AgentPanelKind.annotate({
     description:
-      "browser, database, mcp, diff or files. Shows it in the Conn desktop app on the user's Mac.",
+      "browser, database, mcp, diff, files or terminal. Shows it in the Conn desktop app on the user's Mac.",
   }),
   url: Schema.optional(PanelUrl).annotate({
     description: "browser only: open this page in a new desktop tab.",

@@ -82,7 +82,7 @@ impl ConnApp {
         self.panel_saves.written = Some(saved.clone());
         for (id, url) in self.thread_panels.restore(saved) {
             self.right_panel
-                .update(cx, |panel, cx| panel.navigate_browser(id, url, cx));
+                .update(cx, |panel, cx| panel.restore_browser(id, url, cx));
         }
     }
 
@@ -202,6 +202,19 @@ impl ConnApp {
                 write_layout(&path, &latest.to_json());
             }
         }
+    }
+
+    /// Starts a panel write that never finishes, as a slow disk would.
+    #[cfg(test)]
+    pub(super) fn stall_panel_write_for_test(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
+        self.panel_saves.path = Some(path);
+        self.panel_saves.in_flight = Some(InFlight {
+            layout: self.current_thread_panels(cx),
+            done: cx
+                .background_executor()
+                .spawn(futures::future::pending::<bool>())
+                .shared(),
+        });
     }
 
     /// The shown thread's panel as `ThreadPanels` keeps it.

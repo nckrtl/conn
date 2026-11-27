@@ -953,7 +953,7 @@ const MAX_PROVIDER_INSTANCE_MUTATIONS: usize = 32;
 /// `server.getSettings` sends them, secrets left out. Orbit reads what it provisioned here.
 async fn provider_instances(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Err(response) = require_providers_manage(&state, &headers) {
-        return response;
+        return *response;
     }
     let Some(environment) = &state.deps.environment else {
         return engine_unavailable();
@@ -973,7 +973,7 @@ async fn mutate_provider_instances(
     body: axum::body::Bytes,
 ) -> Response {
     if let Err(response) = require_providers_manage(&state, &headers) {
-        return response;
+        return *response;
     }
     let mutations = match provider_instance_mutations(&body) {
         Ok(mutations) => mutations,
@@ -1005,14 +1005,14 @@ async fn mutate_provider_instances(
 
 /// [`require_scope`] for `providers:manage`; the 403 also carries the `scope_required` reason
 /// that ADR 0274 names.
-fn require_providers_manage(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
-    let principal = authenticated(state, headers).map_err(|response| *response)?;
+fn require_providers_manage(state: &AppState, headers: &HeaderMap) -> Result<(), Box<Response>> {
+    let principal = authenticated(state, headers)?;
     if principal.has_scope(PROVIDERS_MANAGE) {
         return Ok(());
     }
     let mut body = scope_required_body(PROVIDERS_MANAGE);
     body["reason"] = json!("scope_required");
-    Err(Json(body).with_status(StatusCode::FORBIDDEN))
+    Err(Box::new(Json(body).with_status(StatusCode::FORBIDDEN)))
 }
 
 /// The request's mutations, or the index and reason of the first one the contract refuses.

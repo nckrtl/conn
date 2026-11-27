@@ -36,6 +36,10 @@ const TAG_ANNOTATIONS_SUBSCRIBE: &str = "annotations.subscribe";
 const TAG_SUBSCRIBE_SERVER_CONFIG: &str = "subscribeServerConfig";
 const TAG_DISPATCH_COMMAND: &str = "orchestration.dispatchCommand";
 const PING_INTERVAL: Duration = Duration::from_secs(5);
+/// Store-owned background threads that may open (catch up) at once. The open thread (rank 0)
+/// never waits; the others queue by rank, so the visible state comes first and twenty threads
+/// do not compete for one socket and one server store at the same time.
+const BACKGROUND_OPENINGS: usize = 2;
 const MAX_MISSED_PONGS: u8 = 2;
 /// How long the TCP connect plus WebSocket upgrade may take before the attempt counts as failed.
 /// Without it, a server that accepts the socket but never answers the upgrade (a restarting
@@ -99,6 +103,12 @@ struct ThreadSubState {
     store_owned: bool,
     /// Lower goes first when a new session subscribes again; ties go most recent first.
     priority: u32,
+    /// A store-owned background thread whose subscribe went out and whose `synchronized` has
+    /// not come yet: it holds one of the [`BACKGROUND_OPENINGS`] slots.
+    opening: bool,
+    /// Its subscribe should go out but has not: new, re-requested, or the session restarted.
+    /// A stream the server ended stays out until something asks for it again.
+    waiting: bool,
 }
 
 impl ThreadSubState {
@@ -110,6 +120,8 @@ impl ThreadSubState {
             touched,
             store_owned: false,
             priority: u32::MAX,
+            opening: false,
+            waiting: true,
         }
     }
 }
@@ -168,6 +180,8 @@ struct DriverState {
     server_config_subscribed: bool,
     server_config_request_id: Option<RequestId>,
     thread_subs: HashMap<String, ThreadSubState>,
+    /// An opening slot freed: send the subscribes that wait for one.
+    admit_due: bool,
     /// Last observed stream sequence per thread, preserved across `UnsubscribeThread` ->
     /// `SubscribeThread` so switching back replays deltas instead of re-downloading a snapshot.
     thread_last_sequences: HashMap<String, i64>,
@@ -203,6 +217,7 @@ impl DriverState {
             server_config_subscribed: false,
             server_config_request_id: None,
             thread_subs: HashMap::new(),
+            admit_due: false,
             thread_last_sequences: HashMap::new(),
             panel_subscription: None,
             panel_request_id: None,
@@ -299,6 +314,8 @@ impl DriverState {
         self.panel_request_id = None;
         for sub in self.thread_subs.values_mut() {
             sub.request_id = None;
+            sub.opening = false;
+            sub.waiting = true;
         }
         for req_id in self.annotation_subs.values_mut() {
             *req_id = None;
@@ -328,7 +345,8 @@ impl DriverState {
             Some(sub) if sub.store_owned => {
                 sub.priority = priority;
                 sub.touched = touched;
-                sub.request_id.is_none()
+                sub.waiting |= sub.request_id.is_none();
+                sub.waiting
             }
             _ => {
                 // The store's cursor is the only one: never a sequence remembered from before.
@@ -339,6 +357,31 @@ impl DriverState {
                 self.thread_subs.insert(thread_id, sub);
                 true
             }
+        }
+    }
+
+    /// Whether `thread_id`'s subscribe may go out now: always, except a store-owned background
+    /// thread while [`BACKGROUND_OPENINGS`] others are still opening.
+    fn may_open(&self, thread_id: &str) -> bool {
+        let background = |sub: &ThreadSubState| sub.store_owned && sub.priority > 0;
+        match self.thread_subs.get(thread_id) {
+            Some(sub) if background(sub) => {
+                self.thread_subs
+                    .values()
+                    .filter(|sub| background(sub) && sub.opening)
+                    .count()
+                    < BACKGROUND_OPENINGS
+            }
+            _ => true,
+        }
+    }
+
+    /// Frees `thread_id`'s opening slot: its `synchronized` came, or its stream ended.
+    fn opened(&mut self, thread_id: &str) {
+        if let Some(sub) = self.thread_subs.get_mut(thread_id)
+            && std::mem::take(&mut sub.opening)
+        {
+            self.admit_due = true;
         }
     }
 
@@ -907,9 +950,7 @@ where
     }
 
     // Each kept cursor asks only for what changed while the session was down.
-    for thread_id in state.thread_ids_by_recency() {
-        send_thread_subscribe(state, &thread_id, ws_write).await?;
-    }
+    admit_threads(state, ws_write).await?;
 
     if state.panel_subscription.is_some() && state.panel_request_id.is_none() {
         send_panel_requests_subscribe(state, ws_write).await?;
@@ -983,7 +1024,9 @@ where
             after,
             priority,
         } => {
-            if state.subscribe_from(thread_id.clone(), after, priority) {
+            if state.subscribe_from(thread_id.clone(), after, priority)
+                && state.may_open(&thread_id)
+            {
                 send_thread_subscribe(state, &thread_id, ws_write).await?;
             }
         }
@@ -1002,6 +1045,7 @@ where
                     send_client_frame(ws_write, &FromClient::Interrupt { request_id }).await?;
                 }
             }
+            admit_threads(state, ws_write).await?;
         }
         Command::ForgetThread(thread_id) => {
             if let Some(request_id) = state.forget_thread(&thread_id) {
@@ -1133,6 +1177,24 @@ where
     send_request(ws_write, request_id, TAG_SUBSCRIBE_SERVER_CONFIG, payload).await
 }
 
+/// Sends the subscribes that wait and may go now ([`DriverState::may_open`]), by rank and then
+/// recency: the open thread at once, background threads as opening slots free.
+async fn admit_threads<S>(state: &mut DriverState, ws_write: &mut S) -> Result<(), String>
+where
+    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+{
+    for thread_id in state.thread_ids_by_recency() {
+        let waiting = state
+            .thread_subs
+            .get(&thread_id)
+            .is_some_and(|sub| sub.waiting && sub.request_id.is_none());
+        if waiting && state.may_open(&thread_id) {
+            send_thread_subscribe(state, &thread_id, ws_write).await?;
+        }
+    }
+    Ok(())
+}
+
 async fn send_thread_subscribe<S>(
     state: &mut DriverState,
     thread_id: &str,
@@ -1183,6 +1245,8 @@ where
     if let Some(sub) = state.thread_subs.get_mut(thread_id) {
         sub.request_id = Some(request_id.clone());
         sub.subscribed_at = Some(std::time::Instant::now());
+        sub.opening = sub.store_owned && sub.priority > 0;
+        sub.waiting = false;
     }
     state.in_flight_streams.insert(
         request_id.clone(),
@@ -1352,9 +1416,19 @@ where
                 })
                 .collect();
             handle_chunk_raw(state, request_id, raw_values, ws_write, events_tx, timing).await?;
+            if std::mem::take(&mut state.admit_due) {
+                admit_threads(state, ws_write)
+                    .await
+                    .map_err(SessionOutcome::Disconnected)?;
+            }
         }
         IncomingServerFrame::Other(FromServer::Exit { request_id, exit }) => {
             handle_exit(state, request_id, exit, events_tx).await?;
+            if std::mem::take(&mut state.admit_due) {
+                admit_threads(state, ws_write)
+                    .await
+                    .map_err(SessionOutcome::Disconnected)?;
+            }
         }
         IncomingServerFrame::Other(FromServer::Defect { defect }) => {
             for (_, call) in state.in_flight_unary.drain() {
@@ -1457,6 +1531,11 @@ where
                             .thread_subs
                             .get(&thread_id)
                             .is_some_and(|s| s.store_owned);
+                        if store_owned
+                            && matches!(item, OrchestrationV2ThreadStreamItem::Synchronized(_))
+                        {
+                            state.opened(&thread_id);
+                        }
                         if !store_owned && let Some(seq) = extract_thread_sequence(&item) {
                             state.thread_last_sequences.insert(thread_id.clone(), seq);
                             if let Some(sub) = state.thread_subs.get_mut(&thread_id) {
@@ -1654,6 +1733,9 @@ async fn handle_exit(
                     && sub.request_id.as_ref() == Some(&request_id)
                 {
                     sub.request_id = None;
+                    if std::mem::take(&mut sub.opening) {
+                        state.admit_due = true;
+                    }
                 }
                 if events_tx
                     .send(ClientEvent::StreamEnded {
@@ -1744,6 +1826,51 @@ mod tests {
             state.thread_subs.get("t").and_then(|s| s.after_sequence),
             None
         );
+    }
+
+    /// What `send_thread_subscribe` records when a subscribe goes out.
+    fn sent(state: &mut DriverState, id: &str) {
+        if let Some(sub) = state.thread_subs.get_mut(id) {
+            sub.request_id = Some(RequestId::Number(1));
+            sub.opening = sub.store_owned && sub.priority > 0;
+            sub.waiting = false;
+        }
+    }
+
+    /// The open thread never waits; background threads open two at a time, and a slot frees
+    /// when an opening's `synchronized` comes.
+    #[test]
+    fn background_threads_open_two_at_a_time() {
+        let mut state = state();
+        for (id, rank) in [("a", 1), ("b", 2), ("c", 3)] {
+            state.subscribe_from(id.into(), None, rank);
+        }
+        assert!(state.may_open("a"));
+        sent(&mut state, "a");
+        sent(&mut state, "b");
+        assert!(!state.may_open("c"), "both slots taken");
+        state.subscribe_from("open".into(), None, 0);
+        assert!(state.may_open("open"), "the open thread never waits");
+        state.opened("a");
+        assert!(state.admit_due && state.may_open("c"), "a slot freed");
+    }
+
+    /// A stream the server ended is not sent again by the queue; asking again re-queues it.
+    #[test]
+    fn an_ended_stream_waits_until_asked_again() {
+        let mut state = state();
+        state.subscribe_from("t".into(), Some(3), 1);
+        sent(&mut state, "t");
+        if let Some(sub) = state.thread_subs.get_mut("t") {
+            sub.request_id = None;
+            sub.opening = false;
+        }
+        assert!(
+            !state.thread_subs.get("t").is_some_and(|s| s.waiting),
+            "parked"
+        );
+        assert!(state.subscribe_from("t".into(), Some(3), 1), "asked again");
+        assert!(state.thread_subs.get("t").is_some_and(|s| s.waiting));
     }
 
     /// A new session subscribes the store's ranks first (the open thread is 0).

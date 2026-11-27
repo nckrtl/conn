@@ -637,7 +637,12 @@ impl Engine {
         ranked.sort();
         let keep: HashSet<String> = ranked.iter().map(|(_, _, id)| id.clone()).collect();
         for (rank, (_, _, id)) in ranked.into_iter().enumerate() {
-            let rank = u32::try_from(rank).unwrap_or(u32::MAX);
+            // Rank 0 never waits for an opening slot: only a thread on screen gets it.
+            let rank = if self.open.contains(&id) {
+                0
+            } else {
+                u32::try_from(rank + 1).unwrap_or(u32::MAX)
+            };
             if self.subscribed.get(&id) != Some(&rank) {
                 let after = self.index.get(&id).and_then(|ix| ix.cursor);
                 if !self.subscribed.contains_key(&id) {

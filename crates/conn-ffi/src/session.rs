@@ -996,8 +996,6 @@ pub struct ConnSession {
     machine: Mutex<Machine<Arc<ConnCore>>>,
     /// Where this session keeps its offline thread cache, if anywhere.
     cache_dir: Option<PathBuf>,
-    /// The app is in the background: connections keep no warm threads.
-    in_background: std::sync::atomic::AtomicBool,
     /// The current attempt's offline reader.
     offline: Mutex<Option<(u64, Arc<OfflineReader>)>>,
     this: Weak<ConnSession>,
@@ -1020,7 +1018,6 @@ impl ConnSession {
             listener,
             machine: Mutex::new(Machine::new()),
             cache_dir,
-            in_background: std::sync::atomic::AtomicBool::new(false),
             offline: Mutex::new(None),
             this: this.clone(),
         })
@@ -1034,12 +1031,6 @@ impl ConnSession {
         server_url: String,
         environment_id: Option<String>,
     ) {
-        if self
-            .in_background
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            core.set_foreground(false);
-        }
         self.step(|m| m.attached(id, core, server_url, environment_id));
     }
 
@@ -1140,14 +1131,10 @@ impl ConnSession {
                 environment_id,
             } => core.expect_environment(environment_id),
             Effect::WipeCache => {
-                if let Some((_, reader)) = self
-                    .offline
+                self.offline
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .take()
-                {
-                    reader.db.invalidate();
-                }
+                    .take();
                 if let Some(dir) = &self.cache_dir {
                     let _ = std::fs::remove_dir_all(dir);
                 }
@@ -1409,50 +1396,6 @@ impl ConnSession {
         self.step(|m| m.restore(saved));
     }
 
-    /// Reads only the completed inbox file. Message database opening and backfill run separately.
-    pub async fn cached_shell(&self, identity: String) -> Option<FfiShellSnapshot> {
-        let dir = self.cache_dir.clone()?;
-        self.orbit
-            .handle()
-            .spawn(async move {
-                if tokio::fs::read_to_string(dir.join(IDENTITY_FILE))
-                    .await
-                    .ok()?
-                    != identity
-                {
-                    return None;
-                }
-                crate::offline::read_saved_shell(&cache_files(&dir).ok()?, &identity).await
-            })
-            .await
-            .ok()
-            .flatten()
-    }
-
-    /// Opens a saved environment's matching cache while its connection or discovery is pending.
-    pub async fn saved_offline_reader(&self, identity: String) -> Option<Arc<OfflineReader>> {
-        let dir = self.cache_dir.clone()?;
-        self.orbit
-            .handle()
-            .spawn(async move {
-                if tokio::fs::read_to_string(dir.join(IDENTITY_FILE))
-                    .await
-                    .ok()?
-                    != identity
-                {
-                    return None;
-                }
-                let dir = cache_files(&dir).ok()?;
-                if !dir.join("messages.sqlite3").is_file() {
-                    return None;
-                }
-                OfflineReader::open(dir, identity, None).await.ok()
-            })
-            .await
-            .ok()
-            .flatten()
-    }
-
     /// The current connection's offline thread cache, once open.
     #[must_use]
     pub fn offline_reader(&self) -> Option<Arc<OfflineReader>> {
@@ -1594,21 +1537,7 @@ impl ConnSession {
     }
 
     pub fn foreground(&self) {
-        self.in_background
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        if let Some(core) = self.core() {
-            core.set_foreground(true);
-        }
         self.step(Machine::foreground);
-    }
-
-    /// The app went to the background: stop the warm thread streams until [`Self::foreground`].
-    pub fn background(&self) {
-        self.in_background
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        if let Some(core) = self.core() {
-            core.set_foreground(false);
-        }
     }
 
     /// Where a link for `environment_id` opens: here only when it is this session's already
@@ -1814,24 +1743,35 @@ mod tests {
         let parent = tempfile::tempdir()?;
         let root = parent.path().join("cache");
         let original = claim_cache_dir(&root, "env")?;
-        let reader = OfflineReader::open(original.clone(), "env".into(), None).await?;
-        reader
-            .db
-            .save_image("env", "thread", "version", b"old")
+        let config = conn_client::ServerConfig {
+            http_base_url: url::Url::parse("http://127.0.0.1:9")?,
+            credential: conn_client::Credential::Bearer("test".into()),
+        };
+        let connection =
+            conn_client::Connection::start(config, &tokio::runtime::Handle::current()).0;
+        let open = |dir: PathBuf| {
+            let connection = connection.clone();
+            async move {
+                conn_cache::Engine::open(
+                    &dir.join("local.sqlite3"),
+                    "env",
+                    connection,
+                    conn_cache::Settings::default(),
+                )
+                .await
+            }
+        };
+        open(original.clone())
+            .await?
+            .images()
+            .save("thread", "version", b"old")
             .await?;
         assert_eq!(claim_cache_dir(&root, "env")?, original);
-        reader.db.invalidate();
         std::fs::remove_dir_all(&root)?;
         let replacement = claim_cache_dir(&root, "env")?;
         assert_ne!(original, replacement);
-        assert!(reader.db.image("env", "thread", "version").await.is_err());
-        assert!(
-            OfflineReader::open(original, "env".into(), None)
-                .await
-                .is_err()
-        );
-        let fresh = OfflineReader::open(replacement, "env".into(), None).await?;
-        assert!(fresh.db.image("env", "thread", "version").await?.is_none());
+        let fresh = open(replacement).await?;
+        assert!(fresh.images().get("thread", "version").await?.is_none());
         Ok(())
     }
 
@@ -3286,27 +3226,15 @@ mod tests {
             "node-new",
             "the cache now belongs to the new Node"
         );
-        match std::fs::read(
-            cache_files(&dir)
-                .expect("cache generation")
-                .join("shell.json"),
-        ) {
-            Ok(bytes) => {
-                let shell = conn_state::environments::LinkedShellSnapshot::from_json(&bytes)
-                    .expect("any shell already written must be a valid replacement snapshot");
-                assert_eq!(shell.environment_id, "node-new");
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => panic!("cannot inspect the new Node's shell: {err}"),
-        }
-        let cold = ConnSession::with_orbit(session.orbit.clone(), Some(dir), recorder);
-        for (identity, allowed) in [("node-old", false), ("node-new", true)] {
-            assert_eq!(
-                rt.block_on(cold.saved_offline_reader(identity.to_owned()))
-                    .is_some(),
-                allowed
-            );
-        }
+        let files = cache_files(&dir).expect("cache generation");
+        assert!(
+            !files.join("shell.json").exists(),
+            "the old Node's inbox is gone"
+        );
+        assert!(
+            files.join("conn-local-v1.sqlite3").is_file(),
+            "the new Node's thread database is open"
+        );
         if let Some(core) = session.core() {
             core.disconnect();
         }

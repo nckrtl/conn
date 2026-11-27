@@ -362,27 +362,6 @@ struct ProposedPlanCard: View {
     }
 }
 
-extension FfiThreadSnapshot {
-    /// History pages are projected independently. Prefer the linked child when it and its wake meet.
-    mutating func removeRepeatedDelegatedResults() {
-        guard !delegatedTaskIds.isEmpty else { return }
-        struct ResultKey: Hashable {
-            let task: String
-            let body: String
-        }
-        let tasks = delegatedTaskIds
-        var seen = Set(entries.compactMap { entry -> ResultKey? in
-            guard case let .subagent(id, _, _, _, _, _, true, body?, _, _, _, _) = entry,
-                  let task = tasks[id] else { return nil }
-            return ResultKey(task: task, body: body.trimmingCharacters(in: .whitespacesAndNewlines))
-        })
-        entries.removeAll { entry in
-            guard case let .user(id, body, _, true, _, _, _) = entry, let task = tasks[id] else { return false }
-            return !seen.insert(ResultKey(task: task, body: body.trimmingCharacters(in: .whitespacesAndNewlines))).inserted
-        }
-    }
-}
-
 /// The whole message in a read-only text view, to select any part of it (the menu's Select text).
 struct SelectTextSheet: View {
     let text: String

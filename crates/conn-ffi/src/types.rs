@@ -517,8 +517,9 @@ pub enum FfiTimelineEntry {
 /// Point-in-time snapshot of one subscribed thread emitted to [`crate::CoreListener::on_thread`].
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record, serde::Serialize, serde::Deserialize)]
 pub struct FfiThreadSnapshot {
-    pub history_cursor: Option<String>,
-    pub server_page: bool,
+    /// Older rows exist above the first entry ([`crate::ConnCore::load_earlier`] reads them).
+    pub has_earlier: bool,
+    pub loading_earlier: bool,
     pub thread_id: String,
     pub project_id: Option<String>,
     pub title: Option<String>,
@@ -1123,11 +1124,8 @@ pub(crate) fn build_thread_snapshot(
     let turn_agents = build_turn_agents(thread, catalog);
 
     FfiThreadSnapshot {
-        history_cursor: thread
-            .history_cursor
-            .clone()
-            .filter(|_| thread.has_more_history),
-        server_page: false,
+        has_earlier: thread.has_more_history,
+        loading_earlier: thread.loading_earlier,
         thread_id: thread.thread_id.clone(),
         project_id: thread
             .thread()

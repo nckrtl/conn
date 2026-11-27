@@ -687,7 +687,7 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
     func cancelQueuedMessage(threadId: String, runId: String) async throws 
     
     /**
-     * Unsubscribes from `thread_id` while retaining its cached timeline for fast re-open.
+     * Leaves `thread_id`; the last few closed threads stay in memory for a quick return.
      */
     func closeThread(threadId: String) 
     
@@ -760,6 +760,12 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
     func launchThread(projectId: String, text: String) async throws  -> String
     
     /**
+     * Loads older rows above an open thread: from the device, else from the server. The next
+     * snapshot carries them.
+     */
+    func loadEarlier(threadId: String) 
+    
+    /**
      * Reads one server-owned settled cursor without blocking incoming shell changes.
      */
     func loadOlderSettled() async throws 
@@ -796,9 +802,9 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
     func pinThread(threadId: String, pinned: Bool) async throws 
     
     /**
-     * Opens this pairing's cache on the connection runtime.
-     * `identity` names the server the cache belongs to (its Orbit server id or environment id),
-     * not its URL: another server at the same URL must not read this one's cache.
+     * Opens this pairing's device database (the thread engine's) on the connection runtime.
+     * `identity` names the server the database belongs to (its Orbit server id or environment
+     * id), not its URL: another server at the same URL must not read this one's threads.
      */
     func prepareOffline(directory: String, identity: String) async throws  -> OfflineReader
     
@@ -894,12 +900,6 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
      * Returns the normalized HTTP base URL this connection targets.
      */
     func serverUrl()  -> String
-    
-    /**
-     * Keeps a few recent threads subscribed while `true` (the app is in the foreground), so
-     * opening one shows its latest state at once; `false` drops them until the next `true`.
-     */
-    func setForeground(foreground: Bool) 
     
     /**
      * Moves `thread_id` into (`settled = true`) or out of (`settled = false`) the Settled shelf
@@ -1079,7 +1079,7 @@ open func cancelQueuedMessage(threadId: String, runId: String)async throws   {
 }
     
     /**
-     * Unsubscribes from `thread_id` while retaining its cached timeline for fast re-open.
+     * Leaves `thread_id`; the last few closed threads stay in memory for a quick return.
      */
 open func closeThread(threadId: String)  {try! rustCall() {
         uniffiCallStatus in
@@ -1256,6 +1256,19 @@ open func launchThread(projectId: String, text: String)async throws  -> String  
 }
     
     /**
+     * Loads older rows above an open thread: from the device, else from the server. The next
+     * snapshot carries them.
+     */
+open func loadEarlier(threadId: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_conncore_load_earlier(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(threadId),uniffiCallStatus
+    )
+}
+}
+    
+    /**
      * Reads one server-owned settled cursor without blocking incoming shell changes.
      */
 open func loadOlderSettled()async throws   {
@@ -1356,9 +1369,9 @@ open func pinThread(threadId: String, pinned: Bool)async throws   {
 }
     
     /**
-     * Opens this pairing's cache on the connection runtime.
-     * `identity` names the server the cache belongs to (its Orbit server id or environment id),
-     * not its URL: another server at the same URL must not read this one's cache.
+     * Opens this pairing's device database (the thread engine's) on the connection runtime.
+     * `identity` names the server the database belongs to (its Orbit server id or environment
+     * id), not its URL: another server at the same URL must not read this one's threads.
      */
 open func prepareOffline(directory: String, identity: String)async throws  -> OfflineReader  {
     return
@@ -1609,19 +1622,6 @@ open func serverUrl() -> String  {
 }
     
     /**
-     * Keeps a few recent threads subscribed while `true` (the app is in the foreground), so
-     * opening one shows its latest state at once; `false` drops them until the next `true`.
-     */
-open func setForeground(foreground: Bool)  {try! rustCall() {
-        uniffiCallStatus in
-    uniffi_conn_ffi_fn_method_conncore_set_foreground(
-            self.uniffiCloneHandle(),
-        FfiConverterBool.lower(foreground),uniffiCallStatus
-    )
-}
-}
-    
-    /**
      * Moves `thread_id` into (`settled = true`) or out of (`settled = false`) the Settled shelf
      * (`thread.settle` / `thread.unsettle`).
      *
@@ -1787,16 +1787,6 @@ public func FfiConverterTypeConnCore_lower(_ value: ConnCore) -> UInt64 {
 public protocol ConnSessionProtocol: AnyObject, Sendable {
     
     /**
-     * The app went to the background: stop the warm thread streams until [`Self::foreground`].
-     */
-    func background() 
-    
-    /**
-     * Reads only the completed inbox file. Message database opening and backfill run separately.
-     */
-    func cachedShell(identity: String) async  -> FfiShellSnapshot?
-    
-    /**
      * The user left this thread: unsubscribe it.
      */
     func closeThread(threadId: String) 
@@ -1857,11 +1847,6 @@ public protocol ConnSessionProtocol: AnyObject, Sendable {
     func restore(saved: FfiSavedSession?) 
     
     func retry() 
-    
-    /**
-     * Opens a saved environment's matching cache while its connection or discovery is pending.
-     */
-    func savedOfflineReader(identity: String) async  -> OfflineReader?
     
     func signOut() 
     
@@ -1943,37 +1928,6 @@ public convenience init(gatewayUrl: String?, cacheDirectory: String?, listener: 
 
     
 
-    
-    /**
-     * The app went to the background: stop the warm thread streams until [`Self::foreground`].
-     */
-open func background()  {try! rustCall() {
-        uniffiCallStatus in
-    uniffi_conn_ffi_fn_method_connsession_background(
-            self.uniffiCloneHandle(),uniffiCallStatus
-    )
-}
-}
-    
-    /**
-     * Reads only the completed inbox file. Message database opening and backfill run separately.
-     */
-open func cachedShell(identity: String)async  -> FfiShellSnapshot?  {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_conn_ffi_fn_method_connsession_cached_shell(
-                        self.uniffiCloneHandle(),FfiConverterString.lower(identity)
-                )
-            },
-            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
-            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
-            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterOptionTypeFfiShellSnapshot.lift,
-            errorHandler: nil
-            
-        )
-}
     
     /**
      * The user left this thread: unsubscribe it.
@@ -2154,26 +2108,6 @@ open func retry()  {try! rustCall() {
             self.uniffiCloneHandle(),uniffiCallStatus
     )
 }
-}
-    
-    /**
-     * Opens a saved environment's matching cache while its connection or discovery is pending.
-     */
-open func savedOfflineReader(identity: String)async  -> OfflineReader?  {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_conn_ffi_fn_method_connsession_saved_offline_reader(
-                        self.uniffiCloneHandle(),FfiConverterString.lower(identity)
-                )
-            },
-            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
-            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
-            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterOptionTypeOfflineReader.lift,
-            errorHandler: nil
-            
-        )
 }
     
 open func signOut()  {try! rustCall() {
@@ -2908,27 +2842,19 @@ public func FfiConverterTypeFfiTextFits_lower(_ value: FfiTextFits) -> UInt64 {
 
 public protocol OfflineReaderProtocol: AnyObject, Sendable {
     
-    func before(thread: String, id: String) async throws  -> FfiThreadSnapshot
-    
     func discardImage(thread: String, file: FfiAttachment) async throws 
     
     func imageBytes(thread: String, file: FfiAttachment, online: Bool) async throws  -> Data
     
+    /**
+     * The thread's prompts, from the server.
+     */
     func outline(thread: String, online: Bool) async throws  -> [FfiPromptMarker]
     
-    func promptWindow(thread: String, id: String, online: Bool) async throws  -> FfiThreadSnapshot
-    
     /**
-     * The thread as last seen: its saved rendered state (run state, work groups, subagents,
-     * requests), else its latest saved messages.
+     * The window around one prompt, from the server.
      */
-    func recent(thread: String) async throws  -> FfiThreadSnapshot
-    
-    func retainsThread(thread: String)  -> Bool
-    
-    func savedShell() async  -> FfiShellSnapshot?
-    
-    func serverBefore(thread: String, anchor: String, continuation: String?, snapshotCursor: String?) async throws  -> FfiThreadSnapshot
+    func promptWindow(thread: String, id: String, online: Bool) async throws  -> FfiThreadSnapshot
     
 }
 open class OfflineReader: OfflineReaderProtocol, @unchecked Sendable {
@@ -2984,22 +2910,6 @@ open class OfflineReader: OfflineReaderProtocol, @unchecked Sendable {
     
 
     
-open func before(thread: String, id: String)async throws  -> FfiThreadSnapshot  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_conn_ffi_fn_method_offlinereader_before(
-                        self.uniffiCloneHandle(),FfiConverterString.lower(thread),FfiConverterString.lower(id)
-                )
-            },
-            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
-            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
-            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeFfiThreadSnapshot_lift,
-            errorHandler: FfiConverterTypeFfiError_lift
-        )
-}
-    
 open func discardImage(thread: String, file: FfiAttachment)async throws   {
     return
         try  await uniffiRustCallAsync(
@@ -3032,6 +2942,9 @@ open func imageBytes(thread: String, file: FfiAttachment, online: Bool)async thr
         )
 }
     
+    /**
+     * The thread's prompts, from the server.
+     */
 open func outline(thread: String, online: Bool)async throws  -> [FfiPromptMarker]  {
     return
         try  await uniffiRustCallAsync(
@@ -3048,75 +2961,15 @@ open func outline(thread: String, online: Bool)async throws  -> [FfiPromptMarker
         )
 }
     
+    /**
+     * The window around one prompt, from the server.
+     */
 open func promptWindow(thread: String, id: String, online: Bool)async throws  -> FfiThreadSnapshot  {
     return
         try  await uniffiRustCallAsync(
             rustFutureFunc: {
                 uniffi_conn_ffi_fn_method_offlinereader_prompt_window(
                         self.uniffiCloneHandle(),FfiConverterString.lower(thread),FfiConverterString.lower(id),FfiConverterBool.lower(online)
-                )
-            },
-            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
-            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
-            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeFfiThreadSnapshot_lift,
-            errorHandler: FfiConverterTypeFfiError_lift
-        )
-}
-    
-    /**
-     * The thread as last seen: its saved rendered state (run state, work groups, subagents,
-     * requests), else its latest saved messages.
-     */
-open func recent(thread: String)async throws  -> FfiThreadSnapshot  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_conn_ffi_fn_method_offlinereader_recent(
-                        self.uniffiCloneHandle(),FfiConverterString.lower(thread)
-                )
-            },
-            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
-            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
-            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterTypeFfiThreadSnapshot_lift,
-            errorHandler: FfiConverterTypeFfiError_lift
-        )
-}
-    
-open func retainsThread(thread: String) -> Bool  {
-    return try!  FfiConverterBool.lift(try! rustCall() {
-        uniffiCallStatus in
-    uniffi_conn_ffi_fn_method_offlinereader_retains_thread(
-            self.uniffiCloneHandle(),
-        FfiConverterString.lower(thread),uniffiCallStatus
-    )
-})
-}
-    
-open func savedShell()async  -> FfiShellSnapshot?  {
-    return
-        try!  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_conn_ffi_fn_method_offlinereader_saved_shell(
-                        self.uniffiCloneHandle()
-                )
-            },
-            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
-            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
-            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
-            liftFunc: FfiConverterOptionTypeFfiShellSnapshot.lift,
-            errorHandler: nil
-            
-        )
-}
-    
-open func serverBefore(thread: String, anchor: String, continuation: String?, snapshotCursor: String?)async throws  -> FfiThreadSnapshot  {
-    return
-        try  await uniffiRustCallAsync(
-            rustFutureFunc: {
-                uniffi_conn_ffi_fn_method_offlinereader_server_before(
-                        self.uniffiCloneHandle(),FfiConverterString.lower(thread),FfiConverterString.lower(anchor),FfiConverterOptionString.lower(continuation),FfiConverterOptionString.lower(snapshotCursor)
                 )
             },
             pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
@@ -10992,8 +10845,11 @@ public func FfiConverterTypeFfiThemeTokens_lower(_ value: FfiThemeTokens) -> Rus
  * Point-in-time snapshot of one subscribed thread emitted to [`crate::CoreListener::on_thread`].
  */
 public struct FfiThreadSnapshot: Equatable, Hashable {
-    public var historyCursor: String?
-    public var serverPage: Bool
+    /**
+     * Older rows exist above the first entry ([`crate::ConnCore::load_earlier`] reads them).
+     */
+    public var hasEarlier: Bool
+    public var loadingEarlier: Bool
     public var threadId: String
     public var projectId: String?
     public var title: String?
@@ -11035,7 +10891,10 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(historyCursor: String?, serverPage: Bool, threadId: String, projectId: String?, title: String?, branch: String?, modelLabel: String?, entries: [FfiTimelineEntry], feedDetails: [String: FfiFeedDetail], delegatedTaskIds: [String: String], workGroups: [FfiWorkGroupTiming], working: Bool, activeRunId: String?, queuedCount: UInt32, synchronized: Bool, 
+    public init(
+        /**
+         * Older rows exist above the first entry ([`crate::ConnCore::load_earlier`] reads them).
+         */hasEarlier: Bool, loadingEarlier: Bool, threadId: String, projectId: String?, title: String?, branch: String?, modelLabel: String?, entries: [FfiTimelineEntry], feedDetails: [String: FfiFeedDetail], delegatedTaskIds: [String: String], workGroups: [FfiWorkGroupTiming], working: Bool, activeRunId: String?, queuedCount: UInt32, synchronized: Bool, 
         /**
          * Approvals still waiting for an answer, in timeline order; the card above the composer
          * shows the first (Conn mobile's `activePendingApproval`).
@@ -11056,8 +10915,8 @@ public struct FfiThreadSnapshot: Equatable, Hashable {
          * The latest turn's agents for the agents capsule, from the projection's subagents and runs
          * (Conn mobile's `deriveThreadTurnSubagents`); `None` when the capsule hides.
          */turnAgents: FfiTurnAgents?) {
-        self.historyCursor = historyCursor
-        self.serverPage = serverPage
+        self.hasEarlier = hasEarlier
+        self.loadingEarlier = loadingEarlier
         self.threadId = threadId
         self.projectId = projectId
         self.title = title
@@ -11094,8 +10953,8 @@ public struct FfiConverterTypeFfiThreadSnapshot: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiThreadSnapshot {
         return
             try FfiThreadSnapshot(
-                historyCursor: FfiConverterOptionString.read(from: &buf), 
-                serverPage: FfiConverterBool.read(from: &buf), 
+                hasEarlier: FfiConverterBool.read(from: &buf), 
+                loadingEarlier: FfiConverterBool.read(from: &buf), 
                 threadId: FfiConverterString.read(from: &buf), 
                 projectId: FfiConverterOptionString.read(from: &buf), 
                 title: FfiConverterOptionString.read(from: &buf), 
@@ -11118,8 +10977,8 @@ public struct FfiConverterTypeFfiThreadSnapshot: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: FfiThreadSnapshot, into buf: inout [UInt8]) {
-        FfiConverterOptionString.write(value.historyCursor, into: &buf)
-        FfiConverterBool.write(value.serverPage, into: &buf)
+        FfiConverterBool.write(value.hasEarlier, into: &buf)
+        FfiConverterBool.write(value.loadingEarlier, into: &buf)
         FfiConverterString.write(value.threadId, into: &buf)
         FfiConverterOptionString.write(value.projectId, into: &buf)
         FfiConverterOptionString.write(value.title, into: &buf)
@@ -16138,7 +15997,10 @@ public enum FfiTimelineEntry: Equatable, Hashable {
     )
     case turnCheckpoint(id: String, runId: String, appRunOrdinal: Int64?, fileCount: UInt32, additions: Int64, deletions: Int64, files: [FfiTurnCheckpointFile]
     )
-    case notice(id: String, text: String, isError: Bool
+    case notice(id: String, text: String, 
+        /**
+         * A warning or an error: drawn as desktop's warning row, not the info divider.
+         */isError: Bool
     )
     /**
      * Fallback for future timeline entry kinds not yet mapped to a dedicated variant.
@@ -19096,7 +18958,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_conncore_cancel_queued_message() != 20281) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_conncore_close_thread() != 13465) {
+    if (uniffi_conn_ffi_checksum_method_conncore_close_thread() != 23517) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_composer_limits() != 43499) {
@@ -19123,6 +18985,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_conncore_launch_thread() != 45360) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_conncore_load_earlier() != 32483) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_conncore_load_older_settled() != 10868) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19138,7 +19003,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_conncore_pin_thread() != 33458) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_conncore_prepare_offline() != 26956) {
+    if (uniffi_conn_ffi_checksum_method_conncore_prepare_offline() != 8828) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_pull_request() != 12943) {
@@ -19172,9 +19037,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_server_url() != 43789) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_conn_ffi_checksum_method_conncore_set_foreground() != 6752) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_settle_thread() != 64028) {
@@ -19234,31 +19096,16 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_threadmcpapp_tool_payload() != 6272) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_offlinereader_before() != 42718) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_conn_ffi_checksum_method_offlinereader_discard_image() != 39557) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_offlinereader_image_bytes() != 27491) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_offlinereader_outline() != 14487) {
+    if (uniffi_conn_ffi_checksum_method_offlinereader_outline() != 61849) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_offlinereader_prompt_window() != 2929) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_conn_ffi_checksum_method_offlinereader_recent() != 17942) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_conn_ffi_checksum_method_offlinereader_retains_thread() != 10877) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_conn_ffi_checksum_method_offlinereader_saved_shell() != 26240) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_conn_ffi_checksum_method_offlinereader_server_before() != 34035) {
+    if (uniffi_conn_ffi_checksum_method_offlinereader_prompt_window() != 61321) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_orbitcore_bound_profile() != 29553) {
@@ -19345,12 +19192,6 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_ffitextfits_fits() != 56087) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_connsession_background() != 59524) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_conn_ffi_checksum_method_connsession_cached_shell() != 29377) {
-        return InitializationResult.apiChecksumMismatch
-    }
     if (uniffi_conn_ffi_checksum_method_connsession_close_thread() != 18448) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19397,9 +19238,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_retry() != 5291) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_conn_ffi_checksum_method_connsession_saved_offline_reader() != 45730) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_sign_out() != 51503) {

@@ -13,7 +13,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{
     CoreListener, FfiComposerLimits, FfiConnectionStatus, FfiSavedSession, FfiShellSnapshot,
-    FfiThreadSnapshot, PumpControl, PumpStats, SessionIdentity, run_pump,
+    FfiThreadSnapshot, PumpControl, PumpState, PumpStats, SessionIdentity, run_pump,
 };
 use crate::types::FfiTimelineEntry;
 
@@ -197,8 +197,12 @@ fn run_burst(turns: usize, burst: usize, pace: Option<Duration>, shell_every: us
     };
     // A dead server: the pump gets its events from this test, not the socket.
     let (connection, _ignored) = Connection::start(config, rt.handle());
+    let dir = tempfile::tempdir().expect("dir");
+    let engine = open_engine(&rt, dir.path(), &connection);
+    let reader = crate::OfflineReader::new(engine.images(), connection.clone());
     let (events_tx, events_rx) = mpsc::channel::<ClientEvent>(burst + 64);
     let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
+    let _ = ctrl_tx.send(PumpControl::EnableEngine(Box::new(engine), reader));
     let recorder = std::sync::Arc::new(Recorder::default());
     let listener: std::sync::Arc<dyn CoreListener> = recorder.clone();
     let (shell_tx, _shell_rx) = watch::channel(None);
@@ -207,7 +211,7 @@ fn run_burst(turns: usize, burst: usize, pace: Option<Duration>, shell_every: us
     rt.spawn(run_pump(
         connection,
         events_rx,
-        ctrl_rx,
+        (ctrl_rx, ctrl_tx.clone()),
         listener,
         std::sync::Arc::default(),
         (shell_tx, status_tx, limits_tx),
@@ -346,16 +350,39 @@ fn pump_bench() {
     }
 }
 
-/// A pump fed by hand, on a dead connection.
-fn bare_pump(rt: &tokio::runtime::Runtime) -> (super::PumpState, std::sync::Arc<Recorder>) {
+fn open_engine(
+    rt: &tokio::runtime::Runtime,
+    dir: &std::path::Path,
+    connection: &Connection,
+) -> conn_cache::Engine {
+    rt.block_on(conn_cache::Engine::open(
+        &dir.join("local.sqlite3"),
+        "env",
+        connection.clone(),
+        conn_cache::Settings::default(),
+    ))
+    .expect("engine")
+}
+
+type Ctrl = mpsc::UnboundedReceiver<PumpControl>;
+
+/// A pump fed by hand, on a dead connection, its engine on the device database in `dir`. Its
+/// device reads come back on the returned receiver; the caller keeps `rt` entered.
+fn bare_pump(
+    rt: &tokio::runtime::Runtime,
+    dir: &std::path::Path,
+) -> (PumpState, std::sync::Arc<Recorder>, Ctrl) {
     let config = ServerConfig {
         http_base_url: "http://127.0.0.1:9/".parse().expect("url"),
         credential: Credential::Bearer("test".into()),
     };
     let (connection, _ignored) = Connection::start(config, rt.handle());
+    let engine = open_engine(rt, dir, &connection);
     let recorder = std::sync::Arc::new(Recorder::default());
-    let state = super::PumpState::new(
-        connection,
+    let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
+    let mut state = PumpState::new(
+        connection.clone(),
+        ctrl_tx,
         recorder.clone(),
         std::sync::Arc::default(),
         (
@@ -369,30 +396,116 @@ fn bare_pump(rt: &tokio::runtime::Runtime) -> (super::PumpState, std::sync::Arc<
             reused_session: None,
         },
     );
-    (state, recorder)
+    state.reader = Some(crate::OfflineReader::new(engine.images(), connection));
+    state.engine = Some(engine);
+    (state, recorder, ctrl_rx)
+}
+
+/// Opens `id` and hands the pump its device read.
+fn open(rt: &tokio::runtime::Runtime, state: &mut PumpState, ctrl: &mut Ctrl, id: &str) {
+    let _ = state.handle_control(PumpControl::OpenThread(id.into()));
+    let read = rt.block_on(ctrl.recv()).expect("device read");
+    assert!(matches!(read, PumpControl::FinishOpen { .. }));
+    let _ = state.handle_control(read);
 }
 
 /// Opens `LONG` with a short synchronized timeline and publishes it once at `at`.
-fn open_long(state: &mut super::PumpState, at: Instant) -> (Value, String, i64) {
+fn open_long(
+    rt: &tokio::runtime::Runtime,
+    state: &mut PumpState,
+    ctrl: &mut Ctrl,
+    at: Instant,
+) -> (Value, String, i64) {
     let (long, run, sequence) = snapshot(LONG, 3);
     state.handle_event(shell(json!({"kind": "snapshot", "snapshot": {
         "schemaVersion": 1, "snapshotSequence": 1, "projects": [],
         "threads": [thread_shell(LONG, 0)], "archivedThreads": []
     }})));
     state.handle_event(shell(json!({"kind": "synchronized"})));
-    let _ = state.handle_control(PumpControl::OpenThread(LONG.into()));
+    open(rt, state, ctrl, LONG);
     state.handle_event(thread(LONG, long.clone()));
     state.handle_event(thread(LONG, json!({"kind": "synchronized"})));
     state.flush_due_at(at);
     (long, run, sequence)
 }
 
+fn stream_text_len(snapshot: &FfiThreadSnapshot) -> Option<usize> {
+    snapshot.entries.iter().find_map(|entry| match entry {
+        FfiTimelineEntry::Assistant { id, markdown, .. } if id == STREAM_ITEM => {
+            Some(markdown.len())
+        }
+        _ => None,
+    })
+}
+
+/// A kept thread's changes reach the device while it is closed, with nothing in memory. Opening
+/// it draws from the device although the server never answers (the connection is dead), and so
+/// does a restart on the same database.
+#[test]
+fn a_kept_thread_opens_from_the_device_before_the_server_answers() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _rt = rt.enter();
+    let dir = tempfile::tempdir().expect("dir");
+    let (mut state, _, mut ctrl) = bare_pump(&rt, dir.path());
+    let (long, run, sequence) = snapshot(LONG, 3);
+    state.handle_event(thread(LONG, long));
+    state.handle_event(thread(LONG, json!({"kind": "synchronized"})));
+    state.handle_event(thread(LONG, delta(&run, sequence + 1, 64)));
+    assert!(
+        state.thread(LONG).is_none(),
+        "a closed kept thread holds nothing in memory"
+    );
+
+    let open_from_device = |state: &mut PumpState, ctrl: &mut Ctrl| {
+        open(&rt, state, ctrl, LONG);
+        state.flush_due_at(Instant::now() + Duration::from_secs(1));
+        state.published.get(LONG).cloned().expect("published")
+    };
+    let first = open_from_device(&mut state, &mut ctrl);
+    assert!(
+        first.synchronized,
+        "the device copy draws as a whole window"
+    );
+    assert_eq!(stream_text_len(&first), Some(64), "with the latest change");
+    drop(state);
+
+    let (mut restarted, _, mut ctrl) = bare_pump(&rt, dir.path());
+    let again = open_from_device(&mut restarted, &mut ctrl);
+    assert_eq!(
+        again.entries, first.entries,
+        "a restart opens the same rows"
+    );
+}
+
+/// The threads left last stay in memory: switching back publishes without a device read.
+#[test]
+fn switching_back_to_a_recent_thread_publishes_at_once() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _rt = rt.enter();
+    let dir = tempfile::tempdir().expect("dir");
+    let (mut state, recorder, mut ctrl) = bare_pump(&rt, dir.path());
+    let t0 = Instant::now();
+    open_long(&rt, &mut state, &mut ctrl, t0);
+    let _ = state.handle_control(PumpControl::CloseThread(LONG.into()));
+    open(&rt, &mut state, &mut ctrl, OTHER);
+    let _ = state.handle_control(PumpControl::CloseThread(OTHER.into()));
+    let published = |r: &Recorder| r.0.lock().map(|s| s.long).unwrap_or_default();
+    let before = published(&recorder);
+
+    let _ = state.handle_control(PumpControl::OpenThread(LONG.into()));
+    assert!(ctrl.try_recv().is_err(), "no device read: it is in memory");
+    state.flush_due_at(t0 + Duration::from_secs(5));
+    assert_eq!(published(&recorder), before + 1, "published at once");
+}
+
 #[test]
 fn a_burst_builds_one_snapshot_per_publication_and_shell_only_changes_publish_nothing() {
     let rt = tokio::runtime::Runtime::new().expect("runtime");
-    let (mut state, recorder) = bare_pump(&rt);
+    let _rt = rt.enter();
+    let dir = tempfile::tempdir().expect("dir");
+    let (mut state, recorder, mut ctrl) = bare_pump(&rt, dir.path());
     let t0 = Instant::now();
-    let (_, run, sequence) = open_long(&mut state, t0);
+    let (_, run, sequence) = open_long(&rt, &mut state, &mut ctrl, t0);
     let published = |r: &Recorder| r.0.lock().map(|s| s.long).unwrap_or_default();
     assert_eq!(published(&recorder), 1);
     let base = state.stats;
@@ -441,7 +554,8 @@ fn a_burst_builds_one_snapshot_per_publication_and_shell_only_changes_publish_no
 #[test]
 fn a_drain_stops_at_its_bound_so_controls_are_serviced() {
     let rt = tokio::runtime::Runtime::new().expect("runtime");
-    let (mut state, _) = bare_pump(&rt);
+    let dir = tempfile::tempdir().expect("dir");
+    let (mut state, _, _ctrl) = bare_pump(&rt, dir.path());
     let (tx, mut rx) = mpsc::channel(512);
     for _ in 0..200 {
         tx.try_send(shell(json!({"kind": "synchronized"})))
@@ -486,9 +600,11 @@ fn rows_for(snapshot: &FfiThreadSnapshot, key: &str) -> usize {
 #[test]
 fn a_reply_shows_at_once_and_its_echo_leaves_exactly_one_row_before_or_after_the_ack() {
     let rt = tokio::runtime::Runtime::new().expect("runtime");
-    let (mut state, _) = bare_pump(&rt);
+    let _rt = rt.enter();
+    let dir = tempfile::tempdir().expect("dir");
+    let (mut state, _, mut ctrl) = bare_pump(&rt, dir.path());
     let t0 = Instant::now();
-    let (long, _, sequence) = open_long(&mut state, t0);
+    let (long, _, sequence) = open_long(&rt, &mut state, &mut ctrl, t0);
     let send = |key: &str| PumpControl::QueueSend {
         thread_id: LONG.into(),
         send: crate::outbox::PendingSend {
@@ -505,7 +621,7 @@ fn a_reply_shows_at_once_and_its_echo_leaves_exactly_one_row_before_or_after_the
         key: key.into(),
         accepted,
     };
-    let last = |state: &super::PumpState| state.published.get(LONG).cloned().expect("published");
+    let last = |state: &PumpState| state.published.get(LONG).cloned().expect("published");
 
     // Echo first, then the acknowledgement.
     let _ = state.handle_control(send("k1"));

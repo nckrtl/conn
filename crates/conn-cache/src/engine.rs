@@ -283,6 +283,17 @@ impl Engine {
         held.state.apply(item)
     }
 
+    /// Subscribes a kept thread again after its stream ended, at its rank and committed cursor.
+    /// False when the engine does not keep the thread.
+    pub fn resubscribe(&self, id: &str) -> bool {
+        let Some(rank) = self.subscribed.get(id) else {
+            return false;
+        };
+        let after = self.index.get(id).and_then(|ix| ix.cursor);
+        self.connection.subscribe_thread_from(id, after, *rank);
+        true
+    }
+
     /// The stream sent an item this client cannot read: keep the thread's cursor where it is.
     pub fn mark_stale(&mut self, thread: &str) {
         self.stale.insert(thread.to_owned());

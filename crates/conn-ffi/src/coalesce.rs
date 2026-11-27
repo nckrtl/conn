@@ -31,10 +31,6 @@ impl SnapshotCoalescer {
         self.last_shell_emit = None;
     }
 
-    pub(crate) fn has_pending_shell(&self) -> bool {
-        self.pending_shell.is_some()
-    }
-
     /// Records a new shell snapshot. Returns `Some(snapshot)` when it can be emitted immediately,
     /// or `None` when it has been buffered to flush at the end of the current 50 ms window.
     pub(crate) fn push_shell(
@@ -150,8 +146,8 @@ pub(crate) mod tests {
 
     pub(crate) fn thread_snap(thread_id: &str, text: &str, working: bool) -> FfiThreadSnapshot {
         FfiThreadSnapshot {
-            history_cursor: None,
-            server_page: false,
+            has_earlier: false,
+            loading_earlier: false,
             thread_id: thread_id.to_owned(),
             project_id: None,
             title: None,

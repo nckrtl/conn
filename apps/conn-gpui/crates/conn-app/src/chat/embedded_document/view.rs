@@ -207,6 +207,14 @@ impl IsolatedSurface {
             wake_task: None,
             event_task: None,
         };
+        // Only a newer frame frees the one before, so a surface that goes (its row scrolled out
+        // or its card unmounted) frees its last frame from the window atlas here.
+        cx.on_release(|this: &mut Self, cx| {
+            if let Some((_, image)) = this.rendered_frame.take() {
+                cx.defer(move |cx| cx.drop_image(image, None));
+            }
+        })
+        .detach();
         surface.start_runtime(cx);
         surface
     }

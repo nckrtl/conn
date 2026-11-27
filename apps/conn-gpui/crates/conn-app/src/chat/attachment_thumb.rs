@@ -36,12 +36,6 @@ pub(super) fn image_format_for_mime(mime_type: &str) -> Option<ImageFormat> {
     }
 }
 
-/// An image GPUI can paint from `bytes`, or `None` for a non-image or unsupported type.
-pub(super) fn preview_image(mime_type: &str, bytes: Vec<u8>) -> Option<Arc<Image>> {
-    let format = image_format_for_mime(mime_type)?;
-    Some(Arc::new(Image::from_bytes(format, bytes)))
-}
-
 /// A sent image in the chat's thumbnail cache.
 pub(super) enum SentImage {
     /// The download or decode with this request number is waiting or running.
@@ -471,10 +465,11 @@ pub(super) fn gallery_cell(
 
 /// A staged image in the composer strip (`ComposerAttachmentStrip.tsx`): a `64px` square,
 /// `rounded-lg`, `border-border/80`, `object-cover`, with the remove button on its corner.
+/// `image` is the chip-sized thumbnail, or `None` while it decodes.
 pub(super) fn staged_image_chip(
     local_id: u64,
     name: &str,
-    image: Arc<Image>,
+    image: Option<ImageSource>,
     uploading: bool,
     failed: bool,
     tokens: &Tokens,
@@ -500,21 +495,26 @@ pub(super) fn staged_image_chip(
             hsla_alpha(tokens.border, 0.80)
         })
         // 8px outer radius, so the picture inside the 1px border takes 7px.
-        .child(
-            img(ImageSource::Image(image))
-                .size_full()
-                .rounded(px(7.0))
-                .object_fit(ObjectFit::Cover)
-                .with_fallback(move || {
-                    div()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(icons::icon(icons::IMAGE, 16.0, muted))
-                        .into_any_element()
-                }),
-        );
+        .child({
+            let placeholder = move || {
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icons::icon(icons::IMAGE, 16.0, muted))
+                    .into_any_element()
+            };
+            match image {
+                Some(image) => img(image)
+                    .size_full()
+                    .rounded(px(7.0))
+                    .object_fit(ObjectFit::Cover)
+                    .with_fallback(placeholder)
+                    .into_any_element(),
+                None => placeholder(),
+            }
+        });
     if uploading || failed {
         chip = chip.child(
             div()
@@ -566,8 +566,6 @@ mod tests {
         assert_eq!(image_format_for_mime("IMAGE/JPG"), Some(ImageFormat::Jpeg));
         assert_eq!(image_format_for_mime("image/webp"), Some(ImageFormat::Webp));
         assert_eq!(image_format_for_mime("application/pdf"), None);
-        assert!(preview_image("text/plain", vec![1, 2, 3]).is_none());
-        assert!(preview_image("image/png", vec![1, 2, 3]).is_some());
     }
 
     #[test]

@@ -40,7 +40,10 @@ pub(crate) mod details_tasks;
 mod details_wakeups;
 mod floating_surfaces;
 mod hover_prefetch;
+mod image_memory;
 mod image_viewer;
+#[cfg(feature = "memory-bench")]
+mod memory_bench;
 mod preview_host;
 mod queue_tray;
 #[cfg(target_os = "macos")]

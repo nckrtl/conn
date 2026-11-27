@@ -274,6 +274,77 @@ impl Offline {
         self.commits.remove(&key);
         self.backfills.retain(|job| job.key != key);
     }
+    /// Whether a cache write of `id` on `env` is still to go: a dirty chat or task list, or a
+    /// snapshot or backfill commit. Its reducer must stay until the write has captured it.
+    pub(super) fn write_pending(&self, env: &str, id: &str) -> bool {
+        let key = (env.to_owned(), id.to_owned());
+        self.dirty.contains(&key)
+            || self.task_links_dirty.contains(&key)
+            || self.commits.contains_key(&key)
+            || self.backfills.iter().any(|job| job.key == key)
+    }
+    /// Forgets that `env` owns `id`'s visible reducer, once that reducer is dropped.
+    pub(super) fn forget_owner(&mut self, env: &str, id: &str) {
+        if self.owners.get(id).is_some_and(|owner| owner == env) {
+            self.owners.remove(id);
+        }
+    }
+    /// Frees what `env` keeps in memory once it is gone for good: its shadow reducers, outlines
+    /// and queued outline reads. Returns the threads whose visible reducer `env` owned, for the
+    /// caller to drop. Outline writes still go to disk.
+    pub(super) fn forget_environment_memory(&mut self, env: &str) -> Vec<String> {
+        self.shadow.retain(|(owner, _), _| owner != env);
+        self.outlines.retain(|(owner, _), _| owner != env);
+        self.outline_requested.retain(|(owner, _), _| owner != env);
+        self.outline_queue.retain(|(owner, _)| owner != env);
+        let owned: Vec<String> = self
+            .owners
+            .iter()
+            .filter(|(_, owner)| *owner == env)
+            .map(|(id, _)| id.clone())
+            .collect();
+        self.owners.retain(|_, owner| owner != env);
+        owned
+    }
+    /// Drops the shadow reducers no watch needs any more (a watch that ended for a thread whose
+    /// id another environment shows). Returns how many went.
+    pub(super) fn evict_unwatched_shadows(&mut self) -> usize {
+        let cold: Vec<ThreadKey> = self
+            .shadow
+            .keys()
+            .filter(|key| {
+                !self.subscriptions.contains_key(*key) && !self.write_pending(&key.0, &key.1)
+            })
+            .cloned()
+            .collect();
+        for key in &cold {
+            self.shadow.remove(key);
+            self.forget_stream(&key.0, &key.1);
+        }
+        cold.len()
+    }
+    #[cfg(test)]
+    pub(super) fn insert_outline_for_test(&mut self, env: &str, id: &str) {
+        self.outlines.insert(
+            (env.to_owned(), id.to_owned()),
+            Arc::new(ThreadOutline::new(Vec::new())),
+        );
+    }
+    #[cfg(test)]
+    pub(super) fn memory_counts_for_test(&self, env: &str) -> (usize, usize, usize, usize) {
+        (
+            self.owners.values().filter(|owner| *owner == env).count(),
+            self.shadow.keys().filter(|(owner, _)| owner == env).count(),
+            self.outlines
+                .keys()
+                .filter(|(owner, _)| owner == env)
+                .count(),
+            self.subscriptions
+                .keys()
+                .filter(|(owner, _)| owner == env)
+                .count(),
+        )
+    }
     pub(super) fn snapshot_cursor(&self, env: Option<&str>, id: &str) -> Option<String> {
         self.snapshot_cursors
             .get(&(env?.to_owned(), id.to_owned()))
@@ -1392,6 +1463,7 @@ impl ConnApp {
             .as_deref()
             .and_then(|id| self.cache_env(id))
             .map(str::to_owned);
+        let watched = self.offline.subscriptions.len();
         self.offline.subscriptions.retain(|pair, conn| {
             if desired.contains(pair) {
                 return true;
@@ -1404,6 +1476,11 @@ impl ConnApp {
             false
         });
         self.offline.desired = desired;
+        // A thread the cache stopped watching (settled, a finished subagent) keeps its timeline
+        // only while it is open or recent (`app/residency.rs`).
+        if self.offline.subscriptions.len() < watched {
+            self.evict_cold_threads();
+        }
     }
     pub(super) fn refresh_selected_outline(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(id) = self.layout.selected_thread_id.clone()
@@ -1638,6 +1715,16 @@ impl ConnApp {
             ));
         }
         writes
+    }
+    /// Test helper: no cache write is pending or running.
+    #[cfg(test)]
+    pub(super) fn offline_writes_idle_for_test(&self) -> bool {
+        !self.offline.saving && self.offline.dirty.is_empty() && self.offline.commits.is_empty()
+    }
+    /// Test helper: takes every pending cache write, as a flush would, without writing it.
+    #[cfg(test)]
+    pub(super) fn pending_saves_for_test(&mut self) -> usize {
+        self.pending_saves(true).len()
     }
     /// Comes back to write the dirty shell once [`SHELL_SAVE_INTERVAL`] has passed.
     fn arm_shell_save(&mut self, cx: &mut Context<'_, Self>) {

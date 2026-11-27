@@ -46,6 +46,9 @@ mod rail_workspaces;
 #[cfg(test)]
 mod reconnect_tests;
 mod regions;
+mod residency;
+#[cfg(test)]
+mod residency_tests;
 mod send_pending;
 #[cfg(test)]
 mod send_pending_tests;
@@ -439,6 +442,8 @@ pub(crate) struct ConnApp {
     speculative: hover_prefetch::SpeculativeThreads<Connection>,
     /// Threads a draft launch subscribed directly, until they are opened.
     launched_threads: HashSet<String>,
+    /// The threads opened last, whose timelines stay in memory (`app/residency.rs`).
+    recent_threads: residency::RecentThreads,
     /// Live control socket server handle (dropped on app exit).
     _control_server: Option<conn_desktop::control::ControlServerHandle>,
     /// Background task draining `conn://` URLs and Unix control socket requests.
@@ -881,6 +886,7 @@ impl ConnApp {
             child_approvals: child_approvals::ChildApprovals::default(),
             speculative: hover_prefetch::SpeculativeThreads::default(),
             launched_threads: HashSet::new(),
+            recent_threads: residency::RecentThreads::default(),
             _control_server: None,
             _activation_task: None,
             subscribed_thread_id: None,
@@ -2016,7 +2022,10 @@ impl ConnApp {
         {
             self.subscribe_open_thread(&thread_id);
         }
+        self.recent_threads.touch(&thread_id);
         self.layout.selected_thread_id = Some(thread_id);
+        // The thread left behind may be one too many to keep (`app/residency.rs`).
+        self.evict_cold_threads();
     }
 
     /// Fetches the next older history page for the currently selected bounded thread and prepends
@@ -4231,6 +4240,7 @@ impl ConnApp {
         }
         self.reveal_open_row = true;
         self.open_thread(thread_id);
+        self.release_gone_terminals(cx);
         if project_id.is_some() {
             self.layout.selected_project_id = project_id;
         }
@@ -4451,6 +4461,48 @@ impl ConnApp {
     pub(crate) fn release_thread_panel(&mut self, owner: &PanelOwner, cx: &mut Context<'_, Self>) {
         self.sync_panel_owner();
         self.forget_thread_panel(owner, cx);
+    }
+
+    /// A deleted thread's terminal session goes with it: emulator, scrollback and shell.
+    pub(crate) fn forget_thread_terminal(
+        &mut self,
+        environment: Option<&str>,
+        thread: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let terminal = self.right_panel.read(cx).terminal_entity();
+        terminal.update(cx, |panel, cx| {
+            panel.forget_thread(environment, thread, cx);
+        });
+    }
+
+    /// Frees the parked terminals of threads that left the lists (archived, settled or deleted
+    /// elsewhere) when their shell lives on the server or has ended. Runs on thread switches.
+    fn release_gone_terminals(&mut self, cx: &mut Context<'_, Self>) {
+        let terminal = self.right_panel.read(cx).terminal_entity();
+        let parked = terminal.read(cx).parked_keys();
+        if parked.is_empty() {
+            return;
+        }
+        let gone: HashSet<crate::panels::terminal_target::SessionKey> = parked
+            .into_iter()
+            .filter(|key| {
+                key.thread.as_deref().is_some_and(|thread| {
+                    // The thread being opened shows its session next.
+                    self.layout.selected_thread_id.as_deref() != Some(thread)
+                        && self
+                            .shell
+                            .threads
+                            .iter()
+                            .find(|t| t.id == thread)
+                            .is_none_or(|t| t.deleted_at.is_some() || ShellState::is_settled(t))
+                })
+            })
+            .collect();
+        if gone.is_empty() {
+            return;
+        }
+        terminal.update(cx, |panel, _| panel.release_gone(|key| gone.contains(key)));
     }
 
     /// A deleted thread's right panel goes with it, and so do its browsers, its waiting
@@ -5745,6 +5797,9 @@ impl ConnApp {
         let deleted = thread_id.to_owned();
         // Before the thread leaves the shell, which tells its environment.
         let owner = self.panel_owner_of_thread(thread_id);
+        let terminal_env = self
+            .linked_environment_of_thread(thread_id)
+            .map(str::to_owned);
         self.dispatch_thread_command_then(
             "delete thread",
             crate::commands::delete_thread(thread_id),
@@ -5752,6 +5807,8 @@ impl ConnApp {
             move |app, cx| {
                 app.forget_thread_draft(&deleted, cx);
                 app.release_thread_panel(&owner, cx);
+                app.forget_thread_terminal(terminal_env.as_deref(), &deleted, cx);
+                app.recent_threads.remove(&deleted);
             },
         );
     }

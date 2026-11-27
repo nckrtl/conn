@@ -80,6 +80,8 @@ pub(super) const COMPOSER_MAX_LINES: usize = 8;
 
 /// Composer card corner radius matching Conn's `rounded-2xl` (`16px`).
 const COMPOSER_RADIUS_PX: f32 = 16.0;
+/// Side of a staged image's chip in the attachment strip, in logical px.
+const STAGED_CHIP_PX: f32 = 64.0;
 /// Composer card shadow: a large blur, a low alpha and a small upward offset.
 const COMPOSER_SHADOW_BLUR_PX: f32 = 32.0;
 const COMPOSER_SHADOW_OFFSET_Y_PX: f32 = -4.0;
@@ -302,8 +304,9 @@ pub(crate) struct Composer {
     /// Placeholder last pushed into the textarea.
     applied_placeholder: &'static str,
     next_attachment_id: u64,
-    /// Thumbnails of staged images, by `PendingAttachment::local_id`.
-    attachment_previews: HashMap<u64, Arc<gpui_kit::Image>>,
+    /// Thumbnails of staged images, by `PendingAttachment::local_id`, decoded at chip size off
+    /// the UI thread. Each is freed (pixels and window texture) once no draft holds its chip.
+    attachment_previews: HashMap<u64, super::attachment_thumb::SentImage>,
     editing_queued: Option<EditingQueuedRun>,
     dictation: DictationState,
     dictation_error: Option<String>,
@@ -1197,9 +1200,7 @@ impl Composer {
         let local_id = self.next_attachment_id;
         self.next_attachment_id = self.next_attachment_id.wrapping_add(1);
         let size_bytes = bytes.len();
-        if let Some(image) = super::attachment_thumb::preview_image(&mime_type, bytes.clone()) {
-            self.attachment_previews.insert(local_id, image);
-        }
+        self.decode_attachment_preview(local_id, &mime_type, &bytes, window, cx);
         self.attachments.push(PendingAttachment {
             local_id,
             name: name.clone(),
@@ -1534,10 +1535,143 @@ impl Composer {
     fn remove_attachment(&mut self, local_id: u64, cx: &mut Context<'_, Self>) {
         let before = self.attachments.len();
         self.attachments.retain(|a| a.local_id != local_id);
-        self.attachment_previews.remove(&local_id);
+        if let Some(preview) = self.attachment_previews.remove(&local_id) {
+            preview.release(cx);
+        }
         if self.attachments.len() != before {
             cx.notify();
         }
+    }
+
+    /// Decodes a staged image's chip thumbnail off the UI thread. GPUI would otherwise decode
+    /// the whole picture for a 64 px chip and keep it for the rest of the session.
+    fn decode_attachment_preview(
+        &mut self,
+        local_id: u64,
+        mime_type: &str,
+        bytes: &[u8],
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        use super::attachment_thumb::{SentImage, image_format_for_mime, load_sent_image};
+        if image_format_for_mime(mime_type).is_none() {
+            return;
+        }
+        self.attachment_previews
+            .insert(local_id, SentImage::Loading(local_id));
+        let target = super::thumb_cache::TargetPx::from_logical(
+            STAGED_CHIP_PX,
+            STAGED_CHIP_PX,
+            window.scale_factor(),
+        );
+        let svg_renderer = cx.svg_renderer();
+        let mime_type = mime_type.to_owned();
+        let bytes = bytes.to_vec();
+        let decode = cx.background_executor().spawn(async move {
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            load_sent_image(&mime_type, bytes, target, svg_renderer, &cancel).0
+        });
+        cx.spawn(async move |this, cx| {
+            let image = decode.await;
+            let _ = this.update(cx, |composer, cx| {
+                let waiting = matches!(
+                    composer.attachment_previews.get(&local_id),
+                    Some(SentImage::Loading(id)) if *id == local_id
+                );
+                match image {
+                    SentImage::Ready(_) if waiting => {
+                        composer.attachment_previews.insert(local_id, image);
+                    }
+                    // A picture that does not decode shows as a file chip.
+                    _ if waiting => {
+                        composer.attachment_previews.remove(&local_id);
+                    }
+                    // The chip went while decoding.
+                    image => image.release(cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Frees the thumbnails no draft shows any more: sent, cleared, or discarded with their
+    /// draft. A parked draft keeps its chips. Returns how many went.
+    fn prune_attachment_previews(&mut self, cx: &mut Context<'_, Self>) -> usize {
+        let live: std::collections::HashSet<u64> = self
+            .attachments
+            .iter()
+            .map(|a| a.local_id)
+            .chain(
+                self.drafts
+                    .parked_drafts()
+                    .flat_map(|(_, d)| d.attachments.iter().map(|a| a.local_id)),
+            )
+            .collect();
+        let gone: Vec<u64> = self
+            .attachment_previews
+            .keys()
+            .filter(|id| !live.contains(id))
+            .copied()
+            .collect();
+        for id in &gone {
+            if let Some(preview) = self.attachment_previews.remove(id) {
+                preview.release(cx);
+            }
+        }
+        gone.len()
+    }
+
+    /// Test helper: stages an image as a paste does, without uploading it. Returns its id.
+    #[cfg(test)]
+    pub(crate) fn stage_image_for_test(
+        &mut self,
+        name: &str,
+        mime_type: &str,
+        bytes: Vec<u8>,
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) -> u64 {
+        let local_id = self.next_attachment_id;
+        self.next_attachment_id = self.next_attachment_id.wrapping_add(1);
+        self.decode_attachment_preview(local_id, mime_type, &bytes, window, cx);
+        self.attachments.push(PendingAttachment {
+            local_id,
+            name: name.to_owned(),
+            size_bytes: bytes.len(),
+            status: AttachmentUploadStatus::Uploading,
+        });
+        cx.notify();
+        local_id
+    }
+
+    /// Test helper: the chip's remove button.
+    #[cfg(test)]
+    pub(crate) fn remove_attachment_for_test(&mut self, local_id: u64, cx: &mut Context<'_, Self>) {
+        self.remove_attachment(local_id, cx);
+    }
+
+    /// Test helper: the decoded thumbnail of staged image `local_id`, once it is ready.
+    #[cfg(test)]
+    pub(crate) fn attachment_preview_image_for_test(
+        &self,
+        local_id: u64,
+    ) -> Option<Arc<gpui_kit::RenderImage>> {
+        match self.attachment_previews.get(&local_id)? {
+            super::attachment_thumb::SentImage::Ready(image) => Some(image.clone()),
+            _ => None,
+        }
+    }
+
+    /// Test helper: how many staged-image thumbnails the composer holds, and how many decoded.
+    #[cfg(test)]
+    pub(crate) fn attachment_previews_for_test(&self) -> (usize, usize) {
+        let ready = self
+            .attachment_previews
+            .values()
+            .filter(|p| matches!(p, super::attachment_thumb::SentImage::Ready(_)))
+            .count();
+        (self.attachment_previews.len(), ready)
     }
 
     /// Submits the current draft with the default dispatch (Enter or the send button).
@@ -2388,6 +2522,8 @@ impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         // One popover at a time: opening one closes the others (Nick, #323).
         self.keep_one_popover(cx);
+        // Thumbnails of chips no draft shows any more are freed.
+        self.prune_attachment_previews(cx);
         // `noProviderAvailable` (`ChatComposer.tsx:934-945`): no instance is usable for this
         // composer. Until the first config arrives the catalog is merely unknown.
         let provider_selection = self
@@ -2822,11 +2958,11 @@ impl Render for Composer {
             }
             for att in &self.attachments {
                 let local_id = att.local_id;
-                if let Some(image) = self.attachment_previews.get(&local_id).cloned() {
+                if let Some(preview) = self.attachment_previews.get(&local_id) {
                     strip = strip.child(super::attachment_thumb::staged_image_chip(
                         local_id,
                         &att.name,
-                        image,
+                        preview.source(),
                         matches!(att.status, AttachmentUploadStatus::Uploading),
                         matches!(att.status, AttachmentUploadStatus::Error(_)),
                         &tokens,

@@ -138,8 +138,12 @@ pub(crate) struct McpPanel {
     /// `(call_key, nonce)` while showing the brief "Copied" checkmark.
     copied_result: Option<(String, u64)>,
     copied_nonce: u64,
-    /// Decoded base64 result images cached by content hash.
+    /// Decoded base64 result images cached by content hash, scaled to what the result pane
+    /// shows ([`catalog::fit_result_image`]).
     image_cache: HashMap<u64, Option<Arc<RenderImage>>>,
+    /// Images the cache let go during a render. The next render frees their window textures,
+    /// after the frame that last painted them.
+    retired_images: Vec<Arc<RenderImage>>,
 
     // Log tab state.
     expanded_log_ids: HashSet<u64>,
@@ -203,6 +207,12 @@ impl McpPanel {
 
     pub(crate) fn new(tokens: Tokens, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
         let (mcp, mut events) = McpSessions::new();
+        // A closed panel frees the result images it decoded.
+        cx.on_release(|this: &mut Self, cx| {
+            this.retire_cached_images();
+            this.free_retired_images(cx);
+        })
+        .detach();
 
         let event_task = cx.spawn(async move |this, cx| {
             // A Tokio receiver is awaitable from any executor, so no Tokio task has to forward
@@ -310,6 +320,7 @@ impl McpPanel {
             copied_result: None,
             copied_nonce: 0,
             image_cache: HashMap::new(),
+            retired_images: Vec::new(),
             expanded_log_ids: HashSet::new(),
             log_scroll: ScrollHandle::new(),
             _subscriptions: vec![cmd_sub, url_sub, name_sub, cwd_sub, tf_sub, rf_sub, pf_sub],
@@ -1392,6 +1403,7 @@ impl McpPanel {
 
 impl Render for McpPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        self.free_retired_images(cx);
         self.sync_inputs(window, cx);
         let Some(server) = self.selected_server().cloned() else {
             return chrome::empty_state(

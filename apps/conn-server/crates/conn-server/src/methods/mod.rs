@@ -8,7 +8,6 @@ use conn_engine::Engine;
 
 use crate::table::MethodTable;
 
-#[cfg(feature = "annotations")]
 pub(crate) mod annotations;
 pub(crate) mod devices;
 pub(crate) mod files;
@@ -17,7 +16,6 @@ mod git_message;
 mod local_servers;
 mod mcp_apps;
 pub(crate) mod orchestration;
-#[cfg(feature = "panels")]
 pub(crate) mod panels;
 mod peer_links;
 mod preview;
@@ -25,7 +23,6 @@ mod projects;
 pub mod provider;
 pub mod provider_auth;
 pub(crate) mod pull_requests;
-#[cfg(feature = "scheduled-tasks")]
 pub(crate) mod scheduled;
 mod secrets;
 pub mod server;

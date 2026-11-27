@@ -16,7 +16,6 @@ use sha2::{Digest, Sha256};
 
 use crate::{Caller, ClientCaller, McpConfig, McpService};
 
-#[cfg(feature = "annotations")]
 mod annotations;
 pub(crate) mod attachments;
 mod background;
@@ -31,7 +30,6 @@ mod preview;
 mod projects;
 mod pull_request_forge;
 mod pull_requests;
-#[cfg(feature = "scheduled-tasks")]
 mod scheduled;
 mod script_completion;
 mod secrets;
@@ -357,21 +355,13 @@ async fn call_in(cx: &Cx<'_>, name: &str, args: Args) -> ToolResult {
         "delegate_task" => tasks::delegate(cx, &args).await,
         "task_status" => tasks::status(cx, &args).await,
         "task_cancel" => tasks::cancel(cx, &args).await,
-        #[cfg(feature = "scheduled-tasks")]
         "schedule_task" => scheduled::schedule(cx, &args).await,
-        #[cfg(feature = "annotations")]
         "annotations_list" => annotations::list(cx, &args).await,
-        #[cfg(feature = "annotations")]
         "annotations_claim" => annotations::claim(cx, &args).await,
-        #[cfg(feature = "annotations")]
         "annotations_complete" => annotations::complete(cx, &args).await,
-        #[cfg(feature = "annotations")]
         "annotations_release" => annotations::release(cx, &args).await,
-        #[cfg(feature = "scheduled-tasks")]
         "list_scheduled_tasks" => scheduled::list(cx, &args).await,
-        #[cfg(feature = "scheduled-tasks")]
         "delete_scheduled_task" => scheduled::delete(cx, &args).await,
-        #[cfg(feature = "scheduled-tasks")]
         "run_scheduled_task_now" => scheduled::run_now(cx, &args).await,
         "list_issues" => issues::list(cx, &args).await,
         "read_issue" => issues::read(cx, &args).await,

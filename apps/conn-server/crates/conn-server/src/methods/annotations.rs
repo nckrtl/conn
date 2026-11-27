@@ -23,7 +23,12 @@ pub(crate) const MODULE: Module = Module {
     start,
     methods: register,
     routes: axum::Router::new,
-    tools: crate::modules::ANNOTATION_TOOLS,
+    tools: &[
+        "annotations_list",
+        "annotations_claim",
+        "annotations_complete",
+        "annotations_release",
+    ],
     capabilities: |_| {},
 };
 

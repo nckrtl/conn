@@ -11,15 +11,6 @@ rust-version.workspace = true
 name = "conn-server"
 path = "src/main.rs"
 
-[features]
-# One per optional module (`src/modules.rs`), on by default. A build without one holds no entry
-# for it, so `CONN_SERVER_MODULES` cannot turn it on, and its tools are always withheld.
-default = ["annotations", "scheduled-tasks", "panels"]
-annotations = ["conn-mcp/annotations"]
-scheduled-tasks = ["conn-mcp/scheduled-tasks"]
-# The broker and `panels.*` only: the tool handlers share code with the browser tools and stay.
-panels = []
-
 [dependencies]
 # Decodes compressed text generator answers (text_generation/drivers.rs).
 flate2.workspace = true

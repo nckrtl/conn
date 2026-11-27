@@ -81,6 +81,8 @@ struct Held {
     floor: Option<f64>,
     more_local: bool,
     older: Option<String>,
+    /// Where its first rows came from, for the `sync.open_drawn` line.
+    source: &'static str,
 }
 
 /// Changes a catch-up may reduce in memory before the window is read again instead.
@@ -115,6 +117,17 @@ pub struct Engine {
     /// again from the device ([`Self::take_reloads`]).
     reloads: Vec<(String, Pending)>,
     older_in_flight: HashSet<String>,
+    perf: Perf,
+}
+
+/// Bookkeeping for the `sync.open_current` and `sync.kept_current` lines (`conn_client::perf`).
+#[derive(Default)]
+struct Perf {
+    /// Open threads whose `synchronized` waits for their window.
+    current_on_load: HashSet<String>,
+    synchronized: HashSet<String>,
+    kept_ranked: bool,
+    kept_logged: bool,
 }
 
 impl std::fmt::Debug for Engine {
@@ -166,6 +179,7 @@ impl Engine {
             catching_up: HashMap::new(),
             reloads: vec![],
             older_in_flight: HashSet::new(),
+            perf: Perf::default(),
         })
     }
 
@@ -200,6 +214,12 @@ impl Engine {
     /// Threads in memory.
     pub fn threads(&self) -> impl Iterator<Item = (&String, &ThreadState)> {
         self.held.iter().map(|(id, held)| (id, &held.state))
+    }
+
+    /// Where a thread in memory got its first rows: `device` or `server`.
+    #[must_use]
+    pub fn source(&self, id: &str) -> Option<&'static str> {
+        self.held.get(id).map(|held| held.source)
     }
 
     /// Whether the device holds rows for the thread.
@@ -288,6 +308,9 @@ impl Engine {
             }
             None
         };
+        if synchronized && conn_client::perf::enabled() {
+            self.note_synchronized(thread, caught_up.is_some());
+        }
         if let Some(buffer) = self.loading.get_mut(thread) {
             buffer.push(item);
             return false;
@@ -330,7 +353,39 @@ impl Engine {
         {
             return false;
         }
-        held.state.apply(item)
+        let changed = held.state.apply(item);
+        if self.perf.current_on_load.remove(thread) {
+            conn_client::perf::open_current(thread);
+        }
+        changed
+    }
+
+    /// Notes a thread's `synchronized` for the `sync.*` lines. An open thread whose catch-up it
+    /// ends is current once the item is applied: now, or when its window arrives.
+    fn note_synchronized(&mut self, thread: &str, ended_catch_up: bool) {
+        if !self.subscribed.contains_key(thread) {
+            return;
+        }
+        self.perf.synchronized.insert(thread.to_owned());
+        if ended_catch_up && self.open.iter().any(|open| open == thread) {
+            self.perf.current_on_load.insert(thread.to_owned());
+        }
+        self.check_kept_current();
+    }
+
+    fn check_kept_current(&mut self) {
+        let perf = &mut self.perf;
+        if perf.kept_ranked
+            && !perf.kept_logged
+            && !self.subscribed.is_empty()
+            && self
+                .subscribed
+                .keys()
+                .all(|id| perf.synchronized.contains(id))
+        {
+            perf.kept_logged = true;
+            conn_client::perf::kept_current(self.subscribed.len());
+        }
     }
 
     /// Windows to read again after a long catch-up. Pass each to [`Self::finish_open`] once
@@ -396,7 +451,20 @@ impl Engine {
             self.connection.subscribe_thread_from(id, after, 0);
             self.subscribed.insert(id.to_owned(), 0);
         }
-        if self.held.contains_key(id) || self.loading.contains_key(id) {
+        // A thread already current opens current: the line goes out once it is in memory.
+        let current = conn_client::perf::enabled()
+            && self.perf.synchronized.contains(id)
+            && !self.catching_up.contains_key(id);
+        if self.held.contains_key(id) && !self.loading.contains_key(id) {
+            if current {
+                conn_client::perf::open_current(id);
+            }
+            return None;
+        }
+        if current {
+            self.perf.current_on_load.insert(id.to_owned());
+        }
+        if self.loading.contains_key(id) {
             return None;
         }
         self.loading.insert(id.to_owned(), vec![]);
@@ -426,6 +494,7 @@ impl Engine {
                 floor: None,
                 more_local: false,
                 older: None,
+                source: "server",
             },
         };
         for item in buffer {
@@ -441,6 +510,9 @@ impl Engine {
             held.state.apply(item);
         }
         self.held.insert(id.to_owned(), held);
+        if self.perf.current_on_load.remove(id) {
+            conn_client::perf::open_current(id);
+        }
         true
     }
 
@@ -588,6 +660,10 @@ impl Engine {
         for id in leaving {
             self.forget(&id);
         }
+        if conn_client::perf::enabled() {
+            self.perf.kept_ranked = true;
+            self.check_kept_current();
+        }
     }
 
     /// Drops a thread from the device and from memory (unless the screen shows it).
@@ -611,6 +687,11 @@ impl Engine {
 }
 
 fn held_from(id: &str, window: Window) -> Held {
+    let source = if window.timeline.is_empty() {
+        "server"
+    } else {
+        "device"
+    };
     let floor = window.timeline.first().and_then(|row| row.ord);
     let projection = rows::projection(id, &window.record, &window.timeline, &window.control);
     let more = window.more_local || window.older.is_some();
@@ -634,6 +715,7 @@ fn held_from(id: &str, window: Window) -> Held {
         floor,
         more_local: window.more_local,
         older: window.older,
+        source,
     }
 }
 

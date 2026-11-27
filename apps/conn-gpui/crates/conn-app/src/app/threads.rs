@@ -106,6 +106,13 @@ impl ConnApp {
             .or_else(|| self.threads.local.get(id))
     }
 
+    /// Where a thread in memory got its first rows: `device` or `server`.
+    pub(super) fn thread_source(&self, id: &str) -> Option<&'static str> {
+        self.thread_env(id)
+            .and_then(|env| self.threads.engines.get(env))
+            .and_then(|slot| slot.engine.source(id))
+    }
+
     pub(super) fn thread_mut(&mut self, id: &str) -> Option<&mut ThreadState> {
         let env = self.thread_env(id).map(str::to_owned);
         match env.and_then(|env| self.threads.engines.get_mut(&env)) {

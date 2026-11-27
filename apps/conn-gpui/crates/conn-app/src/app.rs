@@ -408,6 +408,8 @@ pub(crate) struct ConnApp {
     perf_open: Option<(String, std::time::Instant)>,
     /// `perf_open` not yet handed to the chat view (which logs the first paint).
     perf_open_pending_chat: bool,
+    /// `sync.shell_current` not yet logged for this connection.
+    perf_shell_pending: bool,
     /// Project id currently subscribed to `annotations.subscribe` on `self.connection`.
     subscribed_annotation_project: Option<String>,
     files_subscription: Option<FilesSubscription>,
@@ -819,6 +821,7 @@ impl ConnApp {
             thread_hover: ThreadHoverState::default(),
             perf_open: None,
             perf_open_pending_chat: false,
+            perf_shell_pending: true,
             subscribed_annotation_project: None,
             files_subscription: None,
             annotations: Vec::new(),
@@ -1290,6 +1293,9 @@ impl ConnApp {
         } else {
             None
         };
+        let perf_source = selected
+            .filter(|_| conn_client::perf::enabled())
+            .and_then(|id| self.thread_source(id));
         let thread_connected = selected.is_some_and(|id| self.thread_connected(id));
         let outline = selected.and_then(|id| self.cached_outline(id));
         let timeline = selected.and_then(|id| self.thread(id));
@@ -1384,6 +1390,9 @@ impl ConnApp {
         self.chat.update(cx, |chat, cx| {
             if let Some((perf_thread, opened_at)) = perf_open {
                 chat.set_perf_open(perf_thread, opened_at);
+            }
+            if let Some(source) = perf_source {
+                chat.set_perf_source(source);
             }
             chat.set_shell_availability(has_projects, connected, cx);
             chat.set_draft(draft_view, cx);
@@ -1492,6 +1501,7 @@ impl ConnApp {
                     // A reconnect may reach another server: its next snapshot confirms who.
                     self.primary_confirmed = false;
                 }
+                self.perf_shell_pending = true;
                 self.status = Some(status);
             }
             ClientEvent::BearerIssued(token) => {
@@ -1516,6 +1526,9 @@ impl ConnApp {
             ClientEvent::Shell(item) => {
                 let change = self.shell.apply(item);
                 self.remerge_linked_shells();
+                if self.shell.synchronized && std::mem::take(&mut self.perf_shell_pending) {
+                    conn_client::perf::shell_current();
+                }
                 if self.shell.synchronized
                     && self
                         .layout

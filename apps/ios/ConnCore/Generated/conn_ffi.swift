@@ -18661,6 +18661,16 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
     }
 }
 /**
+ * When the process started (Unix ms), for the `sync.*` perf lines (`CONN_PERF_LOG_FILE`).
+ */
+public func perfSetProcessStart(epochMs: Double)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_func_perf_set_process_start(
+        FfiConverterDouble.lower(epochMs),uniffiCallStatus
+    )
+}
+}
+/**
  * The draft after a send fails. Mobile clears the draft when it sends, so typing during a slow
  * send is kept; a failed send puts the sent text back in front of it (`mergeComposerDraftText`).
  */
@@ -18894,6 +18904,9 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_conn_ffi_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_conn_ffi_checksum_func_perf_set_process_start() != 57481) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_func_composer_restore_draft() != 10150) {
         return InitializationResult.apiChecksumMismatch

@@ -1449,6 +1449,9 @@ struct PumpState {
     shell_watch: watch::Sender<Option<FfiShellSnapshot>>,
     status_watch: watch::Sender<FfiConnectionStatus>,
     limits: watch::Sender<FfiComposerLimits>,
+    /// `conn_client::perf` lines still to log: the shell of this connection, opened threads.
+    perf_shell_pending: bool,
+    perf_drawn_pending: HashSet<String>,
 }
 
 impl PumpState {
@@ -1490,6 +1493,8 @@ impl PumpState {
             shell_watch,
             status_watch,
             limits,
+            perf_shell_pending: true,
+            perf_drawn_pending: HashSet::new(),
         }
     }
 
@@ -1707,6 +1712,9 @@ impl PumpState {
             PumpControl::OpenThread(thread_id) => {
                 self.open_threads.insert(thread_id.clone());
                 self.ended_threads.remove(&thread_id);
+                if conn_client::perf::enabled() {
+                    self.perf_drawn_pending.insert(thread_id.clone());
+                }
                 // The app shows nothing for this thread yet: the first snapshot always goes out.
                 self.published.remove(&thread_id);
                 self.open_in_engine(&thread_id);
@@ -1920,6 +1928,7 @@ impl PumpState {
                 // reducing into this shell, but publish only after this subscription's marker.
                 self.invalidate_shell();
                 self.shell_snapshot_required = false;
+                self.perf_shell_pending = true;
                 self.status_changed_at_ms = now_epoch_ms();
                 let ffi_status: FfiConnectionStatus = status.into();
                 self.status_watch.send_replace(ffi_status.clone());
@@ -2187,6 +2196,9 @@ impl PumpState {
     fn publish_shell(&mut self, snapshot: FfiShellSnapshot) {
         self.shell_watch.send_replace(Some(snapshot.clone()));
         self.listener.on_shell(snapshot);
+        if std::mem::take(&mut self.perf_shell_pending) {
+            conn_client::perf::shell_current();
+        }
         if let Some(reply) = self.pending_older_page.take() {
             self.begin_older_page(reply);
         }
@@ -2225,7 +2237,12 @@ impl PumpState {
         self.published
             .insert(thread_id.to_owned(), snapshot.clone());
         self.stats.published += 1;
+        let drawn = !snapshot.entries.is_empty() && self.perf_drawn_pending.remove(thread_id);
         self.listener.on_thread(snapshot);
+        if drawn {
+            let source = self.engine.as_ref().and_then(|e| e.source(thread_id));
+            conn_client::perf::open_drawn(thread_id, source.unwrap_or("server"));
+        }
     }
 
     fn flush_due(&mut self) {

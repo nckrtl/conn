@@ -1499,8 +1499,17 @@ impl ConnApp {
             .or_else(|| self.draft.as_ref().map(|draft| draft.draft_id.clone()));
         let terminal_target = self.terminal_target(terminal_thread.as_deref(), root.clone());
         let terminal_connection = self.context_connection();
+        // Files reads a linked thread's files on its own machine, like its terminal, and never
+        // falls back to this Mac's server. Other threads read over the primary connection.
+        let files_connection = match self.context_environment() {
+            Some(_) => Some(terminal_connection.clone()),
+            None => self.connection.clone().map(Some),
+        };
         let (history_key, history_hostname) = self.browser_history_context(project_id.as_deref());
         self.right_panel.update(cx, |panel, cx| {
+            if let Some(connection) = files_connection {
+                panel.set_files_connection(connection, cx);
+            }
             panel.set_terminal_target(terminal_target, terminal_connection, cx);
             panel.set_environment(environment_id, cx);
             panel.set_browser_history_context(history_key, history_hostname, cx);
@@ -4713,6 +4722,16 @@ impl ConnApp {
         location: &conn_contract::source::SourceLocation,
         cx: &mut Context<'_, Self>,
     ) {
+        // A link to a workspace folder opens it in the Files tree.
+        if let Some(folder) = location.path.strip_suffix('/')
+            && conn_contract::source::workspace_relative(folder)
+        {
+            let folder = folder.to_owned();
+            self.select_right_panel_tab(RightPanelTab::Files, cx);
+            self.right_panel
+                .update(cx, |panel, cx| panel.reveal_folder(folder, cx));
+            return;
+        }
         self.select_right_panel_surface(PanelSurface::File(location.path.clone()), cx);
         if let Some(lines) = location.lines {
             self.right_panel.update(cx, |panel, cx| {

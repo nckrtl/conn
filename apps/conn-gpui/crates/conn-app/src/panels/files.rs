@@ -46,6 +46,8 @@ use gpui_kit::component::input::{
 
 /// Space above the first source line in the preview.
 const PREVIEW_TOP_PAD_PX: f32 = 12.0;
+/// What the preview says when a linked file is not on the thread's machine.
+const FILE_NOT_FOUND: &str = "This file does not exist.";
 /// Width of the fade at a breadcrumb trail edge that has more crumbs beyond it.
 const CRUMB_FADE_PX: f32 = 14.0;
 const TREE_ROW_HEIGHT_PX: f32 = 28.0;
@@ -360,6 +362,20 @@ impl FilesPanel {
         cx.notify();
     }
 
+    /// The connection the panel reads files over.
+    pub(super) fn connection(&self) -> Option<&Connection> {
+        self.connection.as_ref()
+    }
+
+    /// Test helper: the error the preview shows, with its path.
+    #[cfg(test)]
+    pub(crate) fn preview_error_for_test(&self) -> Option<(String, String)> {
+        match &self.preview {
+            PreviewState::Error { path, message } => Some((path.clone(), message.clone())),
+            _ => None,
+        }
+    }
+
     pub(super) fn set_thread(&mut self, thread: Option<String>, cx: &mut Context<'_, Self>) {
         self.thread = thread;
         self.reset_preview(cx);
@@ -518,7 +534,7 @@ impl FilesPanel {
     }
 
     /// Shows the Files tree with `folder` expanded and selected (a folder crumb was clicked).
-    fn reveal_folder(&mut self, folder: String, cx: &mut Context<'_, Self>) {
+    pub(super) fn reveal_folder(&mut self, folder: String, cx: &mut Context<'_, Self>) {
         self.crumb_menu = None;
         for directory in self.tree.reveal_folder(&folder) {
             self.load_directory(directory, cx);
@@ -942,7 +958,10 @@ impl FilesPanel {
         }
         self.reveal = None;
         self.range_error = None;
-        if let Some(parent) = std::path::Path::new(&path).parent() {
+        // A file outside the workspace (a link to `/abs/file` or `~/file`) has no row in the
+        // workspace tree, so only its preview opens.
+        let host_path = path.starts_with('/') || path.starts_with("~/");
+        if !host_path && let Some(parent) = std::path::Path::new(&path).parent() {
             for dir in parent
                 .ancestors()
                 .filter_map(|p| p.to_str())
@@ -953,7 +972,7 @@ impl FilesPanel {
                 }
             }
         }
-        self.tree.select(Some(path.clone()));
+        self.tree.select((!host_path).then(|| path.clone()));
         let (Some(conn), Some(cwd)) = (self.connection.clone(), self.workspace_root.clone()) else {
             self.present(
                 PreviewState::Error {
@@ -1048,6 +1067,18 @@ impl FilesPanel {
                 }
                 panel.pending_path = None;
                 match res {
+                    Ok(result) if result.exists == Some(false) => {
+                        if let Some(reveal) = panel.reveal.take() {
+                            let _ = reveal.done.send(Err(FILE_NOT_FOUND.to_owned()));
+                        }
+                        panel.present(
+                            PreviewState::Error {
+                                path,
+                                message: FILE_NOT_FOUND.to_owned(),
+                            },
+                            cx,
+                        );
+                    }
                     Ok(result) => {
                         panel.present(
                             PreviewState::Loaded {

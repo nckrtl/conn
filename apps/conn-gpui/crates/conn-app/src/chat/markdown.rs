@@ -1593,7 +1593,10 @@ fn interactive_inline_text(
                 return;
             };
             match target {
-                ClickTarget::Url(url) => cx.open_url(url),
+                // A path the panel cannot open (no thread, a relative path with no workspace)
+                // does nothing rather than reach the system's URL handler.
+                ClickTarget::Url(url) if opens_externally(url) => cx.open_url(url),
+                ClickTarget::Url(_) => {}
                 ClickTarget::WorkspaceFile(path) => {
                     if let Some(cb) = &on_open_file {
                         cb(path.clone(), window, cx);
@@ -1867,9 +1870,9 @@ fn build_styled_text_with_targets(
             Some(ClickTarget::Thread(link.clone()))
         } else if let Some(url) = &span.link {
             if file_links_enabled
-                && let Some(rel) = resolve_clickable_file_path(url, workspace_root)
+                && let Some(location) = resolve_markdown_file_link(url, workspace_root)
             {
-                Some(ClickTarget::WorkspaceFile(rel))
+                Some(ClickTarget::WorkspaceFile(location))
             } else {
                 Some(ClickTarget::Url(url.clone()))
             }
@@ -2127,6 +2130,282 @@ fn resolve_clickable_file_path(
 
     let rel = candidate.strip_prefix("./").unwrap_or(candidate);
     location(rel)
+}
+
+/// File names without an extension that still name a file (`EXTENSIONLESS_FILE_NAMES`).
+const EXTENSIONLESS_FILE_NAMES: [&str; 20] = [
+    "Makefile",
+    "makefile",
+    "GNUmakefile",
+    "Dockerfile",
+    "Containerfile",
+    "Justfile",
+    "justfile",
+    "Rakefile",
+    "Gemfile",
+    "Procfile",
+    "Brewfile",
+    "Caddyfile",
+    "Vagrantfile",
+    "Jenkinsfile",
+    "Podfile",
+    "Fastfile",
+    "BUILD",
+    "WORKSPACE",
+    "LICENSE",
+    "LICENCE",
+];
+
+/// Roots under which an absolute path is a file even without an extension
+/// (`POSIX_FILE_ROOT_PREFIXES`).
+const POSIX_FILE_ROOT_PREFIXES: [&str; 23] = [
+    "/Users/",
+    "/home/",
+    "/tmp/",
+    "/var/",
+    "/etc/",
+    "/opt/",
+    "/mnt/",
+    "/Volumes/",
+    "/private/",
+    "/root/",
+    "/usr/",
+    "/bin/",
+    "/sbin/",
+    "/lib/",
+    "/lib64/",
+    "/srv/",
+    "/dev/",
+    "/proc/",
+    "/sys/",
+    "/run/",
+    "/boot/",
+    "/media/",
+    "/Library/",
+];
+
+/// The `scheme:` of a link that leaves Conn (`hasExternalScheme`). `src/a.rs:12` is not one: what
+/// follows the colon is a position.
+fn has_external_scheme(path: &str) -> bool {
+    let Some((scheme, rest)) = path.split_once(':') else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    let valid = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'));
+    if !valid {
+        return false;
+    }
+    rest.starts_with("//") || !is_position(rest)
+}
+
+/// `42`, `42:7` or `42-50`.
+fn is_position(text: &str) -> bool {
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    match text.split_once([':', '-']) {
+        Some((line, rest)) => digits(line) && digits(rest),
+        None => digits(text),
+    }
+}
+
+/// `%20` and friends decoded. A sequence that is not valid UTF-8 keeps the text as written.
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && let Some(hex) = text.get(i + 1..i + 3)
+            && let Ok(byte) = u8::from_str_radix(hex, 16)
+        {
+            out.push(byte);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap_or_else(|_| text.to_owned())
+}
+
+/// The path of a `file:` URL: `file:///a`, `file://localhost/a` and `file:/a` name `/a`. A file
+/// on another host is not one this Mac can show.
+fn file_url_path(rest: &str) -> Option<&str> {
+    match rest.strip_prefix("//") {
+        Some(authority) if authority.starts_with('/') => Some(authority),
+        Some(authority) => {
+            let (host, path) = authority.split_at(authority.find('/')?);
+            host.eq_ignore_ascii_case("localhost").then_some(path)
+        }
+        None => Some(rest),
+    }
+}
+
+/// `path` with `.` and `..` segments folded in. `None` when `..` climbs above the start.
+fn normalize_path(path: &str) -> Option<String> {
+    let absolute = path.starts_with('/');
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            part => parts.push(part),
+        }
+    }
+    let joined = parts.join("/");
+    Some(if absolute {
+        format!("/{joined}")
+    } else {
+        joined
+    })
+}
+
+/// Whether a link's path names a file or folder and not a web route (`looksLikeFilePath`).
+fn looks_like_link_path(path: &str, has_position: bool) -> bool {
+    if path.starts_with("~/") || path.starts_with("./") || path.starts_with("../") {
+        return true;
+    }
+    let trimmed = path.trim_end_matches('/');
+    let basename = trimmed.rsplit('/').next().unwrap_or(trimmed);
+    let has_extension = basename.rsplit_once('.').is_some_and(|(stem, ext)| {
+        !stem.is_empty()
+            && !ext.is_empty()
+            && ext
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    });
+    if path.starts_with('/') {
+        return POSIX_FILE_ROOT_PREFIXES
+            .iter()
+            .any(|root| path.starts_with(root))
+            || has_position
+            || EXTENSIONLESS_FILE_NAMES.contains(&basename)
+            || has_extension;
+    }
+    if EXTENSIONLESS_FILE_NAMES.contains(&path) {
+        return true;
+    }
+    // `src/lib.rs`, `docs/` or `notes.md`; never `me@example.com`.
+    path.contains('/') || (has_extension && !path.contains('@'))
+}
+
+/// A Markdown link's destination as a file the Files panel opens (`parseMarkdownFileLink` and
+/// `resolveMarkdownFileLinkTarget`): an absolute path, a `file://` URL, a `~/` path, or a path
+/// relative to the thread's workspace, each with an optional `:line[:column]` suffix or `#L10`
+/// fragment. A file in the workspace comes back workspace-relative; any other file keeps its host
+/// path, which the server reads on the thread's own machine. A folder ends in `/`. A web link
+/// (any other scheme) is `None`.
+fn resolve_markdown_file_link(
+    href: &str,
+    workspace_root: Option<&str>,
+) -> Option<conn_contract::source::SourceLocation> {
+    use conn_contract::source::{SourceLines, SourceLocation};
+
+    let trimmed = href.trim();
+    let trimmed = trimmed
+        .strip_prefix('<')
+        .and_then(|inner| inner.strip_suffix('>'))
+        .unwrap_or(trimmed);
+    if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+        return None;
+    }
+    let source = match trimmed.get(..5) {
+        Some(scheme) if scheme.eq_ignore_ascii_case("file:") => file_url_path(&trimmed[5..])?,
+        _ => trimmed,
+    };
+    let (before_hash, hash) = source.split_once('#').unwrap_or((source, ""));
+    let raw_path = before_hash.split('?').next().unwrap_or(before_hash);
+    let path = percent_decode(raw_path.trim());
+    let hash = percent_decode(hash.trim());
+    // A Windows drive (`C:\a`) is not a path on this Mac.
+    let windows_drive = path.len() >= 3
+        && path.as_bytes()[0].is_ascii_alphabetic()
+        && path.as_bytes()[1] == b':'
+        && matches!(path.as_bytes()[2], b'/' | b'\\');
+    if path.is_empty() || windows_drive || has_external_scheme(&path) {
+        return None;
+    }
+    if path
+        .split('/')
+        .any(|part| part == "…" || (part.len() >= 3 && part.bytes().all(|b| b == b'.')))
+    {
+        return None;
+    }
+
+    let file = strip_line_col_suffix(&path);
+    let line_span = |first: &str, last: &str| {
+        let start_line: usize = first.parse().ok()?;
+        let end_line: usize = last.parse().ok()?;
+        (start_line > 0 && end_line >= start_line).then_some(SourceLines {
+            start_line,
+            end_line,
+        })
+    };
+    let from_suffix = path[file.len()..]
+        .strip_prefix(':')
+        .and_then(|suffix| suffix.split(':').next())
+        .and_then(|line| line_span(line, line));
+    let from_hash = hash.strip_prefix('L').and_then(|anchor| {
+        let line_of = |s: &str| {
+            s.chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+        };
+        let (start, end) = anchor.split_once("-L").unwrap_or((anchor, anchor));
+        line_span(&line_of(start), &line_of(end))
+    });
+    let lines = from_suffix.or(from_hash);
+    if file.is_empty() || !looks_like_link_path(file, lines.is_some()) {
+        return None;
+    }
+    let folder = file.ends_with('/');
+    let finish = |path: String| {
+        let path = if folder && !path.ends_with('/') {
+            format!("{path}/")
+        } else {
+            path
+        };
+        SourceLocation { path, lines }
+    };
+
+    if file.starts_with("~/") {
+        return Some(finish(file.to_owned()));
+    }
+    let root = workspace_root
+        .map(|root| root.trim_end_matches('/'))
+        .filter(|root| !root.is_empty());
+    let absolute = if file.starts_with('/') {
+        normalize_path(file)?
+    } else {
+        normalize_path(&format!("{}/{file}", root?))?
+    };
+    if let Some(root) = root {
+        let private_root = format!("/private{root}");
+        let relative = [root, private_root.as_str()].into_iter().find_map(|root| {
+            absolute
+                .strip_prefix(root)
+                .and_then(|rest| rest.strip_prefix('/'))
+        });
+        if let Some(relative) = relative
+            && conn_contract::source::workspace_relative(relative)
+        {
+            return Some(finish(relative.to_owned()));
+        }
+    }
+    Some(finish(absolute))
+}
+
+/// Whether a clicked link may go to the system's URL handler: it has a scheme, and that scheme
+/// is not `file:` or one that runs code. A bare path never does, or macOS answers with
+/// "The application can't be opened. -50".
+fn opens_externally(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url.trim()) else {
+        return false;
+    };
+    parsed.scheme().len() > 1
+        && !matches!(parsed.scheme(), "file" | "javascript" | "data" | "vbscript")
 }
 
 /// Like [`resolve_clickable_file_path`], but keeps where the link points: `path:line` when the
@@ -2659,6 +2938,160 @@ mod tests {
                 ClickTarget::Thread(thread_link("env-1", "thr-1")),
                 ClickTarget::Thread(thread_link("env-2", "thr-2")),
                 ClickTarget::Url("https://a.test".to_owned()),
+            ]
+        );
+    }
+
+    /// A Markdown link's target as the Files panel gets it: its path and line span.
+    fn file_link(href: &str, root: Option<&str>) -> Option<(String, Option<(usize, usize)>)> {
+        resolve_markdown_file_link(href, root).map(|location| {
+            (
+                location.path,
+                location
+                    .lines
+                    .map(|lines| (lines.start_line, lines.end_line)),
+            )
+        })
+    }
+
+    #[test]
+    fn a_markdown_file_link_opens_its_file_in_the_files_panel() {
+        let root = Some("/Users/me/scratch");
+        let at = |path: &str, lines: Option<(usize, usize)>| Some((path.to_owned(), lines));
+        // An absolute path in the workspace becomes workspace-relative; any other keeps its host
+        // path, whatever its extension.
+        assert_eq!(
+            file_link("/Users/me/scratch/2026-11/review-astra.md", root),
+            at("2026-11/review-astra.md", None)
+        );
+        assert_eq!(
+            file_link("/private/Users/me/scratch/a.md", root),
+            at("a.md", None)
+        );
+        assert_eq!(
+            file_link("/Users/me/notes/plan.txt", root),
+            at("/Users/me/notes/plan.txt", None)
+        );
+        assert_eq!(
+            file_link("/Users/me/notes/LICENSE", root),
+            at("/Users/me/notes/LICENSE", None)
+        );
+        // `path:line[:col]` and `#L` set the line.
+        assert_eq!(
+            file_link("/Users/me/notes/plan.md:42", root),
+            at("/Users/me/notes/plan.md", Some((42, 42)))
+        );
+        assert_eq!(
+            file_link("src/lib.rs:42:7", root),
+            at("src/lib.rs", Some((42, 42)))
+        );
+        assert_eq!(
+            file_link("<src/lib.rs#L10-L20>", root),
+            at("src/lib.rs", Some((10, 20)))
+        );
+        // A relative path resolves against the workspace.
+        assert_eq!(
+            file_link("docs/review.md", root),
+            at("docs/review.md", None)
+        );
+        assert_eq!(file_link("./review.md", root), at("review.md", None));
+        assert_eq!(file_link("notes.md?raw=1", root), at("notes.md", None));
+        assert_eq!(
+            file_link("../other/x.txt", root),
+            at("/Users/me/other/x.txt", None)
+        );
+        // `file://` URLs, decoded.
+        assert_eq!(
+            file_link("file:///Users/me/scratch/a%20b.md#L3", root),
+            at("a b.md", Some((3, 3)))
+        );
+        assert_eq!(
+            file_link("file://localhost/tmp/x.log", root),
+            at("/tmp/x.log", None)
+        );
+        // Home paths and folders.
+        assert_eq!(file_link("~/notes.md", root), at("~/notes.md", None));
+        assert_eq!(file_link("docs/", root), at("docs/", None));
+        // No workspace: an absolute path still opens, a relative one cannot resolve.
+        assert_eq!(file_link("/tmp/a.md", None), at("/tmp/a.md", None));
+        assert_eq!(file_link("docs/a.md", None), None);
+        // Web links, other schemes, anchors and routes are not files.
+        for href in [
+            "https://example.com/a.md",
+            "http://localhost:3000/x",
+            "mailto:me@example.com",
+            "conn://thread/env-1/thr-1",
+            "#heading",
+            "//cdn.example.com/a.js",
+            "file://server/share/a.md",
+            "C:\\work\\a.md",
+            "/api/users",
+            "me@example.com",
+            "docs/.../a.md",
+        ] {
+            assert_eq!(file_link(href, root), None, "{href}");
+        }
+    }
+
+    #[test]
+    fn only_a_link_with_a_web_scheme_reaches_the_system() {
+        for url in [
+            "https://a.test/x",
+            "http://localhost:3000",
+            "mailto:me@a.test",
+        ] {
+            assert!(opens_externally(url), "{url}");
+        }
+        for bare in [
+            "/Users/me/scratch/review-astra.md",
+            "review-astra.md",
+            "src/a.rs:4",
+            "file:///tmp/a.md",
+            "javascript:alert(1)",
+            "C:\\a.md",
+            "",
+        ] {
+            assert!(!opens_externally(bare), "{bare}");
+        }
+    }
+
+    /// Absolute, relative, `file://` and `path:line` links click through to the Files panel;
+    /// `https://` stays a web link.
+    #[test]
+    fn markdown_file_links_click_through_to_the_files_panel() {
+        use conn_contract::source::{SourceLines, SourceLocation};
+        let tokens = Tokens::derive(&conn_theme::theme_by_id("dark-ocean").unwrap());
+        let spans = paragraph_spans(
+            "[a](/Users/me/scratch/review-astra.md) [b](/srv/notes/plan.md:42) \
+             [c](docs/a.md) [d](file:///Users/me/scratch/x.rs) [web](https://a.test/x.md)",
+        );
+        let StyledFlow { targets, .. } = build_styled_text_with_targets(
+            &spans,
+            &tokens,
+            None,
+            Some("/Users/me/scratch"),
+            true,
+            None,
+            None,
+            InlineLook::default(),
+        );
+        let file = |path: &str, line: Option<usize>| {
+            ClickTarget::WorkspaceFile(SourceLocation {
+                path: path.to_owned(),
+                lines: line.map(|line| SourceLines {
+                    start_line: line,
+                    end_line: line,
+                }),
+            })
+        };
+        assert_eq!(
+            targets,
+            vec![
+                file("review-astra.md", None),
+                file("/srv/notes/plan.md", Some(42)),
+                file("docs/a.md", None),
+                file("x.rs", None),
+                ClickTarget::Url("https://a.test/x.md".to_owned()),
             ]
         );
     }

@@ -324,13 +324,16 @@ impl ConnApp {
                 .collect()
         });
         self.shell.set_older_scope(scope);
-        self.drive_linked_older_pages(cx);
+        self.sync_linked_older_scopes();
         if !self.sidebar.settled_expanded {
             return;
         }
-        let Some(connection) = self.connection.clone() else {
+        // Counting the listed rows sorts every settled thread: only when some page could start.
+        let primary_possible =
+            self.connection.is_some() && self.shell.next_older_page(0, usize::MAX).is_some();
+        if !primary_possible && !self.linked_older_page_possible() {
             return;
-        };
+        }
         let visible = self.sidebar.tail.count_in(&self.settled_scope_key());
         let listed = sidebar_lists(
             &self.shell,
@@ -342,6 +345,10 @@ impl ConnApp {
         )
         .listed_settled
         .len();
+        self.start_linked_older_pages(listed, visible, cx);
+        let Some(connection) = self.connection.clone() else {
+            return;
+        };
         let Some(request) = self.shell.next_older_page(listed, visible) else {
             return;
         };

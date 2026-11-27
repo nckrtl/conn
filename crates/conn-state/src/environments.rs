@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::shell::Place;
 use crate::{
     OlderPageRequest, ProjectShell, ShellChange, ShellState, ShellStreamItem, ThreadShell,
 };
@@ -259,6 +260,15 @@ impl LinkedShells {
             .collect()
     }
 
+    /// The held environments' shells, in the order they were first seen.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &ShellState)> {
+        self.order.iter().filter_map(|id| {
+            self.shells
+                .get(id)
+                .map(|linked| (id.as_str(), &linked.shell))
+        })
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.shells.is_empty()
@@ -296,41 +306,162 @@ impl LinkedShells {
             labels: HashMap::from([(primary_id.to_owned(), primary_label.to_owned())]),
             ..Origins::default()
         };
-        let mut projects: HashSet<String> = HashSet::new();
-        let mut threads: HashSet<String> = HashSet::new();
-        for project in &shell.projects {
-            projects.insert(project.id.clone());
-        }
-        for thread in shell.threads.iter().chain(&shell.archived_threads) {
-            threads.insert(thread.id.clone());
-        }
-        for id in &self.order {
-            let Some(linked) = self.shells.get(id) else {
-                continue;
-            };
+        let held: Vec<(&String, &LinkedShell)> = self
+            .order
+            .iter()
+            .filter_map(|id| self.shells.get(id).map(|linked| (id, linked)))
+            .collect();
+        let added = shell.extend_with_environments(held.iter().map(|(_, linked)| &linked.shell));
+        for ((id, linked), added) in held.into_iter().zip(added) {
             origins.labels.insert(id.clone(), linked.label.clone());
             origins.linked_order.push(id.clone());
-            for project in &linked.shell.projects {
-                if projects.insert(project.id.clone()) {
-                    origins.project_env.insert(project.id.clone(), id.clone());
-                }
+            for project in added.projects {
+                origins.project_env.insert(project.to_owned(), id.clone());
             }
-            for thread in linked
-                .shell
-                .threads
-                .iter()
-                .chain(&linked.shell.archived_threads)
-            {
-                if threads.insert(thread.id.clone()) {
-                    origins.thread_env.insert(thread.id.clone(), id.clone());
-                }
+            for thread in added.threads {
+                origins.thread_env.insert(thread.to_owned(), id.clone());
             }
-            shell.extend_with_environment(&linked.shell);
         }
-        shell.refresh_derived();
         origins
     }
+
+    /// Whether a change the primary environment's shell applied to the merged `shell` in place
+    /// needs [`Self::merge_into`] again: its projects changed (a snapshot), or a changed thread is
+    /// one a linked environment also holds, so which copy shows may change. Any other change
+    /// leaves the merged shell what merging again would build.
+    #[must_use]
+    pub fn primary_change_needs_merge(&self, shell: &ShellState, change: &ShellChange) -> bool {
+        if self.shells.is_empty() {
+            return false;
+        }
+        change.projects_changed
+            || change.threads_changed.len() > INCREMENTAL_LIMIT
+            || change.threads_changed.iter().any(|id| {
+                shell.foreign_index(id).is_some()
+                    || self
+                        .shells
+                        .values()
+                        .any(|linked| linked.shell.locate(id).is_some())
+            })
+    }
+
+    /// Updates the merged `shell` for the threads `changed` on `environment_id`, as
+    /// [`Self::merge_into`] would list them, without merging every environment again.
+    ///
+    /// `origins` must be what the last merge returned, and `environment_id`'s projects must not
+    /// have changed since. Returns `false` without changing anything when this cannot be done in
+    /// place: the merge order or that environment's Settled paging changed, too many threads
+    /// changed, or a changed thread is one another environment also holds, so which copy shows
+    /// may change. Merge again then.
+    pub fn update_merged(
+        &self,
+        environment_id: &str,
+        changed: &[String],
+        shell: &mut ShellState,
+        origins: &mut Origins,
+    ) -> bool {
+        let Some(index) = origins
+            .linked_order
+            .iter()
+            .position(|id| id == environment_id)
+        else {
+            return false;
+        };
+        let Some(linked) = self.shells.get(environment_id) else {
+            return false;
+        };
+        let order_held = self
+            .order
+            .iter()
+            .filter(|id| self.shells.contains_key(*id))
+            .eq(origins.linked_order.iter());
+        if !order_held
+            || changed.len() > INCREMENTAL_LIMIT
+            || shell.foreign_count() != origins.linked_order.len()
+            || !shell.foreign_paging_matches(index, &linked.shell)
+        {
+            return false;
+        }
+        let others_hold = |id: &str| {
+            self.shells.iter().any(|(other_id, other)| {
+                other_id != environment_id && other.shell.locate(id).is_some()
+            })
+        };
+        // Decide every thread before changing anything.
+        let mut plan: Vec<&str> = Vec::with_capacity(changed.len());
+        let mut seen: HashSet<&str> = HashSet::new();
+        for id in changed {
+            let id = id.as_str();
+            if !seen.insert(id) {
+                continue;
+            }
+            let lists_it = matches!(
+                linked.shell.locate(id),
+                Some((Place::Active | Place::Archived, _))
+            );
+            match origins.thread_env.get(id) {
+                Some(owner) if owner == environment_id => {
+                    // Another holder may show once this environment stops listing it.
+                    if !lists_it && (others_hold(id) || shell.own_older_holds(id)) {
+                        return false;
+                    }
+                    plan.push(id);
+                }
+                Some(owner) => {
+                    let owner_index = origins.linked_order.iter().position(|e| e == owner);
+                    if (lists_it && owner_index.is_none_or(|owner_index| index < owner_index))
+                        || shell.foreign_loaded_holds(index, id)
+                    {
+                        return false;
+                    }
+                }
+                // The primary environment lists it: this copy stays hidden.
+                None if shell.lists(id) => {
+                    if shell.foreign_loaded_holds(index, id) {
+                        return false;
+                    }
+                }
+                None => {
+                    if shell.foreign_index(id).is_some_and(|at| at != index)
+                        || shell.own_older_holds(id)
+                        || others_hold(id)
+                    {
+                        return false;
+                    }
+                    plan.push(id);
+                }
+            }
+        }
+        let mut refresh = false;
+        for id in plan {
+            if let Some(old) = shell.take_foreign(index, id) {
+                refresh |= crate::shell::moves_others(&old);
+            }
+            match linked.shell.locate(id) {
+                Some((place, thread)) => {
+                    refresh |= crate::shell::moves_others(thread);
+                    if place == Place::Loaded {
+                        origins.thread_env.remove(id);
+                    } else {
+                        origins
+                            .thread_env
+                            .insert(id.to_owned(), environment_id.to_owned());
+                    }
+                    shell.put_foreign(index, place, thread.clone());
+                }
+                None => {
+                    origins.thread_env.remove(id);
+                }
+            }
+        }
+        shell.recount_foreign_held(index, &linked.shell);
+        shell.finish_foreign_update(refresh);
+        true
+    }
 }
+
+/// More changed threads than this merge again rather than one by one.
+const INCREMENTAL_LIMIT: usize = 256;
 
 /// The merged shell the sidebar reads and where its rows came from.
 #[derive(Clone, Debug, Default)]
@@ -1086,6 +1217,304 @@ mod tests {
         };
         assert_eq!(ids(&first), ids(&second));
         assert_eq!(first.origins, second.origins);
+    }
+
+    /// A small deterministic generator, so a failing step can be replayed.
+    struct Rng(u64);
+
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        fn below(&mut self, n: usize) -> usize {
+            usize::try_from(self.next() % n as u64).unwrap_or(0)
+        }
+    }
+
+    /// A thread of a small shared pool of ids, so environments collide, with a random run state,
+    /// lineage, request and settle time (some below the cuts).
+    fn random_thread(rng: &mut Rng, project: &str) -> (Value, bool) {
+        let id = format!("t-{}", rng.below(24));
+        let day = 1 + rng.below(27);
+        let kind = rng.below(6);
+        let parent = format!("t-{}", rng.below(24));
+        let thread = thread_json(&id, project, |t| {
+            t["updatedAt"] = json!(format!("2026-11-{day:02}T09:00:00.000Z"));
+            match kind {
+                0 => {
+                    t["settledOverride"] = json!("settled");
+                    t["settledAt"] = json!(format!("2026-11-{day:02}T10:00:00.000Z"));
+                }
+                1 => {
+                    t["lineage"]["parentThreadId"] = json!(parent);
+                    t["lineage"]["relationshipToParent"] = json!("subagent");
+                    t["status"] = json!("running");
+                    t["pendingRuntimeRequest"] = json!({
+                        "id": "r", "kind": "command", "createdAt": "2026-11-13T09:00:00.000Z"
+                    });
+                }
+                2 => t["status"] = json!("running"),
+                _ => {}
+            }
+        });
+        (thread, rng.below(8) == 0)
+    }
+
+    fn random_item(rng: &mut Rng, sequence: i64, project: &str) -> ShellStreamItem {
+        let value = if rng.below(5) == 0 {
+            json!({
+                "kind": "thread.removed", "sequence": sequence,
+                "location": if rng.below(4) == 0 { "archive" } else { "active" },
+                "threadId": format!("t-{}", rng.below(24)),
+            })
+        } else {
+            let (thread, archived) = random_thread(rng, project);
+            json!({
+                "kind": "thread.updated", "sequence": sequence,
+                "location": if archived { "archive" } else { "active" },
+                "thread": thread,
+            })
+        };
+        from_json(value).expect("item decodes")
+    }
+
+    fn random_snapshot(rng: &mut Rng, project: &str, cut: &str) -> ShellStreamItem {
+        let mut threads = Vec::new();
+        let mut archived = Vec::new();
+        for _ in 0..12 {
+            let (thread, in_archive) = random_thread(rng, project);
+            let id = thread["id"].clone();
+            if threads
+                .iter()
+                .chain(&archived)
+                .any(|t: &Value| t["id"] == id)
+            {
+                continue;
+            }
+            if in_archive {
+                archived.push(thread);
+            } else {
+                threads.push(thread);
+            }
+        }
+        from_json(json!({
+            "kind": "snapshot",
+            "snapshot": {
+                "schemaVersion": 1, "snapshotSequence": 1,
+                "projects": [project_json(project, project, &format!("/{project}"), None)],
+                "threads": threads, "archivedThreads": archived,
+                "olderSettled": { "before": cut, "asOfSequence": 1,
+                                  "counts": [{ "projectId": project, "count": 9 }] }
+            }
+        }))
+        .expect("snapshot decodes")
+    }
+
+    /// The merge as it was before it took every environment in one pass: one environment at a
+    /// time, each sorting the lists and refreshing derived state.
+    fn merge_one_by_one(
+        linked: &LinkedShells,
+        shell: &mut ShellState,
+        previous: &Origins,
+    ) -> Origins {
+        previous.strip_from(shell);
+        let mut origins = Origins {
+            primary_id: "nick".to_owned(),
+            labels: HashMap::from([("nick".to_owned(), "nick".to_owned())]),
+            ..Origins::default()
+        };
+        let mut projects: HashSet<String> = shell.projects.iter().map(|p| p.id.clone()).collect();
+        let mut threads: HashSet<String> = shell
+            .threads
+            .iter()
+            .chain(&shell.archived_threads)
+            .map(|t| t.id.clone())
+            .collect();
+        for id in &linked.order {
+            let Some(env) = linked.shells.get(id) else {
+                continue;
+            };
+            origins.labels.insert(id.clone(), env.label.clone());
+            origins.linked_order.push(id.clone());
+            for project in &env.shell.projects {
+                if projects.insert(project.id.clone()) {
+                    origins.project_env.insert(project.id.clone(), id.clone());
+                }
+            }
+            for thread in env.shell.threads.iter().chain(&env.shell.archived_threads) {
+                if threads.insert(thread.id.clone()) {
+                    origins.thread_env.insert(thread.id.clone(), id.clone());
+                }
+            }
+            shell.extend_with_environment(&env.shell);
+        }
+        shell.refresh_derived();
+        origins
+    }
+
+    /// Everything a reader of the merged shell can see.
+    fn view(shell: &ShellState, origins: &Origins) -> Value {
+        let ids = |threads: &[ThreadShell]| -> Vec<String> {
+            threads.iter().map(|t| t.id.clone()).collect()
+        };
+        let refs = |threads: Vec<&ThreadShell>| -> Vec<String> {
+            threads.iter().map(|t| t.id.clone()).collect()
+        };
+        let every: Vec<Value> = (0..24)
+            .map(|n| {
+                let id = format!("t-{n}");
+                json!([
+                    shell.find_thread(&id).map(|t| t.updated_at.clone()),
+                    format!("{:?}", shell.subagent_request(&id)),
+                    format!("{:?}", shell.activity(&id)),
+                    shell.foreign_index(&id),
+                    origins.environment_of_thread(&id),
+                    shell
+                        .find_thread(&id)
+                        .map(|thread| shell.is_listed_settled(thread)),
+                ])
+            })
+            .collect();
+        let mut pairs: Vec<(&String, &String)> = origins.thread_env.iter().collect();
+        pairs.sort();
+        let thread_env = format!("{pairs:?}");
+        json!({
+            "threads": ids(&shell.threads),
+            "archived": ids(&shell.archived_threads),
+            "projects": shell.projects.iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
+            "settled": refs(shell.all_settled_threads()),
+            "listed": refs(shell.top_level_settled_threads()),
+            "unloaded": shell.unloaded_older_settled(None),
+            "older": format!("{:?}", shell.older_settled()),
+            "every": every,
+            "origins": format!("{:?}", origins.linked_order),
+            "thread_env": thread_env,
+        })
+    }
+
+    /// Updating the merged shell in place, for the primary environment's own changes and for one
+    /// linked environment's threads, lists exactly what applying the change and merging every
+    /// environment again lists.
+    #[test]
+    fn updating_the_merged_shell_in_place_matches_merging_again() {
+        let mut in_place_steps = 0;
+        let mut merged_steps = 0;
+        for seed in 1..=40_u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15));
+            let mut primary = ShellState::default();
+            primary.apply(random_snapshot(
+                &mut rng,
+                "p-nick",
+                "2026-11-05T00:00:00.000Z",
+            ));
+            let mut linked = LinkedShells::default();
+            for (env, cut) in [
+                ("mini", "2026-11-08T00:00:00.000Z"),
+                ("vm", "2026-11-03T00:00:00.000Z"),
+                ("studio", "2026-11-10T00:00:00.000Z"),
+            ] {
+                linked.ensure(env, env);
+                linked.apply(env, random_snapshot(&mut rng, &format!("p-{env}"), cut));
+            }
+            // What every change did before: apply it, then merge every environment again, one by
+            // one.
+            let mut reference = primary.clone();
+            let mut reference_origins =
+                merge_one_by_one(&linked, &mut reference, &Origins::default());
+            let mut merged = primary;
+            let mut origins = linked.merge_into("nick", "nick", &mut merged, &Origins::default());
+            assert_eq!(
+                view(&merged, &origins),
+                view(&reference, &reference_origins),
+                "seed {seed}: one pass merges as one by one"
+            );
+            for step in 0..60_i64 {
+                let env = ["nick", "mini", "vm", "studio"][rng.below(4)];
+                if env != "nick" && rng.below(10) == 0 {
+                    // A page of older settled threads arrives: both merge again.
+                    if let Some(request) = linked.next_older_page(env, 0, 100) {
+                        let threads: Vec<Value> = (0..3)
+                            .map(|_| {
+                                let mut thread = random_thread(&mut rng, &format!("p-{env}")).0;
+                                thread["settledOverride"] = json!("settled");
+                                thread["settledAt"] = json!("2026-11-01T10:00:00.000Z");
+                                thread
+                            })
+                            .collect();
+                        let page: OlderSettledPage = from_json(json!({
+                            "snapshotSequence": 1, "threads": threads, "counts": []
+                        }))
+                        .expect("page decodes");
+                        linked.older_page_started(env, &request);
+                        linked.apply_older_page(env, &request, page);
+                        origins = linked.merge_into("nick", "nick", &mut merged, &origins);
+                        reference_origins =
+                            merge_one_by_one(&linked, &mut reference, &reference_origins);
+                        continue;
+                    }
+                }
+                let item = random_item(&mut rng, 10 + step, &format!("p-{env}"));
+                if env == "nick" {
+                    reference.apply(item.clone());
+                    let change = merged.apply(item);
+                    if linked.primary_change_needs_merge(&merged, &change) {
+                        origins = linked.merge_into("nick", "nick", &mut merged, &origins);
+                        merged_steps += 1;
+                    } else {
+                        in_place_steps += 1;
+                    }
+                } else {
+                    let change = linked.apply(env, item).expect("held environment");
+                    if linked.update_merged(env, &change.threads_changed, &mut merged, &mut origins)
+                    {
+                        in_place_steps += 1;
+                    } else {
+                        origins = linked.merge_into("nick", "nick", &mut merged, &origins);
+                        merged_steps += 1;
+                    }
+                }
+                reference_origins = merge_one_by_one(&linked, &mut reference, &reference_origins);
+                assert_eq!(
+                    view(&merged, &origins),
+                    view(&reference, &reference_origins),
+                    "seed {seed} step {step} on {env}"
+                );
+            }
+        }
+        assert!(
+            in_place_steps > merged_steps * 2,
+            "most steps update in place: {in_place_steps} in place, {merged_steps} merged"
+        );
+    }
+
+    #[test]
+    fn a_change_to_a_thread_only_the_primary_holds_needs_no_merge() {
+        let mut shell = primary_shell();
+        let linked = linked();
+        let origins = linked.merge_into("nick", "nick", &mut shell, &Origins::default());
+        let item: ShellStreamItem = from_json(json!({
+            "kind": "thread.updated", "sequence": 9, "location": "active",
+            "thread": thread_json("t-primary-old", "p-conn", at("2026-11-24T09:00:00.000Z")),
+        }))
+        .expect("update decodes");
+        let change = shell.apply(item);
+        assert!(!linked.primary_change_needs_merge(&shell, &change));
+        assert_eq!(shell.threads[0].id, "t-primary-old", "it moved to the top");
+        assert_eq!(origins.environment_of_thread("t-mini"), "mini");
+        assert!(shell.find_thread("t-vm").is_some(), "linked rows stay");
+
+        // A thread a linked environment holds too: which copy shows is the merge's call.
+        let item: ShellStreamItem = from_json(json!({
+            "kind": "thread.updated", "sequence": 10, "location": "active",
+            "thread": thread_json("t-mini", "p-conn", |_| {}),
+        }))
+        .expect("update decodes");
+        let change = shell.apply(item);
+        assert!(linked.primary_change_needs_merge(&shell, &change));
     }
 
     #[test]

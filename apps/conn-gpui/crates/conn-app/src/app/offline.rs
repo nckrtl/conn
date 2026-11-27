@@ -37,6 +37,30 @@ fn expired(thread: &ThreadShell) -> bool {
 
 type ThreadKey = (String, String);
 
+/// More changed threads than this are looked at as a sweep of every thread.
+const SCOPE_LIMIT: usize = 512;
+
+/// Which threads changed since the offline cache last looked at the shell.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(super) enum ShellScope {
+    /// Nothing listed changed.
+    Nothing,
+    /// Only these thread ids changed, on whichever environment.
+    Threads(HashSet<String>),
+    /// Anything may have changed: a snapshot, a new merge, or the first look.
+    #[default]
+    All,
+}
+
+/// Whether the cache watches `thread`'s stream: an unsettled thread the user may open, or a
+/// child (subagent, side chat or delegated task) that still runs or asks something. A finished
+/// child's stream does not change until something starts it again, which the shell reports.
+fn watch_worthy(thread: &ThreadShell) -> bool {
+    thread.deleted_at.is_none()
+        && !ShellState::is_settled(thread)
+        && (!ShellState::is_child(thread) || ShellState::is_live(thread))
+}
+
 #[derive(Clone)]
 struct Backfill {
     key: ThreadKey,
@@ -59,6 +83,12 @@ pub(super) struct Offline {
     expired: HashSet<(String, String)>,
     deadlines: HashMap<ThreadKey, i64>,
     deadlines_dirty: bool,
+    /// The earliest deadline still to pass; `None` when unknown, so the next look sweeps them all.
+    next_deadline: Option<i64>,
+    /// The threads whose streams the cache watches.
+    desired: HashSet<ThreadKey>,
+    /// Which threads changed since expiry and the watches last looked at the shell.
+    scope: ShellScope,
     outlines: HashMap<(String, String), Arc<ThreadOutline>>,
     outline_writes: HashMap<(String, String), String>,
     outline_requested: HashMap<(String, String), String>,
@@ -157,6 +187,60 @@ impl Offline {
         self.disconnected(env);
         self.subscriptions.retain(|(owner, _), _| owner != env);
         self.saved_tails.retain(|(owner, _), _| owner != env);
+    }
+
+    /// Anything listed may have changed: the next look sweeps every thread.
+    pub(super) fn note_all_threads(&mut self) {
+        self.scope = ShellScope::All;
+    }
+
+    /// The threads `ids` changed.
+    pub(super) fn note_threads(&mut self, ids: &[String]) {
+        match &mut self.scope {
+            ShellScope::All => {}
+            ShellScope::Threads(held) => {
+                held.extend(ids.iter().cloned());
+                if held.len() > SCOPE_LIMIT {
+                    self.scope = ShellScope::All;
+                }
+            }
+            ShellScope::Nothing if ids.is_empty() => {}
+            ShellScope::Nothing if ids.len() > SCOPE_LIMIT => self.scope = ShellScope::All,
+            ShellScope::Nothing => {
+                self.scope = ShellScope::Threads(ids.iter().cloned().collect());
+            }
+        }
+    }
+
+    /// What a shell item changed: a snapshot (its projects change) is a sweep.
+    pub(super) fn note_change(&mut self, change: &conn_state::ShellChange) {
+        if change.projects_changed {
+            self.note_all_threads();
+        } else {
+            self.note_threads(&change.threads_changed);
+        }
+    }
+
+    /// The threads whose streams the cache watches, sorted.
+    #[cfg(test)]
+    pub(super) fn desired_for_test(&self) -> Vec<ThreadKey> {
+        let mut desired: Vec<ThreadKey> = self.desired.iter().cloned().collect();
+        desired.sort();
+        desired
+    }
+
+    /// The settlement deadlines and the expired threads, sorted.
+    #[cfg(test)]
+    pub(super) fn expiry_for_test(&self) -> (Vec<(ThreadKey, i64)>, Vec<ThreadKey>) {
+        let mut deadlines: Vec<(ThreadKey, i64)> = self
+            .deadlines
+            .iter()
+            .map(|(key, at)| (key.clone(), *at))
+            .collect();
+        deadlines.sort();
+        let mut expired: Vec<ThreadKey> = self.expired.iter().cloned().collect();
+        expired.sort();
+        (deadlines, expired)
     }
 
     pub(super) fn watching(&self, env: Option<&str>, id: &str) -> bool {
@@ -1048,101 +1132,308 @@ impl ConnApp {
         true
     }
 
-    pub(super) fn expire_offline(&mut self, cx: &mut Context<'_, Self>) {
+    /// Catches the offline cache up with the shell changes noted since the last call. Expiry and
+    /// the watched streams look only at the threads that changed, unless a sweep is due: a
+    /// snapshot, a new merge, or a deadline passing.
+    pub(super) fn offline_follow_shell(&mut self, cx: &mut Context<'_, Self>) {
+        let scope = std::mem::replace(&mut self.offline.scope, ShellScope::Nothing);
         if self.offline.dir.is_none() {
             return;
         }
-        let mut deadlines = std::mem::take(&mut self.offline.deadlines);
-        let previous = deadlines.clone();
-        deadlines.retain(|(env, id), _| self.cache_shell(env, id).is_none());
-        let settled = |t: &ThreadShell| t.deleted_at.is_some() || ShellState::is_settled(t);
-        for thread in self
-            .shell
-            .threads
-            .iter()
-            .chain(&self.shell.archived_threads)
-            .filter(|t| settled(t))
-        {
-            if let (Some(env), Some(at)) = (self.cache_env(&thread.id), expires_at(thread)) {
-                deadlines.insert((env.to_owned(), thread.id.clone()), at);
-            }
+        self.expire_offline_in(&scope, cx);
+        self.reconcile_offline_in(&scope, cx);
+    }
+
+    /// Expires every cached thread whose 24 hours have passed, over every thread (at launch and
+    /// on the clock's minute tick).
+    pub(super) fn expire_offline(&mut self, cx: &mut Context<'_, Self>) {
+        self.expire_offline_in(&ShellScope::All, cx);
+    }
+
+    fn expire_offline_in(&mut self, scope: &ShellScope, cx: &mut Context<'_, Self>) {
+        if self.offline.dir.is_none() {
+            return;
         }
-        for key in self.linked.cache_threads(settled) {
-            if let Some(at) = self.cache_shell(&key.0, &key.1).and_then(expires_at) {
-                deadlines.insert(key, at);
-            }
+        let now = i64::try_from(super::now_ms()).unwrap_or(i64::MAX);
+        let due = self.offline.next_deadline.is_none_or(|at| at <= now);
+        match scope {
+            ShellScope::Threads(ids) if !due => self.expire_threads(ids, now, cx),
+            ShellScope::Nothing if !due => {}
+            _ => self.expire_all(now, cx),
         }
-        let now = i128::from(super::now_ms());
-        let mut expired_keys: HashSet<_> = deadlines
+    }
+
+    /// The environments the cache keeps threads of: the primary one, then each linked one.
+    fn cache_environments(&self) -> Vec<String> {
+        self.server_url
             .iter()
-            .filter(|(_, at)| i128::from(**at) <= now)
-            .map(|(key, _)| key.clone())
-            .collect();
-        expired_keys.extend(
-            self.offline
-                .expired
+            .cloned()
+            .chain(
+                self.linked
+                    .cache_shells()
+                    .into_iter()
+                    .map(|(env, _)| env)
+                    .filter(|env| self.server_url.as_deref() != Some(*env))
+                    .map(str::to_owned),
+            )
+            .collect()
+    }
+
+    /// The copy of `id` on `env` that the active or archived list holds, as a full sweep reads it.
+    fn cache_listed(&self, env: &str, id: &str) -> Option<&ThreadShell> {
+        let find = |shell: &'_ ShellState| {
+            shell
+                .threads
                 .iter()
-                .filter(|key| {
-                    self.offline.dirty.contains(*key) && self.cache_shell(&key.0, &key.1).is_none()
-                })
-                .cloned(),
-        );
-        deadlines.retain(|_, at| i128::from(*at) > now);
-        self.offline.deadlines_dirty |= previous != deadlines;
-        self.offline.deadlines = deadlines;
-        self.offline
-            .dirty
-            .extend(expired_keys.difference(&self.offline.expired).cloned());
-        for key in expired_keys.difference(&self.offline.expired) {
+                .chain(&shell.archived_threads)
+                .position(|t| t.id == id)
+        };
+        if self.server_url.as_deref() == Some(env) {
+            if self.cache_env(id) != Some(env) {
+                return None;
+            }
+            let at = find(&self.shell)?;
+            self.shell
+                .threads
+                .iter()
+                .chain(&self.shell.archived_threads)
+                .nth(at)
+        } else {
+            let shell = self.linked.shell_for_cache(env)?;
+            let at = find(shell)?;
+            shell.threads.iter().chain(&shell.archived_threads).nth(at)
+        }
+    }
+
+    /// Every `(environment, thread)` pair [`Self::cache_shell`] finds, for a sweep.
+    fn cache_index(&self) -> HashSet<(&str, &str)> {
+        let mut held = HashSet::new();
+        if let Some(env) = self.server_url.as_deref() {
+            for thread in self.shell.every_thread() {
+                if self.cache_env(&thread.id) == Some(env) {
+                    held.insert((env, thread.id.as_str()));
+                }
+            }
+        }
+        for (env, shell) in self.linked.cache_shells() {
+            if self.server_url.as_deref() == Some(env) {
+                continue;
+            }
+            for thread in shell.every_thread() {
+                held.insert((env, thread.id.as_str()));
+            }
+        }
+        held
+    }
+
+    /// Forgets what the cache holds in memory of an expired thread. A thread that only now
+    /// expired is also deleted from disk by the next save.
+    fn forget_expired(&mut self, key: &ThreadKey, newly: bool) {
+        if newly {
+            self.offline.dirty.insert(key.clone());
             self.offline.shadow.remove(key);
             if self.offline.owners.get(&key.1) == Some(&key.0) {
                 self.threads.remove(&key.1);
             }
         }
-        for key in &expired_keys {
-            if self.offline.loading_outline.as_ref() == Some(key) {
-                self.offline.loading_outline = None;
-                self.offline.outline_epoch = self.offline.outline_epoch.wrapping_add(1);
-            }
-            self.offline.snapshots.remove(key);
-            self.offline.commits.remove(key);
-            self.offline.outlines.remove(key);
-            self.offline.outline_writes.remove(key);
-            self.offline.outline_requested.remove(key);
+        if self.offline.loading_outline.as_ref() == Some(key) {
+            self.offline.loading_outline = None;
+            self.offline.outline_epoch = self.offline.outline_epoch.wrapping_add(1);
         }
+        self.offline.snapshots.remove(key);
+        self.offline.commits.remove(key);
+        self.offline.outlines.remove(key);
+        self.offline.outline_writes.remove(key);
+        self.offline.outline_requested.remove(key);
+    }
+
+    fn selected_cache_key(&self) -> Option<ThreadKey> {
+        let id = self.layout.selected_thread_id.as_deref()?;
+        Some((self.cache_env(id)?.to_owned(), id.to_owned()))
+    }
+
+    /// The full sweep: the deadline of every settled thread of every environment, and which
+    /// have passed.
+    fn expire_all(&mut self, now: i64, cx: &mut Context<'_, Self>) {
+        let mut deadlines = std::mem::take(&mut self.offline.deadlines);
+        let previous = deadlines.clone();
+        let settled = |t: &ThreadShell| t.deleted_at.is_some() || ShellState::is_settled(t);
+        let expired_keys: HashSet<ThreadKey> = {
+            let held = self.cache_index();
+            deadlines.retain(|(env, id), _| !held.contains(&(env.as_str(), id.as_str())));
+            for thread in self
+                .shell
+                .threads
+                .iter()
+                .chain(&self.shell.archived_threads)
+                .filter(|t| settled(t))
+            {
+                if let (Some(env), Some(at)) = (self.cache_env(&thread.id), expires_at(thread)) {
+                    deadlines.insert((env.to_owned(), thread.id.clone()), at);
+                }
+            }
+            for (env, shell) in self.linked.cache_shells() {
+                for thread in shell
+                    .threads
+                    .iter()
+                    .chain(&shell.archived_threads)
+                    .filter(|t| settled(t))
+                {
+                    if let Some(at) = expires_at(thread) {
+                        deadlines.insert((env.to_owned(), thread.id.clone()), at);
+                    }
+                }
+            }
+            deadlines
+                .iter()
+                .filter(|(_, at)| **at <= now)
+                .map(|(key, _)| key.clone())
+                .chain(
+                    self.offline
+                        .expired
+                        .iter()
+                        .filter(|key| {
+                            self.offline.dirty.contains(*key)
+                                && !held.contains(&(key.0.as_str(), key.1.as_str()))
+                        })
+                        .cloned(),
+                )
+                .collect()
+        };
+        deadlines.retain(|_, at| *at > now);
+        self.offline.next_deadline = Some(deadlines.values().copied().min().unwrap_or(i64::MAX));
+        self.offline.deadlines_dirty |= previous != deadlines;
+        self.offline.deadlines = deadlines;
         let selection_expired = self
-            .layout
-            .selected_thread_id
-            .as_deref()
-            .and_then(|id| Some((self.cache_env(id)?.to_owned(), id.to_owned())))
+            .selected_cache_key()
             .is_some_and(|key| expired_keys.contains(&key) && !self.offline.expired.contains(&key));
+        let previous_expired = std::mem::take(&mut self.offline.expired);
+        for key in &expired_keys {
+            self.forget_expired(key, !previous_expired.contains(key));
+        }
         self.offline.expired = expired_keys;
         if selection_expired {
             self.sync_chat(cx);
         }
         self.schedule_offline_save(cx);
     }
-    pub(super) fn reconcile_offline(&mut self, cx: &mut Context<'_, Self>) {
+
+    /// [`Self::expire_all`] for the threads `ids` alone, on every environment: what the sweep
+    /// would decide for them, with every other deadline left as it is.
+    fn expire_threads(&mut self, ids: &HashSet<String>, now: i64, cx: &mut Context<'_, Self>) {
+        let environments = self.cache_environments();
+        let selected = self.selected_cache_key();
+        let mut selection_expired = false;
+        for id in ids {
+            for env in &environments {
+                let key = (env.clone(), id.clone());
+                let held = self.cache_shell(env, id).is_some();
+                let listed_at = self
+                    .cache_listed(env, id)
+                    .filter(|t| t.deleted_at.is_some() || ShellState::is_settled(t))
+                    .and_then(expires_at);
+                let before = self.offline.deadlines.get(&key).copied();
+                if held {
+                    self.offline.deadlines.remove(&key);
+                }
+                if let Some(at) = listed_at {
+                    self.offline.deadlines.insert(key.clone(), at);
+                }
+                let expired_now = self
+                    .offline
+                    .deadlines
+                    .get(&key)
+                    .is_some_and(|at| *at <= now);
+                if expired_now {
+                    self.offline.deadlines.remove(&key);
+                } else if let Some(at) = self.offline.deadlines.get(&key) {
+                    self.offline.next_deadline =
+                        Some(self.offline.next_deadline.map_or(*at, |next| next.min(*at)));
+                }
+                self.offline.deadlines_dirty |= before != self.offline.deadlines.get(&key).copied();
+                let stays = !held
+                    && self.offline.expired.contains(&key)
+                    && self.offline.dirty.contains(&key);
+                if expired_now || stays {
+                    let newly = !self.offline.expired.contains(&key);
+                    selection_expired |= newly && selected.as_ref() == Some(&key);
+                    self.forget_expired(&key, newly);
+                    self.offline.expired.insert(key);
+                } else {
+                    self.offline.expired.remove(&key);
+                }
+            }
+        }
+        if selection_expired {
+            self.sync_chat(cx);
+        }
+        self.schedule_offline_save(cx);
+    }
+
+    /// Whether the cache watches `id`'s stream on `env` ([`watch_worthy`]), as a full sweep of
+    /// the watches decides it.
+    fn should_watch(&self, env: &str, id: &str) -> bool {
+        if self.server_url.as_deref() == Some(env) {
+            self.cache_env(id) == Some(env) && self.shell.thread(id).is_some_and(watch_worthy)
+        } else {
+            self.linked.shell_for_cache(env).is_some_and(|shell| {
+                shell
+                    .threads
+                    .iter()
+                    .chain(&shell.archived_threads)
+                    .find(|t| t.id == id)
+                    .is_some_and(watch_worthy)
+            })
+        }
+    }
+
+    /// Brings the watched streams in line with the shell: subscribes the threads worth watching
+    /// that changed (all of them on a sweep), and drops the rest. A watch survives reconnects of
+    /// its connection (the client resubscribes it from its cursor); only a new connection for the
+    /// environment needs a new subscription.
+    fn reconcile_offline_in(&mut self, scope: &ShellScope, cx: &mut Context<'_, Self>) {
         if self.offline.dir.is_none() {
             return;
         }
-        let eligible = |t: &ThreadShell| t.deleted_at.is_none() && !ShellState::is_settled(t);
-        let mut candidates: Vec<_> = self
-            .shell
-            .threads
-            .iter()
-            .filter(|t| eligible(t))
-            .filter_map(|t| Some((self.cache_env(&t.id)?.to_owned(), t.id.clone())))
-            .collect();
-        candidates.extend(self.linked.cache_threads(eligible));
-        let mut desired = HashSet::new();
-        for pair in candidates {
-            if !desired.insert(pair.clone()) {
-                continue;
+        let check: Vec<ThreadKey> = match scope {
+            ShellScope::All => {
+                let mut desired = HashSet::new();
+                let mut order = Vec::new();
+                let primary = self
+                    .shell
+                    .threads
+                    .iter()
+                    .filter(|t| watch_worthy(t))
+                    .filter_map(|t| Some((self.cache_env(&t.id)?.to_owned(), t.id.clone())));
+                let linked = self.linked.cache_threads(watch_worthy);
+                for pair in primary.chain(linked) {
+                    if desired.insert(pair.clone()) {
+                        order.push(pair);
+                    }
+                }
+                self.offline.desired = desired;
+                order
             }
+            ShellScope::Threads(ids) => {
+                let environments = self.cache_environments();
+                let mut check = Vec::new();
+                for id in ids {
+                    for env in &environments {
+                        let pair = (env.clone(), id.clone());
+                        if self.should_watch(env, id) {
+                            self.offline.desired.insert(pair.clone());
+                            check.push(pair);
+                        } else {
+                            self.offline.desired.remove(&pair);
+                        }
+                    }
+                }
+                check
+            }
+            ShellScope::Nothing => Vec::new(),
+        };
+        for pair in check {
             self.queue_outline(&pair);
-            // A watch survives reconnects of its connection (the client resubscribes it from its
-            // cursor); only a new connection for the environment needs a new subscription.
             let Some(connection) = self.cache_connection(&pair.0) else {
                 continue;
             };
@@ -1157,6 +1448,7 @@ impl ConnApp {
             }
         }
         self.load_next_outline(cx);
+        let desired = std::mem::take(&mut self.offline.desired);
         self.offline.commits.retain(|key, commit| {
             !matches!(commit, Commit::Prefix { .. }) || desired.contains(key)
         });
@@ -1183,6 +1475,7 @@ impl ConnApp {
             }
             false
         });
+        self.offline.desired = desired;
         // A thread the cache stopped watching (settled, a finished subagent) keeps its timeline
         // only while it is open or recent (`app/residency.rs`).
         if self.offline.subscriptions.len() < watched {

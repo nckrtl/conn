@@ -245,6 +245,11 @@ fn luma(p: image::Rgba<u8>) -> f32 {
 /// In dark and light, with the pointer on a hovered row's Steer, trash or ⋯ button, the tray at
 /// rest is darkest, the hovered row's band is lighter but clearly below the composer, and the
 /// button under the pointer lighter still, about the composer's fill.
+///
+/// The rows sit under the composer's shadow, so its alpha and dither move them. In dark, the
+/// hovered row is about two grey levels below the composer: the subtle shadow lets more of the
+/// row's fill through, and the dither lifts the shadow by half a level on average (a dither that
+/// only adds light cannot be centred). The check therefore asks for 1.5 levels there.
 #[test]
 fn a_hovered_button_is_lighter_than_its_hovered_row() {
     let mut ctx = headless_context();
@@ -260,11 +265,19 @@ fn a_hovered_button_is_lighter_than_its_hovered_row() {
                 .capture_screenshot(window)
                 .unwrap_or_else(|error| panic!("no screenshot: {error}"));
             let scale = image.width() as f32 / WIDTH_PX;
+            // The mean luma of the 5x5 device pixels around a point. The tray sits under the
+            // composer's dithered shadow, where one pixel can read a grey level above or below
+            // its neighbours; the patch's mean is what the eye sees.
             let at = |x: Pixels, y: Pixels| {
-                luma(*image.get_pixel(
+                let (cx, cy) = (
                     (f32::from(x) * scale).round() as u32,
                     (f32::from(y) * scale).round() as u32,
-                ))
+                );
+                let patch: Vec<f32> = (cy - 2..=cy + 2)
+                    .flat_map(|py| (cx - 2..=cx + 2).map(move |px| (px, py)))
+                    .map(|(px, py)| luma(*image.get_pixel(px, py)))
+                    .collect();
+                patch.iter().sum::<f32>() / patch.len() as f32
             };
             // Plain fill: between the ↳ icon and the text, and inside the button's round box,
             // left of its icon.
@@ -273,7 +286,7 @@ fn a_hovered_button_is_lighter_than_its_hovered_row() {
             let fill = at(button.left() + px(3.0), button.center().y);
             let card = at(composer.left() + px(6.0), composer.center().y);
             assert!(
-                tray + 2.0 < band && band + 2.0 < fill && band + 2.0 < card && fill <= card + 4.0,
+                tray + 2.0 < band && band + 2.0 < fill && band + 1.5 < card && fill <= card + 4.0,
                 "{theme}, {label}: tray {tray}, row {band}, button {fill}, composer {card}"
             );
         }

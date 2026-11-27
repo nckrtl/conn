@@ -29,6 +29,8 @@ mod bottom_gap_tests;
 mod card_shots;
 #[cfg(all(test, target_os = "macos"))]
 mod card_tests;
+#[cfg(all(test, target_os = "macos"))]
+mod composer_shadow_shots;
 mod draft_hero;
 mod embedded_document;
 mod embedded_mount;

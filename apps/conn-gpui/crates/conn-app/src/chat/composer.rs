@@ -82,11 +82,13 @@ pub(super) const COMPOSER_MAX_LINES: usize = 8;
 const COMPOSER_RADIUS_PX: f32 = 16.0;
 /// Side of a staged image's chip in the attachment strip, in logical px.
 const STAGED_CHIP_PX: f32 = 64.0;
-/// Composer card shadow: a large blur, a low alpha and a small upward offset.
+/// Composer card shadow: a large blur, a low alpha and a small upward offset. GPUI's blur radius
+/// is the gaussian's sigma, so it matches CSS `box-shadow: 0 -4px 64px` (CSS blur is 2 sigma).
+/// The vendored shadow shader dithers its output, so the falloff has no 8-bit bands.
 const COMPOSER_SHADOW_BLUR_PX: f32 = 32.0;
 const COMPOSER_SHADOW_OFFSET_Y_PX: f32 = -4.0;
-const COMPOSER_SHADOW_ALPHA_DARK: f32 = 0.32;
-const COMPOSER_SHADOW_ALPHA_LIGHT: f32 = 0.12;
+const COMPOSER_SHADOW_ALPHA_DARK: f32 = 0.22;
+const COMPOSER_SHADOW_ALPHA_LIGHT: f32 = 0.08;
 /// Bottom gap below the composer card when the context strip is hidden: the card's bottom
 /// lines up with the bottom of the sidebar's last line (Conn's `sm:h-[1.25rem]` was 4px lower).
 const COMPOSER_BOTTOM_SPACER_PX: f32 =
@@ -3621,6 +3623,39 @@ mod tests {
             composer_card_shadow(&Tokens::derive(&theme)).color.a
         };
         assert!(alpha("dark-ocean") > alpha("t3-code-light"));
+    }
+
+    #[test]
+    fn the_composer_shadow_is_subtle_and_matches_the_lab() {
+        // Locked to lab-gpui's `.composer` box-shadow: `0 -4px 64px` at 0.22 dark, 0.08 light.
+        let shadow = |id: &str| {
+            let theme = conn_theme::theme_by_id(id).expect("a built-in theme");
+            composer_card_shadow(&Tokens::derive(&theme))
+        };
+        for (id, alpha) in [("dark-ocean", 0.22), ("t3-code-light", 0.08)] {
+            let s = shadow(id);
+            assert!(
+                (s.color.a - alpha).abs() < 1e-6,
+                "{id}: alpha {}",
+                s.color.a
+            );
+            assert!(
+                (f32::from(s.blur_radius) - 32.0).abs() < f32::EPSILON,
+                "{id}: blur"
+            );
+            assert!(
+                (f32::from(s.offset.y) + 4.0).abs() < f32::EPSILON,
+                "{id}: offset"
+            );
+            assert!(
+                f32::from(s.offset.x).abs() < f32::EPSILON,
+                "{id}: no x offset"
+            );
+            assert!(
+                f32::from(s.spread_radius).abs() < f32::EPSILON,
+                "{id}: no spread"
+            );
+        }
     }
 
     #[test]

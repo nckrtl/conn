@@ -580,6 +580,11 @@ dt {
   border-radius: var(--composer-radius);
   border: 1px solid var(--line);
   background: var(--raised);
+  /* GPUI composer_card_shadow: blur sigma 32 (CSS blur 64px), 4px up, 0.22 dark, 0.08 light. */
+  box-shadow: 0 -4px 64px rgb(0 0 0 / 0.22);
+}
+.desktop[data-theme="light"] .composer {
+  box-shadow: 0 -4px 64px rgb(0 0 0 / 0.08);
 }
 .composer textarea {
   display: block;

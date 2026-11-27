@@ -29,6 +29,7 @@ mod stderr_log;
 mod superhero;
 mod terminal_settings;
 mod theme;
+mod theme_boot;
 #[cfg(test)]
 mod ui_tests;
 mod vibrancy;
@@ -39,7 +40,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use app::ConnApp;
-use conn_theme::Tokens;
 use futures::AsyncReadExt as _;
 use futures::future::BoxFuture;
 use gpui_kit::http_client::{
@@ -222,8 +222,14 @@ fn main() {
         editor_settings::init(cx);
         colour_space::install(cx);
         vibrancy::install(cx);
-        let theme = live::initial_theme();
-        let tokens = Tokens::derive(&theme);
+        // The saved theme, read before the window opens so the first frame already uses it
+        // (the Orbit profile arrives later, over the network).
+        let boot = theme_boot::BootTheme::load();
+        let (theme, tokens) = theme_boot::startup_theme(
+            &boot,
+            live::theme_from_env().as_deref(),
+            vibrancy::system_appearance(),
+        );
         theme::apply_kit_theme(&tokens, cx);
         vibrancy::sync_appearance(tokens.appearance);
         let server = live::startup_server();
@@ -268,7 +274,11 @@ fn main() {
                 ..Default::default()
             },
             cx,
-            move |window, cx| cx.new(|cx| ConnApp::new(theme.id, tokens, server, window, cx)),
+            move |window, cx| {
+                cx.new(|cx| {
+                    ConnApp::new_with_boot_theme(theme.id, tokens, boot, server, window, cx)
+                })
+            },
         )
         .expect("failed to open Conn main window");
         // Become the active app with the window in front, as a launched app should.

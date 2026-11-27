@@ -264,6 +264,7 @@ impl OrbitSyncState {
                 ProfileAppearanceMode::Dark => Appearance::Dark,
                 ProfileAppearanceMode::System => current_appearance,
             };
+            effects.follow_system = matches!(parsed.mode, ProfileAppearanceMode::System);
             effects.theme_id = Some(match target_app {
                 Appearance::Light => self.light_theme_id.clone(),
                 Appearance::Dark => self.dark_theme_id.clone(),
@@ -332,6 +333,8 @@ impl OrbitSyncState {
                             ProfileAppearanceMode::Dark => Appearance::Dark,
                             ProfileAppearanceMode::System => current_appearance,
                         };
+                        effects.follow_system =
+                            matches!(parsed.mode, ProfileAppearanceMode::System);
                         let slot_id = match target_appearance {
                             Appearance::Light => self.light_theme_id.clone(),
                             Appearance::Dark => self.dark_theme_id.clone(),
@@ -453,6 +456,8 @@ impl OrbitSyncState {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct OrbitAdoptEffects {
     pub(crate) theme_id: Option<String>,
+    /// The profile's appearance mode is System: `theme_id` is the slot for the macOS appearance.
+    pub(crate) follow_system: bool,
     pub(crate) reduce_transparency: Option<bool>,
 }
 

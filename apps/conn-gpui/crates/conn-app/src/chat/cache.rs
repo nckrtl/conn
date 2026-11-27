@@ -811,7 +811,8 @@ impl RowCache {
                 | TimelineEntry::OrbitTask { .. }
                 | TimelineEntry::ProposedPlan { .. }
                 | TimelineEntry::Subagent { .. }
-                | TimelineEntry::BackgroundCommand { .. } => {
+                | TimelineEntry::BackgroundCommand { .. }
+                | TimelineEntry::BackgroundWork { .. } => {
                     base_items.push(VirtualItem::Card { row_idx: idx });
                     idx += 1;
                 }

@@ -158,6 +158,7 @@ impl OfflineReader {
         self.db
             .merge(&self.env, thread, &rows)
             .await
+            .map(|_| ())
             .map_err(read_error)
     }
 

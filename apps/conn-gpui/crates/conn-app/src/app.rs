@@ -1701,7 +1701,11 @@ impl ConnApp {
             return;
         };
         self.merge_after_primary_change(&change);
-        self.offline.shell_changed();
+        // The saved shell holds threads and projects. Items that only move the sequence are not
+        // worth rewriting megabytes for.
+        if change.projects_changed || !change.threads_changed.is_empty() {
+            self.offline.shell_changed();
+        }
         if self.shell.synchronized
             && self
                 .layout

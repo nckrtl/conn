@@ -22,7 +22,7 @@ conn-preview = { path = "crates/conn-preview" }
 command-fds = { version = "0.3.3", features = ["tokio"] }
 zip = { version = "9.6", default-features = false, features = ["deflate-flate2"] }
 nix = { version = "0.31", default-features = false, features = ["net"] }
-conn-mcp = { path = "crates/conn-mcp" }
+conn-mcp = { path = "crates/conn-mcp", default-features = false }
 conn-vcs = { path = "crates/conn-vcs" }
 conn-files = { path = "crates/conn-files" }
 conn-terminal = { path = "crates/conn-terminal" }

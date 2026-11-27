@@ -7,6 +7,13 @@ license.workspace = true
 publish.workspace = true
 rust-version.workspace = true
 
+[features]
+# The tool handlers of two optional modules of the server (`conn-server/src/modules.rs`), on
+# by default. Off, the handlers are not built, and the server withholds those tools.
+default = ["annotations", "scheduled-tasks"]
+annotations = []
+scheduled-tasks = []
+
 [dependencies]
 conn-support.workspace = true
 conn-preview.workspace = true

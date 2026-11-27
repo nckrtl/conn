@@ -47,11 +47,48 @@ pub(crate) struct Boot<'a> {
     pub host: &'a Host,
 }
 
-/// Every module with an entry, in start order.
+/// Every module with an entry, in start order. A cargo feature that is off leaves its module
+/// out of the build.
 pub(crate) const ALL: &[&Module] = &[
+    #[cfg(feature = "annotations")]
     &crate::methods::annotations::MODULE,
+    #[cfg(feature = "scheduled-tasks")]
     &crate::methods::scheduled::MODULE,
+    #[cfg(feature = "panels")]
     &crate::methods::panels::MODULE,
+];
+
+/// Each entry's `/mcp` tools. They live here, not in the entry, so a build without the module
+/// still withholds them ([`UNBUILT`]).
+pub(crate) const ANNOTATION_TOOLS: &[&str] = &[
+    "annotations_list",
+    "annotations_claim",
+    "annotations_complete",
+    "annotations_release",
+];
+pub(crate) const SCHEDULED_TASK_TOOLS: &[&str] = &[
+    "schedule_task",
+    "list_scheduled_tasks",
+    "delete_scheduled_task",
+    "run_scheduled_task_now",
+];
+pub(crate) const PANEL_TOOLS: &[&str] = &[
+    "panel_open",
+    "mcp_connect",
+    "mcp_call",
+    "database_query",
+    "files_selection",
+    "files_reveal",
+];
+
+/// The tools of the modules this build leaves out.
+const UNBUILT: &[&[&str]] = &[
+    #[cfg(not(feature = "annotations"))]
+    ANNOTATION_TOOLS,
+    #[cfg(not(feature = "scheduled-tasks"))]
+    SCHEDULED_TASK_TOOLS,
+    #[cfg(not(feature = "panels"))]
+    PANEL_TOOLS,
 ];
 
 /// The browser: the Chrome on this machine and the desktop tab relay (`conn_preview`).
@@ -131,9 +168,10 @@ fn known() -> impl Iterator<Item = (&'static str, &'static [&'static str])> {
 }
 
 fn withheld(enabled: &[&str]) -> Vec<&'static str> {
-    known()
-        .filter(|(name, _)| !enabled.contains(name))
-        .flat_map(|(_, tools)| tools.iter().copied())
+    let off = known().filter(|(name, _)| !enabled.contains(name));
+    off.map(|(_, tools)| tools)
+        .chain(UNBUILT.iter().copied())
+        .flat_map(|tools| tools.iter().copied())
         .collect()
 }
 

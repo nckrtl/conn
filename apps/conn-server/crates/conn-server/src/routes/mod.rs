@@ -9,6 +9,7 @@ use crate::AppState;
 mod assets;
 mod definitions;
 mod device_hub;
+#[cfg(feature = "scheduled-tasks")]
 pub(crate) mod hooks;
 pub mod mcp;
 mod oauth_mcp;

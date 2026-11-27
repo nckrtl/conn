@@ -21,14 +21,7 @@ pub(crate) const MODULE: Module = Module {
     start,
     methods: register,
     routes: axum::Router::new,
-    tools: &[
-        "panel_open",
-        "mcp_connect",
-        "mcp_call",
-        "database_query",
-        "files_selection",
-        "files_reveal",
-    ],
+    tools: crate::modules::PANEL_TOOLS,
     capabilities: |_| {},
 };
 

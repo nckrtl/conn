@@ -29,6 +29,7 @@ float quad_sdf(float2 point, Bounds_ScaledPixels bounds,
                Corners_ScaledPixels corner_radii);
 float quad_sdf_impl(float2 center_to_point, float corner_radius);
 float gaussian(float x, float sigma);
+float interleaved_gradient_noise(float2 position);
 float2 erf(float2 x);
 float blur_along_x(float x, float y, float sigma, float corner,
                    float2 half_size);
@@ -551,7 +552,21 @@ fragment float4 shadow_fragment(ShadowFragmentInput input [[stage_in]],
     alpha *= saturate(0.5 - element_distance);
   }
 
-  return input.color * float4(1., 1., 1., alpha);
+  // conn-gpui: dither the 8-bit output. A soft shadow over a dark background spans only a few
+  // grey levels, and each level showed as a solid band. Add up to one level of grey, picked per
+  // pixel by interleaved gradient noise, so rounding spreads the levels into a smooth falloff.
+  // Blending is `src * a + dst * (1 - a)`, so `p / a` extra in the colour adds `p` to the output
+  // whatever the background. Cap `p` at the shadow's own alpha, so no dither shows where the
+  // shadow has faded out.
+  float4 color = input.color * float4(1., 1., 1., alpha);
+  float dither = min(interleaved_gradient_noise(input.position.xy) / 255., color.a);
+  color.rgb = saturate(color.rgb + dither / max(color.a, 1e-6));
+  return color;
+}
+
+// A per-pixel threshold in [0, 1) with little low-frequency energy (Jimenez 2014).
+float interleaved_gradient_noise(float2 position) {
+  return fract(52.9829189 * fract(dot(position, float2(0.06711056, 0.00583715))));
 }
 
 struct UnderlineVertexOutput {

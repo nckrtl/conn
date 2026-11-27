@@ -14,11 +14,16 @@ path = "src/main.rs"
 [features]
 # One per optional module (`src/modules.rs`), on by default. A build without one holds no entry
 # for it, so `CONN_SERVER_MODULES` cannot turn it on, and its tools are always withheld.
-default = ["annotations", "scheduled-tasks", "panels"]
+default = ["annotations", "scheduled-tasks", "panels", "claude", "codex", "acp"]
 annotations = ["conn-mcp/annotations"]
 scheduled-tasks = ["conn-mcp/scheduled-tasks"]
 # The broker and `panels.*` only: the tool handlers share code with the browser tools and stay.
 panels = []
+# One per provider driver, on by default. A build without one offers no instance of it. The
+# tests and the examples need all three.
+claude = ["dep:conn-provider-claude"]
+codex = ["dep:conn-provider-codex"]
+acp = ["dep:conn-provider-acp"]
 
 [dependencies]
 # Decodes compressed text generator answers (text_generation/drivers.rs).
@@ -31,9 +36,9 @@ conn-engine.workspace = true
 conn-provider.workspace = true
 # Image attachments of a title through an agent provider (`attachments::saved_path`).
 conn-provider-support.workspace = true
-conn-provider-claude.workspace = true
-conn-provider-codex.workspace = true
-conn-provider-acp.workspace = true
+conn-provider-claude = { workspace = true, optional = true }
+conn-provider-codex = { workspace = true, optional = true }
+conn-provider-acp = { workspace = true, optional = true }
 conn-mcp.workspace = true
 conn-vcs.workspace = true
 conn-files.workspace = true

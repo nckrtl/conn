@@ -365,6 +365,7 @@ fn decode_manifest(manifest: &Value) -> Option<i64> {
             }
         }
     }
+    #[cfg(feature = "claude")]
     if !conn_provider_claude::catalog::manifest_adapters_are_valid(manifest) {
         return None;
     }

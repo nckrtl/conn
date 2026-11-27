@@ -28,6 +28,7 @@ use crate::{
 /// disabled instance before the first status refresh. Reads the file with `std::fs`: call it
 /// before the runtime starts. A file that does not decode gives Grok's default (off); the
 /// settings store logs it.
+#[cfg(feature = "acp")]
 pub fn stored_grok_settings(state_dir: &std::path::Path) -> conn_provider_acp::GrokSettings {
     let stored = crate::settings::effective(&state_dir.join("settings.json"));
     conn_provider_acp::GrokSettings::from_instance(

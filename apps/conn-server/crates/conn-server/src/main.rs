@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use conn_provider::Provider;
+#[cfg(feature = "claude")]
 use conn_provider_claude::{ClaudeConfig, ClaudeProvider, HelperCommand};
 use conn_server::serve::{ServeOptions, serve_with_instances};
 
@@ -17,6 +18,7 @@ fn main() {
         std::process::exit(conn_server::cli::acp_mcp_call(&args));
     }
     // Antigravity's `BROWSER`: reports a sign-in URL instead of opening a browser.
+    #[cfg(feature = "acp")]
     if std::env::args_os().nth(1).as_deref()
         == Some(std::ffi::OsStr::new(conn_provider_acp::BROWSER_SUBCOMMAND))
     {
@@ -55,6 +57,7 @@ fn run_server() {
     // the providers are detected (Codex looks for its binary on that PATH). Blocking is fine:
     // the runtime runs nothing yet.
     conn_support::login_env::hydrate();
+    #[cfg(feature = "claude")]
     let mut claude = ClaudeConfig {
         // `conn-files` stores attachments here; the CLI may read them.
         attachments_dir: Some(options.state_dir.join("attachments")),
@@ -74,9 +77,11 @@ fn run_server() {
         device_instructions: Some(conn_mcp::DEVICE_INSTRUCTIONS.to_owned()),
         ..ClaudeConfig::default()
     };
+    #[cfg(feature = "claude")]
     if let Some(helper) = &options.sdk_host {
         claude.helper = HelperCommand::from_path(helper);
     }
+    #[cfg(feature = "codex")]
     let codex = conn_provider_codex::CodexConfig {
         // The same store Claude reads; Codex gets a path line per attachment and the images.
         attachments_dir: Some(options.state_dir.join("attachments")),
@@ -88,10 +93,12 @@ fn run_server() {
         ..Default::default()
     };
     // One SDK host process for every Claude instance (it runs only while a query is open).
+    #[cfg(feature = "claude")]
     let claude_host = conn_provider_claude::helper::claude_host(
         claude.helper.clone(),
         conn_provider_claude::DRIVER,
     );
+    #[cfg(feature = "acp")]
     let antigravity = conn_provider_acp::AntigravityConfig {
         state_dir: options.state_dir.clone(),
         attachments_dir: Some(options.state_dir.join("attachments")),
@@ -99,6 +106,7 @@ fn run_server() {
         model_manifest: options.model_manifest.clone(),
         status_notifier: options.status_notifier.clone(),
     };
+    #[cfg(feature = "acp")]
     let grok = conn_provider_acp::AcpConfig {
         workspace_cwd: Some(options.cwd.clone()),
         attachments_dir: Some(options.state_dir.join("attachments")),
@@ -106,42 +114,57 @@ fn run_server() {
     };
     let instances = Arc::new(conn_server::instances::Instances::new(
         &[
+            #[cfg(feature = "claude")]
             conn_provider_claude::DRIVER,
+            #[cfg(feature = "codex")]
             conn_provider_codex::DRIVER,
+            #[cfg(feature = "acp")]
             conn_provider_acp::ANTIGRAVITY.driver,
+            #[cfg(feature = "acp")]
             conn_provider_acp::GROK.driver,
         ],
+        // Called only for a driver of the list above.
         Arc::new(
             move |id: &str, driver: &str, entry: Option<&serde_json::Value>| {
-                let provider: Arc<dyn Provider> = if driver == conn_provider_acp::ANTIGRAVITY.driver
-                {
-                    Arc::new(conn_provider_acp::AntigravityProvider::for_instance(
+                #[cfg(feature = "acp")]
+                if driver == conn_provider_acp::ANTIGRAVITY.driver {
+                    let provider = conn_provider_acp::AntigravityProvider::for_instance(
                         id.into(),
                         antigravity.clone(),
                         entry,
-                    ))
-                } else if driver == conn_provider_acp::GROK.driver {
-                    Arc::new(conn_provider_acp::AcpProvider::with_settings(
+                    );
+                    return Some(Arc::new(provider) as Arc<dyn Provider>);
+                }
+                #[cfg(feature = "acp")]
+                if driver == conn_provider_acp::GROK.driver {
+                    let provider = conn_provider_acp::AcpProvider::with_settings(
                         id.into(),
                         &conn_provider_acp::GROK,
                         grok.clone(),
                         conn_provider_acp::GrokSettings::from_instance(entry),
-                    ))
-                } else if driver == conn_provider_claude::DRIVER {
-                    Arc::new(ClaudeProvider::for_instance(
+                    );
+                    return Some(Arc::new(provider) as Arc<dyn Provider>);
+                }
+                #[cfg(feature = "claude")]
+                if driver == conn_provider_claude::DRIVER {
+                    let provider = ClaudeProvider::for_instance(
                         id.into(),
                         claude.clone(),
                         entry,
                         &claude_host,
-                    ))
-                } else {
-                    Arc::new(conn_provider_codex::CodexProvider::for_instance(
+                    );
+                    return Some(Arc::new(provider) as Arc<dyn Provider>);
+                }
+                #[cfg(feature = "codex")]
+                let provider: Option<Arc<dyn Provider>> =
+                    Some(Arc::new(conn_provider_codex::CodexProvider::for_instance(
                         id.into(),
                         codex.clone(),
                         entry,
-                    ))
-                };
-                Some(provider)
+                    )));
+                #[cfg(not(feature = "codex"))]
+                let provider: Option<Arc<dyn Provider>> = None;
+                provider
             },
         ),
     ));

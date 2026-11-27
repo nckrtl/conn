@@ -121,10 +121,13 @@ const TIMELINE_END_GAP_PX: f32 = 20.0;
 const ASSISTANT_TEXT_PAD_PX: f32 = 2.0;
 const ASSISTANT_ROW_PAD_BEFORE_WORK_PX: f32 = 16.0;
 const ASSISTANT_ROW_PAD_PX: f32 = 20.0;
-/// A user row's `pb` when it ends a group, and the `pt-0.5` above the actions row under its
-/// bubble.
+/// The hover-only actions row under a finished message, which keeps its place in the layout.
+const ASSISTANT_META_HEIGHT_PX: f32 = 6.0 + card_face::CARD_ACTION_BOX_PX;
+/// A user row's `pb` when it ends a group, and the hover-only actions row under its bubble
+/// (`pt-0.5` and the copy button), which keeps its place in the layout.
 const USER_ROW_PAD_PX: f32 = 16.0;
 const USER_ACTIONS_PAD_TOP_PX: f32 = 2.0;
+const USER_ACTIONS_HEIGHT_PX: f32 = USER_ACTIONS_PAD_TOP_PX + card_face::CARD_ACTION_BOX_PX;
 /// A work group's `pb` when its fold is open or live, and when it is a settled fold.
 const WORK_GROUP_OPEN_PAD_PX: f32 = 8.0;
 const WORK_GROUP_FOLD_PAD_PX: f32 = 12.0;

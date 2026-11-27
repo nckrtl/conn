@@ -1589,3 +1589,45 @@ fn custom_model_usage_waits_for_its_reported_capacity() {
         );
     }
 }
+
+#[test]
+fn a_command_finishing_during_the_final_reply_keeps_its_wake() {
+    let mut m = Mapper::new(FixedEnv::default(), SESSION);
+    let t = provider_thread("late");
+    m.begin_turn(&turn_input(1, &t, "start", "full-access"), "default");
+    for frame in [
+        json!({"type":"system","subtype":"task_started","task_id":"bg","tool_use_id":"tool","description":"sleep","is_backgrounded":true,"task_type":"local_bash","session_id":"s"}),
+        json!({"type":"system","subtype":"task_notification","task_id":"bg","tool_use_id":"tool","status":"completed","summary":"done","session_id":"s"}),
+        json!({"type":"assistant","parent_tool_use_id":null,"uuid":"a","message":{"id":"m","content":[{"type":"text","text":"Final reply"}]}}),
+        json!({"type":"result","subtype":"success","is_error":false,"terminal_reason":"completed","result":"Final reply","duration_ms":1,"duration_api_ms":1,"num_turns":1,"usage":{},"modelUsage":{},"total_cost_usd":0}),
+    ] {
+        m.handle(Inbound::from_value(frame));
+    }
+    assert!(m.has_pending_background_work());
+    m.begin_continuation(&turn_input(2, &t, "continue", "full-access"), "default");
+    assert!(!m.has_pending_background_work());
+}
+#[test]
+fn a_text_only_gateway_limit_preserves_its_reset() {
+    let mut m = Mapper::new(FixedEnv::default(), SESSION);
+    m.begin_turn(
+        &turn_input(1, &provider_thread("cooldown"), "continue", "full-access"),
+        "default",
+    );
+    let msg = "API Error: Request rejected (429) · All credentials for model claude-opus-5-5 are cooling down via provider claude (reset after 4m 6s)";
+    let mut seen = false;
+    for f in [
+        json!({"type":"assistant","uuid":"a","error":"rate_limit","message":{"id":"m","role":"assistant","content":[{"type":"text","text":msg}]}}),
+        json!({"type":"result","subtype":"success","uuid":"r","is_error":true,"terminal_reason":"api_error","api_error_status":429,"result":msg,"duration_ms":1,"duration_api_ms":1,"num_turns":1,"usage":{},"modelUsage":{},"total_cost_usd":0}),
+    ] {
+        for out in m.handle(Inbound::from_value(f)) {
+            if let Out::Event(ProviderEvent::TurnTerminal(t)) = out {
+                let failure = to_json(t.failure.as_ref().unwrap());
+                assert_eq!(failure["class"], "usage_limit");
+                assert_eq!(failure["resetAt"], "1970-01-01T00:04:06.000Z");
+                seen = true;
+            }
+        }
+    }
+    assert!(seen);
+}

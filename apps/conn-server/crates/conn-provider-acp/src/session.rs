@@ -2612,7 +2612,7 @@ async fn handle_permission(inner: &Arc<Inner>, generation: u64, id: RequestId, p
             }
         }
     }
-    let (params, policy, kind) = {
+    let (params, policy, kind, locations) = {
         let state = inner.state.lock().await;
         if state.generation != generation {
             return;
@@ -2623,7 +2623,11 @@ async fn handle_permission(inner: &Arc<Inner>, generation: u64, id: RequestId, p
             .as_str()
             .map(str::to_owned)
             .or_else(|| state.mapper.tracked_tool_kind(tool_call_id));
-        (params, state.policy.clone(), kind)
+        let locations = state
+            .mapper
+            .permission_paths(&params["toolCall"])
+            .unwrap_or_default();
+        (params, state.policy.clone(), kind, locations)
     };
     if inner.config.flavor.driver == "antigravity"
         && let Some(key) = params["toolCall"]["toolCallId"]
@@ -2653,12 +2657,6 @@ async fn handle_permission(inner: &Arc<Inner>, generation: u64, id: RequestId, p
         inner.deliver(&mut state, out).await;
         return;
     }
-    let locations: Vec<String> = params["toolCall"]["locations"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|l| l["path"].as_str().map(str::to_owned))
-        .collect();
     let flavor = inner.config.flavor;
     let disposition = match (flavor.permission_override)(&policy) {
         Some(disposition) => disposition,

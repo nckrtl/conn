@@ -946,6 +946,8 @@ impl<E: Env> Mapper<E> {
         };
         let parent = sub.parent.clone();
         let turn = Turn {
+            prompt_pending: false,
+            prompt_dropped: false,
             thread_id: sub.child_thread_id.clone(),
             run_id: None,
             run_ordinal: parent.run_ordinal,

@@ -52,7 +52,7 @@ pub(crate) fn form_questions(schema: &Value, message: &str) -> Option<Value> {
         if kind == "array" {
             q["multiSelect"] = json!(true);
         }
-        if !required && kind == "string" && options.is_empty() {
+        if !required {
             q["required"] = json!(false);
         }
         questions.push(q);
@@ -201,6 +201,23 @@ pub(crate) fn permission_response(questions: &Value, answers: Option<&Value>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn optional_typed_fields_can_be_skipped() {
+        let schema = json!({"type":"object","properties":{"count":{"type":"integer"},"answer":{"type":"boolean"},"choice":{"type":"string","enum":["a","b"]}}});
+        let questions = form_questions(&schema, "Choose").unwrap();
+        assert!(
+            questions
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|q| q["required"] == false)
+        );
+        assert_eq!(
+            form_response(&schema, Some(&json!({}))).to_line(),
+            r#"{"action":"accept","content":{}}"#
+        );
+    }
+
     #[test]
     fn option_ids_take_precedence_over_ambiguous_labels() {
         let q=permission_question(&json!({"toolCall":{"toolCallId":"interaction_1"},"options":[{"optionId":"1","kind":"allow_once","name":"Yes"},{"optionId":"2","kind":"allow_once","name":"Yes"}]})).unwrap();

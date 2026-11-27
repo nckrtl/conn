@@ -280,7 +280,7 @@ pub async fn serve_with_instances(
         vcs: vcs.clone(),
         terminals: terminals.clone(),
         environment: environment.clone(),
-        scheduled_tasks: OnceLock::new(),
+        thread_deleted: std::sync::Mutex::default(),
         devices: OnceLock::new(),
         settlement_wake: Arc::default(),
         idle_compaction: OnceLock::new(),

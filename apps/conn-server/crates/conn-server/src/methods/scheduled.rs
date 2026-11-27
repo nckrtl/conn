@@ -24,8 +24,8 @@ use crate::{
     table::{Failure, MethodTable},
 };
 
-/// The scheduled tasks module: the store and its timer, `scheduledTasks.*`, the webhook route
-/// and the agent's schedule tools. Deleting a thread removes its tasks through the `Host` slot.
+/// The scheduled tasks module: the store and its timer, `scheduledTasks.*`, the webhook route,
+/// the agent's schedule tools and the cleanup for a deleted thread.
 pub(crate) const MODULE: Module = Module {
     name: "scheduled-tasks",
     start,
@@ -51,7 +51,15 @@ fn start<'a>(boot: &'a Boot<'a>, deps: &'a mut Deps) -> BoxFuture<'a, ()> {
             start_timer: !crate::serve::inert(),
         })
         .await;
-        let _ = boot.host.scheduled_tasks.set(tasks.clone());
+        // `ResourceCleanupService`: a deleted thread takes the tasks bound to it.
+        let bound = tasks.clone();
+        boot.host.on_thread_deleted(move |thread_id| {
+            let (tasks, thread_id) = (bound.clone(), thread_id.to_owned());
+            Box::pin(async move {
+                let deleted = tasks.delete_for_thread(&thread_id).await;
+                deleted.map_err(|e| format!("deleting the thread's scheduled tasks: {e}"))
+            })
+        });
         deps.scheduled_tasks = Some(tasks);
     })
 }

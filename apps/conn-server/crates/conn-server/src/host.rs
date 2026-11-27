@@ -4,7 +4,7 @@
 
 use std::{
     path::PathBuf,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex, OnceLock},
 };
 
 use conn_contract::{
@@ -22,6 +22,10 @@ use serde_json::Value;
 
 use crate::{environment::Environment, methods::vcs::VcsShared};
 
+/// A module's cleanup for one deleted thread. Its error goes back to the engine, which tries
+/// the close again.
+pub type ThreadDeleted = Box<dyn Fn(&str) -> BoxFuture<'static, Result<(), String>> + Send + Sync>;
+
 pub struct Host {
     /// Set once the service exists; it needs the engine, which needs this host.
     pub mcp: OnceLock<Arc<McpService>>,
@@ -29,8 +33,9 @@ pub struct Host {
     pub vcs: VcsShared,
     pub terminals: TerminalManager,
     pub environment: Arc<Environment>,
-    /// Set once the service exists; it needs the engine, which needs this host.
-    pub scheduled_tasks: OnceLock<conn_features::scheduled::ScheduledTasks>,
+    /// What the optional modules bound to a thread, removed when it is deleted
+    /// (`ResourceCleanupService`). A module adds its cleanup when it starts.
+    pub thread_deleted: Mutex<Vec<ThreadDeleted>>,
     /// Device sessions a closed thread held (`ResourceCleanupService.cleanupDevices`).
     pub devices: OnceLock<conn_devices::Devices>,
     /// Wakes the automatic settlement sweep: a settlement can free a parent's delegates.
@@ -640,10 +645,13 @@ impl EngineHost for Host {
         let terminals = self.terminals.clone();
         // The thread's device sessions end; the devices stay on for other threads.
         let devices = self.devices.get().cloned();
-        // `ResourceCleanupService`: a deleted thread takes the tasks bound to it.
-        let tasks = deleted
-            .then(|| self.scheduled_tasks.get().cloned())
-            .flatten();
+        // A deleted thread takes what the modules bound to it. No await holds the lock.
+        let modules: Vec<_> = if deleted {
+            let cleanups = crate::lock(&self.thread_deleted);
+            cleanups.iter().map(|cleanup| cleanup(thread_id)).collect()
+        } else {
+            Vec::new()
+        };
         let thread_id = thread_id.to_owned();
         Box::pin(async move {
             // Each step runs whatever the others did; their errors come back together, so the
@@ -663,10 +671,10 @@ impl EngineHost for Host {
             if let Err(e) = terminals {
                 errors.push(format!("closing the thread's terminals stopped: {e}"));
             }
-            if let Some(tasks) = tasks
-                && let Err(e) = tasks.delete_for_thread(&thread_id).await
-            {
-                errors.push(format!("deleting the thread's scheduled tasks: {e}"));
+            for cleanup in modules {
+                if let Err(e) = cleanup.await {
+                    errors.push(e);
+                }
             }
             if let Some(devices) = devices {
                 match tokio::time::timeout(
@@ -699,6 +707,14 @@ impl EngineHost for Host {
 const DEVICE_RELEASE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl Host {
+    /// Adds a module's cleanup for a deleted thread.
+    pub fn on_thread_deleted(
+        &self,
+        cleanup: impl Fn(&str) -> BoxFuture<'static, Result<(), String>> + Send + Sync + 'static,
+    ) {
+        crate::lock(&self.thread_deleted).push(Box::new(cleanup));
+    }
+
     /// `cleanUpSettledThread` (`ThreadSettlementService.ts:700`) for the committed settlement
     /// named by `settled_at`, one cleanup at a time. While that settlement is still the
     /// thread's, `closeOnSettle` closes its `stopOnSettle` terminals and then every idle one;
@@ -800,7 +816,7 @@ mod tests {
             vcs: VcsShared::default(),
             terminals: crate::methods::terminal::manager(Some(&environment)),
             environment: environment.clone(),
-            scheduled_tasks: OnceLock::new(),
+            thread_deleted: Mutex::default(),
             devices: OnceLock::new(),
             previews: OnceLock::new(),
             settle_cleanups: Arc::default(),
@@ -935,7 +951,7 @@ mod tests {
             vcs: VcsShared::default(),
             terminals,
             environment,
-            scheduled_tasks: OnceLock::new(),
+            thread_deleted: Mutex::default(),
             devices: OnceLock::new(),
             previews: OnceLock::new(),
             settle_cleanups: Arc::default(),
@@ -1139,6 +1155,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// A module's cleanup runs for a deleted thread only. Its error goes back to the engine.
+    #[tokio::test(flavor = "current_thread")]
+    async fn delete_runs_the_modules_cleanups() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-delete-modules-{}", conn_support::uuid_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let host = cleanup_host(&dir);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let log = seen.clone();
+        host.on_thread_deleted(move |thread_id| {
+            log.lock().unwrap().push(thread_id.to_owned());
+            Box::pin(std::future::ready(Ok(())))
+        });
+        host.on_thread_deleted(|thread_id| {
+            let thread_id = thread_id.to_owned();
+            Box::pin(async move { Err(format!("nothing to remove for {thread_id}")) })
+        });
+
+        host.thread_closed("archived", ThreadClose::Archived)
+            .await
+            .unwrap();
+        assert!(seen.lock().unwrap().is_empty());
+        let error = host
+            .thread_closed("deleted", ThreadClose::Deleted)
+            .await
+            .unwrap_err();
+        assert_eq!(error, "nothing to remove for deleted");
+        assert_eq!(*seen.lock().unwrap(), ["deleted"]);
+        host.terminals.shutdown().await;
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     fn git(dir: &std::path::Path, args: &[&str]) {
         let out = std::process::Command::new("git")
             .args(args)
@@ -1233,7 +1281,7 @@ mod tests {
             vcs: VcsShared::default(),
             terminals: terminals.clone(),
             environment: environment.clone(),
-            scheduled_tasks: OnceLock::new(),
+            thread_deleted: Mutex::default(),
             devices: OnceLock::new(),
             previews: OnceLock::new(),
             settle_cleanups: Arc::default(),
@@ -1463,7 +1511,7 @@ mod tests {
             vcs: VcsShared::default(),
             terminals: terminals.clone(),
             environment: environment.clone(),
-            scheduled_tasks: OnceLock::new(),
+            thread_deleted: Mutex::default(),
             devices: OnceLock::new(),
             previews: OnceLock::new(),
             settle_cleanups: Arc::default(),
@@ -1692,7 +1740,7 @@ mod tests {
             vcs: VcsShared::default(),
             terminals: crate::methods::terminal::manager(Some(&environment)),
             environment: environment.clone(),
-            scheduled_tasks: OnceLock::new(),
+            thread_deleted: Mutex::default(),
             devices: OnceLock::new(),
             worktree_cleanup: OnceLock::new(),
             previews: OnceLock::new(),
@@ -1815,7 +1863,7 @@ mod tests {
             vcs: VcsShared::default(),
             terminals: crate::methods::terminal::manager(Some(&environment)),
             environment: environment.clone(),
-            scheduled_tasks: OnceLock::new(),
+            thread_deleted: Mutex::default(),
             previews: OnceLock::new(),
             devices: OnceLock::new(),
             settle_cleanups: Arc::default(),

@@ -882,7 +882,7 @@ mod tests {
             vcs: crate::methods::vcs::VcsShared::default(),
             terminals: crate::methods::terminal::manager(Some(&env)),
             environment: env.clone(),
-            scheduled_tasks: std::sync::OnceLock::new(),
+            thread_deleted: std::sync::Mutex::default(),
             devices: std::sync::OnceLock::new(),
             previews: std::sync::OnceLock::new(),
             settle_cleanups: Arc::default(),

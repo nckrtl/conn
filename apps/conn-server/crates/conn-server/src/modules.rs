@@ -27,8 +27,8 @@ pub const VAR: &str = "CONN_SERVER_MODULES";
 pub(crate) struct Module {
     /// Its name in [`VAR`].
     pub name: &'static str,
-    /// Builds its service into `deps` and starts its jobs. A thread-close hook follows the
-    /// `Host` slot it fills.
+    /// Builds its service into `deps`, starts its jobs and adds its cleanup for a deleted
+    /// thread (`Host::on_thread_deleted`).
     pub start: for<'a> fn(&'a Boot<'a>, &'a mut Deps) -> BoxFuture<'a, ()>,
     /// Registers its RPC methods on the service `start` built.
     pub methods: fn(&mut MethodTable, &Deps),

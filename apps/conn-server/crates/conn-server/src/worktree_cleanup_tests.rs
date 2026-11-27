@@ -479,7 +479,7 @@ impl Fixture {
             vcs: crate::methods::vcs::VcsShared::default(),
             terminals: terminals.clone(),
             environment: environment.clone(),
-            scheduled_tasks: std::sync::OnceLock::new(),
+            thread_deleted: std::sync::Mutex::default(),
             devices: std::sync::OnceLock::new(),
             worktree_cleanup: std::sync::OnceLock::new(),
             previews: std::sync::OnceLock::new(),

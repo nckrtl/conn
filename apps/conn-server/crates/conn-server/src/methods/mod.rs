@@ -16,7 +16,7 @@ mod git_message;
 mod local_servers;
 mod mcp_apps;
 pub(crate) mod orchestration;
-mod panels;
+pub(crate) mod panels;
 mod peer_links;
 mod preview;
 mod projects;
@@ -104,7 +104,6 @@ pub fn register_all(table: &mut MethodTable, deps: &Deps) {
     terminal::register(table, deps);
     secrets::register(table, deps);
     test_logins::register(table, deps);
-    panels::register(table, deps);
     devices::register(table, deps);
     source_control::register(table, deps);
     pull_requests::register(table, deps);

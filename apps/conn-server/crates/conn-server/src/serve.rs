@@ -407,7 +407,6 @@ pub async fn serve_with_instances(
     }
     let mut deps = Deps {
         preview: preview.clone(),
-        panels: Some(conn_features::panels::PanelBroker::default()),
         secrets: Some(secrets),
         test_logins: Some(conn_features::test_logins::TestLogins::new(&state_dir)),
         engine: Some(engine.clone()),

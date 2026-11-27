@@ -1,14 +1,43 @@
 //! Requests to show panels on the connected Conn desktops.
 
 use super::Deps;
-use crate::table::{Failure, MethodTable};
+use crate::{
+    modules::{Boot, Module},
+    table::{Failure, MethodTable},
+};
 use conn_contract::{
     source::{DesktopPanelResponse, DesktopPanelSubscription},
     to_json,
 };
+use conn_engine::BoxFuture;
+use conn_features::panels::PanelBroker;
 use tokio::sync::mpsc;
 
-pub(super) fn register(table: &mut MethodTable, deps: &Deps) {
+/// The panel bridge module: the broker that carries a request to a connected desktop,
+/// `panels.*`, and the agent tools that only a desktop answers. Off, the browser tools still
+/// work on this machine's Chrome but ask no desktop for a tab.
+pub(crate) const MODULE: Module = Module {
+    name: "panels",
+    start,
+    methods: register,
+    routes: axum::Router::new,
+    tools: &[
+        "panel_open",
+        "mcp_connect",
+        "mcp_call",
+        "database_query",
+        "files_selection",
+        "files_reveal",
+    ],
+    capabilities: |_| {},
+};
+
+fn start<'a>(_: &'a Boot<'a>, deps: &'a mut Deps) -> BoxFuture<'a, ()> {
+    deps.panels = Some(PanelBroker::default());
+    Box::pin(std::future::ready(()))
+}
+
+fn register(table: &mut MethodTable, deps: &Deps) {
     let Some(panels) = deps.panels.clone() else {
         return;
     };

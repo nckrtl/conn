@@ -51,6 +51,7 @@ pub(crate) struct Boot<'a> {
 pub(crate) const ALL: &[&Module] = &[
     &crate::methods::annotations::MODULE,
     &crate::methods::scheduled::MODULE,
+    &crate::methods::panels::MODULE,
 ];
 
 /// The browser: the Chrome on this machine and the desktop tab relay (`conn_preview`).

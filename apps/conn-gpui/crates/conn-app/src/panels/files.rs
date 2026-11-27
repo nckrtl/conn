@@ -2196,11 +2196,10 @@ fn decode_preview_image(
     let fit = |side: u32| ((f64::from(side) * scale).floor() as u32).max(1);
     // Channel order does not matter to the resize, so the BGRA pixels stay BGRA.
     let frame = image::RgbaImage::from_raw(width, height, decoded.as_bytes(0)?.to_vec())?;
-    let scaled = image::imageops::resize(
+    let scaled = conn_image_cache::pixels::crop_resize(
         &frame,
-        fit(width),
-        fit(height),
-        image::imageops::FilterType::Triangle,
+        (0, 0, width, height),
+        (fit(width), fit(height)),
     );
     Some(Arc::new(RenderImage::new(vec![image::Frame::new(scaled)])))
 }

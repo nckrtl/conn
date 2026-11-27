@@ -3,9 +3,82 @@ import { copyFeedText } from "../../../lab-ios/src/components/copyFeedText";
 import { FEED_THREAD, LAB_ENVIRONMENT_LABEL } from "../../../lab-ios/src/data/fixtures";
 import { requests } from "./desktopPullRequests";
 import { prKey } from "../../../lab-ios/src/data/pullRequests";
-import { defaultThread, tasks, type Thread } from "./fixtures";
+import { backgroundThread, defaultThread, tasks, type Thread } from "./fixtures";
 import { Icon } from "./Icon";
 import "./ThreadDetails.css";
+
+// GPUI `header/details_card.rs` sections the lab shows on the background commands thread, with the
+// texts of GPUI's `details_schedules` and `details_wakeups` screenshots.
+type DotState = "running" | "done" | "failed" | "idle";
+interface Automation {
+  title: string;
+  line: string;
+  dot: DotState;
+  enabled: boolean;
+}
+interface ChildAgent {
+  title: string;
+  provider: "claude" | "openai";
+  meta: string;
+  state: DotState;
+  trailing: string;
+}
+const automations: Automation[] = [
+  { title: "Morning digest", line: "Daily at 09:00 · next in 3h", dot: "done", enabled: true },
+  { title: "Weekly cleanup", line: "Every 60 min · paused", dot: "failed", enabled: false },
+];
+const wakeups = [
+  { title: "Check the CI run", line: "Wakeup · one-off · next in 4m (est.)" },
+  { title: "Check the deploy", line: "Cron · recurring · Every 5 minutes" },
+];
+const runningAgents: ChildAgent[] = [
+  {
+    title: "Set up executor v2 + Orbit MCP for conn machine",
+    provider: "claude",
+    meta: "on nick · Opus 5.5 · medium",
+    state: "running",
+    trailing: "2m",
+  },
+];
+const previousAgents: ChildAgent[] = [
+  {
+    title: "Check stalled pull requests",
+    provider: "openai",
+    meta: "GPT-6.2 Astra · high",
+    state: "done",
+    trailing: "48s",
+  },
+  {
+    title: "Rebuild the icon set",
+    provider: "claude",
+    meta: "Opus 5.5 · medium",
+    state: "failed",
+    trailing: "Failed",
+  },
+];
+
+/** A glyph with the 6px status dot in a 2px popover-coloured ring on its top right. */
+function WithDot({ icon, state }: { icon: string; state: DotState }) {
+  return (
+    <span className="inspector-dot-host">
+      <Icon name={icon} />
+      <i className="inspector-dot" data-state={state} />
+    </span>
+  );
+}
+
+function AgentRow({ agent }: { agent: ChildAgent }) {
+  return (
+    <button className="inspector-row inspector-agent" data-tip={agent.title}>
+      <WithDot icon={agent.provider} state={agent.state} />
+      <span className="inspector-two-line">
+        <span>{agent.title}</span>
+        <small>{agent.meta}</small>
+      </span>
+      <small>{agent.trailing}</small>
+    </button>
+  );
+}
 
 interface ThreadDetailsProps {
   thread: Thread;
@@ -44,6 +117,9 @@ export function ThreadDetails({
     linkedTasks.some((task) => task.pr === pr.number && task.project === pr.project),
   );
   const agents = entries.filter((entry) => entry.kind === "subagent");
+  const scheduled = thread.id === backgroundThread.id;
+  const [enabled, setEnabled] = useState(() => automations.map((task) => task.enabled));
+  const [previousOpen, setPreviousOpen] = useState(false);
   const running = agents.filter((agent) => agent.status === "running");
   const previous = agents.filter((agent) => agent.status !== "running");
   const environment =
@@ -147,6 +223,86 @@ export function ThreadDetails({
                 </span>
               </button>
             ))}
+          </section>
+        )}
+        {scheduled && (
+          <section aria-label="Automations">
+            <h3>
+              Automations
+              <button
+                className="inspector-icon-button"
+                aria-label="Manage scheduled tasks"
+                data-tip="Manage scheduled tasks"
+              >
+                <Icon name="adjust" />
+              </button>
+            </h3>
+            {automations.map((task, index) => (
+              <div
+                className="inspector-row inspector-task"
+                key={task.title}
+                data-tip={task.title + "\n" + task.line}
+              >
+                <WithDot icon="scheduled" state={task.dot} />
+                <span className="inspector-two-line inspector-task-text">
+                  <span>{task.title}</span>
+                  <small>{task.line}</small>
+                </span>
+                <button
+                  className="inspector-icon-button"
+                  aria-label={"Run " + task.title + " now"}
+                  data-tip="Run now"
+                >
+                  <Icon name="play" />
+                </button>
+                <button
+                  className="inspector-switch"
+                  role="switch"
+                  aria-checked={enabled[index]}
+                  aria-label={(enabled[index] ? "Pause " : "Resume ") + task.title}
+                  onClick={() => setEnabled(enabled.map((on, i) => (i === index ? !on : on)))}
+                />
+              </div>
+            ))}
+          </section>
+        )}
+        {scheduled && (
+          <section aria-label="Agent wakeups">
+            <h3>Agent wakeups</h3>
+            {wakeups.map((wakeup) => (
+              <div
+                className="inspector-row inspector-task"
+                key={wakeup.title}
+                data-tip={wakeup.title + "\n" + wakeup.line + "\nConn cannot cancel this wakeup."}
+              >
+                <Icon name="scheduled" />
+                <span className="inspector-two-line inspector-task-text">
+                  <span>{wakeup.title}</span>
+                  <small>{wakeup.line}</small>
+                </span>
+              </div>
+            ))}
+          </section>
+        )}
+        {scheduled && (
+          <section aria-label="Subagents">
+            <h3>Subagents · {runningAgents.length} running</h3>
+            {runningAgents.map((agent) => (
+              <AgentRow key={agent.title} agent={agent} />
+            ))}
+            <button
+              className="inspector-row"
+              aria-expanded={previousOpen}
+              onClick={() => setPreviousOpen(!previousOpen)}
+            >
+              <Icon name="agent" />
+              <span>Previous agents</span>
+              <small className="inspector-failed">1 failed</small>
+              {!previousOpen && <small className="inspector-count">{previousAgents.length}</small>}
+              <Icon name={previousOpen ? "chevron-down" : "chevron-right"} />
+            </button>
+            {previousOpen &&
+              previousAgents.map((agent) => <AgentRow key={agent.title} agent={agent} />)}
           </section>
         )}
         {agents.length > 0 && (

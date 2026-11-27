@@ -3,6 +3,14 @@ import XCTest
 
 @MainActor
 extension XCUIApplication {
+    /// The workspace's bottom-toolbar switcher (`WorkspaceRootView.workspaceSwitcher`): a segmented
+    /// control whose segments are labelled Threads, Tasks, Pull requests and Search. The bottom
+    /// toolbar hides while searching, so the switcher only exists outside search.
+    var workspaceSwitcher: XCUIElement { segmentedControls["workspace.switcher"] }
+
+    /// One segment of the switcher, by its accessibility label.
+    func workspaceSegment(_ label: String) -> XCUIElement { workspaceSwitcher.buttons[label] }
+
     func visiblePickerElement(where matches: (any XCUIElementSnapshot) -> Bool) -> (any XCUIElementSnapshot)? {
         guard let root = try? snapshot() else { return nil }
         func find(_ node: any XCUIElementSnapshot) -> (any XCUIElementSnapshot)? {
@@ -91,7 +99,7 @@ final class ConnSpikeUITests: XCTestCase {
         saveScreenshot(named: "home\(themeSuffix)", dir: screensDir)
 
         // 2b. Search mode
-        let searchButton = app.buttons["workspace.searchButton"].firstMatch
+        let searchButton = app.workspaceSegment("Search").firstMatch
         if searchButton.waitForExistence(timeout: 5) {
             searchButton.tap()
             RunLoop.current.run(until: Date().addingTimeInterval(0.5))
@@ -104,7 +112,7 @@ final class ConnSpikeUITests: XCTestCase {
         }
 
         // 2c. Tasks tab: Orbit's tasks (or why they cannot be read), then the lane menu.
-        let tasksTab = app.buttons["workspace.tab.tasks"].firstMatch
+        let tasksTab = app.workspaceSegment("Tasks").firstMatch
         if tasksTab.waitForExistence(timeout: 5) {
             tasksTab.tap()
             let answered = NSPredicate(format: "identifier BEGINSWITH 'tasks.row.' OR identifier IN {'tasks.empty', 'tasks.error'}")
@@ -126,7 +134,7 @@ final class ConnSpikeUITests: XCTestCase {
         }
 
         // 2d. Pull requests tab
-        let prsTab = app.buttons["workspace.tab.pullRequests"].firstMatch
+        let prsTab = app.workspaceSegment("Pull requests").firstMatch
         if prsTab.waitForExistence(timeout: 5) {
             prsTab.tap()
             RunLoop.current.run(until: Date().addingTimeInterval(0.5))
@@ -134,7 +142,7 @@ final class ConnSpikeUITests: XCTestCase {
         }
 
         // Return to Threads tab
-        let threadsTab = app.buttons["workspace.tab.threads"].firstMatch
+        let threadsTab = app.workspaceSegment("Threads").firstMatch
         if threadsTab.waitForExistence(timeout: 5) {
             threadsTab.tap()
             RunLoop.current.run(until: Date().addingTimeInterval(0.4))
@@ -499,7 +507,9 @@ final class ConnSpikeUITests: XCTestCase {
         capture("excerpt")
     }
 
-    func testWorkspaceSystemTabs() throws {
+    /// The bottom toolbar's segmented switcher moves between Threads, Tasks and Pull requests, its
+    /// Search segment swaps the toolbar for the search field, and Back from a result returns to it.
+    func testWorkspaceToolbarSwitcher() throws {
         let env = ProcessInfo.processInfo.environment
         guard let pairing = env["CONN_PAIRING_URL"], !pairing.isEmpty else {
             throw XCTSkip("Set CONN_PAIRING_URL to run against an isolated, seeded Conn server")
@@ -515,14 +525,15 @@ final class ConnSpikeUITests: XCTestCase {
         url.typeText(pairing)
         app.buttons["pairing.connectButton"].tap()
 
-        let bar = app.tabBars.firstMatch
-        XCTAssertTrue(bar.waitForExistence(timeout: 25))
-        let threads = bar.buttons["workspace.tab.threads"]
-        let tasks = bar.buttons["workspace.tab.tasks"]
-        let pullRequests = bar.buttons["workspace.tab.pullRequests"]
-        let search = bar.buttons["workspace.searchButton"]
+        let switcher = app.workspaceSwitcher
+        XCTAssertTrue(switcher.waitForExistence(timeout: 25))
+        let threads = app.workspaceSegment("Threads")
+        let tasks = app.workspaceSegment("Tasks")
+        let pullRequests = app.workspaceSegment("Pull requests")
+        let search = app.workspaceSegment("Search")
         XCTAssertTrue(threads.isSelected)
         XCTAssertTrue(tasks.isHittable && pullRequests.isHittable && search.isHittable)
+        // The segmented control's glass thumb follows a drag from one segment to another.
         let center = CGVector(dx: 0.5, dy: 0.5)
         threads.coordinate(withNormalizedOffset: center).press(forDuration: 0.35,
             thenDragTo: tasks.coordinate(withNormalizedOffset: center), withVelocity: .slow, thenHoldForDuration: 0.2)
@@ -535,8 +546,11 @@ final class ConnSpikeUITests: XCTestCase {
         let field = app.textFields["workspace.searchField"]
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         XCTAssertEqual(field.placeholderValue, "Search pull requests")
+        // Search hides the bottom toolbar; the field and its cancel button take its place.
+        XCTAssertTrue(switcher.waitForNonExistence(timeout: 5))
         let cancel = app.buttons["workspace.cancelSearch"]
         cancel.tap()
+        XCTAssertTrue(switcher.waitForExistence(timeout: 5))
         XCTAssertTrue(pullRequests.wait(for: \.isSelected, toEqual: true, timeout: 5))
 
         threads.tap()
@@ -549,14 +563,16 @@ final class ConnSpikeUITests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 15))
         row.tap()
         XCTAssertTrue(app.descendants(matching: .any)["thread.composer"].waitForExistence(timeout: 10))
-        XCTAssertFalse(bar.exists || field.exists || cancel.exists)
+        XCTAssertFalse(switcher.exists || field.exists || cancel.exists)
         XCTAssertFalse(app.buttons["workspace.settingsButton"].exists || app.buttons["inbox.newThreadButton"].exists)
         app.navigationBars.buttons["Back"].tap()
         XCTAssertTrue(field.waitForExistence(timeout: 5))
         XCTAssertEqual(field.value as? String, threadTitle)
         XCTAssertTrue(app.keyboards.firstMatch.waitForNonExistence(timeout: 5), "Back should restore results without reopening the keyboard")
         XCTAssertTrue(cancel.isHittable, "Cancel must be reachable after returning from a result")
+        XCTAssertFalse(switcher.exists, "The toolbar stays hidden while the results show")
         cancel.tap()
+        XCTAssertTrue(switcher.waitForExistence(timeout: 5))
         XCTAssertTrue(threads.wait(for: \.isSelected, toEqual: true, timeout: 5))
     }
 
@@ -591,7 +607,7 @@ final class ConnSpikeUITests: XCTestCase {
             XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
         }
         try await mode("normal")
-        let threads = app.buttons["workspace.tab.threads"]
+        let threads = app.workspaceSegment("Threads")
         let ready = threads.waitForExistence(timeout: 25)
         if !ready { capture("workspace-failure") }
         XCTAssertTrue(ready)
@@ -599,7 +615,7 @@ final class ConnSpikeUITests: XCTestCase {
         let firstThread = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'inbox.thread.'")).firstMatch
         XCTAssertTrue(firstThread.waitForExistence(timeout: 15))
         capture("threads")
-        app.buttons["workspace.searchButton"].tap()
+        app.workspaceSegment("Search").tap()
         capture("bottom-search")
         app.buttons["workspace.cancelSearch"].tap()
         app.buttons["Filter threads"].tap()
@@ -690,13 +706,13 @@ final class ConnSpikeUITests: XCTestCase {
         app.navigationBars.buttons.firstMatch.tap()
         if fixture != nil {
             try await mode("unavailable")
-            app.buttons["workspace.tab.tasks"].tap()
+            app.workspaceSegment("Tasks").tap()
             XCTAssertTrue(app.descendants(matching: .any)["tasks.error"].firstMatch.waitForExistence(timeout: 10))
             capture("tasks-unavailable")
             threads.tap()
             try await mode("normal")
         }
-        app.buttons["workspace.tab.tasks"].tap()
+        app.workspaceSegment("Tasks").tap()
         let task = env["CONN_TEST_TASK_ID"].map { app.descendants(matching: .any)["tasks.row." + $0].firstMatch } ?? app.descendants(matching: .any).matching(NSPredicate(format: "identifier BEGINSWITH 'tasks.row.'")).firstMatch
         if task.waitForExistence(timeout: 12) {
             capture("tasks")
@@ -731,7 +747,7 @@ final class ConnSpikeUITests: XCTestCase {
             capture("expanded-step")
             app.navigationBars.buttons.firstMatch.tap()
         }
-        app.buttons["workspace.tab.pullRequests"].tap()
+        app.workspaceSegment("Pull requests").tap()
         let pr = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'pr.row.'")).firstMatch
         XCTAssertTrue(pr.waitForExistence(timeout: 40), "The test server should list at least one open pull request")
         app.buttons["Filter pull requests"].tap()
@@ -810,7 +826,7 @@ final class ConnSpikeUITests: XCTestCase {
             app.navigationBars.buttons.firstMatch.tap()
             try await mode("empty")
             threads.tap()
-            app.buttons["workspace.tab.pullRequests"].tap()
+            app.workspaceSegment("Pull requests").tap()
             XCTAssertTrue(app.staticTexts["No pull requests"].waitForExistence(timeout: 12))
             capture("pull-requests-empty")
             try await mode("normal")
@@ -905,7 +921,7 @@ final class ConnSpikeUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Not connected"].exists)
         XCTAssertFalse(alert.exists)
         XCTAssertTrue(row.exists)
-        app.buttons["workspace.tab.pullRequests"].tap()
+        app.workspaceSegment("Pull requests").tap()
         XCTAssertTrue(app.buttons["pr.row.hardimpactdev/hauzer.140"].waitForExistence(timeout: 15))
     }
 
@@ -1433,7 +1449,8 @@ final class ConnSpikeUITests: XCTestCase {
     }
 
     /// Writes the running app's accessibility tree to `CONN_DUMP_PATH` (layout debugging).
-    /// The workspace bar is one row: settings circle, tab pill, new-thread circle, level and not overlapping.
+    /// The workspace bar is one bottom-toolbar row: settings circle, segmented switcher, new-thread
+    /// circle, level and not overlapping.
     func testWorkspaceBarRowLayout() throws {
         guard let pairing = ProcessInfo.processInfo.environment["CONN_PAIRING_URL"], !pairing.isEmpty else {
             throw XCTSkip("Set CONN_PAIRING_URL to run against an isolated, seeded Conn server")
@@ -1448,12 +1465,12 @@ final class ConnSpikeUITests: XCTestCase {
         url.typeText(pairing)
         app.buttons["pairing.connectButton"].tap()
 
-        let bar = app.tabBars.firstMatch
-        XCTAssertTrue(bar.waitForExistence(timeout: 25))
+        let switcher = app.workspaceSwitcher
+        XCTAssertTrue(switcher.waitForExistence(timeout: 25))
         let settings = app.buttons["workspace.settingsButton"]
         let newThread = app.buttons["inbox.newThreadButton"]
-        let tabs = ["threads", "tasks", "pullRequests"].map { bar.buttons["workspace.tab.\($0)"] }
-        let search = bar.buttons["workspace.searchButton"]
+        let tabs = ["Threads", "Tasks", "Pull requests"].map { app.workspaceSegment($0) }
+        let search = app.workspaceSegment("Search")
         XCTAssertTrue(settings.waitForExistence(timeout: 5) && newThread.exists)
 
         func capture(_ name: String) {
@@ -1464,12 +1481,10 @@ final class ConnSpikeUITests: XCTestCase {
         }
 
         func checkRow(_ name: String) {
-            // The tab bar element is the system's full-width container. The visible pill is the four
-            // tab items plus the pill's 4pt inner inset.
-            let items = (tabs + [search]).map(\.frame)
-            let b = items.dropFirst().reduce(items[0]) { $0.union($1) }.insetBy(dx: -4, dy: -4)
+            // The pill is the segmented switcher itself, a bottom-toolbar item between the circles.
+            let b = switcher.frame
             let s = settings.frame, n = newThread.frame
-            let named = [("settings", s), ("pill", b), ("new", n)] + (tabs + [search]).map { ($0.identifier, $0.frame) }
+            let named = [("settings", s), ("pill", b), ("new", n)] + (tabs + [search]).map { ($0.label, $0.frame) }
             let report = named
                 .map { "\($0.0): x \($0.1.minX)–\($0.1.maxX) y \($0.1.minY)–\($0.1.maxY) h \($0.1.height)" }
                 .joined(separator: "\n")
@@ -1486,8 +1501,8 @@ final class ConnSpikeUITests: XCTestCase {
             XCTAssertLessThanOrEqual(s.maxX, b.minX, name + " settings overlaps bar\n" + report)
             XCTAssertLessThanOrEqual(b.maxX, n.minX, name + " new overlaps bar\n" + report)
             for tab in tabs + [search] {
-                XCTAssertTrue(tab.isHittable, name + " " + tab.identifier + " is not hittable")
-                XCTAssertTrue(b.contains(tab.frame), name + " " + tab.identifier + " is outside the bar")
+                XCTAssertTrue(tab.isHittable, name + " " + tab.label + " is not hittable")
+                XCTAssertTrue(b.insetBy(dx: -1, dy: -1).contains(tab.frame), name + " " + tab.label + " is outside the bar")
             }
             XCTAssertTrue(settings.isHittable && newThread.isHittable, name + " circles are not hittable")
         }
@@ -1625,7 +1640,7 @@ final class ConnSpikeUITests: XCTestCase {
         XCTAssertEqual(app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH 'inbox.thread.'")).count, 1)
         let searchQueries = env["CONN_ARCHIVED_CHILD"] == "1" ? [] : ["Artifact child", "child-only-branch"]
         for query in searchQueries {
-            app.tabBars.firstMatch.buttons["Search"].tap()
+            app.workspaceSegment("Search").tap()
             let search = app.textFields.matching(NSPredicate(format: "placeholderValue == %@", "Search threads")).firstMatch
             XCTAssertTrue(search.waitForExistence(timeout: 5))
             search.tap()

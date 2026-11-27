@@ -54,6 +54,15 @@ impl SentImage {
         }
     }
 
+    /// What its gallery tile shows.
+    pub(super) fn tile(&self) -> TileImage {
+        match self {
+            Self::Ready(image) => TileImage::Ready(ImageSource::Render(image.clone())),
+            Self::Loading(_) => TileImage::Loading,
+            Self::Failed => TileImage::Missing,
+        }
+    }
+
     /// Frees the window textures once the cache let this go. Deferred, so a window that is
     /// painting right now is back in the app and loses its texture too.
     pub(super) fn release(self, cx: &mut App) {
@@ -61,6 +70,16 @@ impl SentImage {
             cx.defer(move |cx| cx.drop_image(image, None));
         }
     }
+}
+
+/// What a gallery tile shows.
+pub(super) enum TileImage {
+    Ready(ImageSource),
+    /// Still loading: a plain fill, so a picture that comes from disk a moment later never
+    /// flashes the missing-image icon.
+    Loading,
+    /// No picture: the fill with the image icon.
+    Missing,
 }
 
 /// One thumbnail load: what to download.
@@ -411,13 +430,19 @@ pub(super) fn runs_by<T, K: PartialEq>(
 /// bounds first and rounds that visible quad, so a portrait or landscape picture keeps its
 /// round corners. The tile paints no border, and the picture is absolutely placed so its
 /// natural size never feeds the grid row height.
-pub(super) fn gallery_tile(
-    image: Option<ImageSource>,
-    tokens: &Tokens,
-    radii: TileRadii,
-) -> AnyElement {
+pub(super) fn gallery_tile(image: TileImage, tokens: &Tokens, radii: TileRadii) -> AnyElement {
     let muted = hsla(tokens.muted_foreground);
     let fill = hsla_alpha(tokens.muted, 0.60);
+    let fill_only = move || {
+        div()
+            .size_full()
+            .rounded_tl(px(radii.top_left))
+            .rounded_tr(px(radii.top_right))
+            .rounded_br(px(radii.bottom_right))
+            .rounded_bl(px(radii.bottom_left))
+            .bg(fill)
+            .into_any_element()
+    };
     let placeholder = move || {
         div()
             .size_full()
@@ -433,7 +458,7 @@ pub(super) fn gallery_tile(
             .into_any_element()
     };
     match image {
-        Some(image) => img(image)
+        TileImage::Ready(image) => img(image)
             .absolute()
             .inset_0()
             .size_full()
@@ -444,7 +469,12 @@ pub(super) fn gallery_tile(
             .object_fit(ObjectFit::Cover)
             .with_fallback(placeholder)
             .into_any_element(),
-        None => div()
+        TileImage::Loading => div()
+            .absolute()
+            .inset_0()
+            .child(fill_only())
+            .into_any_element(),
+        TileImage::Missing => div()
             .absolute()
             .inset_0()
             .child(placeholder())

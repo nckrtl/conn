@@ -55,6 +55,15 @@ pub(super) fn subagent_summary_key(entry_id: &str) -> String {
 const AUTO_ADVANCE_DELAY: Duration = Duration::from_millis(200);
 /// Conn's `ANCHORED_COPY_TOAST_TIMEOUT_MS`: how long a Copy button shows its check.
 const COPY_CONFIRM_DURATION: Duration = Duration::from_millis(1_000);
+
+/// Images a hover warms at most: the newest of the thread.
+const WARM_MAX_IMAGES: usize = 12;
+
+/// How long saving an attachment waits for the server: a whole file may be large.
+const SAVE_DEADLINES: conn_client::FetchDeadlines = conn_client::FetchDeadlines {
+    rpc: Duration::from_secs(30),
+    download: Duration::from_secs(600),
+};
 /// Conn's `SECRET_REQUEST_DEFAULT_PLACEHOLDER`.
 const SECRET_DEFAULT_PLACEHOLDER: &str = "Paste the secret";
 /// Indentation per directory level in the lab's changed-files tree.
@@ -236,16 +245,23 @@ impl ChatView {
         image: &conn_contract::ChatImageAttachment,
         target: super::thumb_cache::TargetPx,
         cx: &mut Context<'_, Self>,
-    ) -> Option<gpui_kit::ImageSource> {
-        use super::attachment_thumb::{SentImage, ThumbJob};
-        self.connection.as_ref()?;
-        let key = (image.id.clone(), target);
+    ) -> super::attachment_thumb::TileImage {
+        use super::attachment_thumb::{SentImage, ThumbJob, TileImage};
+        if self.connection.is_none() {
+            return TileImage::Missing;
+        }
+        let key = (self.environment_key.clone(), image.id.clone(), target);
         let mut thumbs = self.attachment_thumbs.borrow_mut();
         if let Some(entry) = thumbs.get(&key) {
             if matches!(entry, SentImage::Loading(_)) {
                 self.thumb_loads.borrow_mut().touch(&key);
             }
-            return entry.source();
+            let tile = entry.tile();
+            #[cfg(test)]
+            if matches!(tile, TileImage::Ready(_)) {
+                self.ready_tiles.set(self.ready_tiles.get() + 1);
+            }
+            return tile;
         }
         let request = self.next_thumb_request.get();
         self.next_thumb_request.set(request + 1);
@@ -261,7 +277,7 @@ impl ChatView {
         if let Some(start) = start {
             self.start_thumb(start, cx);
         }
-        None
+        TileImage::Loading
     }
 
     /// Downloads and decodes one thumbnail; its permit in [`Self::thumb_loads`] is taken. The
@@ -278,14 +294,20 @@ impl ChatView {
             .borrow_mut()
             .insert(request, cancel.clone());
         let connection = self.connection.clone();
+        let store = self.image_store.clone();
         let svg_renderer = cx.svg_renderer();
-        let target = key.1;
+        let environment = key.0.clone();
+        let target = key.2;
         cx.spawn(async move |this, cx| {
             let bytes = match connection {
-                Some(connection) if !cancel.load(Ordering::Relaxed) => connection
-                    .fetch_attachment_bytes_within(
+                Some(connection) if !cancel.load(Ordering::Relaxed) => store
+                    .attachment_bytes(
+                        cx.background_executor(),
+                        &connection,
+                        environment.as_deref(),
                         &job.attachment_id,
                         super::thumb_cache::LOAD_DEADLINES,
+                        None,
                     )
                     .await
                     .ok(),
@@ -338,6 +360,8 @@ impl ChatView {
     /// tiles not drawn since the last call. Runs once per chat render, before the timeline
     /// lays out its rows.
     pub(super) fn sweep_thumb_loads(&mut self, cx: &mut Context<'_, Self>) {
+        #[cfg(test)]
+        self.ready_tiles.set(0);
         for old in self.attachment_thumbs.get_mut().begin_frame() {
             old.release(cx);
         }
@@ -355,14 +379,71 @@ impl ChatView {
         }
     }
 
-    /// Cancels every thumbnail load and drops every thumbnail (reconnect). Running work keeps
-    /// its permit until it returns.
-    pub(super) fn clear_thumbs(&mut self, cx: &mut Context<'_, Self>) {
+    /// Downloads to disk the newest [`WARM_MAX_IMAGES`] of `ids` that are not there yet, one at
+    /// a time, so the thread they belong to opens without waiting on the network. Nothing is
+    /// decoded: the pixels decode when the thread shows them. A sidebar hover calls it.
+    pub(crate) fn warm_attachments(
+        &mut self,
+        environment: String,
+        connection: conn_client::Connection,
+        ids: Vec<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if !self.image_store.enabled() {
+            return;
+        }
+        let ids: Vec<String> = ids
+            .into_iter()
+            .rev()
+            .filter(|id| self.warming.insert((environment.clone(), id.clone())))
+            .take(WARM_MAX_IMAGES)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let store = self.image_store.clone();
+        cx.spawn(async move |this, cx| {
+            for id in &ids {
+                let (check, env, key) = (store.clone(), environment.clone(), id.clone());
+                let cached = cx
+                    .background_executor()
+                    .spawn(async move { check.contains(&env, &key) })
+                    .await;
+                if !cached {
+                    let _ = store
+                        .attachment_bytes(
+                            cx.background_executor(),
+                            &connection,
+                            Some(&environment),
+                            id,
+                            super::thumb_cache::LOAD_DEADLINES,
+                            None,
+                        )
+                        .await;
+                }
+            }
+            let _ = this.update(cx, |view, _| {
+                for id in ids {
+                    view.warming.remove(&(environment.clone(), id));
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Cancels every thumbnail load (reconnect or another environment). Decoded thumbnails stay:
+    /// their keys name their environment, so they never show for another server, and a thread
+    /// opened again shows them at once. Running work keeps its permit until it returns.
+    pub(super) fn cancel_thumb_loads(&mut self, cx: &mut Context<'_, Self>) {
         let _running = self.thumb_loads.get_mut().clear();
         for (_, cancel) in self.thumb_cancels.get_mut().drain() {
             cancel.store(true, Ordering::Relaxed);
         }
-        for image in self.attachment_thumbs.get_mut().clear() {
+        // A thumbnail with no environment cannot tell servers apart, so it goes too.
+        let thumbs = self.attachment_thumbs.get_mut();
+        for image in thumbs.retain(|(environment, ..), entry| {
+            environment.is_some() && matches!(entry, super::attachment_thumb::SentImage::Ready(_))
+        }) {
             image.release(cx);
         }
     }
@@ -703,6 +784,8 @@ impl ChatView {
             .unwrap_or_else(std::env::temp_dir);
         let prompt = cx.prompt_for_new_path(&directory, Some(&file_name));
         let id = id.to_owned();
+        let store = self.image_store.clone();
+        let environment = self.environment_key.clone();
         cx.spawn(async move |this, cx| {
             let outcome: Result<(), String> = async {
                 let chosen = match prompt.await {
@@ -711,8 +794,15 @@ impl ChatView {
                     Ok(Ok(None)) | Err(_) => return Ok(()),
                     Ok(Err(err)) => return Err(err.to_string()),
                 };
-                let bytes = connection
-                    .fetch_attachment_bytes(&id)
+                let bytes = store
+                    .attachment_bytes(
+                        cx.background_executor(),
+                        &connection,
+                        environment.as_deref(),
+                        &id,
+                        SAVE_DEADLINES,
+                        None,
+                    )
                     .await
                     .map_err(|err| err.to_string())?;
                 cx.background_executor()
@@ -1947,8 +2037,9 @@ impl ChatView {
 
         // Lab `SubagentCard`: `<model> · <effort>` (and the state while no time shows), the run
         // time at the right.
+        let child = self.subagent_children.get(id);
         let model = subagent_card_model(
-            self.subagent_child_models.get(id),
+            child.and_then(SubagentChild::selected_model),
             self.subagent_models.get(id),
         );
         let model_text =
@@ -1960,8 +2051,12 @@ impl ChatView {
         meta_parts.extend(model_text);
         // A task on another machine has the driver `remote` here, a label and not a provider, so the
         // mark comes from the instance and model it runs.
-        let (provider_key, provider_label) =
-            subagent_provider(role, model, self.server_config.catalog());
+        let (provider_key, provider_label) = subagent_provider(
+            role,
+            child.and_then(|child| child.driver.as_deref()),
+            model,
+            self.server_config.catalog(),
+        );
         let provider_mark = div()
             .id(SharedString::from(format!("subagent-provider-{id}")))
             .a11y(
@@ -2684,10 +2779,11 @@ pub(super) fn outline_button_surface(
 /// (`Agent` for a provider with no mark of its own).
 ///
 /// The subagent's driver names the provider, except for a task on another machine: its driver is
-/// `remote`. Then the provider comes from the model catalog, the instance id, or the model slug,
-/// in that order.
-fn subagent_provider(
+/// `remote`. Then the provider comes from `child_driver` (the driver the child's own environment
+/// lists for its instance), the model catalog, the instance id, or the model slug, in that order.
+pub(crate) fn subagent_provider(
     role: &str,
+    child_driver: Option<&str>,
     model: Option<&conn_state::SubagentModel>,
     catalog: &conn_state::providers::ModelCatalog,
 ) -> (String, &'static str) {
@@ -2697,8 +2793,13 @@ fn subagent_provider(
             .find_model(model.instance_id.as_deref(), slug)
             .map(|found| found.driver.as_str())
     });
+    let instance_driver = model
+        .and_then(|model| model.instance_id.as_deref())
+        .and_then(|instance| catalog.driver_for_instance(instance));
     let candidates = [
         Some(role),
+        child_driver,
+        instance_driver,
         catalog_driver,
         model.and_then(|model| model.instance_id.as_deref()),
         model.and_then(|model| model.model.as_deref()),
@@ -2713,6 +2814,23 @@ fn subagent_provider(
         .unwrap_or_else(|| (role.to_owned(), "Agent"))
 }
 
+/// A subagent's child thread as its own environment knows it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SubagentChild {
+    /// The child's own model selection (`model` is `None` when it has none).
+    pub(crate) model: conn_state::SubagentModel,
+    /// The driver of the child's provider instance, from the catalog of the child's environment.
+    pub(crate) driver: Option<String>,
+}
+
+impl SubagentChild {
+    /// The child's own model, when its selection names one.
+    #[must_use]
+    pub(crate) fn selected_model(&self) -> Option<&conn_state::SubagentModel> {
+        self.model.model.is_some().then_some(&self.model)
+    }
+}
+
 /// The model a subagent card shows: the child thread's own selection (`child`, from the shell)
 /// when known, else the parent's subagent record (the delegate call's `target`). The record can
 /// lack the options the child runs with, so the child wins.
@@ -2723,13 +2841,20 @@ pub(crate) fn subagent_card_model<'a>(
     child.filter(|model| model.model.is_some()).or(record)
 }
 
-/// The child thread's own model of each subagent entry of `thread`, by entry id. `child_shell`
-/// finds a child thread in the shell: its id and, for a child on another linked environment, that
-/// environment (`None`: the parent's own environment). Children the shell lacks are left out.
-pub(crate) fn subagent_child_models<'a>(
+/// The child thread of each subagent entry of `thread`, by entry id. `child_shell` finds a child
+/// thread in the shell, with the catalog of its environment when that one is known: its id and,
+/// for a child on another linked environment, that environment (`None`: the parent's own
+/// environment). Children the shell lacks are left out.
+pub(crate) fn subagent_children<'a>(
     thread: &conn_state::ThreadState,
-    child_shell: impl Fn(&str, Option<&str>) -> Option<&'a conn_state::ThreadShell>,
-) -> HashMap<String, conn_state::SubagentModel> {
+    child_shell: impl Fn(
+        &str,
+        Option<&str>,
+    ) -> Option<(
+        &'a conn_state::ThreadShell,
+        Option<&'a conn_state::providers::ModelCatalog>,
+    )>,
+) -> HashMap<String, SubagentChild> {
     thread
         .entries
         .iter()
@@ -2743,20 +2868,43 @@ pub(crate) fn subagent_child_models<'a>(
             else {
                 return None;
             };
-            let child = match (remote_child, child_thread_id) {
+            let (child, catalog) = match (remote_child, child_thread_id) {
                 (Some(remote), _) => {
                     child_shell(&remote.thread_id, Some(remote.environment_id.as_str()))
                 }
                 (None, Some(child)) => child_shell(child, None),
                 (None, None) => None,
             }?;
-            let model = conn_state::SubagentModel::from_selection(
-                &child.provider_instance_id,
-                &child.model_selection,
-            );
-            model.model.is_some().then(|| (id.clone(), model))
+            let child = subagent_child(child, catalog);
+            (child.model.model.is_some() || child.driver.is_some()).then(|| (id.clone(), child))
         })
         .collect()
+}
+
+/// The model and driver of `child`, a thread on the environment whose catalog is `catalog`
+/// (`None`: not known yet, so no driver).
+fn subagent_child(
+    child: &conn_state::ThreadShell,
+    catalog: Option<&conn_state::providers::ModelCatalog>,
+) -> SubagentChild {
+    let model = conn_state::SubagentModel::from_selection(
+        &child.provider_instance_id,
+        &child.model_selection,
+    );
+    let driver = catalog
+        .and_then(|catalog| {
+            catalog
+                .driver_for_instance(&child.provider_instance_id)
+                .or_else(|| {
+                    let slug = model.model.as_deref()?;
+                    catalog
+                        .find_model(Some(&child.provider_instance_id), slug)
+                        .map(|found| found.driver.as_str())
+                })
+        })
+        .filter(|driver| !driver.is_empty())
+        .map(str::to_owned);
+    SubagentChild { model, driver }
 }
 
 /// Option ids that carry a provider's effort: Codex and Grok `reasoningEffort`, Claude `effort`,
@@ -2812,7 +2960,8 @@ pub(crate) fn subagent_model_text(
 #[cfg(test)]
 mod subagent_model_tests {
     use super::{
-        subagent_card_model, subagent_child_models, subagent_model_text, subagent_provider,
+        SubagentChild, subagent_card_model, subagent_children, subagent_model_text,
+        subagent_provider,
     };
     use conn_state::providers::ModelCatalog;
     use conn_state::{SubagentModel, ThreadShell, ThreadState, TimelineEntry, TurnItemStatus};
@@ -2986,12 +3135,19 @@ mod subagent_model_tests {
             ),
             subagent_entry("card-unknown", Some("child-missing"), None),
         ];
-        let models = subagent_child_models(&thread, |id, environment| match (id, environment) {
-            ("child-local", None) => Some(&local),
-            ("child-remote", Some("mini")) => Some(&remote),
+        let catalog = catalog();
+        let children = subagent_children(&thread, |id, environment| match (id, environment) {
+            ("child-local", None) => Some((&local, None)),
+            ("child-remote", Some("mini")) => Some((&remote, Some(&catalog))),
             _ => None,
         });
-        let catalog = catalog();
+        let models: HashMap<String, SubagentModel> = children
+            .iter()
+            .map(|(id, child)| (id.clone(), child.model.clone()))
+            .collect();
+        // The remote child's environment lists its instance; the local one's is not known.
+        assert_eq!(children["card-remote"].driver.as_deref(), Some("codex"));
+        assert_eq!(children["card-local"].driver, None);
         assert_eq!(
             effort_of(subagent_model_text(&catalog, &models["card-local"])),
             "high"
@@ -3040,11 +3196,14 @@ mod subagent_model_tests {
     #[test]
     fn the_driver_names_the_provider_mark() {
         let catalog = ModelCatalog::default();
-        assert_eq!(subagent_provider("claudeAgent", None, &catalog).1, "Claude");
-        assert_eq!(subagent_provider("codex", None, &catalog).1, "OpenAI");
-        assert_eq!(subagent_provider("grok", None, &catalog).1, "Grok");
         assert_eq!(
-            subagent_provider("antigravity", None, &catalog).1,
+            subagent_provider("claudeAgent", None, None, &catalog).1,
+            "Claude"
+        );
+        assert_eq!(subagent_provider("codex", None, None, &catalog).1, "OpenAI");
+        assert_eq!(subagent_provider("grok", None, None, &catalog).1, "Grok");
+        assert_eq!(
+            subagent_provider("antigravity", None, None, &catalog).1,
             "Antigravity"
         );
     }
@@ -3054,14 +3213,38 @@ mod subagent_model_tests {
         let catalog = ModelCatalog::default();
         let claude = model("claudeAgent", "claude-opus-5-5");
         assert_eq!(
-            subagent_provider("remote", Some(&claude), &catalog),
+            subagent_provider("remote", None, Some(&claude), &catalog),
             ("claudeAgent".to_owned(), "Claude")
         );
         // A custom instance id says nothing; the model slug does.
         let codex = model("work-box", "gpt-5.5");
         assert_eq!(
-            subagent_provider("remote", Some(&codex), &catalog).1,
+            subagent_provider("remote", None, Some(&codex), &catalog).1,
             "OpenAI"
+        );
+    }
+
+    #[test]
+    fn the_childs_environment_driver_names_an_unbranded_remote_task() {
+        let catalog = ModelCatalog::default();
+        let custom = model("box-a", "frontier-1");
+        assert_eq!(
+            subagent_provider("remote", Some("codex"), Some(&custom), &catalog).1,
+            "OpenAI"
+        );
+        let child = SubagentChild {
+            model: custom,
+            driver: Some("claudeAgent".to_owned()),
+        };
+        assert_eq!(
+            subagent_provider(
+                "remote",
+                child.driver.as_deref(),
+                child.selected_model(),
+                &catalog
+            )
+            .1,
+            "Claude"
         );
     }
 
@@ -3070,11 +3253,11 @@ mod subagent_model_tests {
         let catalog = ModelCatalog::default();
         let unknown = model("mystery", "mystery-1");
         assert_eq!(
-            subagent_provider("remote", Some(&unknown), &catalog),
+            subagent_provider("remote", None, Some(&unknown), &catalog),
             ("remote".to_owned(), "Agent")
         );
         assert_eq!(
-            subagent_provider("remote", None, &catalog),
+            subagent_provider("remote", None, None, &catalog),
             ("remote".to_owned(), "Agent")
         );
     }

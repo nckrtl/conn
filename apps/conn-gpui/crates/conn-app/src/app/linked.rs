@@ -524,6 +524,22 @@ impl ConnApp {
         self.connection.clone()
     }
 
+    /// The provider and model catalog of linked environment `environment` (`None`: the primary
+    /// one), or `None` while a linked environment has sent no config.
+    pub(crate) fn environment_catalog(
+        &self,
+        environment: Option<&str>,
+    ) -> Option<&conn_state::providers::ModelCatalog> {
+        match environment {
+            Some(environment) if environment != self.primary_environment_id() => self
+                .linked
+                .configs
+                .get(environment)
+                .map(|config| config.catalog()),
+            _ => Some(self.server_config.catalog()),
+        }
+    }
+
     /// The provider and model catalog of the environment the open thread (or draft) lives on.
     pub(crate) fn active_server_config(
         &self,
@@ -1166,6 +1182,12 @@ impl ConnApp {
         );
     }
 
+    /// Test helper: whether the primary connection reports Connected.
+    #[cfg(test)]
+    pub(crate) fn connected_for_test(&self) -> bool {
+        matches!(self.status, Some(ConnectionStatus::Connected))
+    }
+
     /// Test helper: whether a linked environment's connection reports Connected.
     #[cfg(test)]
     pub(crate) fn linked_connected_for_test(&self, environment_id: &str) -> bool {
@@ -1187,6 +1209,12 @@ impl ConnApp {
         self.linked
             .scratch_roots
             .insert(environment_id.to_owned(), root.to_owned());
+    }
+
+    /// Test helper: the id of the environment this app is connected to.
+    #[cfg(test)]
+    pub(crate) fn primary_environment_id_for_test(&self) -> String {
+        self.primary_environment_id()
     }
 
     /// Test helper: a linked environment's provider catalog.

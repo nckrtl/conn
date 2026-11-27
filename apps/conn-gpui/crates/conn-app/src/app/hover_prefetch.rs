@@ -233,7 +233,45 @@ impl ConnApp {
                 self.drop_speculative(previous);
             }
         }
+        self.warm_thread_images(thread_id, cx);
         self.arm_speculative_timer(now, cx);
+    }
+
+    /// Downloads the hovered thread's newest sent pictures to disk, as far as its timeline is
+    /// known now, so opening it decodes them without the network.
+    fn warm_thread_images(&mut self, thread_id: &str, cx: &mut Context<'_, Self>) {
+        let Some(thread) = self.threads.get(thread_id) else {
+            return;
+        };
+        let ids: Vec<String> = thread
+            .entries
+            .iter()
+            .filter_map(|entry| match entry {
+                conn_state::TimelineEntry::User { attachments, .. } => Some(attachments),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|attachment| match attachment {
+                conn_contract::ChatAttachment::Image(image) => Some(image.id.clone()),
+                _ => None,
+            })
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let environment = self
+            .linked_environment_of_thread(thread_id)
+            .map(str::to_owned);
+        let (Some(url), Some(connection)) = (
+            self.context_server_url(environment.as_deref())
+                .map(str::to_owned),
+            self.connection_for_thread(thread_id),
+        ) else {
+            return;
+        };
+        self.chat.update(cx, |chat, cx| {
+            chat.warm_attachments(url, connection, ids, cx)
+        });
     }
 
     /// Prefetches when the card is still on `thread_id` after [`OPEN_DELAY`]. A card that slides

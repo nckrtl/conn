@@ -636,9 +636,10 @@ dt {
 .model-picker {
   bottom: calc(100% + 4px);
   right: 0;
-  width: min(552px, calc(100cqw - 52px));
+  /* GPUI `PickerGeometry`: at most 480px, 52px inside the room, 264px tall (47.25vh at most). */
+  width: max(280px, min(480px, calc(100cqw - 52px)));
   max-width: calc(100vw - 32px);
-  max-height: min(294.75px, 47.25vh);
+  height: min(264px, 47.25vh);
   display: flex;
   gap: 3px;
   padding: 3px;
@@ -664,10 +665,12 @@ dt {
   overflow-y: auto;
   scrollbar-width: none;
 }
+/* Concentric with the 12px shell: 12 − (3 inset + 1 rail padding) = 8 (GPUI #447). */
 .providers .tool {
   width: 100%;
   height: auto;
   aspect-ratio: 1;
+  border-radius: 8px;
 }
 .models {
   flex: 1;
@@ -679,7 +682,8 @@ dt {
   flex: none;
   gap: 8px;
   padding: 8px 10px;
-  height: 43px;
+  /* The first model row's icon centres on the first provider tile's (GPUI #447). */
+  height: 36px;
   border-bottom: 1px solid var(--line);
   border-radius: 0;
   background: none;
@@ -759,7 +763,7 @@ dt {
   display: flex;
 }
 .picker-options {
-  width: min(38%, 192px);
+  width: min(45%, 192px);
   flex: none;
   min-width: 0;
   display: flex;
@@ -784,7 +788,8 @@ dt {
   gap: 8px;
   min-width: 0;
   width: 100%;
-  padding: 6px 8px;
+  height: 30px;
+  padding: 0 8px;
   color: var(--ink);
   background: var(--selected);
   border: 1px solid var(--line);
@@ -1130,9 +1135,7 @@ dt {
 .panel {
   position: relative;
 }
-.messages .assistant-reply {
-  padding: 0 4px;
-}
+/* The timeline sits flush left with its dividers (GPUI #385: `TIMELINE_INSET_PX` = 0). */
 .agent-line,
 .worked {
   display: flex;
@@ -1172,7 +1175,7 @@ dt {
 .messages > .worked {
   --lead: var(--text-ink-top);
   height: auto;
-  padding: 0 4px calc(var(--timeline-divider-gap) - var(--text-ink-bottom));
+  padding: 0 0 calc(var(--timeline-divider-gap) - var(--text-ink-bottom));
   border-bottom: 1px solid var(--line);
   margin-block-end: calc(var(--timeline-divider-gap) - var(--timeline-block-gap));
   font-size: 14px;
@@ -1185,17 +1188,47 @@ dt {
 .messages > .timeline-end {
   margin-block-start: calc(-1 * var(--timeline-block-gap));
 }
-.composer .tool[aria-label="Send message"] {
+/* GPUI `render_send_button`: the primary role (`messageAction`) and its foreground. */
+.composer .tool[data-send] {
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  background: var(--ink);
-  color: var(--bg);
+  background: var(--native-messageAction);
+  color: var(--native-messageActionForeground);
 }
-.composer .tool[aria-label="Send message"]:disabled {
-  background: var(--selected);
-  color: var(--muted);
+.composer .tool[data-send]:not(:disabled):hover {
+  background: color-mix(in srgb, var(--native-messageAction) 88%, transparent);
+  color: var(--native-messageActionForeground);
+}
+.composer .tool[data-send] .icon[data-glyph="arrow-up"] {
+  width: 14px;
+  height: 14px;
+}
+/* While a turn runs and the prompt is empty: Stop (`render_stop_button`), 90% destructive. */
+.composer .tool[data-stop] {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--native-error) 90%, transparent);
+  color: var(--native-errorForeground);
+}
+.composer .tool[data-stop]:hover {
+  background: var(--native-error);
+  color: var(--native-errorForeground);
+}
+.composer .tool[data-stop] .icon {
+  width: 12px;
+  height: 12px;
+}
+/* A disabled primary keeps its look, muted (`theme::disabled_primary`): 40% fill in dark, 35% in
+   light, the label at 60%. */
+.composer .tool[data-send]:disabled {
+  background: color-mix(in srgb, var(--native-messageAction) 40%, transparent);
+  color: color-mix(in srgb, var(--native-messageActionForeground) 60%, transparent);
   opacity: 1;
+}
+.desktop[data-theme="light"] .composer .tool[data-send]:disabled {
+  background: color-mix(in srgb, var(--native-messageAction) 35%, transparent);
 }
 .composer-mic {
   display: inline-flex;
@@ -1386,8 +1419,9 @@ dt {
 
 @media (max-width: 600px) {
   .model-picker {
-    width: min(552px, calc(100cqw - 36px));
+    width: max(280px, min(480px, calc(100cqw - 36px)));
     max-width: 100%;
+    height: min(256px, 47.25vh);
   }
   .picker-options {
     padding: 8px;
@@ -1972,4 +2006,41 @@ dt {
 .panel-workspace {
   height: 100%;
   min-width: 0;
+}
+/* A new General thread (GPUI `render_draft_hero`): the 30/36 heading 16px above the composer, the
+   pair centred in the card by equal flexible space above and below. */
+.chat-thread[data-hero] {
+  display: flex;
+  flex-direction: column;
+}
+.chat-thread[data-hero] > .timeline {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  overflow: visible;
+}
+.chat-thread[data-hero]::after {
+  content: "";
+  flex: 1;
+}
+.chat-thread[data-hero] .chat-dock {
+  align-self: stretch;
+}
+.chat-thread[data-hero] .composer-wrap {
+  padding-bottom: 0;
+}
+.draft-heading {
+  width: calc(100% - 96px);
+  max-width: 736px;
+  margin: 0 auto;
+  padding-bottom: 16px;
+  text-align: center;
+  font-size: 30px;
+  font-weight: 400;
+  line-height: 36px;
+  color: var(--ink);
+}
+.messages[hidden] {
+  display: none;
 }

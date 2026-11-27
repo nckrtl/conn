@@ -11,6 +11,9 @@ rust-version.workspace = true
 conn-support.workspace = true
 conn-contract.workspace = true
 conn-provider.workspace = true
+# `report_label` for a delegated task's question wake (`src/families.rs`); already in the
+# server binary.
+conn-provider-support.workspace = true
 # Git checkpoints per turn (`src/checkpoint.rs`); already in the server binary.
 conn-vcs.workspace = true
 # The host definition registry: pull request link keys as T3 writes them (`src/pull_requests.rs`).

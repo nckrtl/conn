@@ -61,6 +61,8 @@ mod thumb_cache;
 
 /// A sent image thumbnail: attachment id and decode size.
 type ThumbKey = (String, thumb_cache::TargetPx);
+#[cfg(test)]
+mod fold_gap_tests;
 mod timeline_cards;
 mod toc;
 #[cfg(test)]
@@ -131,6 +133,13 @@ const USER_ACTIONS_HEIGHT_PX: f32 = USER_ACTIONS_PAD_TOP_PX + card_face::CARD_AC
 /// A work group's `pb` when its fold is open or live, and when it is a settled fold.
 const WORK_GROUP_OPEN_PAD_PX: f32 = 8.0;
 const WORK_GROUP_FOLD_PAD_PX: f32 = 12.0;
+/// The painted space on each side of a settled fold's divider (Nick, 2026-11-27): above it, the
+/// header's `pb-2` plus the space under the "Worked for" baseline. What follows the divider sits
+/// as far below it, except a user message, which keeps [`USER_MESSAGE_GAP_PX`].
+const FOLD_DIVIDER_GAP_PX: f32 = 8.0 + BODY_INK_BOTTOM_PX;
+/// Where a work-log row first paints under its top: its icon, centred in the 24px row, and the
+/// label's cap top both land about 6px down.
+const WORK_ROW_INK_TOP_PX: f32 = 6.0;
 /// The `pb` of a notice row, and of the "Working" row.
 const NOTICE_ROW_PAD_PX: f32 = 8.0;
 const WORKING_ROW_PAD_PX: f32 = 4.0;
@@ -2218,6 +2227,7 @@ impl ChatView {
                 &rows[*row_start..*row_end],
                 *has_active,
                 *continues_steer,
+                self.fold_pad_px(idx),
                 cx,
             ),
             VirtualItem::Card { row_idx } => self.render_card(&rows[*row_idx].entry, cx),
@@ -2268,6 +2278,23 @@ impl ChatView {
             outer = outer.pb(px(end_pad.max(0.0)));
         }
         outer.into_any_element()
+    }
+
+    /// A closed, settled fold's `pb`: what follows its divider paints [`FOLD_DIVIDER_GAP_PX`]
+    /// under it, as the "Worked for" text paints above it. A user message keeps its own 48px
+    /// gap (see `Self::user_bubble_pads`), and the last row keeps the end gap; both count on
+    /// [`WORK_GROUP_FOLD_PAD_PX`].
+    fn fold_pad_px(&self, idx: usize) -> f32 {
+        let rows = self.cache.rows();
+        match self
+            .cache
+            .items()
+            .get(idx + 1)
+            .and_then(|next| Neighbour::of(next, rows))
+        {
+            None | Some(Neighbour::User) => WORK_GROUP_FOLD_PAD_PX,
+            Some(next) => (FOLD_DIVIDER_GAP_PX - neighbour_space_above(next)).max(0.0),
+        }
     }
 
     /// The space a user bubble's row keeps above its bubble and under its actions row, so the
@@ -2894,6 +2921,7 @@ impl ChatView {
         rows: &[CachedRow],
         has_active: bool,
         continues_steer: bool,
+        fold_pad: f32,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
         let manually_expanded = self.expanded_ids.contains(group_id);
@@ -3001,20 +3029,23 @@ impl ChatView {
         }
 
         if manually_expanded {
-            let mut list = div().flex().flex_col().w_full().min_w_0().pt(px(4.0));
+            // Under a settled header's divider, the first row paints as far below it as the
+            // "Worked for" text sits above it. The live group has no divider: it keeps `pt-1`.
+            let list_pad = if has_active {
+                4.0
+            } else {
+                FOLD_DIVIDER_GAP_PX - WORK_ROW_INK_TOP_PX
+            };
+            let mut list = div().flex().flex_col().w_full().min_w_0().pt(px(list_pad));
             for row in rows {
                 list = list.child(self.render_work_entry(row, cx));
             }
             container = container.pb(px(WORK_GROUP_OPEN_PAD_PX)).child(list);
         } else {
-            // Nick (#280, #290): a settled fold's separator needs the same air below as above it.
-            // Above: 8px `pb-2` plus the label's half-leading (~4px), so 12px below.
-            // An active group has no separator, so it keeps Conn's `pb-1.5` (6px).
-            container = container.pb(px(if has_active {
-                6.0
-            } else {
-                WORK_GROUP_FOLD_PAD_PX
-            }));
+            // A settled fold's divider has the same painted space below as above it (see
+            // `ChatView::fold_pad_px`). An active group has no divider, so it keeps Conn's
+            // `pb-1.5` (6px).
+            container = container.pb(px(if has_active { 6.0 } else { fold_pad }));
         }
 
         container.into_any_element()

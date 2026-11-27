@@ -992,7 +992,8 @@ impl RowCache {
         }
 
         // A user bubble's space depends on its neighbours, and so does the space under an
-        // assistant row before one, so their keys change with them and the list measures again.
+        // assistant row before one or under a settled fold, so their keys change with them and
+        // the list measures again.
         let item_keys = items
             .iter()
             .enumerate()
@@ -1012,6 +1013,18 @@ impl RowCache {
                         .is_some_and(|next| is_user_bubble(next, rows))
                 {
                     key.push_str(":before-user");
+                } else if matches!(
+                    item,
+                    VirtualItem::WorkGroup {
+                        has_active: false,
+                        ..
+                    }
+                ) {
+                    // A settled fold's space under its divider depends on what follows it.
+                    let next = items
+                        .get(index + 1)
+                        .and_then(|next| Neighbour::of(next, rows));
+                    key.push_str(&format!(":{next:?}"));
                 }
                 key
             })

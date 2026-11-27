@@ -463,8 +463,8 @@ fn a_kept_thread_opens_from_the_device_before_the_server_answers() {
     };
     let first = open_from_device(&mut state, &mut ctrl);
     assert!(
-        first.synchronized,
-        "the device copy draws as a whole window"
+        !first.synchronized,
+        "the device copy draws at once but is not caught up until the stream says so"
     );
     assert_eq!(stream_text_len(&first), Some(64), "with the latest change");
     drop(state);

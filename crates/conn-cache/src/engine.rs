@@ -65,6 +65,8 @@ impl Images {
 
 enum Job {
     Write(String, ThreadWrite),
+    /// The thread list to save, as `LinkedShellSnapshot` JSON.
+    Shell(Vec<u8>),
     Read {
         thread: String,
         before: Option<f64>,
@@ -112,6 +114,10 @@ pub struct Engine {
     catching_up: HashSet<String>,
     /// Older pages on their way, by thread, with the window generation they were asked for.
     older_in_flight: HashMap<String, u64>,
+    /// The thread list saved on the device, until the app takes it to draw before the server
+    /// answers.
+    saved_shell: Option<ShellState>,
+    shell_saved_at: Option<std::time::Instant>,
     next_generation: u64,
     runtime: tokio::runtime::Handle,
     perf: Perf,
@@ -157,6 +163,16 @@ impl Engine {
     ) -> Result<Self, sqlx::Error> {
         let pool = db::open(path).await?;
         let index = db::read_index(&pool, env).await?;
+        let saved_shell = db::read_shell(&pool, env)
+            .await?
+            .and_then(|bytes| conn_state::environments::LinkedShellSnapshot::from_json(&bytes))
+            .filter(|saved| saved.environment_id == env)
+            .map(|saved| {
+                // Drawn at once, current only when the server's shell arrives.
+                let mut shell = saved.into_shell();
+                shell.synchronized = false;
+                shell
+            });
         let (jobs, rx) = mpsc::unbounded_channel();
         tokio::spawn(run(pool.clone(), env.to_owned(), connection.clone(), rx));
         Ok(Self {
@@ -166,6 +182,8 @@ impl Engine {
             pool,
             settings,
             index,
+            saved_shell,
+            shell_saved_at: None,
             held: HashMap::new(),
             loading: HashMap::new(),
             open: vec![],
@@ -595,6 +613,27 @@ impl Engine {
         }
     }
 
+    /// The thread list saved on the device at the last launch, to draw at once (not
+    /// synchronized). `None` after the first call or when none is saved.
+    pub fn take_saved_shell(&mut self) -> Option<ShellState> {
+        self.saved_shell.take()
+    }
+
+    /// Saves the thread list for the next launch: at most every few seconds, unless `now` (for
+    /// going to the background or quitting). Call it with a synchronized shell.
+    pub fn save_shell(&mut self, shell: &ShellState, now: bool) {
+        const EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+        if !now && self.shell_saved_at.is_some_and(|at| at.elapsed() < EVERY) {
+            return;
+        }
+        self.shell_saved_at = Some(std::time::Instant::now());
+        let snapshot =
+            conn_state::environments::LinkedShellSnapshot::capture_inventory(&self.env, shell);
+        if let Ok(bytes) = snapshot.to_json() {
+            let _ = self.jobs.send(Job::Shell(bytes));
+        }
+    }
+
     /// Keeps the device in step with the shell: the open threads and every unsettled thread
     /// stay subscribed and stored, the open thread first, then those that need the user,
     /// working threads, then the newest. A thread that leaves the set is deleted from the
@@ -707,9 +746,9 @@ fn held_from(id: &str, window: Window) -> Held {
     });
     match from_json::<Item>(snapshot) {
         Ok(item) => {
+            // Ready to draw, not caught up: `synchronized` waits for the stream's own marker,
+            // so the syncing bar shows until the thread is current.
             state.apply(item);
-            // The device copy is a whole window: draw it, the stream only brings it current.
-            state.synchronized = true;
         }
         Err(e) => eprintln!("conn-cache: stored window of {id} does not decode: {e}"),
     }
@@ -736,6 +775,7 @@ async fn run(
     // Threads whose rows a failed write lost: their cursor stays until a fresh window, so a
     // later write cannot move it past the lost change.
     let mut frozen: HashSet<String> = HashSet::new();
+    let mut shell: Option<Vec<u8>> = None;
     while let Some(job) = jobs.recv().await {
         let mut next = Some(job);
         while let Some(job) = next.take().or_else(|| jobs.try_recv().ok()) {
@@ -751,7 +791,13 @@ async fn run(
                     before,
                     reply,
                 } => reads.push((thread, before, reply)),
+                Job::Shell(bytes) => shell = Some(bytes),
             }
+        }
+        if let Some(bytes) = shell.take()
+            && let Err(e) = db::write_shell(&pool, &env, &bytes).await
+        {
+            eprintln!("conn-cache: shell save failed: {e}");
         }
         if !batch.is_empty() {
             let mut writes = std::mem::take(&mut batch);
@@ -1107,6 +1153,25 @@ mod tests {
             Some(9_000_000),
             "cursor moves"
         );
+    }
+
+    /// The thread list saved on one launch draws on the next, before the server answers.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_saved_thread_list_opens_with_the_next_launch() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let path = dir.path().join("local.sqlite3");
+        let mut shell = ShellState::default();
+        shell.sequence = Some(42);
+        let mut first = engine(&path, Settings::default()).await;
+        assert!(first.take_saved_shell().is_none());
+        first.save_shell(&shell, true);
+        settle(&first, "any").await;
+        drop(first);
+        let mut second = engine(&path, Settings::default()).await;
+        let saved = second.take_saved_shell().unwrap_or_else(|| panic!("saved"));
+        assert_eq!(saved.sequence, Some(42));
+        assert!(!saved.synchronized, "drawn, not current");
+        assert!(second.take_saved_shell().is_none(), "taken once");
     }
 
     /// A stale thread keeps its cursor; a deleted thread leaves the device; closed threads

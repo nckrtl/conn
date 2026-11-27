@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS threads (
   cursor INTEGER, older TEXT, record TEXT,
   opened_at INTEGER NOT NULL DEFAULT 0, active_at INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (env, thread)) WITHOUT ROWID;
+CREATE TABLE IF NOT EXISTS shells (
+  env TEXT PRIMARY KEY, body BLOB NOT NULL) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS attachment_images (
   position INTEGER PRIMARY KEY, environment TEXT NOT NULL, thread TEXT NOT NULL,
   version TEXT NOT NULL, bytes BLOB NOT NULL, UNIQUE(environment,thread,version));
@@ -439,6 +441,30 @@ fn stored_row(row: &sqlx::sqlite::SqliteRow) -> Option<(Row, usize)> {
         },
         size,
     ))
+}
+
+/// The thread list saved for `env`, as `LinkedShellSnapshot` JSON.
+pub(crate) async fn read_shell(
+    pool: &SqlitePool,
+    env: &str,
+) -> Result<Option<Vec<u8>>, sqlx::Error> {
+    sqlx::query_scalar("SELECT body FROM shells WHERE env = ?")
+        .bind(env)
+        .fetch_optional(pool)
+        .await
+}
+
+pub(crate) async fn write_shell(
+    pool: &SqlitePool,
+    env: &str,
+    body: &[u8],
+) -> Result<(), sqlx::Error> {
+    sqlx::query("INSERT OR REPLACE INTO shells (env, body) VALUES (?, ?)")
+        .bind(env)
+        .bind(body)
+        .execute(pool)
+        .await
+        .map(|_| ())
 }
 
 pub(crate) async fn image(

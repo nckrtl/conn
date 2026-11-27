@@ -399,17 +399,6 @@ pub async fn serve_with_instances(
         engine.clone(),
         Arc::new(conn_features::clock::SystemClock),
     );
-    let scheduled_tasks =
-        conn_features::scheduled::ScheduledTasks::start(conn_features::scheduled::Config {
-            state_dir: state_dir.clone(),
-            clock: Arc::new(conn_features::clock::SystemClock),
-            zone: jiff::tz::TimeZone::system(),
-            runner: Arc::new(conn_features::scheduled::EngineRunner::new(engine.clone())),
-            secret_requests: Some(secrets.clone()),
-            start_timer: !inert,
-        })
-        .await;
-    let _ = host.scheduled_tasks.set(scheduled_tasks.clone());
     // Off, no browser state exists and no sweep runs; Chrome starts with the first use anyway.
     let preview = crate::modules::on(crate::modules::BROWSER)
         .then(|| conn_preview::tabs::Preview::new(state_dir.clone()));
@@ -422,7 +411,6 @@ pub async fn serve_with_instances(
         secrets: Some(secrets),
         test_logins: Some(conn_features::test_logins::TestLogins::new(&state_dir)),
         engine: Some(engine.clone()),
-        scheduled_tasks: Some(scheduled_tasks),
         providers,
         instances,
         environment: Some(environment.clone()),
@@ -453,6 +441,7 @@ pub async fn serve_with_instances(
     let boot = crate::modules::Boot {
         state_dir: &state_dir,
         engine: &engine,
+        host: &host,
     };
     crate::modules::start(&boot, &mut deps).await;
     start_agent_tools(&mut deps, &host, &sqlite_engine, addr);

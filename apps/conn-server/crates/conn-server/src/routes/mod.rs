@@ -9,7 +9,7 @@ use crate::AppState;
 mod assets;
 mod definitions;
 mod device_hub;
-mod hooks;
+pub(crate) mod hooks;
 pub mod mcp;
 mod oauth_mcp;
 pub(crate) mod preview;
@@ -25,7 +25,6 @@ pub fn router() -> Router<AppState> {
         .merge(assets::router())
         .merge(definitions::router())
         .merge(device_hub::router())
-        .merge(hooks::router())
         .merge(preview::router())
         .merge(preview_tunnel::router())
         .merge(pull_requests::router())

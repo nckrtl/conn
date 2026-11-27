@@ -4,17 +4,62 @@
 //! Scopes: `scopes.rs`. As the T3 server (`withVisibleWebhookUrls`), the list stream shows a
 //! webhook task's URL only to sessions with `orchestration:operate`: the URL starts agents.
 
+use std::sync::Arc;
+
 use conn_contract::{
     ScheduledTaskGetWebhookDeliveryInput, ScheduledTaskListWebhookDeliveriesInput,
     ScheduledTaskSetEnabledInput, to_json,
 };
-use conn_features::scheduled::{Failure as TaskFailure, ScheduledTasks, TaskError, UpsertInput};
+use conn_engine::BoxFuture;
+use conn_features::scheduled::{
+    Config, EngineRunner, Failure as TaskFailure, ScheduledTasks, TaskError, UpsertInput,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use super::Deps;
-use crate::table::{Failure, MethodTable};
+use crate::{
+    modules::{Boot, Module},
+    table::{Failure, MethodTable},
+};
+
+/// The scheduled tasks module: the store and its timer, `scheduledTasks.*`, the webhook route
+/// and the agent's schedule tools. Deleting a thread removes its tasks through the `Host` slot.
+pub(crate) const MODULE: Module = Module {
+    name: "scheduled-tasks",
+    start,
+    methods: register,
+    routes: crate::routes::hooks::router,
+    tools: &[
+        "schedule_task",
+        "list_scheduled_tasks",
+        "delete_scheduled_task",
+        "run_scheduled_task_now",
+    ],
+    // One-time and fresh-session schedules, which mobile gates on.
+    capabilities: |capabilities| {
+        capabilities.one_time_schedules = Some(true);
+        capabilities.scheduled_task_thread_modes = Some(true);
+    },
+};
+
+fn start<'a>(boot: &'a Boot<'a>, deps: &'a mut Deps) -> BoxFuture<'a, ()> {
+    Box::pin(async move {
+        let tasks = ScheduledTasks::start(Config {
+            state_dir: boot.state_dir.to_owned(),
+            clock: Arc::new(conn_features::clock::SystemClock),
+            zone: jiff::tz::TimeZone::system(),
+            runner: Arc::new(EngineRunner::new(boot.engine.clone())),
+            secret_requests: deps.secrets.clone(),
+            // A rehearsal copy holds the original's tasks: it must run none of them.
+            start_timer: !crate::serve::inert(),
+        })
+        .await;
+        let _ = boot.host.scheduled_tasks.set(tasks.clone());
+        deps.scheduled_tasks = Some(tasks);
+    })
+}
 
 /// `ScheduledTaskDeleteInput` and `ScheduledTaskRunNowInput`: `{id}`.
 #[derive(Debug, Deserialize)]
@@ -26,7 +71,7 @@ fn task_failure(error: &TaskError) -> Failure {
     Failure::Fail(error.to_contract())
 }
 
-pub(super) fn register(table: &mut MethodTable, deps: &Deps) {
+fn register(table: &mut MethodTable, deps: &Deps) {
     let Some(service) = deps.scheduled_tasks.clone() else {
         return;
     };

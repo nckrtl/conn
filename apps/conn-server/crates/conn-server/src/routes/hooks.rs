@@ -23,7 +23,7 @@ use crate::AppState;
 /// The relay records this header.
 const OUTCOME_HEADER: &str = "x-t3-hook-outcome";
 
-pub(super) fn router() -> Router<AppState> {
+pub(crate) fn router() -> Router<AppState> {
     Router::new().route(
         "/api/hooks/{hook_id}/{token}",
         get(hook).post(hook).put(hook).patch(hook).head(hook),

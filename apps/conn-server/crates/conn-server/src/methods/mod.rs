@@ -23,7 +23,7 @@ mod projects;
 pub mod provider;
 pub mod provider_auth;
 pub(crate) mod pull_requests;
-mod scheduled;
+pub(crate) mod scheduled;
 mod secrets;
 pub mod server;
 pub(crate) mod source_control;
@@ -102,7 +102,6 @@ pub fn register_all(table: &mut MethodTable, deps: &Deps) {
     files::register(table, deps);
     mcp_apps::register(table, deps);
     terminal::register(table, deps);
-    scheduled::register(table, deps);
     secrets::register(table, deps);
     test_logins::register(table, deps);
     panels::register(table, deps);

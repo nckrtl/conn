@@ -18,7 +18,7 @@ use axum::Router;
 use conn_contract::ExecutionEnvironmentCapabilities;
 use conn_engine::{BoxFuture, Engine};
 
-use crate::{AppState, methods::Deps, table::MethodTable};
+use crate::{AppState, host::Host, methods::Deps, table::MethodTable};
 
 /// The variable that lists the enabled modules.
 pub const VAR: &str = "CONN_SERVER_MODULES";
@@ -27,7 +27,8 @@ pub const VAR: &str = "CONN_SERVER_MODULES";
 pub(crate) struct Module {
     /// Its name in [`VAR`].
     pub name: &'static str,
-    /// Builds its service into `deps` and starts its jobs.
+    /// Builds its service into `deps` and starts its jobs. A thread-close hook follows the
+    /// `Host` slot it fills.
     pub start: for<'a> fn(&'a Boot<'a>, &'a mut Deps) -> BoxFuture<'a, ()>,
     /// Registers its RPC methods on the service `start` built.
     pub methods: fn(&mut MethodTable, &Deps),
@@ -43,10 +44,14 @@ pub(crate) struct Module {
 pub(crate) struct Boot<'a> {
     pub state_dir: &'a Path,
     pub engine: &'a Arc<dyn Engine>,
+    pub host: &'a Host,
 }
 
 /// Every module with an entry, in start order.
-pub(crate) const ALL: &[&Module] = &[&crate::methods::annotations::MODULE];
+pub(crate) const ALL: &[&Module] = &[
+    &crate::methods::annotations::MODULE,
+    &crate::methods::scheduled::MODULE,
+];
 
 /// The browser: the Chrome on this machine and the desktop tab relay (`conn_preview`).
 pub const BROWSER: &str = "browser";
@@ -203,8 +208,9 @@ mod tests {
         }
         let all: Vec<&str> = known().map(|(name, _)| name).collect();
         assert_eq!(withheld(&all), Vec::<&str>::new());
+        let no_devices: Vec<&str> = all.iter().copied().filter(|n| *n != DEVICES).collect();
         assert_eq!(
-            withheld(&[BROWSER, "annotations"]),
+            withheld(&no_devices),
             [
                 "device_list",
                 "device_open",

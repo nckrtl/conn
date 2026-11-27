@@ -382,12 +382,9 @@ fn capabilities_of(server_restart: bool, modules: &[&str]) -> ExecutionEnvironme
     capabilities.mcp_mode_limit_header = Some(true);
     capabilities.link_fence = Some(true);
     capabilities.peer_link_pairing_codes = Some(true);
-    // Served features mobile gates on: `/clear` dispatch (`freshContext` in conn-engine),
-    // one-time and fresh-session schedules (conn-features), PR watches, issue links and the
-    // per-command output stream.
+    // Served features mobile gates on: `/clear` dispatch (`freshContext` in conn-engine), PR
+    // watches, issue links and the per-command output stream.
     capabilities.fresh_context = Some(true);
-    capabilities.one_time_schedules = Some(true);
-    capabilities.scheduled_task_thread_modes = Some(true);
     capabilities.thread_pull_request_watch = Some(true);
     capabilities.issue_linked_threads = Some(true);
     capabilities.command_output_streaming = Some(true);
@@ -494,10 +491,14 @@ mod tests {
                 "threadPullRequestWatch"
             ]
         );
-        // A bare server promises none of its modules.
+        // A bare server promises none of its modules; a module brings its own flags.
         let bare = conn_contract::to_json(&capabilities_of(false, &[]));
         assert!(bare.get("serverBrowser").is_none());
+        assert!(bare.get("oneTimeSchedules").is_none());
         assert_eq!(bare["pullRequests"], true);
+        let scheduled = conn_contract::to_json(&capabilities_of(false, &["scheduled-tasks"]));
+        assert_eq!(scheduled["scheduledTaskThreadModes"], true);
+        assert!(scheduled.get("serverBrowser").is_none());
     }
 }
 

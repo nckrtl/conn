@@ -16,6 +16,12 @@ struct ThreadView: View {
     @Environment(\.connTheme) private var theme
     @Environment(\.dismiss) private var dismiss
     @State private var readingWindow: FfiThreadSnapshot?
+    /// Older history loaded above the live thread. It is joined to the live snapshot instead of
+    /// freezing a copy, so the thread keeps updating and the composer stays usable.
+    @State private var earlier: EarlierHistory?
+    /// The live snapshot with `earlier` joined in, for one live revision: the join copies every
+    /// entry, and `snapshot` is read many times per update while a reply streams.
+    @State private var joined = JoinedSnapshot()
     @State private var markers: [FfiPromptMarker] = []
     @State private var outlineQuery = ""
     @State private var showsOutline = false
@@ -76,7 +82,10 @@ struct ThreadView: View {
 
     private var snapshot: FfiThreadSnapshot? {
         if let readingWindow, readingWindow.threadId == threadId { return readingWindow }
-        if let current = store.openThread, current.threadId == threadId { return current }
+        if let current = store.openThread, current.threadId == threadId {
+            guard let earlier, earlier.threadId == threadId else { return current }
+            return joined.value(revision: store.openThreadRevision, earlier: earlier, live: current)
+        }
         // Covered by a thread opened from a link: keep the feed, so Back returns to the same spot.
         return retainedSnapshot?.threadId == threadId ? retainedSnapshot : nil
     }
@@ -105,6 +114,9 @@ struct ThreadView: View {
         }
         return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
+
+    /// Rows taken from the message cache per step of older history (about ten turns).
+    private static let cachedPageEntries = 20
 
     private var canReadEarlier: Bool {
         guard let snapshot, store.offlineReader != nil, !snapshot.entries.isEmpty, !pageExhausted else { return false }
@@ -148,7 +160,9 @@ struct ThreadView: View {
                     var older: [FfiTimelineEntry] = []
                     if !current.serverPage {
                         let page = try await reader.before(thread: threadId, id: first)
-                        older = page.entries
+                        // The cache hands back everything it has; take the newest part and fetch
+                        // the next part (from the cache, so it is quick) as the reader scrolls up.
+                        older = Array(page.entries.suffix(Self.cachedPageEntries))
                         current.feedDetails.merge(page.feedDetails) { current, _ in current }
                         current.delegatedTaskIds.merge(page.delegatedTaskIds) { current, _ in current }
                     }
@@ -189,7 +203,11 @@ struct ThreadView: View {
                         return
                     }
                     // The feed keeps the first visible row in place as the older rows land above it.
-                    readingWindow = current
+                    if readingWindow != nil {
+                        readingWindow = current
+                    } else if let live = store.openThread, live.threadId == threadId {
+                        earlier = EarlierHistory(threadId: threadId, merged: current, live: live)
+                    }
                 }
                 historyNotice = nil
             } catch {
@@ -314,10 +332,9 @@ struct ThreadView: View {
             }
         }
         .onChange(of: store.status) { _, status in
+            // The feed keeps the reader's row in place on its own; freezing a copy here left the
+            // composer disabled until Jump.
             if status == .connected { historyNotice = nil }
-            if !chrome.pinned && readingWindow == nil {
-                readingWindow = store.openThread
-            }
         }
         .alert("Rename Thread", isPresented: $showingRename) {
             TextField("Title", text: $renameDraft)
@@ -837,4 +854,56 @@ func feedSignature(_ parts: AnyHashable?...) -> Int {
     var hasher = Hasher()
     for part in parts { hasher.combine(part) }
     return hasher.finalize()
+}
+
+/// History loaded above the live thread: the entries and their details, plus where paging goes
+/// on from. `join` puts them in front of each new live snapshot.
+@MainActor
+final class JoinedSnapshot {
+    private var key: (revision: Int, earlier: UUID)?
+    private var cached: FfiThreadSnapshot?
+
+    func value(revision: Int, earlier: EarlierHistory, live: FfiThreadSnapshot) -> FfiThreadSnapshot {
+        if let key, key.revision == revision, key.earlier == earlier.version, let cached { return cached }
+        var result = live
+        earlier.join(into: &result)
+        key = (revision, earlier.version)
+        cached = result
+        return result
+    }
+}
+
+struct EarlierHistory {
+    let threadId: String
+    /// New for every page, so the joined snapshot is rebuilt when more history arrives.
+    let version = UUID()
+    var entries: [FfiTimelineEntry]
+    var feedDetails: [String: FfiFeedDetail]
+    var delegatedTaskIds: [String: String]
+    var workGroups: [FfiWorkGroupTiming]
+    var serverPage: Bool
+    var historyCursor: String?
+
+    init(threadId: String, merged: FfiThreadSnapshot, live: FfiThreadSnapshot) {
+        self.threadId = threadId
+        let liveIds = Set(live.entries.map(\.entryId))
+        let liveGroups = Set(live.workGroups.map(\.id))
+        entries = merged.entries.filter { !liveIds.contains($0.entryId) }
+        feedDetails = merged.feedDetails.filter { live.feedDetails[$0.key] == nil }
+        delegatedTaskIds = merged.delegatedTaskIds.filter { live.delegatedTaskIds[$0.key] == nil }
+        workGroups = merged.workGroups.filter { !liveGroups.contains($0.id) }
+        serverPage = merged.serverPage
+        historyCursor = merged.historyCursor
+    }
+
+    func join(into live: inout FfiThreadSnapshot) {
+        let liveIds = Set(live.entries.map(\.entryId))
+        live.entries.insert(contentsOf: entries.filter { !liveIds.contains($0.entryId) }, at: 0)
+        live.feedDetails.merge(feedDetails) { current, _ in current }
+        live.delegatedTaskIds.merge(delegatedTaskIds) { current, _ in current }
+        let liveGroups = Set(live.workGroups.map(\.id))
+        live.workGroups.insert(contentsOf: workGroups.filter { !liveGroups.contains($0.id) }, at: 0)
+        live.serverPage = serverPage
+        live.historyCursor = historyCursor
+    }
 }

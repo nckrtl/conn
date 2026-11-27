@@ -43,7 +43,11 @@ final class CoreStore {
     }
     private let publications: InboxPublications
     private var restoringLaunchInventory = false
-    private(set) var openThread: FfiThreadSnapshot?
+    private(set) var openThread: FfiThreadSnapshot? {
+        didSet { openThreadRevision &+= 1 }
+    }
+    /// Counts `openThread` changes, so views can cache work derived from it without comparing it.
+    @ObservationIgnored private(set) var openThreadRevision = 0
     /// The last session state lines (`logState`), newest last, for the offline pill's details.
     private(set) var sessionHistory: [String] = []
     private(set) var openThreadId: String?

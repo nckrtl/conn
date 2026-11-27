@@ -294,6 +294,11 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
         order = ids
         let gapsChanged = layout.items != items
         layout.items = items
+        // A changed row already in a cell (a streaming reply) keeps its height for now; its cell
+        // reports the new one when it redraws, so the row is laid out once per update, not twice.
+        for id in live {
+            if let row = rows[id], let entry = measured[id] { measured[id] = (row.signature, entry.height) }
+        }
         measureNow(changed: changed)
         if orderChanged {
             var snapshot = NSDiffableDataSourceSnapshot<Int, String>()

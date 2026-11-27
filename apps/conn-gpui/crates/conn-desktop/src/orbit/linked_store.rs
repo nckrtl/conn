@@ -82,16 +82,39 @@ impl LinkedStore {
     }
 
     fn write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+        use std::io::Write as _;
+
+        Self::write_with(path, |writer| writer.write_all(bytes))
+    }
+
+    /// Replaces `path` with what `fill` writes, through a buffer: a serializer makes one small
+    /// write per token, which would be millions of system calls for a large shell.
+    fn write_with(
+        path: &Path,
+        fill: impl FnOnce(&mut std::io::BufWriter<std::fs::File>) -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        use std::io::Write as _;
+
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, bytes)?;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o600);
+        }
+        let mut writer = std::io::BufWriter::with_capacity(256 * 1024, options.open(&tmp)?);
+        fill(&mut writer)?;
+        writer.flush()?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
             let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
         }
+        drop(writer);
         std::fs::rename(&tmp, path)
     }
 
@@ -100,10 +123,30 @@ impl LinkedStore {
     /// # Errors
     /// Returns an `InvalidInput` error for an id that is not a plain id, or any write error.
     pub fn save_shell(&self, environment_id: &str, bytes: &[u8]) -> std::io::Result<()> {
+        Self::write(&self.shell_path(environment_id)?, bytes)
+    }
+
+    /// Saves one environment's snapshot as JSON, written straight to the file through a buffer
+    /// rather than built in memory first.
+    ///
+    /// # Errors
+    /// Returns an `InvalidInput` error for an id that is not a plain id, or any serialization or
+    /// write error.
+    pub fn save_shell_json(
+        &self,
+        environment_id: &str,
+        snapshot: &impl Serialize,
+    ) -> std::io::Result<()> {
+        Self::write_with(&self.shell_path(environment_id)?, |writer| {
+            serde_json::to_writer(writer, snapshot).map_err(std::io::Error::from)
+        })
+    }
+
+    fn shell_path(&self, environment_id: &str) -> std::io::Result<PathBuf> {
         let stem = file_stem(environment_id).ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::InvalidInput, "not an environment id")
         })?;
-        Self::write(&self.shells_dir().join(format!("{stem}.json")), bytes)
+        Ok(self.shells_dir().join(format!("{stem}.json")))
     }
 
     /// The bytes of every saved snapshot, in file-name order.

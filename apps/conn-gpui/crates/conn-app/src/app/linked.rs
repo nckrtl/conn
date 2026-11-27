@@ -11,7 +11,9 @@
 //! `docs/scope.md`, section "Linked environments".
 
 use std::collections::{HashMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use conn_client::environments::{EnvironmentEvent, EnvironmentSet, EnvironmentTarget};
 use conn_client::{ClientEvent, Connection, ConnectionStatus, Credential, ServerConfig};
@@ -26,8 +28,39 @@ use gpui_kit::Context;
 use super::ConnApp;
 use crate::panels::terminal_target::{SessionKey, TerminalTarget, is_local_server_url};
 
-/// How long a changed shell waits before it is saved, so a burst of events writes once.
-const SHELL_SAVE_DELAY: std::time::Duration = std::time::Duration::from_secs(3);
+/// Orders the writes of linked shells: a later snapshot is never overwritten by an earlier one
+/// that ran slowly, and the quit's write lands last.
+static SHELL_SERIAL: AtomicU64 = AtomicU64::new(0);
+/// The serial of the snapshot last written for each environment. Held while a file is written, so
+/// two writes of one environment never interleave.
+static SHELLS_WRITTEN: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
+
+/// A linked shell captured for a write.
+pub(super) struct ShellWrite {
+    serial: u64,
+    snapshot: LinkedShellSnapshot,
+}
+
+/// Writes the snapshots to `store`, skipping any that an environment's newer one has passed.
+/// Blocks: run it off the main thread, or at quit.
+pub(super) fn write_linked_shells(store: &LinkedStore, writes: Vec<ShellWrite>) {
+    let mut written = SHELLS_WRITTEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let written = written.get_or_insert_with(HashMap::new);
+    for ShellWrite { serial, snapshot } in writes {
+        let environment = &snapshot.environment_id;
+        if written.get(environment).is_some_and(|last| *last > serial) {
+            continue;
+        }
+        match store.save_shell_json(environment, &snapshot) {
+            Ok(()) => {
+                written.insert(environment.clone(), serial);
+            }
+            Err(err) => eprintln!("linked environments: could not save a shell: {err}"),
+        }
+    }
+}
 
 /// What the app knows about the environments it lists beside its primary one.
 #[derive(Default)]
@@ -43,7 +76,10 @@ pub(super) struct LinkedEnvironments {
     missing_since_ms: HashMap<String, i64>,
     /// Environments whose live shell changed since it was last saved.
     dirty: HashSet<String>,
-    save_scheduled: bool,
+    /// When each environment's shell was last captured for a write.
+    saved_at: HashMap<String, Instant>,
+    /// A timer waits to save the dirty shells that are not due yet.
+    save_armed: bool,
     origins: Origins,
     set: Option<EnvironmentSet>,
     /// Environments a pairing is being minted for.
@@ -746,49 +782,112 @@ impl ConnApp {
         (projects, preselected)
     }
 
-    /// Saves the shells that changed, a little after the last change, off the main thread
-    /// (Conn: `EnvironmentShellState.persistLatest`). Only a synced shell is saved, never one that
-    /// was merely restored.
+    /// How long `environment`'s dirty shell must still wait before it may be written; zero when
+    /// it may now.
+    fn linked_save_wait(&self, environment: &str, now: Instant) -> Duration {
+        self.linked
+            .saved_at
+            .get(environment)
+            .map_or(Duration::ZERO, |at| {
+                super::offline::SHELL_SAVE_INTERVAL
+                    .saturating_sub(now.saturating_duration_since(*at))
+            })
+    }
+
+    /// Captures the dirty shells that are due: every one with `flush`, else those not saved within
+    /// [`super::offline::SHELL_SAVE_INTERVAL`]. Only a synced shell is saved, never one that was
+    /// merely restored. An unsynced one stays dirty until it syncs.
+    fn take_linked_shell_writes(&mut self, flush: bool) -> Vec<ShellWrite> {
+        let now = Instant::now();
+        let mut ids: Vec<String> = self.linked.dirty.iter().cloned().collect();
+        ids.sort();
+        let mut writes = Vec::new();
+        for id in ids {
+            if !flush && !self.linked_save_wait(&id, now).is_zero() {
+                continue;
+            }
+            match self.linked.shells.shell(&id) {
+                None => {
+                    self.linked.dirty.remove(&id);
+                }
+                Some(shell) if !shell.synchronized => {
+                    if flush {
+                        self.linked.dirty.remove(&id);
+                    }
+                }
+                Some(_) => {
+                    self.linked.dirty.remove(&id);
+                    if let Some(snapshot) = self.linked.shells.snapshot(&id) {
+                        self.linked.saved_at.insert(id, now);
+                        writes.push(ShellWrite {
+                            serial: SHELL_SERIAL.fetch_add(1, Ordering::Relaxed) + 1,
+                            snapshot,
+                        });
+                    }
+                }
+            }
+        }
+        writes
+    }
+
+    /// Saves the shells that changed, off the main thread (Conn:
+    /// `EnvironmentShellState.persistLatest`). A shell is written at most every
+    /// [`super::offline::SHELL_SAVE_INTERVAL`]: the file is megabytes, and a running thread changes
+    /// the shell every few seconds. A change inside the interval waits for a timer, and the quit
+    /// writes what is left ([`Self::linked_on_quit`]).
     fn schedule_linked_shell_save(&mut self, cx: &mut Context<'_, Self>) {
-        if self.linked.save_scheduled || self.linked.dirty.is_empty() || self.linked.store.is_none()
-        {
+        let Some(store) = self.linked.store.clone() else {
+            return;
+        };
+        if self.linked.dirty.is_empty() {
             return;
         }
-        self.linked.save_scheduled = true;
+        let writes = self.take_linked_shell_writes(false);
+        if !writes.is_empty() {
+            crate::live::RT.spawn_blocking(move || write_linked_shells(&store, writes));
+        }
+        if self.linked.save_armed {
+            return;
+        }
+        let now = Instant::now();
+        let Some(wait) = self
+            .linked
+            .dirty
+            .iter()
+            .map(|id| self.linked_save_wait(id, now))
+            .filter(|wait| !wait.is_zero())
+            .min()
+        else {
+            return;
+        };
+        self.linked.save_armed = true;
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(SHELL_SAVE_DELAY).await;
-            let _ = this.update(cx, |app, _cx| {
-                app.linked.save_scheduled = false;
-                let dirty: Vec<String> = app.linked.dirty.drain().collect();
-                let snapshots: Vec<LinkedShellSnapshot> = dirty
-                    .iter()
-                    .filter(|id| {
-                        app.linked
-                            .shells
-                            .shell(id)
-                            .is_some_and(|shell| shell.synchronized)
-                    })
-                    .filter_map(|id| app.linked.shells.snapshot(id))
-                    .collect();
-                let Some(store) = app.linked.store.clone() else {
-                    return;
-                };
-                crate::live::RT.spawn_blocking(move || {
-                    for snapshot in snapshots {
-                        match snapshot.to_json() {
-                            Ok(bytes) => {
-                                if let Err(err) = store.save_shell(&snapshot.environment_id, &bytes)
-                                {
-                                    eprintln!("linked environments: could not save a shell: {err}");
-                                }
-                            }
-                            Err(err) => eprintln!("linked environments: shell snapshot: {err}"),
-                        }
-                    }
-                });
+            cx.background_executor().timer(wait).await;
+            let _ = this.update(cx, |app, cx| {
+                app.linked.save_armed = false;
+                app.schedule_linked_shell_save(cx);
             });
         })
         .detach();
+    }
+
+    /// Writes the dirty linked shells at quit, at once and in this call, the way
+    /// [`Self::offline_on_quit`] writes the primary one. Waits for a write in flight, so this
+    /// one lands last.
+    pub(super) fn linked_on_quit(&mut self) -> impl std::future::Future<Output = ()> + use<> {
+        let store = self.linked.store.clone();
+        let writes = if store.is_some() {
+            self.take_linked_shell_writes(true)
+        } else {
+            Vec::new()
+        };
+        async move {
+            if let Some(store) = store
+                && !writes.is_empty()
+            {
+                write_linked_shells(&store, writes);
+            }
+        }
     }
 
     /// The linked environments for Settings: every one this device lists, saved or switched off,
@@ -1134,6 +1233,7 @@ impl ConnApp {
         self.linked.opened_scratch = None;
         self.linked.statuses.clear();
         self.linked.dirty.clear();
+        self.linked.saved_at.clear();
         if let Some(store) = &self.linked.store {
             for bytes in store.load_shells() {
                 if let Some(snapshot) = LinkedShellSnapshot::from_json(&bytes)
@@ -1231,6 +1331,7 @@ impl ConnApp {
             changed |= self.linked.shells.remove(environment_id);
             self.linked.statuses.remove(environment_id);
             self.linked.dirty.remove(environment_id);
+            self.linked.saved_at.remove(environment_id);
             self.linked.settings.disabled.remove(environment_id);
             self.linked.settings.instances.remove(environment_id);
             self.orbit.sessions.remove_bearer(environment_id);
@@ -1648,5 +1749,98 @@ mod tests {
         );
         assert_eq!(merged.origins.environment_of_thread("t-mini"), "mini");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A linked shell is written at most every 30 seconds, an unsynced one waits, and the quit
+    /// writes whatever is still dirty.
+    #[gpui_kit::test]
+    fn linked_shells_are_written_at_most_every_thirty_seconds_and_at_quit(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use crate::ui_tests::mount_app;
+
+        let dir = tempfile::tempdir().expect("config directory");
+        let store = LinkedStore::at(dir.path());
+        let (_, app) = mount_app(cx);
+        let quit = cx.update(|cx| {
+            app.update(cx, |app, _cx| {
+                app.linked.store = Some(store.clone());
+                app.linked.shells.ensure("mini", "mini");
+                app.linked.shells.restore("mini", shell_with_a_thread());
+                let writes = |app: &mut ConnApp, flush: bool| {
+                    app.linked.dirty.insert("mini".to_owned());
+                    app.take_linked_shell_writes(flush).len()
+                };
+                assert_eq!(writes(app, false), 1, "the first change is written");
+                assert_eq!(writes(app, false), 0, "a change seconds later waits");
+                assert!(
+                    app.linked.dirty.contains("mini"),
+                    "and is kept for the timer"
+                );
+                app.linked.saved_at.insert(
+                    "mini".to_owned(),
+                    Instant::now()
+                        - super::super::offline::SHELL_SAVE_INTERVAL
+                        - Duration::from_secs(1),
+                );
+                assert_eq!(writes(app, false), 1, "written once the interval passed");
+
+                let mut unsynced = shell_with_a_thread();
+                unsynced.synchronized = false;
+                app.linked.shells.restore("mini", unsynced);
+                app.linked.saved_at.clear();
+                assert_eq!(
+                    writes(app, false),
+                    0,
+                    "a shell that never synced is not saved"
+                );
+
+                app.linked.shells.restore("mini", shell_with_a_thread());
+                app.linked
+                    .saved_at
+                    .insert("mini".to_owned(), Instant::now());
+                app.linked.dirty.insert("mini".to_owned());
+                app.linked_on_quit()
+            })
+        });
+        use futures::FutureExt as _;
+        assert!(
+            quit.now_or_never().is_some(),
+            "the quit write has no await point"
+        );
+        let saved = store.load_shells();
+        assert_eq!(
+            saved.len(),
+            1,
+            "the quit wrote the shell inside its interval"
+        );
+        assert!(
+            LinkedShellSnapshot::from_json(&saved[0])
+                .expect("a snapshot")
+                .threads
+                .iter()
+                .any(|t| t.id == "t-mini")
+        );
+    }
+
+    /// Two writes of one environment land in order: an older one that ran late cannot replace
+    /// the newer snapshot.
+    #[test]
+    fn an_older_linked_snapshot_never_replaces_a_newer_one() {
+        let dir = tempfile::tempdir().expect("config directory");
+        let store = LinkedStore::at(dir.path());
+        let snapshot = |label: &str, serial| {
+            let mut running = LinkedShells::default();
+            running.ensure("ordered", label);
+            running.restore("ordered", shell_with_a_thread());
+            ShellWrite {
+                serial,
+                snapshot: running.snapshot("ordered").expect("a shell"),
+            }
+        };
+        write_linked_shells(&store, vec![snapshot("newer", 1_000_002)]);
+        write_linked_shells(&store, vec![snapshot("older", 1_000_001)]);
+        let saved = LinkedShellSnapshot::from_json(&store.load_shells()[0]).expect("a snapshot");
+        assert_eq!(saved.label, "newer");
     }
 }

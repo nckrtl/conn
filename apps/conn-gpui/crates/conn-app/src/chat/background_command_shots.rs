@@ -3,7 +3,10 @@
 
 use std::path::Path;
 
-use conn_state::{BackgroundCommandOutcome, ItemStatus, NoticeLevel, ThreadState, TimelineEntry};
+use conn_state::{
+    BackgroundCommandOutcome, BackgroundWorkItem, BackgroundWorkKind, ItemStatus, NoticeLevel,
+    ThreadState, TimelineEntry,
+};
 
 use super::left_align_shots::render_pngs;
 
@@ -99,6 +102,96 @@ fn after() -> ThreadState {
     ])
 }
 
+const BUILD: &str = "Build baseline server with fake provider";
+const CHECK: &str = "Run server tools/check.sh";
+
+/// The several-work notices of the multi-command card, as `(id, summary, card)`.
+fn several() -> Vec<(&'static str, String, TimelineEntry)> {
+    use BackgroundCommandOutcome::{Failed, Finished};
+    use BackgroundWorkKind::{Command, Monitor};
+    let item = |kind, label: &str, exit_code| BackgroundWorkItem {
+        kind,
+        label: Some(label.to_owned()),
+        exit_code,
+    };
+    let work = |id: &str, summary: &str, outcome, kind, items: Vec<BackgroundWorkItem>| {
+        TimelineEntry::BackgroundWork {
+            id: id.to_owned(),
+            summary: summary.to_owned(),
+            outcome,
+            count: items.len(),
+            kind,
+            items,
+            detail: None,
+        }
+    };
+    let three = format!("Command \"{BUILD}\", command \"{BUILD}\" and command \"{CHECK}\" failed");
+    let two = "Command \"make\" (exit 0) and command \"npm test\" (exit 2) failed".to_owned();
+    let mixed = "Command \"cargo build --release\" and monitor \"CI checks\" finished".to_owned();
+    vec![
+        (
+            "bg-three",
+            three.clone(),
+            work(
+                "bg-three",
+                &three,
+                Failed,
+                Some(Command),
+                vec![
+                    item(Command, BUILD, None),
+                    item(Command, BUILD, None),
+                    item(Command, CHECK, None),
+                ],
+            ),
+        ),
+        (
+            "bg-two",
+            two.clone(),
+            work(
+                "bg-two",
+                &two,
+                Failed,
+                Some(Command),
+                vec![
+                    item(Command, "make", Some(0)),
+                    item(Command, "npm test", Some(2)),
+                ],
+            ),
+        ),
+        (
+            "bg-mixed",
+            mixed.clone(),
+            work(
+                "bg-mixed",
+                &mixed,
+                Finished,
+                None,
+                vec![
+                    item(Command, "cargo build --release", None),
+                    item(Monitor, "CI checks", None),
+                ],
+            ),
+        ),
+    ]
+}
+
+fn several_before() -> ThreadState {
+    base(
+        several()
+            .into_iter()
+            .map(|(id, summary, _)| TimelineEntry::Notice {
+                id: id.to_owned(),
+                text: summary,
+                level: NoticeLevel::Info,
+            })
+            .collect(),
+    )
+}
+
+fn several_after() -> ThreadState {
+    base(several().into_iter().map(|(_, _, card)| card).collect())
+}
+
 /// `CONN_THREAD_SHOTS_DIR=<dir> cargo test -p conn-app render_background_command_screenshots --
 /// --ignored`
 #[test]
@@ -113,5 +206,10 @@ fn render_background_command_screenshots() {
     render_pngs(dir, "after-expanded", &after, &|chat, cx| {
         chat.toggle_expanded("bg-ok", cx);
         chat.toggle_expanded("bg-fail", cx);
+    });
+    render_pngs(dir, "multi-before", &several_before, &|_, _| {});
+    render_pngs(dir, "multi-after", &several_after, &|_, _| {});
+    render_pngs(dir, "multi-after-expanded", &several_after, &|chat, cx| {
+        chat.toggle_expanded("bg-three", cx);
     });
 }

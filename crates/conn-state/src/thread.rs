@@ -265,6 +265,64 @@ pub enum TimelineEntry {
         /// The provider's own summary or output, shown on expand.
         detail: Option<String>,
     },
+    /// Several pieces of background work that ended in one wake: the server joins them into one
+    /// summary with one shared outcome (`Command "a", command "b" and command "c" failed`).
+    BackgroundWork {
+        id: String,
+        /// The server's own summary, whole. The card's expand panel and the iOS bridge show it.
+        summary: String,
+        /// The shared outcome. The server says `failed` when any one failed, `were stopped` when
+        /// any one was stopped and none failed, and `finished` only when all of them finished.
+        outcome: BackgroundCommandOutcome,
+        /// How many pieces of work ended.
+        count: usize,
+        /// The one kind they all share; `None` when kinds mix.
+        kind: Option<BackgroundWorkKind>,
+        /// Each piece of work in the server's order, duplicates kept. Empty when the server only
+        /// counted them (`4 commands failed`).
+        items: Vec<BackgroundWorkItem>,
+        /// The provider's own summary or output, shown on expand.
+        detail: Option<String>,
+    },
+}
+
+/// The kind of one piece of background work in a notification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BackgroundWorkKind {
+    Command,
+    Monitor,
+    Subagent,
+    BackgroundTask,
+}
+
+impl BackgroundWorkKind {
+    const ALL: [Self; 4] = [
+        Self::Command,
+        Self::Monitor,
+        Self::Subagent,
+        Self::BackgroundTask,
+    ];
+
+    /// The server's noun for one and for several (`Command`, `commands`).
+    #[must_use]
+    pub fn noun(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Command => ("Command", "commands"),
+            Self::Monitor => ("Monitor", "monitors"),
+            Self::Subagent => ("Subagent", "subagents"),
+            Self::BackgroundTask => ("Background task", "background tasks"),
+        }
+    }
+}
+
+/// One piece of work a `BackgroundWork` summary names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BackgroundWorkItem {
+    pub kind: BackgroundWorkKind,
+    /// The first line of its description or command, as the server cut it.
+    pub label: Option<String>,
+    /// A command's exit code, when the provider reported one.
+    pub exit_code: Option<i64>,
 }
 
 /// How a background command ended.
@@ -296,7 +354,8 @@ impl TimelineEntry {
             | Self::ProposedPlan { id, .. }
             | Self::Subagent { id, .. }
             | Self::Notice { id, .. }
-            | Self::BackgroundCommand { id, .. } => id,
+            | Self::BackgroundCommand { id, .. }
+            | Self::BackgroundWork { id, .. } => id,
         }
     }
 }
@@ -2542,11 +2601,8 @@ fn parse_command_summary(summary: &str) -> Option<(Option<String>, Option<i64>)>
         return Some((None, exit_code));
     }
     let label = head.strip_prefix("Command \"")?.strip_suffix('"')?;
-    // Several commands join as `Command "a" (exit 0) and command "b"`.
-    if label.contains("\" (exit ")
-        || label.contains("\" and command \"")
-        || label.contains("\", command \"")
-    {
+    // Several commands join as `Command "a" (exit 0) and command "b"`, or with other kinds.
+    if label.contains("\" (exit ") || reads_as_a_join(label) {
         return None;
     }
     let label = label.trim();
@@ -2559,8 +2615,223 @@ fn is_exit_code(code: &str) -> bool {
     !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
+/// The card for a notification about several commands or monitors (or a mix); `None` for one
+/// piece of work, for subagents only, or for a summary the server does not write.
+fn background_work_entry(item: &NotificationItem) -> Option<TimelineEntry> {
+    use BackgroundWorkKind as Kind;
+    use conn_contract::OrchestrationV2NotificationSource as Source;
+    use conn_contract::OrchestrationV2NotificationSourceMonitorPullRequestSectionOutcome as Outcome;
+
+    let (verb, work) = parse_several_summary(&item.summary)?;
+    let (count, items, kind) = match work {
+        SeveralWork::Named(items) => {
+            let first = items[0].kind;
+            let same = items.iter().all(|i| i.kind == first);
+            (items.len(), items, same.then_some(first))
+        }
+        SeveralWork::Counted(count, kind) => (count, Vec::new(), kind),
+    };
+    // The server's `source` names the shared kind, or `background_task` when kinds mix.
+    let source_fits = match &item.source {
+        Source::Command(_) | Source::BackgroundCommand(_) => kind == Some(Kind::Command),
+        Source::Monitor(_) => kind == Some(Kind::Monitor),
+        Source::BackgroundTask(_) | Source::BackgroundTask2(_) => {
+            matches!(kind, None | Some(Kind::BackgroundTask))
+        }
+        _ => false,
+    };
+    if !source_fits {
+        return None;
+    }
+    let any_bad_exit = items.iter().any(|i| i.exit_code.is_some_and(|c| c != 0));
+    let outcome = match (item.outcome, verb) {
+        (Outcome::Completed, "finished") if any_bad_exit => BackgroundCommandOutcome::Failed,
+        (Outcome::Completed, "finished") => BackgroundCommandOutcome::Finished,
+        (Outcome::Failed, "failed") => BackgroundCommandOutcome::Failed,
+        (Outcome::Cancelled, "were stopped") => BackgroundCommandOutcome::Stopped,
+        _ => return None,
+    };
+    let detail = item
+        .detail
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty() && *d != item.summary.trim())
+        .map(str::to_owned);
+    Some(TimelineEntry::BackgroundWork {
+        id: item.id.clone(),
+        summary: item.summary.clone(),
+        outcome,
+        count,
+        kind,
+        items,
+        detail,
+    })
+}
+
+/// What a summary of several pieces of work says about them.
+#[derive(Debug, PartialEq)]
+enum SeveralWork {
+    /// `Command "a" and monitor "b" failed`: each one, in order.
+    Named(Vec<BackgroundWorkItem>),
+    /// `4 commands failed`: only how many, and their kind (`None` for `background tasks`).
+    Counted(usize, Option<BackgroundWorkKind>),
+}
+
+/// Reads the server's summary of several pieces of work (`reportsSummary` in
+/// `conn-provider-support/src/notification.rs`): two or three names joined by `, ` and ` and `,
+/// or a count past three, then one shared verb. `None` unless exactly one reading fits, so a
+/// label that itself looks like a join never splits wrongly.
+fn parse_several_summary(summary: &str) -> Option<(&'static str, SeveralWork)> {
+    const VERBS: [&str; 3] = ["failed", "were stopped", "finished"];
+    let summary = summary.trim();
+    let (head, verb) = VERBS.iter().find_map(|verb| {
+        let head = summary.strip_suffix(verb)?.strip_suffix(' ')?;
+        Some((head, *verb))
+    })?;
+    if let Some(counted) = parse_counted_work(head) {
+        return Some((verb, counted));
+    }
+    let mut readings: Vec<Vec<BackgroundWorkItem>> = Vec::new();
+    for (items, seps) in name_readings(head, true, 3) {
+        // A label that itself reads as a join (`a", command "b`) is the wrong split.
+        if items
+            .iter()
+            .filter_map(|i| i.label.as_deref())
+            .any(|label| label.contains("\" (exit ") || reads_as_a_join(label))
+        {
+            continue;
+        }
+        // The server joins all but the last name with `, ` and the last with ` and `.
+        let joined = seps
+            .split_last()
+            .is_some_and(|(last, rest)| *last == " and " && rest.iter().all(|sep| *sep == ", "));
+        if (2..=3).contains(&items.len())
+            && joined
+            && items.iter().any(|i| i.label.is_some())
+            && !readings.contains(&items)
+        {
+            readings.push(items);
+        }
+    }
+    match <[_; 1]>::try_from(readings) {
+        Ok([items]) => Some((verb, SeveralWork::Named(items))),
+        Err(_) => None,
+    }
+}
+
+/// True when `label` holds the server's join between two names: `", monitor "` or `" and command`.
+fn reads_as_a_join(label: &str) -> bool {
+    BackgroundWorkKind::ALL.into_iter().any(|kind| {
+        let noun = kind.noun().0.to_lowercase();
+        [", ", " and "].into_iter().any(|sep| {
+            label.contains(&format!("\"{sep}{noun} \""))
+                || label.ends_with(&format!("\"{sep}{noun}"))
+                || label.contains(&format!("\"{sep}{noun}, "))
+                || label.contains(&format!("\"{sep}{noun} and "))
+        })
+    })
+}
+
+/// `4 commands`, `5 background tasks`.
+fn parse_counted_work(head: &str) -> Option<SeveralWork> {
+    let (count, noun) = head.split_once(' ')?;
+    if count.is_empty() || count.starts_with('0') || !count.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let count: usize = count.parse().ok()?;
+    if count < 2 {
+        return None;
+    }
+    let kind = match noun {
+        "background tasks" => None,
+        noun => Some(
+            BackgroundWorkKind::ALL
+                .into_iter()
+                .find(|kind| kind.noun().1 == noun)?,
+        ),
+    };
+    Some(SeveralWork::Counted(count, kind))
+}
+
+/// Every way `text` reads as a run of at most `left` names (`Command "x" (exit 2)`, `monitor`),
+/// each with the separators between them.
+fn name_readings(
+    text: &str,
+    first: bool,
+    left: usize,
+) -> Vec<(Vec<BackgroundWorkItem>, Vec<&'static str>)> {
+    let mut readings = Vec::new();
+    if left == 0 {
+        return readings;
+    }
+    for kind in BackgroundWorkKind::ALL {
+        let noun = kind.noun().0;
+        let noun = if first {
+            noun.to_owned()
+        } else {
+            noun.to_lowercase()
+        };
+        let Some(rest) = text.strip_prefix(noun.as_str()) else {
+            continue;
+        };
+        // The name has no label, or a quoted one that may hold quotes of its own: try each
+        // closing quote.
+        let mut labelled: Vec<(Option<&str>, &str)> = vec![(None, rest)];
+        if let Some(quoted) = rest.strip_prefix(" \"") {
+            for (at, _) in quoted.match_indices('"') {
+                let label = &quoted[..at];
+                if !label.trim().is_empty() {
+                    labelled.push((Some(label), &quoted[at + 1..]));
+                }
+            }
+        }
+        for (label, after) in labelled {
+            let (exit_code, after) = match kind {
+                BackgroundWorkKind::Command => strip_exit_suffix(after),
+                _ => (None, after),
+            };
+            let item = BackgroundWorkItem {
+                kind,
+                label: label.map(str::to_owned),
+                exit_code,
+            };
+            if after.is_empty() {
+                readings.push((vec![item.clone()], Vec::new()));
+            }
+            for sep in [", ", " and "] {
+                let Some(next) = after.strip_prefix(sep) else {
+                    continue;
+                };
+                for (mut items, mut seps) in name_readings(next, false, left - 1) {
+                    items.insert(0, item.clone());
+                    seps.insert(0, sep);
+                    readings.push((items, seps));
+                }
+            }
+        }
+    }
+    readings
+}
+
+/// A leading ` (exit N)`, as the server writes it after a command's name.
+fn strip_exit_suffix(text: &str) -> (Option<i64>, &str) {
+    let Some(rest) = text.strip_prefix(" (exit ") else {
+        return (None, text);
+    };
+    let Some((code, after)) = rest.split_once(')') else {
+        return (None, text);
+    };
+    match code.parse::<i64>() {
+        Ok(code_value) if is_exit_code(code) => (Some(code_value), after),
+        _ => (None, text),
+    }
+}
+
 fn map_notification(item: NotificationItem) -> Option<TimelineEntry> {
     if let Some(entry) = background_command_entry(&item) {
+        return Some(entry);
+    }
+    if let Some(entry) = background_work_entry(&item) {
         return Some(entry);
     }
     Some(TimelineEntry::Notice {

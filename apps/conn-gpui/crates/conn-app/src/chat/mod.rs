@@ -5,6 +5,7 @@ mod approval_state;
 mod artifact_template;
 mod attachment_thumb;
 mod background_command;
+mod background_work;
 mod cache;
 mod card_face;
 mod cards;
@@ -48,6 +49,8 @@ mod provider_banner;
 mod question_logic;
 mod question_panel;
 mod queue_tray;
+#[cfg(all(test, target_os = "macos"))]
+mod queue_tray_shots;
 pub(crate) use self::queue_tray::PendingSendRow;
 mod request_stack;
 pub(crate) mod selection;
@@ -2452,6 +2455,26 @@ impl ChatView {
                     label: label.as_deref(),
                     outcome: *outcome,
                     exit_code: *exit_code,
+                    detail: detail.as_deref(),
+                },
+                cx,
+            ),
+            TimelineEntry::BackgroundWork {
+                id,
+                summary,
+                outcome,
+                count,
+                kind,
+                items,
+                detail,
+            } => self.render_background_work_card(
+                &background_work::BackgroundWorkCard {
+                    id,
+                    summary,
+                    outcome: *outcome,
+                    count: *count,
+                    kind: *kind,
+                    items,
                     detail: detail.as_deref(),
                 },
                 cx,

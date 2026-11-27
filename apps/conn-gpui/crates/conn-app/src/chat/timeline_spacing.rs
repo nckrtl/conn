@@ -171,9 +171,10 @@ pub(super) fn card_ink(entry: &TimelineEntry, light: bool) -> (f32, f32) {
         TimelineEntry::BackgroundCommand { .. } => {
             (WORK_ROW_INK_TOP_PX, TERMINAL_ROW_INK_BOTTOM_PX)
         }
-        TimelineEntry::UserInputRequest { .. } | TimelineEntry::SecretRequest { .. } => {
-            (WORK_ROW_INK_TOP_PX, WORK_ROW_INK_BOTTOM_PX)
-        }
+        // The multi-command card ends on its last command's row.
+        TimelineEntry::BackgroundWork { .. }
+        | TimelineEntry::UserInputRequest { .. }
+        | TimelineEntry::SecretRequest { .. } => (WORK_ROW_INK_TOP_PX, WORK_ROW_INK_BOTTOM_PX),
         TimelineEntry::ProposedPlan { .. } | TimelineEntry::EmbeddedDocument { .. } if light => {
             (PLAIN_LIGHT_CARD_INK_TOP_PX, PLAIN_LIGHT_CARD_INK_BOTTOM_PX)
         }

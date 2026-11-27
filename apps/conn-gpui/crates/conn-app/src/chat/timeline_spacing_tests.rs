@@ -14,8 +14,8 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use conn_state::{
-    BackgroundCommandOutcome, EntryTiming, ItemStatus, NoticeLevel, ThreadState, TimelineEntry,
-    TurnItemStatus,
+    BackgroundCommandOutcome, BackgroundWorkItem, BackgroundWorkKind, EntryTiming, ItemStatus,
+    NoticeLevel, ThreadState, TimelineEntry, TurnItemStatus,
 };
 use conn_theme::Tokens;
 use gpui_kit::test::TestQueryExt as _;
@@ -107,6 +107,8 @@ enum Spec {
     Plan,
     Delegate,
     BackgroundCommand,
+    /// Several background commands that ended together, as one card.
+    BackgroundWork,
     /// The "Working for" row and its "Thinking" row. Always last.
     Working,
     /// The "Working for" row and the live group under it. Always last.
@@ -114,7 +116,7 @@ enum Spec {
 }
 
 impl Spec {
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 15] = [
         Self::Paragraph,
         Self::LastParagraph,
         Self::User,
@@ -127,6 +129,7 @@ impl Spec {
         Self::Plan,
         Self::Delegate,
         Self::BackgroundCommand,
+        Self::BackgroundWork,
         Self::Working,
         Self::Live,
     ];
@@ -230,6 +233,23 @@ impl Scene {
                 exit_code: Some(0),
                 detail: None,
             }),
+            Spec::BackgroundWork => {
+                let item = |label: &str| BackgroundWorkItem {
+                    kind: BackgroundWorkKind::Command,
+                    label: Some(label.to_owned()),
+                    exit_code: Some(0),
+                };
+                let items = vec![item("BUILD"), item("CHECK")];
+                entries.push(TimelineEntry::BackgroundWork {
+                    id: id("bgw"),
+                    summary: "BUILD AND CHECK FINISHED".to_owned(),
+                    outcome: BackgroundCommandOutcome::Finished,
+                    count: items.len(),
+                    kind: Some(BackgroundWorkKind::Command),
+                    items,
+                    detail: None,
+                });
+            }
             Spec::Working => self.thread.working = true,
             Spec::Live => {
                 self.thread.working = true;
@@ -308,6 +328,7 @@ fn block_name(items: &[VirtualItem], index: usize, chat: &super::ChatView) -> St
             TimelineEntry::ProposedPlan { .. } => "plan card",
             TimelineEntry::Subagent { .. } => "delegate card",
             TimelineEntry::BackgroundCommand { .. } => "background command",
+            TimelineEntry::BackgroundWork { .. } => "background commands",
             _ => "card",
         }
         .to_owned(),

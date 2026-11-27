@@ -1261,9 +1261,10 @@ pub(crate) fn map_timeline_entry_with_context(
             text: text.clone(),
             is_error: level.is_error(),
         },
-        // iOS has no command card: it keeps showing a finished background command as the plain
-        // notice it always did, with the server's own summary text.
-        TimelineEntry::BackgroundCommand { id, summary, .. } => FfiTimelineEntry::Notice {
+        // iOS has no command card: it keeps showing finished background work as the plain notice
+        // it always did, with the server's own summary text.
+        TimelineEntry::BackgroundCommand { id, summary, .. }
+        | TimelineEntry::BackgroundWork { id, summary, .. } => FfiTimelineEntry::Notice {
             id: id.clone(),
             text: summary.clone(),
             is_error: false,
@@ -1718,6 +1719,35 @@ mod tests {
                 "{summary}: the same Info notice iOS drew before the card"
             );
         }
+    }
+
+    #[test]
+    fn a_several_commands_card_reaches_ios_as_the_plain_notice_it_was() {
+        use conn_state::BackgroundCommandOutcome::Failed;
+        use conn_state::{BackgroundWorkItem, BackgroundWorkKind::Command};
+        let summary = "Command \"Build\", command \"Build\" and command \"Check\" failed";
+        let item = |label: &str| BackgroundWorkItem {
+            kind: Command,
+            label: Some(label.to_owned()),
+            exit_code: None,
+        };
+        let card = TimelineEntry::BackgroundWork {
+            id: "wake-3".to_owned(),
+            summary: summary.to_owned(),
+            outcome: Failed,
+            count: 3,
+            kind: Some(Command),
+            items: vec![item("Build"), item("Build"), item("Check")],
+            detail: Some("output the iOS notice never showed".to_owned()),
+        };
+        assert_eq!(
+            map_timeline_entry_with_context(&card, &HashMap::new(), &HashMap::new()),
+            FfiTimelineEntry::Notice {
+                id: "wake-3".to_owned(),
+                text: summary.to_owned(),
+                is_error: false,
+            }
+        );
     }
 
     #[test]

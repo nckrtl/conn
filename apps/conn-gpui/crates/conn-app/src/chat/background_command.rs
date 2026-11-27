@@ -226,7 +226,7 @@ impl ChatView {
 
 /// The label on one line, as a command row shows it: a `sh -c "…"` wrapper is unwrapped and every
 /// whitespace run collapses.
-fn command_one_line(label: &str) -> String {
+pub(super) fn command_one_line(label: &str) -> String {
     super::command_label::command_row_label(label)
 }
 

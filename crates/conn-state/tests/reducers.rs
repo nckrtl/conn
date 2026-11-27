@@ -2481,17 +2481,6 @@ fn other_notifications_stay_plain_notices() {
             "expected the plain notice {text:?}, got {entry:?}"
         );
     };
-    // Several commands in one wake.
-    for summary in [
-        "2 commands finished",
-        "Command \"make\" (exit 0) and command \"npm test\" (exit 2) failed",
-        "Command \"a\" and command \"b\" finished",
-    ] {
-        plain(
-            notification_entry(json!({"kind": "command"}), "completed", summary, None),
-            summary,
-        );
-    }
     // Other kinds of background work keep the pill.
     for (source, summary) in [
         (
@@ -2519,6 +2508,258 @@ fn other_notifications_stay_plain_notices() {
         ),
         "Command \"tail -f\" updated",
     );
+}
+
+fn background_work(
+    entry: &TimelineEntry,
+) -> (
+    conn_state::BackgroundCommandOutcome,
+    usize,
+    Option<conn_state::BackgroundWorkKind>,
+    Vec<(conn_state::BackgroundWorkKind, Option<&str>, Option<i64>)>,
+) {
+    match entry {
+        TimelineEntry::BackgroundWork {
+            outcome,
+            count,
+            kind,
+            items,
+            ..
+        } => (
+            *outcome,
+            *count,
+            *kind,
+            items
+                .iter()
+                .map(|i| (i.kind, i.label.as_deref(), i.exit_code))
+                .collect(),
+        ),
+        other => panic!("expected a background work card, got {other:?}"),
+    }
+}
+
+#[test]
+fn several_commands_become_one_card_with_a_row_each() {
+    use conn_state::BackgroundCommandOutcome::{Failed, Finished, Stopped};
+    use conn_state::BackgroundWorkKind::Command;
+    // Two, with the server's own exit suffixes; the shared verb is `failed` because one failed.
+    let entry = notification_entry(
+        json!({"kind": "command"}),
+        "failed",
+        "Command \"make\" (exit 0) and command \"npm test\" (exit 2) failed",
+        None,
+    );
+    assert_eq!(
+        background_work(&entry),
+        (
+            Failed,
+            2,
+            Some(Command),
+            vec![
+                (Command, Some("make"), Some(0)),
+                (Command, Some("npm test"), Some(2))
+            ]
+        )
+    );
+    // Three, as in Nick's thread: the duplicate stays two rows.
+    let summary = "Command \"Build baseline server with fake provider\", command \"Build baseline server with fake provider\" and command \"Run server tools/check.sh\" failed";
+    let entry = notification_entry(json!({"kind": "command"}), "failed", summary, None);
+    assert_eq!(
+        background_work(&entry),
+        (
+            Failed,
+            3,
+            Some(Command),
+            vec![
+                (
+                    Command,
+                    Some("Build baseline server with fake provider"),
+                    None
+                ),
+                (
+                    Command,
+                    Some("Build baseline server with fake provider"),
+                    None
+                ),
+                (Command, Some("Run server tools/check.sh"), None),
+            ]
+        )
+    );
+    assert!(
+        matches!(&entry, TimelineEntry::BackgroundWork { summary: s, .. } if s == summary),
+        "the summary is kept whole"
+    );
+    // All finished, all stopped, and one with no label.
+    let entry = notification_entry(
+        json!({"kind": "command"}),
+        "completed",
+        "Command \"a\" and command \"b\" finished",
+        None,
+    );
+    assert_eq!(background_work(&entry).0, Finished);
+    let entry = notification_entry(
+        json!({"kind": "command"}),
+        "cancelled",
+        "Command \"sleep 1\" and command were stopped",
+        None,
+    );
+    assert_eq!(
+        background_work(&entry),
+        (
+            Stopped,
+            2,
+            Some(Command),
+            vec![(Command, Some("sleep 1"), None), (Command, None, None)]
+        )
+    );
+}
+
+#[test]
+fn a_completed_group_with_a_non_zero_exit_is_failed() {
+    use conn_state::BackgroundCommandOutcome::Failed;
+    let entry = notification_entry(
+        json!({"kind": "command"}),
+        "completed",
+        "Command \"make\" (exit 0) and command \"lint\" (exit 1) finished",
+        None,
+    );
+    assert_eq!(background_work(&entry).0, Failed);
+}
+
+#[test]
+fn counted_and_mixed_work_make_a_card_too() {
+    use conn_state::BackgroundCommandOutcome::{Failed, Finished};
+    use conn_state::BackgroundWorkKind::{Command, Monitor};
+    let entry = notification_entry(
+        json!({"kind": "command"}),
+        "failed",
+        "4 commands failed",
+        Some("one log line"),
+    );
+    assert_eq!(background_work(&entry), (Failed, 4, Some(Command), vec![]));
+    let entry = notification_entry(
+        json!({"kind": "background_task"}),
+        "failed",
+        "Command \"a\" and monitor \"b\" failed",
+        None,
+    );
+    assert_eq!(
+        background_work(&entry),
+        (
+            Failed,
+            2,
+            None,
+            vec![(Command, Some("a"), None), (Monitor, Some("b"), None)]
+        )
+    );
+    let entry = notification_entry(
+        json!({"kind": "monitor"}),
+        "completed",
+        "Monitor \"CI\" and monitor \"deploy\" finished",
+        None,
+    );
+    assert_eq!(background_work(&entry).2, Some(Monitor));
+    let entry = notification_entry(
+        json!({"kind": "background_task"}),
+        "completed",
+        "5 background tasks finished",
+        None,
+    );
+    assert_eq!(background_work(&entry), (Finished, 5, None, vec![]));
+}
+
+#[test]
+fn a_label_with_quotes_parses_only_when_one_reading_fits() {
+    use conn_state::BackgroundWorkKind::Command;
+    // Quotes inside a label that cannot be a join.
+    let entry = notification_entry(
+        json!({"kind": "command"}),
+        "failed",
+        "Command \"echo \"hi\"\" and command \"make\" failed",
+        None,
+    );
+    assert_eq!(
+        background_work(&entry).3,
+        vec![
+            (Command, Some("echo \"hi\""), None),
+            (Command, Some("make"), None)
+        ]
+    );
+    // A label that itself reads as a join: two readings, so it stays a plain notice.
+    let summary = "Command \"a\" and command \"b\", command \"c\" and command \"d\" failed";
+    let entry = notification_entry(json!({"kind": "command"}), "failed", summary, None);
+    assert!(
+        matches!(&entry, TimelineEntry::Notice { text, .. } if text == summary),
+        "ambiguous: {entry:?}"
+    );
+}
+
+#[test]
+fn several_work_notices_the_server_does_not_write_stay_plain() {
+    for (source, outcome, summary) in [
+        // The source and the names disagree.
+        (
+            json!({"kind": "command"}),
+            "failed",
+            "Command \"a\" and monitor \"b\" failed",
+        ),
+        (
+            json!({"kind": "monitor"}),
+            "failed",
+            "Command \"a\" and command \"b\" failed",
+        ),
+        // The outcome and the verb disagree.
+        (
+            json!({"kind": "command"}),
+            "completed",
+            "Command \"a\" and command \"b\" failed",
+        ),
+        // Subagents keep their pill.
+        (
+            json!({"kind": "subagent"}),
+            "completed",
+            "Subagent \"a\" and subagent \"b\" finished",
+        ),
+        (
+            json!({"kind": "subagent"}),
+            "completed",
+            "2 subagents finished",
+        ),
+        // Not joined the server's way.
+        (
+            json!({"kind": "command"}),
+            "failed",
+            "Command \"a\", command \"b\" failed",
+        ),
+        (
+            json!({"kind": "command"}),
+            "failed",
+            "Command \"a\" and command \"b\" and command \"c\" failed",
+        ),
+        (
+            json!({"kind": "command"}),
+            "failed",
+            "command \"a\" and command \"b\" failed",
+        ),
+        (json!({"kind": "command"}), "failed", "1 commands failed"),
+        (json!({"kind": "command"}), "failed", "02 commands failed"),
+        (
+            json!({"kind": "command"}),
+            "failed",
+            "Command and command failed",
+        ),
+        (
+            json!({"kind": "command"}),
+            "updated",
+            "Command \"a\" and command \"b\" updated",
+        ),
+    ] {
+        let entry = notification_entry(source, outcome, summary, None);
+        assert!(
+            matches!(&entry, TimelineEntry::Notice { text, .. } if text == summary),
+            "{summary:?} stays a plain notice, got {entry:?}"
+        );
+    }
 }
 
 #[test]

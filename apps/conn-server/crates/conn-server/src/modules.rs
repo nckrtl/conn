@@ -103,6 +103,8 @@ const GUARDED: &[(&str, &[&str])] = &[
         BROWSER,
         &[
             "html_preview",
+            "save_test_login",
+            "request_credentials",
             "fill_credential",
             "preview_open",
             "preview_status",

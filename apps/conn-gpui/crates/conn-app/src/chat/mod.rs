@@ -4,6 +4,7 @@
 mod approval_state;
 mod artifact_template;
 mod attachment_thumb;
+mod background_command;
 mod cache;
 mod card_face;
 mod cards;
@@ -19,6 +20,8 @@ pub(crate) use self::composer_state::{
     ThreadWorkspace, approval_arrived, approval_redirect_notice, branch_selection_target,
     local_branch_name_from_remote_ref, plan_approval_send, previous_worktree,
 };
+#[cfg(test)]
+mod background_command_shots;
 #[cfg(all(test, target_os = "macos"))]
 mod card_shots;
 #[cfg(all(test, target_os = "macos"))]
@@ -2293,6 +2296,20 @@ impl ChatView {
                 cx,
             ),
             TimelineEntry::OrbitTask { id, task, .. } => self.render_orbit_task_card(id, task, cx),
+            TimelineEntry::BackgroundCommand {
+                id,
+                label,
+                outcome,
+                exit_code,
+                detail,
+            } => self.render_background_command_row(
+                id,
+                label.as_deref(),
+                *outcome,
+                *exit_code,
+                detail.as_deref(),
+                cx,
+            ),
             _ => div().into_any_element(),
         }
     }

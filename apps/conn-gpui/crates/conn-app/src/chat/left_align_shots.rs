@@ -75,7 +75,7 @@ fn thread() -> ThreadState {
 /// Renders `thread` offscreen to `<prefix>-dark.png` and `<prefix>-light.png` in `dir`, after
 /// calling `setup` on the chat view. It opens no window on screen and takes no focus: GPUI's
 /// headless renderer draws into a texture.
-fn render_pngs(
+pub(super) fn render_pngs(
     dir: &Path,
     prefix: &str,
     thread: &dyn Fn() -> ThreadState,

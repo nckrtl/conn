@@ -262,11 +262,14 @@ struct ConnComposerPill<Trailing: View>: View {
                 .frame(minHeight: Self.control)
                 .accessibilityElement(children: .combine)
                 .accessibilityLabel("Recording")
+                // A stop-recording button: the send circle's shape in red, a white stop inside.
                 Button { finishDictation(send: false) } label: {
-                    ThreadGlyph(name: "stop", size: 14)
-                        .foregroundStyle(theme.foreground)
-                        .frame(width: 36, height: Self.control)
-                        .contentShape(Rectangle())
+                    ZStack {
+                        Circle().fill(theme.destructive).frame(width: 30, height: 30)
+                        ThreadGlyph(name: "stop", size: 12).foregroundStyle(.white)
+                    }
+                    .frame(width: 36, height: Self.control)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Stop dictation")

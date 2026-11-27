@@ -519,84 +519,31 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
         if abs(target - cv.contentOffset.y) > 0.5 { cv.contentOffset.y = target }
     }
 
-    private func scrollToEnd(animated: Bool) {
+    /// Jump to the end at once, as desktop does. The rows near the end are measured first, so the
+    /// end is where it will stay; an animated scroll aimed at guessed heights ran past it.
+    private func scrollToEnd(animated _: Bool = false) {
         let cv = collectionView
         pinned = true
-        programmatic = true
-        view.layoutIfNeeded()
-        cv.layoutIfNeeded()
-        let distance = cv.maxOffsetY - cv.contentOffset.y
-        guard animated, distance > 0.5 else {
-            programmatic = false
-            cv.setNeedsLayout()
-            cv.layoutIfNeeded()
-            return
-        }
-        // From far up, start a screen above the end, so the rows between needn't be measured.
-        if distance > cv.bounds.height * 1.5 {
-            cv.contentOffset.y = cv.maxOffsetY - cv.bounds.height
-            cv.layoutIfNeeded()
-        }
-        animateToEnd()
-    }
-
-    // MARK: - Animated scroll to the end
-
-    private var link: CADisplayLink?
-    private var animationStart: CFTimeInterval = 0
-    private var animationDistance: CGFloat = 0
-
-    /// Eases the distance to the end down to zero. It aims at the end as it is in each frame, so
-    /// rows measured on the way (which move the offset and would cancel UIKit's animated
-    /// `setContentOffset`) never leave it short.
-    private func animateToEnd() {
-        stopAnimation()
-        let cv = collectionView
-        animationDistance = cv.maxOffsetY - cv.contentOffset.y
-        guard animationDistance > 0.5 else {
-            finishAnimation()
-            return
-        }
-        programmatic = true
-        animationStart = CACurrentMediaTime()
-        let link = CADisplayLink(target: DisplayLinkTarget(self), selector: #selector(DisplayLinkTarget.tick))
-        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
-        link.add(to: .main, forMode: .common)
-        self.link = link
-    }
-
-    fileprivate func animationFrame() {
-        let progress = min(1, (CACurrentMediaTime() - animationStart) / 0.35)
-        let eased = 1 - pow(1 - progress, 3)
-        let cv = collectionView
-        cv.contentOffset.y = cv.maxOffsetY - animationDistance * (1 - eased)
-        if progress >= 1 { finishAnimation() }
-    }
-
-    private func finishAnimation() {
-        stopAnimation()
         programmatic = false
-        collectionView.setNeedsLayout()
-        collectionView.layoutIfNeeded()
+        view.layoutIfNeeded()
+        measureNow(changed: [])
+        layout.invalidateLayout()
+        for _ in 0..<4 {
+            cv.layoutIfNeeded()
+            if abs(cv.contentOffset.y - cv.maxOffsetY) <= 0.5 { break }
+            cv.setContentOffset(CGPoint(x: 0, y: cv.maxOffsetY), animated: false)
+        }
         updateChrome()
     }
 
-    private func stopAnimation() {
-        link?.invalidate()
-        link = nil
-    }
-
-    override func viewDidDisappear(_ animated: Bool) {
-        super.viewDidDisappear(animated)
-        if link != nil { finishAnimation() }
-    }
+    private func stopAnimation() {}
 
     private func settle() {
         let distance = collectionView.maxOffsetY - collectionView.contentOffset.y
         // Within 24 pt of the end counts as the end, as before.
         if distance <= 24 {
             pinned = true
-            if distance > 0.5 { animateToEnd() }
+            if distance > 0.5 { scrollToEnd() }
         }
         if reachTopArmed {
             reachTopArmed = false
@@ -711,14 +658,6 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
         pinned = false
         return true
     }
-}
-
-/// Holds the controller weakly, so the display link doesn't keep it alive.
-@MainActor
-private final class DisplayLinkTarget: NSObject {
-    weak var controller: ThreadFeedController?
-    init(_ controller: ThreadFeedController) { self.controller = controller }
-    @objc func tick() { controller?.animationFrame() }
 }
 
 /// The feed's scroll view: after each layout pass it keeps the end in view while pinned, and

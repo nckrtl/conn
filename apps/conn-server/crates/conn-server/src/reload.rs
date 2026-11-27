@@ -44,6 +44,13 @@ async fn run(
     poll: Duration,
     hangup: tokio::signal::unix::Signal,
 ) {
+    let reader = match Reader::start(environment.clone()) {
+        Ok(reader) => reader,
+        Err(error) => {
+            eprintln!("conn-server: the environment reload did not start: {error}");
+            return;
+        }
+    };
     let mut hangup = Some(hangup);
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + poll, poll);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -65,13 +72,40 @@ async fn run(
             }
             _ = tick.tick() => "poll",
         };
-        let reader = environment.clone();
-        if let Ok(true) = tokio::task::spawn_blocking(move || reader.reload()).await {
-            eprintln!(
+        match reader.reload().await {
+            Some(true) => eprintln!(
                 "conn-server: environment reloaded ({reason}): label {:?}",
                 environment.label()
-            );
+            ),
+            Some(false) => {}
+            None => return,
         }
+    }
+}
+
+/// The thread that reads the label and the Instance file. It is not the blocking pool: a
+/// pool thread retires after 10 idle seconds, and a job every [`POLL`] keeps four alive.
+struct Reader(std::sync::mpsc::SyncSender<tokio::sync::oneshot::Sender<bool>>);
+
+impl Reader {
+    /// The thread ends when the reload task drops this.
+    fn start(environment: Arc<Environment>) -> std::io::Result<Self> {
+        let (requests, queue) = std::sync::mpsc::sync_channel::<tokio::sync::oneshot::Sender<_>>(1);
+        std::thread::Builder::new()
+            .name("conn-reload".into())
+            .spawn(move || {
+                for reply in queue {
+                    let _ = reply.send(environment.reload());
+                }
+            })?;
+        Ok(Self(requests))
+    }
+
+    /// Whether the descriptor changed. `None` when the thread is gone.
+    async fn reload(&self) -> Option<bool> {
+        let (reply, changed) = tokio::sync::oneshot::channel();
+        self.0.try_send(reply).ok()?;
+        changed.await.ok()
     }
 }
 

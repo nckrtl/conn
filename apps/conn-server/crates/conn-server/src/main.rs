@@ -29,12 +29,17 @@ fn main() {
     run_server();
 }
 
+/// The most blocking-pool threads at once. One turn on the fake provider uses six.
+const BLOCKING_THREADS: usize = 16;
+
 fn run_server() {
     // One thread: a container serves a handful of clients, and each worker thread costs
-    // stack and allocator arenas.
+    // stack and allocator arenas. The blocking pool gets a cap for the same reason: tokio's
+    // default lets a burst start 512 threads. Jobs past the cap wait in the pool's queue.
     let runtime = conn_server::serve::or_exit(
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
+            .max_blocking_threads(BLOCKING_THREADS)
             .build(),
         "cannot start the runtime",
     );

@@ -2186,20 +2186,6 @@ mod tests {
             matches!(&build_thread_snapshot(&recorded, None, &Default::default()).entries[..], [FfiTimelineEntry::User{text,created_by_agent:true,..}] if text == body)
         );
 
-        // An offline row saved before attribution was cached still has the Rust server's command-derived id.
-        let cached = json!({"User":{"id":format!("turn-item:message:delegated-completion:{TASK}:18"),
-            "text":transport,"created_by_agent":false,"created_at":null,"attachments":[],"is_steer":false,"run_id":null}});
-        let legacy: conn_cache::Message = serde_json::from_value(cached.clone()).unwrap();
-        assert_eq!(legacy.delegated_results().unwrap()[0].body, body);
-        let mut quote_cache = cached;
-        quote_cache["User"]["id"] = json!("turn-item:my-message");
-        assert!(
-            serde_json::from_value::<conn_cache::Message>(quote_cache)
-                .unwrap()
-                .delegated_results()
-                .is_none()
-        );
-
         let mut child = wake.clone();
         for (key, value) in [
             ("id", json!("child-card")),

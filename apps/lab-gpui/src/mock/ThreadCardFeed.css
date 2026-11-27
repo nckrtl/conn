@@ -92,3 +92,27 @@
   color: inherit;
   font: inherit;
 }
+/* GPUI #401 (`card_face::card_shell`): the frame bleeds 3px out of the text column on each side,
+   so the body sits on the column. Only the body takes the hover: 4% of the foreground over it. */
+.desktop-card-feed[data-code-cards="true"] :is(.m-agent-message, .m-subagent, .m-orbit-receipt) {
+  margin-inline: calc(-1 * var(--thread-card-inset, 3px));
+}
+.desktop-card-feed[data-code-cards="true"]
+  :is(.m-agent-message, .m-subagent, .m-orbit-receipt):hover
+  .m-feed-card-content {
+  background: color-mix(
+    in srgb,
+    color-mix(in srgb, var(--thread-card-surface) 94%, white) 96%,
+    var(--color-foreground)
+  );
+}
+.desktop-card-feed[data-code-cards="true"]
+  [data-ios-theme="light"]
+  :is(.m-agent-message, .m-subagent, .m-orbit-receipt):hover
+  .m-feed-card-content {
+  background: color-mix(in srgb, white 96%, var(--color-foreground));
+}
+/* The task card is a full-width button: an auto width lets the negative margins widen it too. */
+.desktop-card-feed[data-code-cards="true"] .m-orbit-receipt {
+  width: auto;
+}

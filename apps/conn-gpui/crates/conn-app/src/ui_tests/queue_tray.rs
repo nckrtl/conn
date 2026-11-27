@@ -193,6 +193,83 @@ fn the_tray_tucks_behind_the_composer_with_one_row_per_queued_message_in_send_or
     );
 }
 
+/// The hairlines between the tray's rows: how many show, and where.
+fn tray_dividers(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+) -> Vec<(String, gpui_kit::Bounds<gpui_kit::Pixels>)> {
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        window
+            .elements()
+            .iter()
+            .filter_map(|element| {
+                let label = element.label()?;
+                label
+                    .starts_with("Queued row divider")
+                    .then(|| (label.to_string(), element.bounds()))
+            })
+            .collect()
+    })
+    .expect("mounted window")
+}
+
+#[gpui_kit::test]
+fn a_hairline_divides_each_pair_of_rows_and_none_sits_at_the_ends(cx: &mut TestAppContext) {
+    let texts = ["first in line", "second in line", "third in line"];
+    let mut tray_heights = Vec::new();
+    for count in 1..=texts.len() {
+        let mounted = mount_with_queue(cx, &texts[..count]);
+        let dividers = tray_dividers(cx, mounted.window);
+        assert_eq!(
+            dividers.len(),
+            count - 1,
+            "{count} rows draw {} dividers",
+            dividers.len()
+        );
+        let (tray, rows) = cx
+            .update_window(mounted.window, |_, window, cx| {
+                window.render_frame(cx);
+                let tray = window.find_by_label("Queued messages").bounds();
+                let rows: Vec<_> = (0..count)
+                    .map(|n| {
+                        window
+                            .find_by_label(&row_label(n + 1, count, texts[n]))
+                            .bounds()
+                    })
+                    .collect();
+                (tray, rows)
+            })
+            .expect("mounted window");
+        for (index, (label, divider)) in dividers.iter().enumerate() {
+            assert_eq!(label, "Queued row divider", "divider {index} shows");
+            // On the boundary between two rows: none above the first or below the last.
+            assert!(
+                (f32::from(divider.top()) - f32::from(rows[index + 1].top())).abs() < 0.6,
+                "divider {index} at {:?} is not on the top of row {}",
+                divider.top(),
+                index + 1
+            );
+            // One pixel, lined up with the row content, not the tray's edges.
+            assert!((f32::from(divider.size.height) - 1.0).abs() < 0.01);
+            assert!(divider.left() >= rows[index].left());
+            assert!(divider.right() <= rows[index].right());
+            assert!(divider.left() > tray.left() + px(8.0));
+        }
+        // The rows keep their height: no row grows or moves for the divider.
+        for row in &rows {
+            assert!((f32::from(row.size.height) - ROW_HEIGHT).abs() < 0.6);
+        }
+        tray_heights.push(f32::from(tray.size.height));
+    }
+    for pair in tray_heights.windows(2) {
+        assert!(
+            (pair[1] - pair[0] - ROW_HEIGHT).abs() < 0.6,
+            "a row adds exactly one row height to the tray: {tray_heights:?}"
+        );
+    }
+}
+
 #[gpui_kit::test]
 fn a_long_message_truncates_inside_the_narrower_row(cx: &mut TestAppContext) {
     let long = "word ".repeat(120);

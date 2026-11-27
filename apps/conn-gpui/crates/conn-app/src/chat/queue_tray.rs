@@ -51,6 +51,11 @@ const LIGHT_FILL_MIX: f32 = 0.75;
 const DARK_FILL_COMPOSER_SHARE: f32 = 0.86;
 /// Text opacity of a queued message's preview: dimmer than the composer's text.
 const ROW_TEXT_ALPHA: f32 = 0.7;
+/// The hairline between two rows starts this far in from the rows' left edge: under the `↳`.
+const DIVIDER_LEFT_PX: f32 = 10.0;
+/// The hairline ends this far in from the rows' right edge: under the right edge of the `…` glyph
+/// (the row's 4px right padding plus the 5px between the 24px button and its 14px glyph).
+const DIVIDER_RIGHT_PX: f32 = 9.0;
 /// An optimistic order the server has not confirmed is dropped after this long.
 const ORDER_OVERRIDE_TTL: Duration = Duration::from_secs(5);
 
@@ -219,6 +224,9 @@ pub(super) struct QueueState {
     /// The gap the drag would drop into (see [`reorder_target`]).
     drop_slot: Option<usize>,
     order_override: Option<OrderOverride>,
+    /// The row under the pointer, by timeline entry id. Its hover fill covers the hairlines on
+    /// either side of it.
+    hovered: Option<String>,
     scroll: ScrollHandle,
 }
 
@@ -229,6 +237,7 @@ impl QueueState {
             dragging: None,
             drop_slot: None,
             order_override: None,
+            hovered: None,
             scroll: ScrollHandle::new(),
         }
     }
@@ -576,6 +585,20 @@ impl ChatView {
         }
     }
 
+    fn note_queue_row_hover(&mut self, id: &str, hovered: bool, cx: &mut Context<'_, Self>) {
+        let next = if hovered {
+            Some(id.to_owned())
+        } else if self.queue.hovered.as_deref() == Some(id) {
+            None
+        } else {
+            return;
+        };
+        if self.queue.hovered != next {
+            self.queue.hovered = next;
+            cx.notify();
+        }
+    }
+
     fn drop_queue_drag(&mut self, run_id: &str, cx: &mut Context<'_, Self>) {
         let slot = self.queue.drop_slot.take();
         self.queue.dragging = None;
@@ -802,10 +825,33 @@ impl ChatView {
         #[cfg(test)]
         let list = gpui_kit::TestSupportExt::test_support(list);
         let mut list = list;
+        // A row with a fill (hovered or being edited) covers the hairlines on either side of it.
+        // While a row drags, the hairlines stay put: the drop line marks the gap instead.
+        let filled = |row: &QueueRow| {
+            let hovered = self.queue.dragging.is_none()
+                && self.queue.hovered.as_deref() == Some(row.id.as_str());
+            let editing = !row.run_id.is_empty()
+                && self.editing_queued_run_id.as_deref() == Some(row.run_id.as_str());
+            hovered || editing
+        };
+        let mut filled_above = false;
+        let mut divider_index = 0;
+        let mut divider = |visible: bool| {
+            divider_index += 1;
+            row_divider(divider_index, border, visible)
+        };
         for (index, row) in rows.iter().enumerate() {
+            let filled_here = filled(row);
+            if index > 0 {
+                list = list.child(divider(!filled_above && !filled_here));
+            }
+            filled_above = filled_here;
             list = list.child(self.render_queue_row(index, total, row, drop_slot, cx));
         }
-        for pending in &self.pending_sends {
+        for (index, pending) in self.pending_sends.iter().enumerate() {
+            if total > 0 || index > 0 {
+                list = list.child(divider(!(index == 0 && filled_above)));
+            }
             list = list.child(self.render_pending_send_row(pending));
         }
 
@@ -1060,6 +1106,9 @@ impl ChatView {
             .rounded(px(TRAY_RADIUS_PX - TRAY_PAD_PX))
             .when(is_editing, |el| el.bg(hsla_alpha(tokens.primary, 0.12)))
             .when(!is_editing, |el| el.hover(move |s| s.bg(hover_bg)))
+            .on_hover(cx.listener(move |view, hovered: &bool, _, cx| {
+                view.note_queue_row_hover(&id, *hovered, cx);
+            }))
             .when(is_dragged, |el| el.opacity(0.4))
             .child(icons::icon(
                 icons::REPLY_INDENT,
@@ -1115,6 +1164,38 @@ impl ChatView {
         let row_el = gpui_kit::TestSupportExt::test_support(row_el);
         row_el.into_any_element()
     }
+}
+
+/// The hairline between two rows. It takes no height, so rows keep their size and place; its line
+/// lies over the top pixel of the row below, inset to line up with the rows' content. A row's
+/// fill hides it (`visible` false) rather than painting over half of it.
+fn row_divider(index: usize, color: Hsla, visible: bool) -> AnyElement {
+    let line = div()
+        .id(SharedString::from(format!("chat-queue-divider-{index}")))
+        .absolute()
+        .top_0()
+        .left(px(DIVIDER_LEFT_PX))
+        .right(px(DIVIDER_RIGHT_PX))
+        .h(px(1.0))
+        .when(visible, |line| line.bg(color));
+    // Only tests see the hairline in the accessibility tree; it is decoration to a screen reader.
+    #[cfg(test)]
+    let line = gpui_kit::TestSupportExt::test_support(line).a11y(
+        gpui_kit::Role::Splitter,
+        SharedString::from(format!("chat.queue.divider.{index}")),
+        if visible {
+            "Queued row divider"
+        } else {
+            "Queued row divider (covered)"
+        },
+    );
+    div()
+        .relative()
+        .flex_none()
+        .w_full()
+        .h(px(0.0))
+        .child(line)
+        .into_any_element()
 }
 
 /// The 2px line that marks where a dragged row would land, along the top or bottom of a row.

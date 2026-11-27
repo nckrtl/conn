@@ -17,6 +17,7 @@ pub mod local_servers;
 pub mod managed;
 pub mod methods;
 pub mod model_manifest;
+pub mod modules;
 pub mod oauth;
 pub mod orbit_link;
 pub mod peers;

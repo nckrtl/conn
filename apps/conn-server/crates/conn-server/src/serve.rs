@@ -410,10 +410,14 @@ pub async fn serve_with_instances(
         })
         .await;
     let _ = host.scheduled_tasks.set(scheduled_tasks.clone());
-    let preview = conn_preview::tabs::Preview::new(state_dir.clone());
-    let _ = host.previews.set(preview.clone());
+    // Off, no browser state exists and no sweep runs; Chrome starts with the first use anyway.
+    let preview = crate::modules::on(crate::modules::BROWSER)
+        .then(|| conn_preview::tabs::Preview::new(state_dir.clone()));
+    if let Some(preview) = &preview {
+        let _ = host.previews.set(preview.clone());
+    }
     let mut deps = Deps {
-        preview: Some(preview.clone()),
+        preview: preview.clone(),
         panels: Some(conn_features::panels::PanelBroker::default()),
         secrets: Some(secrets),
         test_logins: Some(conn_features::test_logins::TestLogins::new(&state_dir)),
@@ -437,7 +441,9 @@ pub async fn serve_with_instances(
         ))),
         // An inert copy holds the original's peer links: it must not use them.
         peers: (!inert).then(|| crate::peers::PeerLinks::new(environment.clone(), engine.clone())),
-        devices: Some(crate::methods::devices::start(environment.clone())),
+        // Off, no device service exists and nothing follows the device hosts.
+        devices: crate::modules::on(crate::modules::DEVICES)
+            .then(|| crate::methods::devices::start(environment.clone())),
         provider_status: crate::methods::provider::ProviderStatus::with_notifier(status_notifier),
         model_manifest: Some(crate::model_manifest::ModelManifest::new(
             state_dir.clone(),
@@ -611,7 +617,9 @@ pub async fn serve_with_instances(
         mcp.stop_remote_tasks().await;
     }
     engine.shutdown().await;
-    preview.shutdown().await;
+    if let Some(preview) = preview {
+        preview.shutdown().await;
+    }
     // Device hubs and agent daemons stop, here and on SSH hosts, as T3's finalizers do;
     // bounded, so an unreachable host cannot hold the stop.
     if let Some(devices) = devices {

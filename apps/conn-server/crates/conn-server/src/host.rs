@@ -223,14 +223,16 @@ impl conn_vcs::setup::SetupRunner for TerminalSetup {
 impl Host {
     fn credential_request(&self, session: AgentSession) -> ThreadCredentialRequest {
         ThreadCredentialRequest {
-            preview: crate::settings::agent_browser_access(
-                &self.environment.settings.raw(),
-                session.project_id.as_deref(),
-            ),
-            device: conn_devices::agent_device_access(
-                &self.environment.settings.raw(),
-                session.project_id.as_deref(),
-            ),
+            preview: crate::modules::on(crate::modules::BROWSER)
+                && crate::settings::agent_browser_access(
+                    &self.environment.settings.raw(),
+                    session.project_id.as_deref(),
+                ),
+            device: crate::modules::on(crate::modules::DEVICES)
+                && conn_devices::agent_device_access(
+                    &self.environment.settings.raw(),
+                    session.project_id.as_deref(),
+                ),
             thread_id: session.thread_id,
             provider_instance_id: session.provider_instance_id,
             subagent: session.subagent,

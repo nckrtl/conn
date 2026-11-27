@@ -1479,6 +1479,7 @@ builder with a test that fails without the fix.
 - **Release `conn-server-v0.5.3`**: Claude Code, Codex, Grok and Antigravity aligned with upstream T3, including the Codex MCP sign-in fixes (#358); the version bump is its own PR.
 - **Release `conn-server-v0.5.4`**: the desktop preview relay for agent browser tabs (#380), `conn://thread/…` thread links (#395), and the Gateway thread outbox (#383); the version bump is its own PR.
 - **Release `conn-server-v0.5.5`**: agents on linked environments drive the GPUI integrated browser and panels (#423), and linked-environment thread details list scheduled tasks (#426); the version bump is its own PR.
+- **Release `conn-server-v0.5.6`**: stricter provider approval checks and turn recovery after wakes and prompt-delivery failures (#438); the version bump is its own PR.
 
 ## Partly followed to Conn `444f032be7` (the 2026-11-18 sync)
 

@@ -214,9 +214,42 @@ fn tray_dividers(
     .expect("mounted window")
 }
 
+/// The tray's border, and each hairline between rows, are this thick.
+const LINE: f32 = 1.0;
+
+/// The tray, its rows top to bottom, and the composer, after a frame.
+fn tray_layout(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    texts: &[&str],
+) -> (
+    gpui_kit::Bounds<gpui_kit::Pixels>,
+    Vec<gpui_kit::Bounds<gpui_kit::Pixels>>,
+    gpui_kit::Bounds<gpui_kit::Pixels>,
+) {
+    cx.update_window(window, |_, window, cx| {
+        window.render_frame(cx);
+        let tray = window.find_by_label("Queued messages").bounds();
+        let composer = window.find_by_label("Message input card").bounds();
+        let rows = texts
+            .iter()
+            .enumerate()
+            .map(|(n, text)| {
+                window
+                    .find_by_label(&row_label(n + 1, texts.len(), text))
+                    .bounds()
+            })
+            .collect();
+        (tray, rows, composer)
+    })
+    .expect("mounted window")
+}
+
 #[gpui_kit::test]
-fn a_hairline_divides_each_pair_of_rows_and_none_sits_at_the_ends(cx: &mut TestAppContext) {
-    let texts = ["first in line", "second in line", "third in line"];
+fn a_full_width_hairline_divides_each_pair_of_rows_and_none_sits_at_the_ends(
+    cx: &mut TestAppContext,
+) {
+    let texts = ["first in line", "second in line", "third in line", "fourth in line"];
     let mut tray_heights = Vec::new();
     for count in 1..=texts.len() {
         let mounted = mount_with_queue(cx, &texts[..count]);
@@ -227,46 +260,82 @@ fn a_hairline_divides_each_pair_of_rows_and_none_sits_at_the_ends(cx: &mut TestA
             "{count} rows draw {} dividers",
             dividers.len()
         );
-        let (tray, rows) = cx
-            .update_window(mounted.window, |_, window, cx| {
-                window.render_frame(cx);
-                let tray = window.find_by_label("Queued messages").bounds();
-                let rows: Vec<_> = (0..count)
-                    .map(|n| {
-                        window
-                            .find_by_label(&row_label(n + 1, count, texts[n]))
-                            .bounds()
-                    })
-                    .collect();
-                (tray, rows)
-            })
-            .expect("mounted window");
+        let (tray, rows, _) = tray_layout(cx, mounted.window, &texts[..count]);
         for (index, (label, divider)) in dividers.iter().enumerate() {
             assert_eq!(label, "Queued row divider", "divider {index} shows");
-            // On the boundary between two rows: none above the first or below the last.
+            // Between two rows: right under one, right over the next.
+            assert!((f32::from(divider.top() - rows[index].bottom())).abs() < 0.01);
+            assert!((f32::from(rows[index + 1].top() - divider.bottom())).abs() < 0.01);
+            assert!((f32::from(divider.size.height) - LINE).abs() < 0.01);
+            // Edge to edge inside the tray's border.
             assert!(
-                (f32::from(divider.top()) - f32::from(rows[index + 1].top())).abs() < 0.6,
-                "divider {index} at {:?} is not on the top of row {}",
-                divider.top(),
-                index + 1
+                (f32::from(divider.left() - tray.left()) - LINE).abs() < 0.01,
+                "divider {index} starts {:?} in from the tray's left edge",
+                divider.left() - tray.left()
             );
-            // One pixel, lined up with the row content, not the tray's edges.
-            assert!((f32::from(divider.size.height) - 1.0).abs() < 0.01);
-            assert!(divider.left() >= rows[index].left());
-            assert!(divider.right() <= rows[index].right());
-            assert!(divider.left() > tray.left() + px(8.0));
-        }
-        // The rows keep their height: no row grows or moves for the divider.
-        for row in &rows {
-            assert!((f32::from(row.size.height) - ROW_HEIGHT).abs() < 0.6);
+            assert!(
+                (f32::from(tray.right() - divider.right()) - LINE).abs() < 0.01,
+                "divider {index} ends {:?} in from the tray's right edge",
+                tray.right() - divider.right()
+            );
         }
         tray_heights.push(f32::from(tray.size.height));
     }
     for pair in tray_heights.windows(2) {
         assert!(
-            (pair[1] - pair[0] - ROW_HEIGHT).abs() < 0.6,
-            "a row adds exactly one row height to the tray: {tray_heights:?}"
+            (pair[1] - pair[0] - ROW_HEIGHT - LINE).abs() < 0.6,
+            "a row adds one row and one hairline to the tray: {tray_heights:?}"
         );
+    }
+}
+
+/// Every row's visible band is the same height: tray top to the first hairline, hairline to
+/// hairline, and the last hairline to the composer's top edge, which hides the tray's tucked
+/// bottom. Each row (its hover fill) fills its band exactly, so its content centres in it.
+#[gpui_kit::test]
+fn every_row_band_is_the_same_height_down_to_the_composer(cx: &mut TestAppContext) {
+    let texts = ["first in line", "second in line", "third in line", "fourth in line"];
+    for count in 1..=texts.len() {
+        let mounted = mount_with_queue(cx, &texts[..count]);
+        let dividers = tray_dividers(cx, mounted.window);
+        let (tray, rows, composer) = tray_layout(cx, mounted.window, &texts[..count]);
+        // The clear space between lines: below the tray's top border, between hairlines, and
+        // above the composer's top edge.
+        let mut edges = vec![f32::from(tray.top()) + LINE];
+        for (_, divider) in &dividers {
+            edges.push(f32::from(divider.top()));
+            edges.push(f32::from(divider.bottom()));
+        }
+        edges.push(f32::from(composer.top()));
+        let bands: Vec<f32> = edges.chunks(2).map(|band| band[1] - band[0]).collect();
+        assert_eq!(bands.len(), count);
+        for (index, band) in bands.iter().enumerate() {
+            assert!(
+                (band - ROW_HEIGHT).abs() <= 1.0,
+                "{count} rows: band {index} is {band}px, expected {ROW_HEIGHT}px: {bands:?}"
+            );
+        }
+        let (min, max) = bands
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(lo, hi), b| (lo.min(*b), hi.max(*b)));
+        assert!(
+            max - min <= 1.0,
+            "{count} rows: the first, middle and last bands differ: {bands:?}"
+        );
+        for (index, (row, band)) in rows.iter().zip(edges.chunks(2)).enumerate() {
+            assert!(
+                (f32::from(row.top()) - band[0]).abs() < 0.6
+                    && (f32::from(row.bottom()) - band[1]).abs() < 0.6,
+                "{count} rows: row {index} spans {:?}..{:?}, its band {}..{}",
+                row.top(),
+                row.bottom(),
+                band[0],
+                band[1]
+            );
+            // The hover fill reaches the tray's sides, inside the border.
+            assert!((f32::from(row.left() - tray.left()) - LINE).abs() < 0.01);
+            assert!((f32::from(tray.right() - row.right()) - LINE).abs() < 0.01);
+        }
     }
 }
 

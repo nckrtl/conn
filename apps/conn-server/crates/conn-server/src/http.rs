@@ -5,7 +5,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 
 use axum::{
     Extension, Form, Json, Router,
-    extract::{ConnectInfo, Path, Query, Request, State, WebSocketUpgrade},
+    extract::{ConnectInfo, Path, Query, Request, State},
     http::{HeaderMap, HeaderValue, Method, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -971,7 +971,7 @@ pub(crate) fn internal_reason(reason: &str) -> Response {
 }
 
 async fn ws(
-    upgrade: WebSocketUpgrade,
+    upgrade: yawc::IncomingUpgrade,
     State(state): State<AppState>,
     Query(query): Query<HashMap<String, String>>,
     headers: HeaderMap,
@@ -1010,17 +1010,20 @@ async fn ws(
     };
     let table = state.table.clone();
     let auth = state.auth;
-    upgrade
-        .max_message_size(MAX_MESSAGE_BYTES)
-        .max_frame_size(MAX_MESSAGE_BYTES)
-        .on_upgrade(move |socket| async move {
-            let _connected = auth.connect(&session_id);
-            // A revoked session loses its open sockets at once, as with the T3 server.
-            tokio::select! {
-                _ = session::run(socket, table, options) => {}
-                _ = revoked(&auth, &session_id) => {}
-            }
-        })
+    let Ok((response, socket)) = upgrade.upgrade(session::deflate_options(MAX_MESSAGE_BYTES))
+    else {
+        return error_invalid();
+    };
+    tokio::spawn(async move {
+        let Ok(socket) = socket.await else { return };
+        let _connected = auth.connect(&session_id);
+        // A revoked session loses its open sockets at once, as with the T3 server.
+        tokio::select! {
+            _ = session::run(socket, table, options) => {}
+            _ = revoked(&auth, &session_id) => {}
+        }
+    });
+    response.into_response()
 }
 
 /// A periodic check that never catches up. tokio's default (`Burst`) fires every missed tick
@@ -2102,6 +2105,97 @@ mod tests {
         })
         .await;
         assert!(closed.is_ok(), "the socket stayed open after revocation");
+    }
+
+    /// `/ws` answers a permessage-deflate offer and stays plain without one.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_main_socket_deflates_only_when_offered() {
+        let (addr, auth) = serve().await;
+        let token = standard_session(&auth);
+        let head = |extra: &str| {
+            format!(
+                "GET /ws?orchestrationProtocol=2 HTTP/1.1\r\nauthorization: Bearer {token}\r\n{UPGRADE}{extra}"
+            )
+        };
+        let offered = "\r\nsec-websocket-extensions: permessage-deflate; client_max_window_bits";
+        let (status, response, _) = call_full(addr, &head(offered), "").await;
+        assert_eq!(status, 101);
+        assert!(
+            response.contains("sec-websocket-extensions: permessage-deflate"),
+            "{response}"
+        );
+        let (status, response, _) = call_full(addr, &head(""), "").await;
+        assert_eq!(status, 101);
+        assert!(!response.contains("sec-websocket-extensions"), "{response}");
+    }
+
+    /// A large message crosses compressed both ways and arrives whole.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_large_message_round_trips_compressed() {
+        let auth = AuthStore::in_memory();
+        let mut table = MethodTable::new();
+        // Input echoed back: 2 MB of text that compresses like JSON does.
+        table.unary(
+            "server.getConfig",
+            |_, input: Value| async move { Ok(input) },
+        );
+        let state = AppState {
+            table: Arc::new(table),
+            auth: auth.clone(),
+            descriptor: crate::environment::fixed_descriptor(crate::environment::descriptor(
+                "env-test", "Test", false, None,
+            )),
+            engine: None,
+            deps: Default::default(),
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router(state)).await });
+        let token = standard_session(&auth);
+        let url = format!("ws://{addr}/ws?orchestrationProtocol=2")
+            .parse()
+            .unwrap();
+        let request = yawc::HttpRequestBuilder::new()
+            .header(header::AUTHORIZATION, format!("Bearer {token}"));
+        let mut socket = yawc::WebSocket::connect(url)
+            .with_options(
+                yawc::Options::default()
+                    .with_max_payload_read(MAX_MESSAGE_BYTES)
+                    .with_compression_level(yawc::CompressionLevel::fast()),
+            )
+            .with_request(request)
+            .await
+            .unwrap();
+        let big: String = (0..40_000)
+            .map(|n| format!("{{\"sequence\":{n},\"kind\":\"event\"}},"))
+            .collect();
+        let call = json!({"_tag": "Request", "id": "1", "tag": "server.getConfig",
+            "payload": {"big": big}, "headers": []});
+        futures_util::SinkExt::send(&mut socket, yawc::Frame::text(call.to_string()))
+            .await
+            .unwrap();
+        let reply = loop {
+            let frame = socket.next_frame().await.unwrap();
+            if frame.opcode() == yawc::OpCode::Text {
+                break frame;
+            }
+        };
+        let reply: Value = serde_json::from_slice(reply.payload()).unwrap();
+        assert_eq!(reply["exit"]["value"]["big"].as_str(), Some(big.as_str()));
+    }
+
+    fn standard_session(auth: &AuthStore) -> String {
+        auth.issue_session(auth::SessionRequest {
+            scopes: auth::STANDARD_SCOPES
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
+            label: None,
+            subject: None,
+            ttl_ms: auth::SESSION_TTL_MS,
+        })
+        .unwrap()
+        .token
     }
 
     /// The preview viewer socket ends with its session too, on revoke and on logout.

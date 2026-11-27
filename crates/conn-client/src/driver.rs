@@ -15,11 +15,8 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderValue;
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tracing::{debug, warn};
+use yawc::{Frame, OpCode, WebSocketError};
 
 use crate::auth::{TokenExchangeError, exchange_pairing_code};
 use crate::wire::{
@@ -523,12 +520,8 @@ async fn fetch_environment(base: &url::Url) -> Option<String> {
     body.get("environmentId")?.as_str().map(str::to_owned)
 }
 
-fn is_auth_rejection(err: &tokio_tungstenite::tungstenite::Error) -> bool {
-    matches!(
-        err,
-        tokio_tungstenite::tungstenite::Error::Http(response)
-            if matches!(response.status().as_u16(), 401 | 403)
-    )
+fn is_auth_rejection(err: &WebSocketError) -> bool {
+    matches!(err, WebSocketError::InvalidStatusCode(401 | 403))
 }
 
 pub(crate) async fn run(
@@ -607,7 +600,7 @@ pub(crate) async fn run(
             }
         };
 
-        let ws_request = match build_ws_request(&state.config.http_base_url, &token) {
+        let (ws_url, ws_request) = match build_ws_request(&state.config.http_base_url, &token) {
             Ok(req) => req,
             Err(err) => {
                 let msg = err.to_string();
@@ -619,16 +612,21 @@ pub(crate) async fn run(
             }
         };
 
-        let ws_config = WebSocketConfig::default()
-            .max_message_size(Some(MAX_JOINED_MESSAGE_BYTES))
-            .max_frame_size(Some(MAX_JOINED_MESSAGE_BYTES));
-
-        // `disable_nagle = true` (TCP_NODELAY): every client frame is a small Ack or Request. With
+        // Offers permessage-deflate; the server chooses the context settings.
+        // `with_no_delay` (TCP_NODELAY): every client frame is a small Ack or Request. With
         // Nagle on, a `subscribeThread` sent right after an Ack waits for the server's delayed
         // TCP ACK (up to ~200 ms on macOS) before it leaves the socket.
+        let ws_options = yawc::Options::default()
+            .with_max_payload_read(MAX_JOINED_MESSAGE_BYTES)
+            .with_utf8()
+            .with_no_delay()
+            .with_compression_level(yawc::CompressionLevel::fast())
+            .with_compression_threshold(256);
         let handshake = tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
-            tokio_tungstenite::connect_async_with_config(ws_request, Some(ws_config), true),
+            yawc::WebSocket::connect(ws_url)
+                .with_options(ws_options)
+                .with_request(ws_request),
         );
         let connected = match handshake.await {
             Ok(result) => result,
@@ -641,7 +639,7 @@ pub(crate) async fn run(
             }
         };
         match connected {
-            Ok((ws_stream, _response)) => {
+            Ok(ws_stream) => {
                 state.backoff.reset();
                 if events_tx
                     .send(ClientEvent::Status(ConnectionStatus::Connected))
@@ -737,19 +735,13 @@ async fn resolve_bearer(
 fn build_ws_request(
     http_base_url: &url::Url,
     bearer_token: &str,
-) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, ClientError> {
+) -> Result<(url::Url, yawc::HttpRequestBuilder), ClientError> {
     let ws_url = build_ws_url(http_base_url)?;
-    let mut request = ws_url
-        .as_str()
-        .into_client_request()
-        .map_err(|err| ClientError::Connection(format!("invalid websocket request: {err}")))?;
-    let auth_header = HeaderValue::from_str(&format!("Bearer {bearer_token}"))
+    let auth_header = reqwest::header::HeaderValue::from_str(&format!("Bearer {bearer_token}"))
         .map_err(|err| ClientError::Auth(format!("invalid bearer token header: {err}")))?;
-    request.headers_mut().insert(
-        tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
-        auth_header,
-    );
-    Ok(request)
+    let request =
+        yawc::HttpRequestBuilder::new().header(reqwest::header::AUTHORIZATION, auth_header);
+    Ok((ws_url, request))
 }
 
 fn drain_pending_commands(state: &mut DriverState, cmd_rx: &mut mpsc::UnboundedReceiver<Command>) {
@@ -807,8 +799,7 @@ enum SessionOutcome {
     Disconnected(String),
 }
 
-type WsStream =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type WsStream = yawc::TcpWebSocket;
 
 async fn run_session(
     state: &mut DriverState,
@@ -834,14 +825,17 @@ async fn run_session(
         tokio::select! {
             maybe_msg = ws_read.next() => {
                 match maybe_msg {
-                    Some(Ok(Message::Text(text))) => {
+                    Some(frame) if frame.opcode() == OpCode::Text => {
+                        let Ok(text) = std::str::from_utf8(frame.payload()) else {
+                            return SessionOutcome::Disconnected("ws text is not UTF-8".to_owned());
+                        };
                         // Receiving any text frame (including multi-part snapshot chunks) proves
                         // the server connection is live; don't let keepalive drop a huge snapshot
                         // mid-transfer while the server is busy streaming frame parts.
                         missed_pongs = 0;
                         let part_at = std::time::Instant::now();
                         let started_at = *message_started_at.get_or_insert(part_at);
-                        let whole = match joiner.push(&text) {
+                        let whole = match joiner.push(text) {
                             Ok(Some(whole)) => {
                                 message_started_at = None;
                                 whole
@@ -881,18 +875,14 @@ async fn run_session(
                             }
                         }
                     }
-                    Some(Ok(Message::Ping(payload))) => {
-                        if let Err(err) = ws_write.send(Message::Pong(payload)).await {
-                            return SessionOutcome::Disconnected(format!("ws pong send failed: {err}"));
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) | None => {
+                    // yawc answers pings itself and ends the stream on a read error.
+                    Some(frame) if frame.opcode() == OpCode::Close => {
                         return SessionOutcome::Disconnected("server closed websocket".to_owned());
                     }
-                    Some(Ok(Message::Binary(_) | Message::Pong(_) | Message::Frame(_))) => {}
-                    Some(Err(err)) => {
-                        return SessionOutcome::Disconnected(format!("ws read error: {err}"));
+                    None => {
+                        return SessionOutcome::Disconnected("websocket closed or failed".to_owned());
                     }
+                    Some(_) => {}
                 }
             }
             _ = ping_interval.tick() => {
@@ -909,11 +899,11 @@ async fn run_session(
                     Some(Command::Close) | None => {
                         state.closed = true;
                         let _ = send_client_frame(&mut ws_write, &FromClient::Eof).await;
-                        let _ = ws_write.send(Message::Close(None)).await;
+                        let _ = ws_write.send(Frame::close(yawc::close::CloseCode::Normal, "")).await;
                         return SessionOutcome::Closed;
                     }
                     Some(Command::Reconnect) => {
-                        let _ = ws_write.send(Message::Close(None)).await;
+                        let _ = ws_write.send(Frame::close(yawc::close::CloseCode::Normal, "")).await;
                         return SessionOutcome::ReconnectNow;
                     }
                     Some(cmd) => {
@@ -932,7 +922,7 @@ async fn restore_subscriptions_and_pending<S>(
     ws_write: &mut S,
 ) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     // Calls first: the server reads its store one request at a time, so a send queued while the
     // server was away must not wait behind every resubscribed stream's replay.
@@ -983,7 +973,7 @@ async fn handle_online_command<S>(
     ws_write: &mut S,
 ) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     match cmd {
         Command::SubscribeShell {
@@ -1128,7 +1118,7 @@ where
 
 async fn send_shell_subscribe<S>(state: &mut DriverState, ws_write: &mut S) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     let input = OrchestrationV2SubscribeShellInput {
         after_sequence: state.shell_after_sequence,
@@ -1156,7 +1146,7 @@ async fn send_server_config_subscribe<S>(
     ws_write: &mut S,
 ) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     let input = SubscribeServerConfigPayload {
         environment_themes: None,
@@ -1181,7 +1171,7 @@ where
 /// recency: the open thread at once, background threads as opening slots free.
 async fn admit_threads<S>(state: &mut DriverState, ws_write: &mut S) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     for thread_id in state.thread_ids_by_recency() {
         let waiting = state
@@ -1201,7 +1191,7 @@ async fn send_thread_subscribe<S>(
     ws_write: &mut S,
 ) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     let store_owned = state
         .thread_subs
@@ -1262,7 +1252,7 @@ async fn send_panel_requests_subscribe<S>(
     ws_write: &mut S,
 ) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     let Some(input) = &state.panel_subscription else {
         return Ok(());
@@ -1283,7 +1273,7 @@ async fn send_annotations_subscribe<S>(
     ws_write: &mut S,
 ) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     let input = AnnotationProjectInput {
         project_id: project_id.to_owned(),
@@ -1307,7 +1297,7 @@ async fn send_unary_call<S>(
     ws_write: &mut S,
 ) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     // The caller stopped waiting: nothing would read the answer.
     if call.reply.is_closed() {
@@ -1334,7 +1324,7 @@ async fn send_generic_stream<S>(
     ws_write: &mut S,
 ) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     let request_id = state.alloc_request_id();
     state
@@ -1353,7 +1343,7 @@ async fn send_request<S>(
     payload: Value,
 ) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     let frame = FromClient::Request(Request {
         id,
@@ -1371,12 +1361,12 @@ where
 
 async fn send_client_frame<S>(ws_write: &mut S, frame: &FromClient) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     let text = encode_client_frame(frame)
         .map_err(|err| format!("failed to serialize client frame: {err}"))?;
     ws_write
-        .send(Message::Text(text.into()))
+        .send(Frame::text(text))
         .await
         .map_err(|err| format!("ws send failed: {err}"))
 }
@@ -1397,7 +1387,7 @@ async fn handle_incoming_frame<S>(
     timing: MessageTiming,
 ) -> Result<(), SessionOutcome>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     match frame {
         IncomingServerFrame::Chunk { request_id, values } => {
@@ -1465,7 +1455,7 @@ async fn handle_chunk_raw<S>(
     timing: MessageTiming,
 ) -> Result<(), SessionOutcome>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     // Always acknowledge chunks immediately so server streams never stall.
     send_client_frame(

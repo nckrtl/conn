@@ -1959,10 +1959,12 @@ impl ChatView {
 
         // Lab `SubagentCard`: `<model> · <effort>` (and the state while no time shows), the run
         // time at the right.
-        let model_text = self
-            .subagent_models
-            .get(id)
-            .and_then(|model| subagent_model_text(self.server_config.catalog(), model));
+        let model = subagent_card_model(
+            self.subagent_child_models.get(id),
+            self.subagent_models.get(id),
+        );
+        let model_text =
+            model.and_then(|model| subagent_model_text(self.server_config.catalog(), model));
         let mut meta_parts: Vec<String> = Vec::new();
         if let Some(remote) = remote_child {
             meta_parts.push(format!("on {}", remote.label));
@@ -1970,11 +1972,8 @@ impl ChatView {
         meta_parts.extend(model_text);
         // A task on another machine has the driver `remote` here, a label and not a provider, so the
         // mark comes from the instance and model it runs.
-        let (provider_key, provider_label) = subagent_provider(
-            role,
-            self.subagent_models.get(id),
-            self.server_config.catalog(),
-        );
+        let (provider_key, provider_label) =
+            subagent_provider(role, model, self.server_config.catalog());
         let provider_mark = div()
             .id(SharedString::from(format!("subagent-provider-{id}")))
             .a11y(
@@ -2735,6 +2734,63 @@ fn subagent_provider(
         .unwrap_or_else(|| (role.to_owned(), "Agent"))
 }
 
+/// The model a subagent card shows: the child thread's own selection (`child`, from the shell)
+/// when known, else the parent's subagent record (the delegate call's `target`). The record can
+/// lack the options the child runs with, so the child wins.
+pub(crate) fn subagent_card_model<'a>(
+    child: Option<&'a conn_state::SubagentModel>,
+    record: Option<&'a conn_state::SubagentModel>,
+) -> Option<&'a conn_state::SubagentModel> {
+    child.filter(|model| model.model.is_some()).or(record)
+}
+
+/// The child thread's own model of each subagent entry of `thread`, by entry id. `child_shell`
+/// finds a child thread in the shell: its id and, for a child on another linked environment, that
+/// environment (`None`: the parent's own environment). Children the shell lacks are left out.
+pub(crate) fn subagent_child_models<'a>(
+    thread: &conn_state::ThreadState,
+    child_shell: impl Fn(&str, Option<&str>) -> Option<&'a conn_state::ThreadShell>,
+) -> HashMap<String, conn_state::SubagentModel> {
+    thread
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            let TimelineEntry::Subagent {
+                id,
+                child_thread_id,
+                remote_child,
+                ..
+            } = entry
+            else {
+                return None;
+            };
+            let child = match (remote_child, child_thread_id) {
+                (Some(remote), _) => {
+                    child_shell(&remote.thread_id, Some(remote.environment_id.as_str()))
+                }
+                (None, Some(child)) => child_shell(child, None),
+                (None, None) => None,
+            }?;
+            let model = conn_state::SubagentModel::from_selection(
+                &child.provider_instance_id,
+                &child.model_selection,
+            );
+            model.model.is_some().then(|| (id.clone(), model))
+        })
+        .collect()
+}
+
+/// Option ids that carry a provider's effort: Codex and Grok `reasoningEffort`, Claude `effort`,
+/// Antigravity `thought_level`.
+const EFFORT_OPTION_IDS: [&str; 6] = [
+    "reasoningEffort",
+    "effort",
+    "thought_level",
+    "reasoning_effort",
+    "thinking_level",
+    "reasoning",
+];
+
 /// `<model> · <effort>` for a subagent card, for example `Opus 5.5 · medium`. The model name is the
 /// composer's trigger label; the effort is the composer's effort label, lowercased. A model the
 /// catalog does not list shows its slug and the raw reasoning option.
@@ -2763,7 +2819,7 @@ pub(crate) fn subagent_model_text(
     let effort = found
         .and_then(|found| found.effort_summary(Some(&options)).word)
         .or_else(|| {
-            ["reasoningEffort", "effort", "reasoning"]
+            EFFORT_OPTION_IDS
                 .iter()
                 .find_map(|key| model.options.get(*key).cloned())
         })
@@ -2776,10 +2832,197 @@ pub(crate) fn subagent_model_text(
 
 #[cfg(test)]
 mod subagent_model_tests {
-    use super::{subagent_model_text, subagent_provider};
-    use conn_state::SubagentModel;
+    use super::{
+        subagent_card_model, subagent_child_models, subagent_model_text, subagent_provider,
+    };
     use conn_state::providers::ModelCatalog;
+    use conn_state::{SubagentModel, ThreadShell, ThreadState, TimelineEntry, TurnItemStatus};
+    use serde_json::{Value, json};
     use std::collections::HashMap;
+
+    /// A provider whose one model has an effort select `option` (default `low`) with choices.
+    fn provider(instance: &str, driver: &str, slug: &str, name: &str, option: &str) -> Value {
+        json!({
+            "instanceId": instance, "driver": driver, "displayName": name, "enabled": true,
+            "installed": true, "status": "ready", "auth": {"status": "authenticated"},
+            "checkedAt": "2026-11-27T00:00:00Z",
+            "models": [{
+                "slug": slug, "name": name, "isCustom": false,
+                "capabilities": { "optionDescriptors": [{
+                    "id": option, "label": "Effort", "type": "select",
+                    "options": [
+                        { "id": "low", "label": "Low", "isDefault": true },
+                        { "id": "medium", "label": "Medium" },
+                        { "id": "high", "label": "High" } ],
+                    "currentValue": "low",
+                }] },
+            }],
+        })
+    }
+
+    fn catalog() -> ModelCatalog {
+        let providers = [
+            provider(
+                "codex",
+                "codex",
+                "gpt-6.2-astra",
+                "GPT-6.2 Astra",
+                "reasoningEffort",
+            ),
+            provider(
+                "claudeAgent",
+                "claudeAgent",
+                "claude-opus-5-5",
+                "Claude Opus 5.5",
+                "effort",
+            ),
+            provider(
+                "antigravity",
+                "antigravity",
+                "gemini-4-pro",
+                "Gemini 4 Pro",
+                "thought_level",
+            ),
+        ]
+        .map(|value| Some(conn_contract::from_json(value).expect("a provider")));
+        ModelCatalog::from_providers(&providers)
+    }
+
+    fn with_option(instance: &str, slug: &str, option: &str, value: &str) -> SubagentModel {
+        SubagentModel {
+            options: HashMap::from([(option.to_owned(), value.to_owned())]),
+            ..model(instance, slug)
+        }
+    }
+
+    fn effort_of(text: Option<String>) -> String {
+        let text = text.expect("a model text");
+        text.rsplit(" · ").next().unwrap_or_default().to_owned()
+    }
+
+    #[test]
+    fn each_provider_shows_the_effort_it_runs_at() {
+        let catalog = catalog();
+        let codex = with_option("codex", "gpt-6.2-astra", "reasoningEffort", "high");
+        assert_eq!(effort_of(subagent_model_text(&catalog, &codex)), "high");
+        let claude = with_option("claudeAgent", "claude-opus-5-5", "effort", "medium");
+        assert_eq!(effort_of(subagent_model_text(&catalog, &claude)), "medium");
+        let gemini = with_option("antigravity", "gemini-4-pro", "thought_level", "high");
+        assert_eq!(effort_of(subagent_model_text(&catalog, &gemini)), "high");
+    }
+
+    #[test]
+    fn no_options_shows_the_model_default() {
+        let catalog = catalog();
+        let bare = model("codex", "gpt-6.2-astra");
+        assert_eq!(effort_of(subagent_model_text(&catalog, &bare)), "low");
+    }
+
+    #[test]
+    fn an_uncatalogued_antigravity_model_shows_its_raw_thought_level() {
+        let model = with_option("antigravity", "gemini-9", "thought_level", "High");
+        assert_eq!(
+            subagent_model_text(&ModelCatalog::default(), &model).as_deref(),
+            Some("gemini-9 · high")
+        );
+    }
+
+    #[test]
+    fn the_child_thread_selection_wins_over_the_subagent_record() {
+        let catalog = catalog();
+        // The Conn Server's record names the model but not the options it was started with.
+        let record = model("codex", "gpt-6.2-astra");
+        let child = with_option("codex", "gpt-6.2-astra", "reasoningEffort", "high");
+        let shown = subagent_card_model(Some(&child), Some(&record)).expect("a model");
+        assert_eq!(effort_of(subagent_model_text(&catalog, shown)), "high");
+        // Without the child, the record (the delegate call's target) shows.
+        let record = with_option("codex", "gpt-6.2-astra", "reasoningEffort", "medium");
+        let shown = subagent_card_model(None, Some(&record)).expect("a model");
+        assert_eq!(effort_of(subagent_model_text(&catalog, shown)), "medium");
+        // A child shell with no model says nothing.
+        let empty = SubagentModel::default();
+        assert_eq!(
+            subagent_card_model(Some(&empty), Some(&record)),
+            Some(&record)
+        );
+    }
+
+    fn child_shell(id: &str, effort: &str) -> ThreadShell {
+        conn_contract::from_json(json!({
+            "createdBy": "agent", "creationSource": "mcp", "id": id, "projectId": "p",
+            "title": "Child", "providerInstanceId": "codex",
+            "modelSelection": { "instanceId": "codex", "model": "gpt-6.2-astra",
+                "options": [{ "id": "reasoningEffort", "value": effort }] },
+            "runtimeMode": "full-access", "interactionMode": "default", "branch": null,
+            "worktreePath": null,
+            "lineage": { "rootThreadId": id, "parentThreadId": "parent", "relationshipToParent": null },
+            "forkedFrom": null, "activeProviderThreadId": null, "latestRunId": null,
+            "activeRunId": null, "status": "running", "pendingRuntimeRequest": null,
+            "latestVisibleMessage": null, "latestUserMessageAt": null,
+            "hasActionableProposedPlan": false, "itemCount": 0, "visibleItemCount": 0,
+            "createdAt": "2026-11-27T09:00:00.000Z", "updatedAt": "2026-11-27T09:00:00.000Z",
+            "archivedAt": null, "settledOverride": null, "settledAt": null, "deletedAt": null
+        }))
+        .expect("thread decodes")
+    }
+
+    fn subagent_entry(
+        id: &str,
+        child: Option<&str>,
+        remote: Option<conn_contract::OrchestrationV2RemoteTaskChild>,
+    ) -> TimelineEntry {
+        TimelineEntry::Subagent {
+            id: id.to_owned(),
+            child_thread_id: child.map(str::to_owned),
+            title: "Review".to_owned(),
+            role: "codex".to_owned(),
+            status: TurnItemStatus::Running,
+            summary: None,
+            remote_child: remote,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        }
+    }
+
+    #[test]
+    fn local_and_linked_environment_children_read_their_own_shells() {
+        let local = child_shell("child-local", "high");
+        let remote = child_shell("child-remote", "medium");
+        let mut thread = ThreadState::new("parent");
+        thread.entries = vec![
+            subagent_entry("card-local", Some("child-local"), None),
+            subagent_entry(
+                "card-remote",
+                None,
+                Some(conn_contract::OrchestrationV2RemoteTaskChild {
+                    environment_id: "mini".to_owned(),
+                    thread_id: "child-remote".to_owned(),
+                    label: "Mac mini".to_owned(),
+                    title: None,
+                    run_id: None,
+                    stopped_there: None,
+                    stop_count: None,
+                }),
+            ),
+            subagent_entry("card-unknown", Some("child-missing"), None),
+        ];
+        let models = subagent_child_models(&thread, |id, environment| match (id, environment) {
+            ("child-local", None) => Some(&local),
+            ("child-remote", Some("mini")) => Some(&remote),
+            _ => None,
+        });
+        let catalog = catalog();
+        assert_eq!(
+            effort_of(subagent_model_text(&catalog, &models["card-local"])),
+            "high"
+        );
+        assert_eq!(
+            effort_of(subagent_model_text(&catalog, &models["card-remote"])),
+            "medium"
+        );
+        assert!(!models.contains_key("card-unknown"));
+    }
 
     #[test]
     fn a_model_the_catalog_lacks_shows_its_slug_and_raw_effort() {

@@ -407,17 +407,15 @@ fn shell_agent(
         agent_elapsed(false, run_started, run_completed, now_secs)
             .or_else(|| entry.and_then(|(_, s, c)| agent_elapsed(false, s, c, now_secs)))
     };
-    let model = entry
-        .and_then(|(id, ..)| entry_model(timeline, id, catalog))
-        .or_else(|| {
-            crate::chat::subagent_model_text(
-                catalog,
-                &conn_state::SubagentModel::from_selection(
-                    &child.provider_instance_id,
-                    &child.model_selection,
-                ),
-            )
-        });
+    // The child's own selection first: the parent's subagent record can lack its options.
+    let model = crate::chat::subagent_model_text(
+        catalog,
+        &conn_state::SubagentModel::from_selection(
+            &child.provider_instance_id,
+            &child.model_selection,
+        ),
+    )
+    .or_else(|| entry.and_then(|(id, ..)| entry_model(timeline, id, catalog)));
     AgentRow {
         key: child.id.clone(),
         thread_id: child.id.clone(),

@@ -8,7 +8,7 @@ mod background_command;
 mod cache;
 mod card_face;
 mod cards;
-pub(crate) use cards::subagent_model_text;
+pub(crate) use cards::{subagent_child_models, subagent_model_text};
 mod child_approvals;
 pub(crate) use self::child_approvals::ChildApprovalCard;
 mod color;
@@ -333,6 +333,9 @@ pub(crate) struct ChatView {
     entry_timings: HashMap<String, EntryTiming>,
     /// The model of each subagent card, by timeline entry id.
     subagent_models: HashMap<String, conn_state::SubagentModel>,
+    /// The child thread's own model of each subagent card, by timeline entry id, from the shell.
+    /// It wins over [`Self::subagent_models`], whose record can lack the child's options.
+    subagent_child_models: HashMap<String, conn_state::SubagentModel>,
     run_timings: HashMap<String, RunTiming>,
     turn_checkpoints: HashMap<String, TurnCheckpointSummary>,
     expanded_ids: HashSet<String>,
@@ -600,6 +603,7 @@ impl ChatView {
             perf_open: None,
             entry_timings: HashMap::new(),
             subagent_models: HashMap::new(),
+            subagent_child_models: HashMap::new(),
             run_timings: HashMap::new(),
             turn_checkpoints: HashMap::new(),
             expanded_ids: HashSet::new(),
@@ -1277,6 +1281,19 @@ impl ChatView {
     ) {
         self.composer
             .update(cx, |c, cx| c.set_branch_context(context, cx));
+    }
+
+    /// Sets the child thread's own model of each subagent card, by timeline entry id. A child
+    /// whose selection changes repaints its card.
+    pub(crate) fn set_subagent_child_models(
+        &mut self,
+        models: HashMap<String, conn_state::SubagentModel>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.subagent_child_models != models {
+            self.subagent_child_models = models;
+            cx.notify();
+        }
     }
 
     pub(crate) fn set_thread_context(

@@ -194,6 +194,8 @@ run 4 120 "replay" env DECODE_COVERAGE="$decoded" \
   node crates/conn-server/tools/replay.mjs "$release/examples/replay_server" "${scenarios[@]}"
 run 4 120 "decode coverage" \
   node crates/conn-server/tools/decode-coverage.mjs "$decoded" "$release/conn-server"
+# A capability is advertised if and only if what it promises is registered; every flag has a row.
+run 4 120 "capabilities" node crates/conn-server/tools/capabilities-check.mjs "$release/conn-server"
 run 4 120 "settings-diff" node crates/conn-server/tools/settings-diff.mjs "$release/conn-server"
 # Settings secrets: the T3 server's own settings service and this server on one state folder.
 run 4 120 "secrets-interop" node crates/conn-server/tools/secrets-interop.mjs "$release"

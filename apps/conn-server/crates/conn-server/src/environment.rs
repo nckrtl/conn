@@ -343,7 +343,7 @@ pub(crate) fn descriptor(
 /// The one place for what this server advertises. A capability promises a behaviour that
 /// clients then rely on, so each one here is served; every other one stays unset (off). This
 /// covers the descriptor's `capabilities` and the flags `ServerConfig` carries
-/// ([`config_flags`]).
+/// ([`config_flags`]). `tools/capabilities-check.mjs` holds each flag to what is registered.
 pub fn capabilities(server_restart: bool) -> ExecutionEnvironmentCapabilities {
     capabilities_of(server_restart, crate::modules::enabled())
 }

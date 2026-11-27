@@ -93,6 +93,7 @@ Read the report, then the log. Then:
 | `cargo test engine_commands` | The contract dropped or renamed a command type the engine handles | Follow the rename in `crates/conn-engine/src/commands.rs`. |
 | `check-copies` | A hand-kept auth or wire table no longer matches upstream | Update `auth.rs` or `conn-wire` to the value the check prints. |
 | `decode coverage` | A newly registered method has no run that decodes its answer | Add a call to `effect-client.mjs`; only if that is impossible, a line with a reason in `decode-coverage.pending`. |
+| `capabilities` | The contract has a new capability flag, or a method was registered whose flag is still off | Give the flag a row in `crates/conn-server/tools/capabilities.json` that says what proves it. Turn the flag on in `environment.rs` only when the server serves what it promises; until then the row carries `off` with the reason. |
 | `settings-diff` | The T3 server's settings rules moved | Follow the printed path in `settings.rs`, and add a case to `settings-cases.json`. |
 | `cargo clippy`, `cargo test`, `release build` | A changed method type | Follow the **changed** lines of the report in `crates/conn-server/src/methods`. |
 | `effect-client`, `replay`, `client-check` | The wire, the frame parts or the client reducers moved | Compare with `packages/shared/src/socketFrameParts.ts` and the `effect` version in the lockfile. |

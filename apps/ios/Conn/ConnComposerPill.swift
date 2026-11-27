@@ -60,12 +60,14 @@ struct ConnComposerPill<Trailing: View>: View {
                 ScrollView(.horizontal) {
                     HStack(spacing: 10) {
                         ForEach(draft.files) { file in
+                            let upload = draft.uploads?.statuses[file.uploadId]
+                            let retry: () -> Void = { draft.uploads?.retry(file) }
                             if file.isImage {
-                                ComposerImageThumbnail(file: file, locked: draft.locked) {
+                                ComposerImageThumbnail(file: file, upload: upload, locked: draft.locked, retry: retry) {
                                     draft.files.removeAll { $0.id == file.id }
                                 }
                             } else {
-                                ComposerFileChip(file: file, locked: draft.locked) {
+                                ComposerFileChip(file: file, upload: upload, locked: draft.locked, retry: retry) {
                                     draft.files.removeAll { $0.id == file.id }
                                 }
                             }
@@ -529,7 +531,9 @@ private struct ComposerSheetEdge: View {
 /// remove target is 44 pt. The picture is decoded once, at thumbnail size, off the main thread.
 private struct ComposerImageThumbnail: View {
     let file: ComposerFile
+    let upload: FfiUploadStatus?
     let locked: Bool
+    let retry: () -> Void
     let remove: () -> Void
     @Environment(\.connTheme) private var theme
     @Environment(\.displayScale) private var displayScale
@@ -548,7 +552,16 @@ private struct ComposerImageThumbnail: View {
                         .scaledToFill()
                 }
             }
+            .overlay { uploadOverlay }
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                if case .failed = upload {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(theme.destructive, lineWidth: 1.5)
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .onTapGesture { if case .failed = upload { retry() } }
             .overlay(alignment: .topTrailing) {
                 Button(action: remove) {
                     ThreadGlyph(name: "close", size: 10)
@@ -565,6 +578,27 @@ private struct ComposerImageThumbnail: View {
             }
             .task(id: file.id) { image = await Self.thumbnail(of: file.url, pixels: Self.side * displayScale * 2) }
             .accessibilityElement(children: .contain)
+            .accessibilityLabel(uploadAccessibilityLabel(file.name, upload))
+            .accessibilityAction(named: "Retry upload") { if case .failed = upload { retry() } }
+    }
+
+    /// Lab `.m-upload-ring` / `.m-upload-retry`: the picture dims under a still ring, or the
+    /// retry glyph once it failed.
+    @ViewBuilder private var uploadOverlay: some View {
+        switch upload {
+        case let .uploading(progress):
+            ZStack {
+                Color.black.opacity(0.45)
+                UploadRing(progress: progress, side: 24).foregroundStyle(.white)
+            }
+        case .failed:
+            ZStack {
+                Color.black.opacity(0.45)
+                ThreadGlyph(name: "refresh", size: 18).foregroundStyle(.white)
+            }
+        default:
+            EmptyView()
+        }
     }
 
     private static func thumbnail(of url: URL, pixels: CGFloat) async -> UIImage? {
@@ -585,14 +619,22 @@ private struct ComposerImageThumbnail: View {
 /// A draft file, as before: icon, name and a remove button in a rounded chip.
 private struct ComposerFileChip: View {
     let file: ComposerFile
+    let upload: FfiUploadStatus?
     let locked: Bool
+    let retry: () -> Void
     let remove: () -> Void
     @Environment(\.connTheme) private var theme
 
+    private var failed: Bool { if case .failed = upload { true } else { false } }
+
     var body: some View {
         HStack(spacing: 6) {
-            ThreadGlyph(name: "file-text", size: 16)
-            Text(file.name).lineLimit(1).truncationMode(.middle)
+            switch upload {
+            case let .uploading(progress): UploadRing(progress: progress, side: 16)
+            case .failed: ThreadGlyph(name: "refresh", size: 16)
+            default: ThreadGlyph(name: "file-text", size: 16)
+            }
+            Text(failed ? "Tap to retry" : file.name).lineLimit(1).truncationMode(.middle)
             Button(action: remove) {
                 ThreadGlyph(name: "close", size: 14)
                     .frame(minWidth: 44, minHeight: 44)
@@ -603,8 +645,45 @@ private struct ComposerFileChip: View {
             .accessibilityLabel("Remove \(file.name)")
         }
         .font(.system(size: 13))
+        .foregroundStyle(failed ? theme.destructive : Color.primary)
         .padding(.leading, 10)
         .background(theme.card.opacity(0.78), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            if failed {
+                RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.destructive, lineWidth: 1.5)
+            }
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onTapGesture { if failed { retry() } }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(uploadAccessibilityLabel(file.name, upload))
+        .accessibilityAction(named: "Retry upload") { if failed { retry() } }
+    }
+}
+
+/// Lab `UploadRing`: a faint track and the share sent. It never spins.
+private struct UploadRing: View {
+    let progress: Float
+    let side: CGFloat
+
+    var body: some View {
+        ZStack {
+            Circle().stroke(lineWidth: 2.5).opacity(0.3)
+            Circle()
+                .trim(from: 0, to: CGFloat(max(0.04, progress)))
+                .stroke(style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+        }
+        .padding(side * 3 / 24)
+        .frame(width: side, height: side)
+    }
+}
+
+private func uploadAccessibilityLabel(_ name: String, _ upload: FfiUploadStatus?) -> String {
+    switch upload {
+    case let .uploading(progress): "\(name), uploading, \(Int((progress * 100).rounded())) percent"
+    case .failed: "\(name) failed to upload. Tap to retry."
+    default: name
     }
 }
 

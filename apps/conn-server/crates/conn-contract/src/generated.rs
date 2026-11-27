@@ -6033,6 +6033,8 @@ pub struct OrchestrationV2ProviderTurn {
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_dropped: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_usage: Option<OrchestrationV2ProviderTurnTokenUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_token_usage: Option<OrchestrationV2ProviderTurnTurnTokenUsage>,

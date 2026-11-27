@@ -57,43 +57,47 @@ async fn explicit_compaction_restores_context_after_completion_with_its_original
       emit '{"method":"item/completed","params":{"threadId":"th1","turnId":"compact","item":{"id":"cc","type":"contextCompaction"}}}'
       emit '{"method":"turn/completed","params":{"threadId":"th1","turn":{"id":"compact","status":"completed"}}}' ;;
     *'"method":"thread/inject_items"'*) emit "{\"id\":$id,\"result\":{}}" ;;"#;
-    let mut f = Fixture::open(
-        "native-compact",
-        &script_with("null", &[], cases),
-        Duration::from_secs(1),
-    )
-    .await;
-    let mut first = turn(&f.thread, 1, "hello");
-    first.app_context = vec![conn_provider::AppContextEntry {
-        key: "note".into(),
-        text: "external text".into(),
-    }];
-    f.session.start_turn(first).await.unwrap();
-    f.until_terminal().await;
-    f.session
-        .start_turn(turn(&f.thread, 2, "/compact"))
-        .await
-        .unwrap();
-    f.until_terminal().await;
-    let frames = all_frames(&f);
-    assert_eq!(
-        frames
-            .iter()
-            .filter(|f| f["method"] == "turn/start")
-            .count(),
-        1
-    );
-    let restored = frames
-        .iter()
-        .find(|f| f["method"] == "thread/inject_items")
-        .unwrap();
-    let item = &restored["params"]["items"][0];
-    assert_eq!(item["role"], "user");
-    assert_eq!(
-        item["content"][0]["text"],
-        "<external_note>external text</external_note>"
-    );
-    f.finish().await;
+    for version in ["0.170.0", "0.171.0"] {
+        let mut f = Fixture::open(
+            "native-compact",
+            &script_with("null", &[], cases).replace("0.167.0", version),
+            Duration::from_secs(1),
+        )
+        .await;
+        let mut first = turn(&f.thread, 1, "hello");
+        first.app_context = vec![conn_provider::AppContextEntry {
+            key: "note".into(),
+            text: "external text".into(),
+        }];
+        f.session.start_turn(first).await.unwrap();
+        f.until_terminal().await;
+        f.session
+            .start_turn(turn(&f.thread, 2, "/compact"))
+            .await
+            .unwrap();
+        f.until_terminal().await;
+        let frames = all_frames(&f);
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|f| f["method"] == "turn/start")
+                .count(),
+            1
+        );
+        let restored = frames.iter().find(|f| f["method"] == "thread/inject_items");
+        if version == "0.171.0" {
+            assert!(restored.is_none());
+            f.finish().await;
+            continue;
+        }
+        let item = &restored.unwrap()["params"]["items"][0];
+        assert_eq!(item["role"], "user");
+        assert_eq!(
+            item["content"][0]["text"],
+            "<external_note>external text</external_note>"
+        );
+        f.finish().await;
+    }
 }
 
 #[tokio::test]

@@ -9,6 +9,11 @@ Conn depends on it. Since 2026-11-16 one Orbit Project runs it in its new contai
 "Released and running in Orbit"); the web and iOS clients were tested against it in a VM
 (see "Client parity, wave 1").
 
+Provider replay coverage now includes Claude Auto approvals and late background task
+notifications, router cooldowns, Codex prompt delivery on interruption, and context
+restoration across the Codex 0.171 boundary. ACP approval checks use the changed paths
+from the tool call and its permission request. Handoffs budget serialized history in bytes.
+
 PR checks now include GitHub’s start and completion timestamps when available. Clients can show elapsed time for completed runs.
 
 **Effect outbox (2026-11-23):** effects commit with their command in `effect_outbox` and one

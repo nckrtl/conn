@@ -9,7 +9,7 @@ mod background_work;
 mod cache;
 mod card_face;
 mod cards;
-pub(crate) use cards::{subagent_child_models, subagent_model_text};
+pub(crate) use cards::{SubagentChild, subagent_children, subagent_model_text, subagent_provider};
 mod child_approvals;
 pub(crate) use self::child_approvals::ChildApprovalCard;
 mod color;
@@ -335,9 +335,10 @@ pub(crate) struct ChatView {
     entry_timings: HashMap<String, EntryTiming>,
     /// The model of each subagent card, by timeline entry id.
     subagent_models: HashMap<String, conn_state::SubagentModel>,
-    /// The child thread's own model of each subagent card, by timeline entry id, from the shell.
-    /// It wins over [`Self::subagent_models`], whose record can lack the child's options.
-    subagent_child_models: HashMap<String, conn_state::SubagentModel>,
+    /// The child thread of each subagent card, by timeline entry id, from the shell: its own model
+    /// (which wins over [`Self::subagent_models`], whose record can lack the child's options) and
+    /// the driver its environment lists for its instance.
+    subagent_children: HashMap<String, SubagentChild>,
     run_timings: HashMap<String, RunTiming>,
     turn_checkpoints: HashMap<String, TurnCheckpointSummary>,
     expanded_ids: HashSet<String>,
@@ -612,7 +613,7 @@ impl ChatView {
             perf_open: None,
             entry_timings: HashMap::new(),
             subagent_models: HashMap::new(),
-            subagent_child_models: HashMap::new(),
+            subagent_children: HashMap::new(),
             run_timings: HashMap::new(),
             turn_checkpoints: HashMap::new(),
             expanded_ids: HashSet::new(),
@@ -1329,15 +1330,15 @@ impl ChatView {
             .update(cx, |c, cx| c.set_branch_context(context, cx));
     }
 
-    /// Sets the child thread's own model of each subagent card, by timeline entry id. A child
-    /// whose selection changes repaints its card.
-    pub(crate) fn set_subagent_child_models(
+    /// Sets the child thread of each subagent card, by timeline entry id. A child whose selection
+    /// or provider changes repaints its card.
+    pub(crate) fn set_subagent_children(
         &mut self,
-        models: HashMap<String, conn_state::SubagentModel>,
+        children: HashMap<String, SubagentChild>,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.subagent_child_models != models {
-            self.subagent_child_models = models;
+        if self.subagent_children != children {
+            self.subagent_children = children;
             cx.notify();
         }
     }

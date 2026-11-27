@@ -320,19 +320,26 @@ impl Lineage<'_> {
     }
 }
 
+/// The parent's record of the model the subagent behind timeline entry `entry_id` runs.
+fn entry_record<'a>(
+    timeline: Option<&'a ThreadState>,
+    entry_id: &str,
+) -> Option<&'a conn_state::SubagentModel> {
+    let timeline = timeline?;
+    timeline
+        .subagent_of_entry
+        .get(entry_id)
+        .and_then(|subagent| timeline.subagent_models.get(subagent))
+        .or_else(|| timeline.subagent_models.get(entry_id))
+}
+
 /// The model text of the subagent behind timeline entry `entry_id`.
 fn entry_model(
     timeline: Option<&ThreadState>,
     entry_id: &str,
     catalog: &ModelCatalog,
 ) -> Option<String> {
-    let timeline = timeline?;
-    let model = timeline
-        .subagent_of_entry
-        .get(entry_id)
-        .and_then(|subagent| timeline.subagent_models.get(subagent))
-        .or_else(|| timeline.subagent_models.get(entry_id))?;
-    crate::chat::subagent_model_text(catalog, model)
+    crate::chat::subagent_model_text(catalog, entry_record(timeline, entry_id)?)
 }
 
 /// `13s`, `2m 4s`: how long a child ran, or has run, from its ISO-8601 start and end.
@@ -357,9 +364,10 @@ fn agent_elapsed(
 fn shell_agent(
     child: &ThreadShell,
     timeline: Option<&ThreadState>,
-    catalog: &ModelCatalog,
+    sources: &AgentSources<'_>,
     now_secs: i64,
 ) -> AgentRow {
+    let catalog = sources.catalog;
     let entry = timeline.and_then(|t| {
         t.entries.iter().find_map(|e| match e {
             TimelineEntry::Subagent {
@@ -408,21 +416,29 @@ fn shell_agent(
             .or_else(|| entry.and_then(|(_, s, c)| agent_elapsed(false, s, c, now_secs)))
     };
     // The child's own selection first: the parent's subagent record can lack its options.
-    let model = crate::chat::subagent_model_text(
+    let own = conn_state::SubagentModel::from_selection(
+        &child.provider_instance_id,
+        &child.model_selection,
+    );
+    let model = crate::chat::subagent_model_text(catalog, &own)
+        .or_else(|| entry.and_then(|(id, ..)| entry_model(timeline, id, catalog)));
+    // The instance id names the provider, else the driver the child's environment lists for it,
+    // else its model.
+    let known = entry.and_then(|(id, ..)| sources.children.get(id));
+    let own_model = (own.model.is_some()).then_some(&own);
+    let (provider, _) = crate::chat::subagent_provider(
+        &child.provider_instance_id,
+        known.and_then(|known| known.driver.as_deref()),
+        own_model.or_else(|| entry.and_then(|(id, ..)| entry_record(timeline, id))),
         catalog,
-        &conn_state::SubagentModel::from_selection(
-            &child.provider_instance_id,
-            &child.model_selection,
-        ),
-    )
-    .or_else(|| entry.and_then(|(id, ..)| entry_model(timeline, id, catalog)));
+    );
     AgentRow {
         key: child.id.clone(),
         thread_id: child.id.clone(),
         environment_id: None,
         environment_label: None,
         title: child.title.clone(),
-        provider: child.provider_instance_id.clone(),
+        provider,
         model,
         state,
         elapsed,
@@ -434,7 +450,7 @@ fn shell_agent(
 fn timeline_agents(
     shell: &ShellState,
     timeline: Option<&ThreadState>,
-    catalog: &ModelCatalog,
+    sources: &AgentSources<'_>,
     now_secs: i64,
     seen: &mut std::collections::HashSet<String>,
 ) -> Vec<AgentRow> {
@@ -473,7 +489,7 @@ fn timeline_agents(
                         && child.lineage.side_chat != Some(true)
                         && seen.insert(child.id.clone())
                     {
-                        rows.push(shell_agent(child, timeline, catalog, now_secs));
+                        rows.push(shell_agent(child, timeline, sources, now_secs));
                     }
                     continue;
                 }
@@ -489,14 +505,25 @@ fn timeline_agents(
             continue;
         }
         let state = AgentState::from_item(*status);
+        // A child on another machine has the role `remote`: its own environment's driver, its
+        // own model, or the parent's record names the provider.
+        let child = sources.children.get(id);
+        let (provider, _) = crate::chat::subagent_provider(
+            role,
+            child.and_then(|child| child.driver.as_deref()),
+            child
+                .and_then(crate::chat::SubagentChild::selected_model)
+                .or_else(|| entry_record(timeline, id)),
+            sources.catalog,
+        );
         rows.push(AgentRow {
             key,
             thread_id,
             environment_id,
             environment_label,
             title,
-            provider: role.clone(),
-            model: entry_model(timeline, id, catalog),
+            provider,
+            model: entry_model(timeline, id, sources.catalog),
             state,
             elapsed: agent_elapsed(
                 !conn_state::subagent_settled(*status),
@@ -516,7 +543,7 @@ pub(crate) fn resolve_lineage<'a>(
     shell: &'a ShellState,
     thread: &ThreadShell,
     timeline: Option<&ThreadState>,
-    catalog: &ModelCatalog,
+    sources: &AgentSources<'_>,
     now_secs: i64,
 ) -> Lineage<'a> {
     use conn_contract::OrchestrationV2AppThreadLineageRelationshipToParent as Rel;
@@ -544,10 +571,10 @@ pub(crate) fn resolve_lineage<'a>(
         {
             continue;
         }
-        rows.push(shell_agent(child, timeline, catalog, now_secs));
+        rows.push(shell_agent(child, timeline, sources, now_secs));
     }
     rows.extend(timeline_agents(
-        shell, timeline, catalog, now_secs, &mut seen,
+        shell, timeline, sources, now_secs, &mut seen,
     ));
     for row in rows {
         if row.state.is_live() {
@@ -585,6 +612,13 @@ pub(crate) fn pull_request_lines(thread: &ThreadShell) -> Vec<String> {
     lines
 }
 
+/// What names a child agent's model and provider: the parent environment's catalog and each
+/// subagent entry's child thread (by entry id), whose driver comes from its own environment.
+pub(crate) struct AgentSources<'a> {
+    pub(crate) catalog: &'a ModelCatalog,
+    pub(crate) children: &'a std::collections::HashMap<String, crate::chat::SubagentChild>,
+}
+
 /// Props for [`render_thread_details_card`].
 pub(crate) struct DetailsCardProps<'a> {
     pub(crate) shell: &'a ShellState,
@@ -594,6 +628,8 @@ pub(crate) struct DetailsCardProps<'a> {
     pub(crate) timeline: Option<&'a ThreadState>,
     /// Names the models of child agents.
     pub(crate) catalog: &'a ModelCatalog,
+    /// Each subagent entry's child thread, by entry id, as its own environment knows it.
+    pub(crate) subagent_children: &'a std::collections::HashMap<String, crate::chat::SubagentChild>,
     pub(crate) state: &'a ThreadDetailsState,
     pub(crate) environment_label: &'a str,
     pub(crate) max_height: f32,
@@ -820,7 +856,10 @@ pub(crate) fn render_thread_details_card(
         props.shell,
         thread,
         props.timeline,
-        props.catalog,
+        &AgentSources {
+            catalog: props.catalog,
+            children: props.subagent_children,
+        },
         current_unix_secs(),
     );
     if !lineage.is_empty() {

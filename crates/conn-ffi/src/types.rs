@@ -1261,6 +1261,13 @@ pub(crate) fn map_timeline_entry_with_context(
             text: text.clone(),
             is_error: level.is_error(),
         },
+        // iOS has no command card: it keeps showing a finished background command as the plain
+        // notice it always did, with the server's own summary text.
+        TimelineEntry::BackgroundCommand { id, summary, .. } => FfiTimelineEntry::Notice {
+            id: id.clone(),
+            text: summary.clone(),
+            is_error: false,
+        },
     }
 }
 
@@ -1678,6 +1685,39 @@ mod tests {
             },
             "Info Notice maps cleanly"
         );
+    }
+
+    #[test]
+    fn a_background_command_card_reaches_ios_as_the_plain_notice_it_was() {
+        use conn_state::BackgroundCommandOutcome::{Failed, Finished};
+        let approvals = HashMap::new();
+        let timings = HashMap::new();
+        for (outcome, exit_code, summary) in [
+            (
+                Finished,
+                None,
+                "Command \"Wait for dev app rebuild\" finished",
+            ),
+            (Failed, Some(2), "Command \"npm test\" failed (exit 2)"),
+        ] {
+            let card = TimelineEntry::BackgroundCommand {
+                id: "wake-1".to_owned(),
+                summary: summary.to_owned(),
+                label: Some("label".to_owned()),
+                outcome,
+                exit_code,
+                detail: Some("output the iOS notice never showed".to_owned()),
+            };
+            assert_eq!(
+                map_timeline_entry_with_context(&card, &approvals, &timings),
+                FfiTimelineEntry::Notice {
+                    id: "wake-1".to_owned(),
+                    text: summary.to_owned(),
+                    is_error: false,
+                },
+                "{summary}: the same Info notice iOS drew before the card"
+            );
+        }
     }
 
     #[test]

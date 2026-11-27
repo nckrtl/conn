@@ -2286,6 +2286,13 @@ fn background_command(
     }
 }
 
+fn card_summary(entry: &TimelineEntry) -> &str {
+    match entry {
+        TimelineEntry::BackgroundCommand { summary, .. } => summary,
+        other => panic!("expected a background command card, got {other:?}"),
+    }
+}
+
 #[test]
 fn a_finished_background_command_becomes_a_command_card() {
     use conn_state::BackgroundCommandOutcome::Finished;
@@ -2319,15 +2326,92 @@ fn a_command_that_exited_non_zero_is_a_failed_card_with_its_code() {
             Some("Tests failed:\n  1) adds numbers")
         )
     );
-    // A provider that calls a non-zero exit "completed" still shows a failure.
+}
+
+#[test]
+fn the_server_summary_is_kept_whole_on_the_card() {
+    for summary in [
+        "Command \"Wait for dev app rebuild\" finished",
+        "Command \"npm test\" failed (exit 2)",
+        "Command \"sleep 600\" was stopped",
+        "Command finished",
+    ] {
+        let outcome = if summary.contains("failed") {
+            "failed"
+        } else if summary.contains("stopped") {
+            "cancelled"
+        } else {
+            "completed"
+        };
+        let entry = notification_entry(json!({"kind": "command"}), outcome, summary, None);
+        assert_eq!(card_summary(&entry), summary);
+    }
+}
+
+#[test]
+fn free_text_in_the_detail_never_changes_the_status() {
+    use conn_state::BackgroundCommandOutcome::Finished;
+    // The command finished. Its output talks about exit codes and failures.
+    for detail in [
+        "previous exit code 1 ignored",
+        "Background command \"make\" completed (exit code 3)",
+        "exit 1",
+        "retry failed twice, then it worked; exit code 255 from the helper",
+        "FAILED: 0 tests, exit code -1",
+    ] {
+        let entry = notification_entry(
+            json!({"kind": "command"}),
+            "completed",
+            "Command \"make\" finished",
+            Some(detail),
+        );
+        assert_eq!(
+            background_command(&entry),
+            (Some("make"), Finished, None, Some(detail)),
+            "detail {detail:?} must not make the command Failed"
+        );
+    }
+}
+
+#[test]
+fn only_a_strict_trailing_exit_suffix_counts() {
+    use conn_state::BackgroundCommandOutcome::{Failed, Finished};
+    // An exit suffix inside the label is part of the label.
     let entry = notification_entry(
         json!({"kind": "command"}),
         "completed",
-        "Command \"make\" finished",
-        Some("Background command \"make\" completed (exit code 3)"),
+        "Command \"echo (exit 5)\" finished",
+        None,
     );
-    let (_, outcome, code, _) = background_command(&entry);
-    assert_eq!((outcome, code), (Failed, Some(3)));
+    assert_eq!(
+        background_command(&entry),
+        (Some("echo (exit 5)"), Finished, None, None)
+    );
+    // A malformed suffix is not a code: the summary is not one the server writes, so it stays a
+    // plain notice rather than guessing.
+    for summary in [
+        "Command \"make\" finished (exit 5",
+        "Command \"make\" finished (exit +5)",
+        "Command \"make\" finished (exit five)",
+        "Command \"make\" finished (exit )",
+    ] {
+        let entry = notification_entry(json!({"kind": "command"}), "completed", summary, None);
+        assert!(
+            matches!(&entry, TimelineEntry::Notice { text, .. } if text == summary),
+            "{summary:?} stays a plain notice, got {entry:?}"
+        );
+    }
+    // The server's own suffix is trusted.
+    let entry = notification_entry(
+        json!({"kind": "command"}),
+        "completed",
+        "Command \"make\" finished (exit 3)",
+        None,
+    );
+    assert_eq!(
+        background_command(&entry),
+        (Some("make"), Failed, Some(3), None)
+    );
 }
 
 #[test]

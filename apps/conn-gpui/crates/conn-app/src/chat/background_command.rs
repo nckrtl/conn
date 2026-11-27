@@ -1,7 +1,8 @@
 //! The card for a background command that ended (`TimelineEntry::BackgroundCommand`): Claude's
 //! `task-notification` for a Bash `run_in_background` task. It is drawn in the family of the
-//! command rows in a work log: a terminal icon, the label on one truncated line, and a caret when
-//! the provider sent a summary to expand. A status reads at the right edge.
+//! command rows in a work log: a terminal icon, the label on one truncated line, and a caret that
+//! opens the server's whole summary, then the provider's output when it sent any. A status reads at
+//! the right edge.
 
 use conn_state::BackgroundCommandOutcome;
 use gpui_kit::{
@@ -57,20 +58,46 @@ pub(super) fn is_command_text(label: &str) -> bool {
     !sentence
 }
 
+/// What the expand panel shows: the server's whole summary, then the provider's output.
+pub(super) fn panel_text(summary: &str, detail: Option<&str>) -> Option<String> {
+    let summary = summary.trim();
+    let detail = detail.map(str::trim).filter(|d| !d.is_empty());
+    match (summary.is_empty(), detail) {
+        (true, None) => None,
+        (true, Some(detail)) => Some(detail.to_owned()),
+        (false, None) => Some(summary.to_owned()),
+        (false, Some(detail)) => Some(format!("{summary}\n\n{detail}")),
+    }
+}
+
+/// The fields of a `TimelineEntry::BackgroundCommand` the card draws.
+pub(super) struct BackgroundCommandCard<'a> {
+    pub id: &'a str,
+    pub summary: &'a str,
+    pub label: Option<&'a str>,
+    pub outcome: BackgroundCommandOutcome,
+    pub exit_code: Option<i64>,
+    pub detail: Option<&'a str>,
+}
+
 impl ChatView {
     /// Renders one ended background command; see the module docs.
     pub(super) fn render_background_command_row(
         &self,
-        id: &str,
-        label: Option<&str>,
-        outcome: BackgroundCommandOutcome,
-        exit_code: Option<i64>,
-        detail: Option<&str>,
+        card: &BackgroundCommandCard<'_>,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
+        let BackgroundCommandCard {
+            id,
+            summary,
+            label,
+            outcome,
+            exit_code,
+            detail,
+        } = *card;
         let expanded = self.expanded_ids.contains(id);
         let toggle_id = id.to_owned();
-        let detail = detail.map(str::trim).filter(|d| !d.is_empty());
+        let body = panel_text(summary, detail);
         let failed = outcome == BackgroundCommandOutcome::Failed;
         let (icon_color, text_color) = if failed {
             (hsla(self.tokens.destructive), hsla(self.tokens.destructive))
@@ -132,7 +159,7 @@ impl ChatView {
                     .child(status_text(outcome, exit_code)),
             );
 
-        line = if detail.is_some() {
+        line = if body.is_some() {
             line.a11y_button(ax_id.clone(), ax)
                 .aria_expanded(expanded)
                 .cursor_pointer()
@@ -173,7 +200,7 @@ impl ChatView {
             // The air a work group leaves below its last row.
             .pb(px(8.0))
             .child(line);
-        if expanded && let Some(detail) = detail {
+        if expanded && let Some(body) = body {
             // Same panel as a command row's output: indented under the label, monospace.
             let panel = div()
                 .id(SharedString::from(format!("bgcmd-detail-{id}")))
@@ -195,7 +222,7 @@ impl ChatView {
                 .text_size(px(11.5))
                 .line_height(px(18.0))
                 .text_color(hsla(self.tokens.muted_foreground))
-                .child(detail.to_owned());
+                .child(body);
             #[cfg(test)]
             let panel = gpui_kit::TestSupportExt::test_support(panel);
             container = container.child(panel);
@@ -237,6 +264,20 @@ mod tests {
     }
 
     #[test]
+    fn the_panel_opens_with_the_summary_then_the_output() {
+        assert_eq!(
+            panel_text("Command \"make\" finished", None).as_deref(),
+            Some("Command \"make\" finished")
+        );
+        assert_eq!(
+            panel_text("Command \"make\" finished", Some("  built 3 crates \n")).as_deref(),
+            Some("Command \"make\" finished\n\nbuilt 3 crates")
+        );
+        assert_eq!(panel_text("  ", Some("   ")), None);
+        assert_eq!(panel_text("", Some("out")).as_deref(), Some("out"));
+    }
+
+    #[test]
     fn descriptions_read_as_prose_and_commands_as_code() {
         assert!(!is_command_text("Wait for dev app rebuild"));
         assert!(is_command_text("npm test"));
@@ -268,6 +309,7 @@ mod render_tests {
     ) -> TimelineEntry {
         TimelineEntry::BackgroundCommand {
             id: id.to_owned(),
+            summary: format!("Command \"{}\" ended", label.unwrap_or_default()),
             label: label.map(str::to_owned),
             outcome,
             exit_code,
@@ -390,34 +432,26 @@ mod render_tests {
     }
 
     #[gpui_kit::test]
-    fn a_card_with_a_summary_expands_and_one_without_does_not(cx: &mut TestAppContext) {
+    fn every_card_expands_to_its_summary_and_output_and_collapses_again(cx: &mut TestAppContext) {
         let window = mount(cx);
-        assert!(
-            !has_label(cx, window, "Details: Wait for dev app rebuild"),
-            "collapsed at first"
-        );
-        cx.update_window(window, |_, window, cx| window.click("bgcmd-bg-ok", cx))
+        for (id, label) in [
+            ("bg-ok", "Wait for dev app rebuild"),
+            ("bg-stopped", "sleep 600"),
+        ] {
+            let panel = format!("Details: {label}");
+            assert!(!has_label(cx, window, &panel), "{id} collapsed at first");
+            cx.update_window(window, |_, window, cx| {
+                window.click(format!("bgcmd-{id}"), cx)
+            })
             .expect("a window");
-        settle(cx, window);
-        assert!(
-            has_label(cx, window, "Details: Wait for dev app rebuild"),
-            "the summary shows after a click"
-        );
-        cx.update_window(window, |_, window, cx| window.click("bgcmd-bg-ok", cx))
+            settle(cx, window);
+            assert!(has_label(cx, window, &panel), "{id} opens after a click");
+            cx.update_window(window, |_, window, cx| {
+                window.click(format!("bgcmd-{id}"), cx)
+            })
             .expect("a window");
-        settle(cx, window);
-        assert!(
-            !has_label(cx, window, "Details: Wait for dev app rebuild"),
-            "a second click collapses it"
-        );
-
-        // A card with no summary has nothing to open.
-        cx.update_window(window, |_, window, cx| window.click("bgcmd-bg-stopped", cx))
-            .expect("a window");
-        settle(cx, window);
-        assert!(
-            !has_label(cx, window, "Details: sleep 600"),
-            "a card without a summary is not expandable"
-        );
+            settle(cx, window);
+            assert!(!has_label(cx, window, &panel), "{id} collapses again");
+        }
     }
 }

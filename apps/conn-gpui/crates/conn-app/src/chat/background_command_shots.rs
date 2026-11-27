@@ -57,9 +57,16 @@ fn before() -> ThreadState {
 
 fn after() -> ThreadState {
     use BackgroundCommandOutcome::{Failed, Finished, Stopped};
-    let card = |id: &str, label: &str, outcome, exit_code, detail: Option<&str>| {
+    let card = |id: &str, label: &str, outcome, exit_code: Option<i64>, detail: Option<&str>| {
+        let verb = match outcome {
+            Finished => "finished",
+            Failed => "failed",
+            Stopped => "was stopped",
+        };
+        let suffix = exit_code.map_or_else(String::new, |code| format!(" (exit {code})"));
         TimelineEntry::BackgroundCommand {
             id: id.to_owned(),
+            summary: format!("Command \"{label}\" {verb}{suffix}"),
             label: Some(label.to_owned()),
             outcome,
             exit_code,

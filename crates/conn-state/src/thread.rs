@@ -254,6 +254,9 @@ pub enum TimelineEntry {
     /// command (Claude's `task-notification` for a Bash `run_in_background` task).
     BackgroundCommand {
         id: String,
+        /// The server's own summary, whole: `Command "npm test" failed (exit 2)`. The card's
+        /// expand panel and the iOS bridge show it as it came.
+        summary: String,
         /// The task's description, else its command, as the provider named it.
         label: Option<String>,
         outcome: BackgroundCommandOutcome,
@@ -2490,14 +2493,15 @@ fn background_command_entry(item: &NotificationItem) -> Option<TimelineEntry> {
     ) {
         return None;
     }
-    let (label, summary_exit) = parse_command_summary(&item.summary)?;
+    let (label, exit_code) = parse_command_summary(&item.summary)?;
     let detail = item
         .detail
         .as_deref()
         .map(str::trim)
         .filter(|d| !d.is_empty() && *d != item.summary.trim())
         .map(str::to_owned);
-    let exit_code = summary_exit.or_else(|| item.detail.as_deref().and_then(exit_code_in_text));
+    // The status is the server's `outcome`. Only the server's own `(exit N)` suffix, never the
+    // provider's free-text detail, can turn a completed command into a failed one.
     let outcome = match item.outcome {
         Outcome::Completed if exit_code.is_some_and(|code| code != 0) => {
             BackgroundCommandOutcome::Failed
@@ -2509,6 +2513,7 @@ fn background_command_entry(item: &NotificationItem) -> Option<TimelineEntry> {
     };
     Some(TimelineEntry::BackgroundCommand {
         id: item.id.clone(),
+        summary: item.summary.clone(),
         label,
         outcome,
         exit_code,
@@ -2526,6 +2531,7 @@ fn parse_command_summary(summary: &str) -> Option<(Option<String>, Option<i64>)>
     let mut exit_code = None;
     if let Some(open) = rest.rfind(" (exit ")
         && let Some(code) = rest[open + " (exit ".len()..].strip_suffix(')')
+        && is_exit_code(code)
         && let Ok(code) = code.parse::<i64>()
     {
         exit_code = Some(code);
@@ -2547,17 +2553,10 @@ fn parse_command_summary(summary: &str) -> Option<(Option<String>, Option<i64>)>
     Some(((!label.is_empty()).then(|| label.to_owned()), exit_code))
 }
 
-/// An `exit code N` (or `exit N`) a provider wrote into its own summary.
-fn exit_code_in_text(text: &str) -> Option<i64> {
-    let lower = text.to_ascii_lowercase();
-    let at = lower.find("exit code ").map(|i| i + "exit code ".len())?;
-    let digits: String = lower[at..]
-        .chars()
-        .enumerate()
-        .take_while(|(i, c)| c.is_ascii_digit() || (*i == 0 && *c == '-'))
-        .map(|(_, c)| c)
-        .collect();
-    digits.parse().ok()
+/// The server writes the code as plain decimal digits, with a `-` for a signal-style negative.
+fn is_exit_code(code: &str) -> bool {
+    let digits = code.strip_prefix('-').unwrap_or(code);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
 }
 
 fn map_notification(item: NotificationItem) -> Option<TimelineEntry> {

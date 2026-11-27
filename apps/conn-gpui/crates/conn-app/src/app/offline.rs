@@ -54,12 +54,21 @@ pub(super) enum ShellScope {
 
 /// Whether the cache watches `thread`'s stream: an unsettled thread the user may open, or a
 /// child (subagent, side chat or delegated task) that still runs or asks something. A finished
-/// child's stream does not change until something starts it again, which the shell reports.
+/// child's stream does not change until something starts it again, which the shell reports. Its
+/// last items may still be on their way when the shell reports it finished, so a watched child
+/// stays watched until they are saved (`Self::hold_finishing`).
 fn watch_worthy(thread: &ThreadShell) -> bool {
     thread.deleted_at.is_none()
         && !ShellState::is_settled(thread)
         && (!ShellState::is_child(thread) || ShellState::is_live(thread))
 }
+
+/// The least a child that just finished stays watched: its last stream items follow the shell's
+/// report by moments.
+const FINISH_SETTLE: Duration = Duration::from_secs(2);
+
+/// The most it stays watched, whatever its stream does. A finished child must not stay watched.
+const FINISH_GRACE: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 struct Backfill {
@@ -87,6 +96,13 @@ pub(super) struct Offline {
     next_deadline: Option<i64>,
     /// The threads whose streams the cache watches.
     desired: HashSet<ThreadKey>,
+    /// Children the shell reports finished that stay watched until their last items are saved,
+    /// and since when.
+    finishing: HashMap<ThreadKey, Instant>,
+    /// A timer waits to look at [`Self::finishing`] again.
+    finishing_armed: bool,
+    /// The chats the write in flight saves.
+    writing: HashSet<ThreadKey>,
     /// Which threads changed since expiry and the watches last looked at the shell.
     scope: ShellScope,
     outlines: HashMap<(String, String), Arc<ThreadOutline>>,
@@ -1392,9 +1408,128 @@ impl ConnApp {
     /// its connection (the client resubscribes it from its cursor); only a new connection for the
     /// environment needs a new subscription.
     fn reconcile_offline_in(&mut self, scope: &ShellScope, cx: &mut Context<'_, Self>) {
+        self.reconcile_offline_at(scope, Instant::now(), cx);
+    }
+
+    /// Looks at the children that finished again, as the clock stands at `now`.
+    #[cfg(test)]
+    pub(super) fn settle_finishing_at(&mut self, now: Instant, cx: &mut Context<'_, Self>) {
+        self.reconcile_offline_at(&ShellScope::Nothing, now, cx);
+    }
+
+    /// Test helper: writes every pending save at once, as a save that lands.
+    #[cfg(test)]
+    pub(super) fn save_offline_now_for_test(&mut self) {
+        let (Some(dir), db) = (self.offline.dir.clone(), self.offline.db.clone()) else {
+            return;
+        };
+        for write in self.pending_saves(true) {
+            save(&dir, db.as_ref(), write).expect("save");
+        }
+    }
+
+    /// Test helper: how many rows of `id`'s chat the cache holds on disk.
+    #[cfg(test)]
+    pub(super) fn cached_rows_for_test(&self, id: &str) -> usize {
+        let (Some(env), Some(db)) = (self.cache_env(id), self.offline.db.as_ref()) else {
+            return 0;
+        };
+        read_chat(db, env, id).map_or(0, |state| state.entries.len())
+    }
+
+    /// Whether `key` is a child thread the shell still lists, whose last items are worth waiting
+    /// for once it finishes.
+    fn finishing_candidate(&self, key: &ThreadKey) -> bool {
+        self.cache_shell(&key.0, &key.1)
+            .is_some_and(|t| t.deleted_at.is_none() && ShellState::is_child(t) && !expired(t))
+    }
+
+    /// Whether the cache holds what the stream of `key` showed last: it has read the thread, no
+    /// run works, and every save of the chat has landed.
+    fn tail_saved(&self, key: &ThreadKey) -> bool {
+        self.cache_state(key)
+            .is_some_and(|state| state.sequence.is_some() && !state.working)
+            && !self.offline.dirty.contains(key)
+            && !self.offline.task_links_dirty.contains(key)
+            && !self.offline.commits.contains_key(key)
+            && !self.offline.writing.contains(key)
+            && !self.offline.backfills.iter().any(|job| job.key == *key)
+    }
+
+    /// A child that is no longer worth watching stays watched until its last items are saved:
+    /// the shell reports it finished before its final items reach the cache. `released` are the
+    /// threads that just left `desired`. Adds the ones that stay to `desired`, and forgets the
+    /// ones that are done or that are worth watching again.
+    fn hold_finishing(
+        &mut self,
+        desired: &mut HashSet<ThreadKey>,
+        released: Vec<ThreadKey>,
+        now: Instant,
+    ) {
+        for key in released {
+            if !desired.contains(&key) && self.finishing_candidate(&key) {
+                self.offline.finishing.entry(key).or_insert(now);
+            }
+        }
+        let held: Vec<(ThreadKey, Instant)> = self
+            .offline
+            .finishing
+            .iter()
+            .map(|(key, since)| (key.clone(), *since))
+            .collect();
+        for (key, since) in held {
+            let waited = now.saturating_duration_since(since);
+            // `desired` holds the key from the last look: only the shell says if it runs again.
+            if self.should_watch(&key.0, &key.1) {
+                self.offline.finishing.remove(&key);
+                continue;
+            }
+            if !self.finishing_candidate(&key) {
+                self.offline.finishing.remove(&key);
+                desired.remove(&key);
+                continue;
+            }
+            let done = waited >= FINISH_GRACE || (waited >= FINISH_SETTLE && self.tail_saved(&key));
+            if done {
+                self.offline.finishing.remove(&key);
+                desired.remove(&key);
+            } else {
+                desired.insert(key);
+            }
+        }
+    }
+
+    /// Comes back to look at the children that finished, until none is left.
+    fn arm_finishing(&mut self, cx: &mut Context<'_, Self>) {
+        if self.offline.finishing.is_empty() || self.offline.finishing_armed {
+            return;
+        }
+        self.offline.finishing_armed = true;
+        let lifetime = Arc::downgrade(&self.offline.lifetime);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FINISH_SETTLE / 2).await;
+            let _ = this.update(cx, |app, cx| {
+                // A server switch replaced the cache: its own timer, if any, is armed.
+                if lifetime.strong_count() == 0 {
+                    return;
+                }
+                app.offline.finishing_armed = false;
+                app.reconcile_offline_in(&ShellScope::Nothing, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn reconcile_offline_at(
+        &mut self,
+        scope: &ShellScope,
+        now: Instant,
+        cx: &mut Context<'_, Self>,
+    ) {
         if self.offline.dir.is_none() {
             return;
         }
+        let mut released: Vec<ThreadKey> = Vec::new();
         let check: Vec<ThreadKey> = match scope {
             ShellScope::All => {
                 let mut desired = HashSet::new();
@@ -1411,7 +1546,12 @@ impl ConnApp {
                         order.push(pair);
                     }
                 }
-                self.offline.desired = desired;
+                let before = std::mem::replace(&mut self.offline.desired, desired);
+                released.extend(
+                    before
+                        .into_iter()
+                        .filter(|key| !self.offline.desired.contains(key)),
+                );
                 order
             }
             ShellScope::Threads(ids) => {
@@ -1423,8 +1563,8 @@ impl ConnApp {
                         if self.should_watch(env, id) {
                             self.offline.desired.insert(pair.clone());
                             check.push(pair);
-                        } else {
-                            self.offline.desired.remove(&pair);
+                        } else if self.offline.desired.remove(&pair) {
+                            released.push(pair);
                         }
                     }
                 }
@@ -1448,7 +1588,8 @@ impl ConnApp {
             }
         }
         self.load_next_outline(cx);
-        let desired = std::mem::take(&mut self.offline.desired);
+        let mut desired = std::mem::take(&mut self.offline.desired);
+        self.hold_finishing(&mut desired, released, now);
         self.offline.commits.retain(|key, commit| {
             !matches!(commit, Commit::Prefix { .. }) || desired.contains(key)
         });
@@ -1476,6 +1617,7 @@ impl ConnApp {
             false
         });
         self.offline.desired = desired;
+        self.arm_finishing(cx);
         // A thread the cache stopped watching (settled, a finished subagent) keeps its timeline
         // only while it is open or recent (`app/residency.rs`).
         if self.offline.subscriptions.len() < watched {
@@ -1826,6 +1968,13 @@ impl ConnApp {
                         return Vec::new();
                     }
                     let writes = app.pending_saves(false);
+                    app.offline.writing = writes
+                        .iter()
+                        .filter_map(|write| match write {
+                            Save::Chat { key, .. } | Save::TaskLinks(key, ..) => Some(key.clone()),
+                            _ => None,
+                        })
+                        .collect();
                     if writes.is_empty() {
                         app.offline.saving = false;
                         app.arm_shell_save(cx);
@@ -1870,6 +2019,7 @@ impl ConnApp {
                         // Only a confirmed write moves the baseline: a skipped or failed one
                         // leaves the next save to write the whole tail again.
                         app.offline.saved(stored);
+                        app.offline.writing.clear();
                         for (env, id) in refresh {
                             if app.cache_env(&id) == Some(&env)
                                 && app.layout.selected_thread_id.as_ref() == Some(&id)

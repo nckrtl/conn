@@ -3348,3 +3348,31 @@ fn merged_desktop_sidebar_orders_the_iphone_fixture() {
     assert_eq!(ids, ["p", "q", "a", "b", "c", "d", "s", "t"]);
     assert_eq!(shell.find_thread("b").unwrap().title, "Primary b");
 }
+
+/// An older page carries the records of its subagent cards: a card far up the thread keeps
+/// its model and status.
+#[test]
+fn an_older_page_brings_its_subagent_records() {
+    let sub = json!({"id":"sub-1", "threadId":"t", "runId":"r", "parentNodeId":"node-1",
+        "origin":"provider_native", "createdBy":"agent", "driver":"claudeAgent",
+        "providerInstanceId":"claudeAgent", "providerThreadId":null, "childThreadId":"child",
+        "nativeTaskRef":null, "prompt":"p", "title":"Review", "model":"claude-opus-5-5",
+        "status":"completed", "result":"done", "startedAt":null, "completedAt":null,
+        "updatedAt":"2026-11-27T00:00:00.000Z"});
+    let mut state = ThreadState::default();
+    state.prepend_history_page(
+        from_json(
+            json!({"snapshotSequence":1, "items":[], "hasMoreHistory":false,
+            "nextCursor":null, "subagents":[sub]}),
+        )
+        .expect("history page"),
+    );
+    assert_eq!(
+        state
+            .subagent_models
+            .get("sub-1")
+            .and_then(|m| m.model.as_deref()),
+        Some("claude-opus-5-5")
+    );
+    assert!(state.subagents.contains_key("sub-1"));
+}

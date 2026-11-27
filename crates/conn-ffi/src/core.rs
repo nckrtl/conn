@@ -1986,6 +1986,14 @@ impl PumpState {
                     .engine
                     .as_mut()
                     .is_some_and(|engine| engine.handle(&thread_id, item));
+                let reloads = self
+                    .engine
+                    .as_mut()
+                    .map(conn_cache::Engine::take_reloads)
+                    .unwrap_or_default();
+                for (id, pending) in reloads {
+                    self.finish_open_later(id, pending);
+                }
                 let apply_ms = conn_client::perf::ms_since(applying);
                 if let Some(state) = self.thread(&thread_id) {
                     if changed && let Some(reader) = &self.reader {
@@ -2077,20 +2085,22 @@ impl PumpState {
             None => {
                 self.show_if_open(thread_id);
             }
-            Some(pending) => {
-                let tx = self.ctrl_tx.clone();
-                let thread_id = thread_id.to_owned();
-                tokio::spawn(async move {
-                    let reading = Instant::now();
-                    let window = pending.await.ok().flatten();
-                    let _ = tx.send(PumpControl::FinishOpen {
-                        thread_id,
-                        window,
-                        read_ms: conn_client::perf::ms_since(reading),
-                    });
-                });
-            }
+            Some(pending) => self.finish_open_later(thread_id.to_owned(), pending),
         }
+    }
+
+    /// Reads a window off the pump and finishes the open with it ([`PumpControl::FinishOpen`]).
+    fn finish_open_later(&self, thread_id: String, pending: conn_cache::Pending) {
+        let tx = self.ctrl_tx.clone();
+        tokio::spawn(async move {
+            let reading = Instant::now();
+            let window = pending.await.ok().flatten();
+            let _ = tx.send(PumpControl::FinishOpen {
+                thread_id,
+                window,
+                read_ms: conn_client::perf::ms_since(reading),
+            });
+        });
     }
 
     /// Publishes an open thread at once when there is something to draw.
@@ -2153,7 +2163,7 @@ impl PumpState {
             .collect();
         for id in ready {
             self.ended_threads.remove(&id);
-            if let Some(engine) = &self.engine {
+            if let Some(engine) = &mut self.engine {
                 engine.resubscribe(&id);
             }
         }

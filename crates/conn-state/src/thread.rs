@@ -1323,6 +1323,15 @@ impl ThreadState {
             .map(|entry| entry.id().to_owned())
             .collect();
 
+        // The page's subagent records: a card far up the thread needs its model and status.
+        for sub in page.subagents.iter().flatten() {
+            self.subagent_models
+                .entry(sub.id.clone())
+                .or_insert_with(|| SubagentModel::from_subagent(sub));
+            self.subagents
+                .entry(sub.id.clone())
+                .or_insert_with(|| SubagentRecord::from_subagent(sub));
+        }
         let mut rows = page.items;
         rows.sort_by_key(|row| row.position);
 

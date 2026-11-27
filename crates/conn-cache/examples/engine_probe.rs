@@ -97,7 +97,9 @@ async fn main() {
                     "status": record.map(|r| format!("{:?}", r.status))});
                 break;
             }
-            let Some(pending) = engine.older(thread) else { break };
+            let Some(pending) = engine.older(thread) else {
+                break;
+            };
             let window = pending.await.ok().flatten();
             engine.finish_older(thread, window);
             pages += 1;

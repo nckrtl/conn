@@ -180,6 +180,19 @@ impl ConnApp {
             .apply(item);
     }
 
+    /// Reads again the windows of open threads whose catch-up was too long to reduce in memory.
+    pub(super) fn finish_reloads(&mut self, env: Option<&str>, cx: &mut Context<'_, Self>) {
+        let Some(env) = env else { return };
+        let Some(slot) = self.threads.engines.get_mut(env) else {
+            return;
+        };
+        let generation = slot.generation;
+        let env = env.to_owned();
+        for (id, pending) in slot.engine.take_reloads() {
+            self.finish_open_later((env.clone(), id), generation, pending, cx);
+        }
+    }
+
     pub(super) fn thread_stale(&mut self, env: Option<&str>, id: &str) {
         if let Some(slot) = env.and_then(|env| self.threads.engines.get_mut(env)) {
             slot.engine.mark_stale(id);
@@ -195,7 +208,10 @@ impl ConnApp {
     /// Asks again for a stream the server ended.
     pub(super) fn resubscribe_thread(&mut self, id: &str) {
         let env = self.thread_env(id).map(str::to_owned);
-        if let Some(slot) = env.as_ref().and_then(|env| self.threads.engines.get(env)) {
+        if let Some(slot) = env
+            .as_ref()
+            .and_then(|env| self.threads.engines.get_mut(env))
+        {
             slot.engine.resubscribe(id);
             return;
         }

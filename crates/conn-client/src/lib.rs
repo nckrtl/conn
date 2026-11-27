@@ -22,6 +22,7 @@ pub mod environments;
 pub mod history;
 pub mod perf;
 pub mod preview;
+pub mod uploads;
 mod wire;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -492,6 +493,12 @@ impl Connection {
     }
 
     /// Shared HTTP client for auxiliary requests against the connected server.
+    /// The Tokio runtime this connection runs on.
+    #[must_use]
+    pub fn runtime(&self) -> &tokio::runtime::Handle {
+        &self.rt
+    }
+
     #[must_use]
     pub fn http_client(&self) -> &reqwest::Client {
         &self.http
@@ -512,6 +519,22 @@ impl Connection {
         name: String,
         mime_type: String,
         bytes: Vec<u8>,
+    ) -> Result<ChatAttachment, ClientError> {
+        self.upload_chat_attachment_with_progress(name, mime_type, bytes, Arc::new(|_| {}))
+            .await
+    }
+
+    /// [`Connection::upload_chat_attachment`], reporting the share of bytes sent (0 to 1).
+    ///
+    /// # Errors
+    ///
+    /// As [`Connection::upload_chat_attachment`].
+    pub async fn upload_chat_attachment_with_progress(
+        &self,
+        name: String,
+        mime_type: String,
+        bytes: Vec<u8>,
+        progress: Arc<dyn Fn(f32) + Send + Sync>,
     ) -> Result<ChatAttachment, ClientError> {
         let size_bytes = i64::try_from(bytes.len()).unwrap_or(i64::MAX);
         let image_mime = match mime_type.to_ascii_lowercase().as_str() {
@@ -562,7 +585,10 @@ impl Connection {
                 let mut req = http
                     .post(upload_url)
                     .header(reqwest::header::CONTENT_TYPE, upload_mime.as_str())
-                    .body(bytes);
+                    .header(reqwest::header::CONTENT_LENGTH, bytes.len())
+                    .body(reqwest::Body::wrap(uploads::ProgressBody::new(
+                        bytes, progress,
+                    )));
                 if let Some(token) = bearer {
                     req = req.bearer_auth(token);
                 }

@@ -156,6 +156,10 @@ pub(crate) fn can_replay(after: u64, high: u64, imported: u64) -> bool {
     after <= high && (imported == 0 || after > imported)
 }
 
+/// A thread stream's first items, the cursor live reads go on from, and the sequence a
+/// `changesAfterSequence` opening pages changed rows from.
+type Opening = (Vec<Value>, u64, Option<u64>);
+
 pub(crate) async fn subscribe_thread(
     inner: Arc<Inner>,
     input: Value,
@@ -177,7 +181,7 @@ pub(crate) async fn subscribe_thread(
     let id = thread_id.clone();
     let first = inner
         .db(
-            move |store| -> Result<Option<(Vec<Value>, u64, Option<u64>)>, String> {
+            move |store| -> Result<Option<Opening>, String> {
                 let high = store.high_water();
                 let imported = store.imported_through();
                 // Rows a client holds are patched by changed rows unless the server now hides some

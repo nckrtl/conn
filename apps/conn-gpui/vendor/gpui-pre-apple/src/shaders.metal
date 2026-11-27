@@ -558,6 +558,10 @@ fragment float4 shadow_fragment(ShadowFragmentInput input [[stage_in]],
   // Blending is `src * a + dst * (1 - a)`, so `p / a` extra in the colour adds `p` to the output
   // whatever the background. Cap `p` at the shadow's own alpha, so no dither shows where the
   // shadow has faded out.
+  // The dither cannot be centred. The colour is clamped at 0, so a black shadow cannot take light
+  // away through it, and a change in alpha scales with the unknown background. With
+  // round-to-nearest output, every dither that only adds light and leaves no bands lifts the mean
+  // by at least half a level; uniform `[0, 1)` noise lifts it by exactly half a level everywhere.
   float4 color = input.color * float4(1., 1., 1., alpha);
   float dither = min(interleaved_gradient_noise(input.position.xy) / 255., color.a);
   color.rgb = saturate(color.rgb + dither / max(color.a, 1e-6));

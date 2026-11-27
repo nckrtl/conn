@@ -90,3 +90,119 @@
   display: block;
   padding-left: 10px;
 }
+/* GPUI `row_base`: medium 13/20 at 80% of the foreground. */
+.thread-inspector .inspector-row {
+  color: color-mix(in srgb, var(--ink) 80%, transparent);
+}
+.thread-inspector h3 {
+  justify-content: space-between;
+}
+.thread-inspector .inspector-icon-button {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 8px;
+}
+.thread-inspector .inspector-icon-button .icon {
+  width: 14px;
+  height: 14px;
+}
+.thread-inspector h3 .inspector-icon-button .icon {
+  width: 16px;
+  height: 16px;
+}
+/* Automation and wakeup rows: title 14/500 over an 11px line, 6px vertical padding. */
+.thread-inspector .inspector-task,
+.thread-inspector .inspector-agent {
+  height: auto;
+  min-height: 32px;
+  padding-block: 6px;
+}
+.thread-inspector .inspector-agent {
+  padding-block: 4px;
+}
+.thread-inspector .inspector-task:hover {
+  background: var(--hover);
+}
+.thread-inspector .inspector-two-line {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+.thread-inspector .inspector-two-line > * {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.thread-inspector .inspector-task-text > span {
+  font-size: 14px;
+}
+.thread-inspector .inspector-task-text > small {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 400;
+  line-height: 16px;
+}
+.thread-inspector .inspector-agent .inspector-two-line > small {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 16px;
+}
+.thread-inspector .inspector-agent > small,
+.thread-inspector .inspector-count {
+  font-weight: 400;
+}
+.thread-inspector .inspector-failed {
+  color: var(--native-error);
+}
+/* `status_dot_cutout`: a 6px dot in a 2px ring of the card's colour, centred on the corner. */
+.inspector-dot-host {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+.inspector-dot {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--native-surfaceOverlay);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--native-mutedForeground) 45%, var(--native-surfaceOverlay));
+}
+.inspector-dot[data-state="running"] {
+  background: oklch(0.623 0.214 259.815);
+}
+.inspector-dot[data-state="done"] {
+  background: oklch(0.696 0.17 162.48);
+}
+.inspector-dot[data-state="failed"] {
+  background: var(--native-error);
+}
+/* `pill_switch`: 34×20 track, 16px thumb, 2px inset; on is the primary 70% toward the foreground. */
+.inspector-switch {
+  display: flex;
+  flex: none;
+  width: 34px;
+  height: 20px;
+  padding: 2px;
+  border-radius: 9999px;
+  background: var(--native-input);
+}
+.inspector-switch::after {
+  content: "";
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--native-canvas);
+}
+.inspector-switch[aria-checked="true"] {
+  justify-content: flex-end;
+  background: color-mix(in oklab, var(--native-messageAction) 70%, var(--ink));
+}

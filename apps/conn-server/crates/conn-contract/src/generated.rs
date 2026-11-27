@@ -8815,6 +8815,8 @@ pub struct OrchestrationV2SubscribeThreadInput {
     pub accept_deduped_bodies: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accept_compact_ids: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub changes_after_sequence: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

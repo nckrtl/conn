@@ -171,41 +171,54 @@ pub(crate) async fn subscribe_thread(
     let bounded = input["acceptBoundedSnapshot"] == true;
     // A bounded snapshot keeps its window's turn items whole; it is small already.
     let omit_local = input["acceptCompactTurnItems"] == true && !bounded;
-    let mut wake = inner.notify.subscribe();
+    // Conn's own resume: the rows changed after this sequence, never "too old" (`wire.md`).
+    let changes_after = input["changesAfterSequence"].as_u64();
+    let wake = inner.thread_wakes.subscribe(&thread_id);
     let id = thread_id.clone();
     let first = inner
-        .db(move |store| -> Result<Option<(Vec<Value>, u64)>, String> {
-            let high = store.high_water();
-            // T3 replays a resumed stream before it looks for the thread (`ws.ts`), so a
-            // client that missed a deletion gets `thread.deleted`.
-            let imported = store.imported_through();
-            if let Some(after) = after.filter(|after| can_replay(*after, high, imported))
-                && store.thread_known(&id)?
-                && let Some(items) = replay(store, &id, after)?
-            {
-                return Ok(Some((items, high)));
-            }
-            if !store.thread_exists(&id)? {
-                return Ok(None);
-            }
-            if bounded && let Some(window) = store.bounded_thread(&id)? {
-                let mut item = snapshot_item(window.projection, high, dedupe, false);
-                item["historyCursor"] = json!(window.history_cursor);
-                item["hasMoreHistory"] = json!(window.has_more_history);
-                item["latestLocalTurnOrdinal"] = json!(window.latest_local_turn_ordinal);
-                return Ok(Some((vec![item], high)));
-            }
-            let (projection, omitted) = store
-                .thread_projection_with(&id, omit_local)?
-                .unwrap_or((Value::Null, false));
-            Ok(Some((
-                vec![snapshot_item(projection, high, dedupe, omitted)],
-                high,
-            )))
-        })
+        .db(
+            move |store| -> Result<Option<(Vec<Value>, u64, Option<u64>)>, String> {
+                let high = store.high_water();
+                let imported = store.imported_through();
+                // Rows a client holds are patched by changed rows unless the server now hides some
+                // (a rollback) or the thread was created again; then the snapshot below replaces them.
+                if let Some(after) =
+                    changes_after.filter(|after| can_replay(*after, high, imported))
+                    && store.thread_known(&id)?
+                    && !store.thread_changes_need_reset(&id, after)?
+                {
+                    return Ok(Some((vec![], after, Some(after))));
+                }
+                let first = |items, high| Ok(Some((items, high, None)));
+                // T3 replays a resumed stream before it looks for the thread (`ws.ts`), so a
+                // client that missed a deletion gets `thread.deleted`.
+                if let Some(after) = after
+                    .filter(|after| can_replay(*after, high, imported))
+                    .filter(|_| changes_after.is_none())
+                    && store.thread_known(&id)?
+                    && let Some(items) = replay(store, &id, after)?
+                {
+                    return first(items, high);
+                }
+                if !store.thread_exists(&id)? {
+                    return Ok(None);
+                }
+                if bounded && let Some(window) = store.bounded_thread(&id)? {
+                    let mut item = snapshot_item(window.projection, high, dedupe, false);
+                    item["historyCursor"] = json!(window.history_cursor);
+                    item["hasMoreHistory"] = json!(window.has_more_history);
+                    item["latestLocalTurnOrdinal"] = json!(window.latest_local_turn_ordinal);
+                    return first(vec![item], high);
+                }
+                let (projection, omitted) = store
+                    .thread_projection_with(&id, omit_local)?
+                    .unwrap_or((Value::Null, false));
+                first(vec![snapshot_item(projection, high, dedupe, omitted)], high)
+            },
+        )
         .await
         .map_err(EngineError::Internal)?;
-    let Some((first, mut cursor)) = first else {
+    let Some((first, mut cursor, changes)) = first else {
         return Err(rejected(thread_error(
             &thread_id,
             format!("Thread {thread_id} does not exist."),
@@ -214,10 +227,43 @@ pub(crate) async fn subscribe_thread(
 
     let (tx, rx) = mpsc::channel(16);
     tokio::spawn(async move {
+        // The whole hold, not only its receiver: the sender lives as long as this stream.
+        let mut wake = wake;
         let error = |message: String| thread_error(&thread_id, message);
         for item in first {
             if !send(&tx, item, error).await {
                 return;
+            }
+        }
+        // Pages of changed rows. A row a commit changes meanwhile comes again in a later page,
+        // newer; the last page's read of the high water is where live events go on.
+        if changes.is_some() {
+            loop {
+                let (id, after) = (thread_id.clone(), cursor);
+                let page = inner
+                    .db(move |store| {
+                        let page = store.thread_changes_after(&id, after, LIVE_READ_BATCH)?;
+                        Ok::<_, String>((page, store.high_water()))
+                    })
+                    .await;
+                let (page, high) = match page {
+                    Ok(page) => page,
+                    Err(e) => {
+                        fail(&tx, error(e)).await;
+                        return;
+                    }
+                };
+                let full = page.len() == LIVE_READ_BATCH;
+                for change in page {
+                    cursor = change.0;
+                    if !send(&tx, event_item(change), error).await {
+                        return;
+                    }
+                }
+                if !full {
+                    cursor = cursor.max(high);
+                    break;
+                }
             }
         }
         if marker && !send(&tx, json!({"kind": "synchronized"}), error).await {
@@ -226,7 +272,7 @@ pub(crate) async fn subscribe_thread(
         loop {
             tokio::select! {
                 _ = tx.closed() => return,
-                changed = wake.changed() => if changed.is_err() { return },
+                changed = wake.rx.changed() => if changed.is_err() { return },
             }
             loop {
                 let (id, after) = (thread_id.clone(), cursor);

@@ -309,6 +309,8 @@ pub(crate) struct Inner {
     /// The latest committed sequence. Stream tasks wake on it and read from the store. Each
     /// commit sends it (`Tx::commit`).
     pub(crate) notify: Arc<watch::Sender<u64>>,
+    /// Per-thread wakes: a thread stream wakes only when its own thread commits.
+    pub(crate) thread_wakes: Arc<crate::store::ThreadWakes>,
     pub(crate) providers: conn_provider::ProviderSet,
     /// Threads with an open provider session. The only per-thread state kept in memory.
     pub(crate) live: Mutex<HashMap<String, Arc<LiveThread>>>,
@@ -535,6 +537,7 @@ impl SqliteEngine {
         tx.enqueue(None, &effects)?;
         tx.commit(None)?;
         let notify = store.published.clone();
+        let thread_wakes = store.thread_wakes.clone();
         let limit_recovery_wake = store.limit_recovery_wake.clone();
         let engine = Self {
             inner: Arc::new(Inner {
@@ -542,6 +545,7 @@ impl SqliteEngine {
                 attention,
                 thread_push,
                 notify,
+                thread_wakes,
                 providers,
                 live: Mutex::new(HashMap::new()),
                 detached: Mutex::new(Vec::new()),

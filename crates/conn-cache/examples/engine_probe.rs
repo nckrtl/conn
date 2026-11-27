@@ -5,6 +5,7 @@
 //! Opens the thread from the device file (if it holds it), catches up, then compares what the
 //! engine draws with a fresh window the server builds for a plain subscriber. Prints one JSON
 //! line: open-from-device time, catch-up time, rows drawn, and rows that differ.
+//! `PROBE_COMPARE=0` skips the fresh window, so only the engine's own connection runs.
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -106,6 +107,19 @@ async fn main() {
         }
     }
 
+    if std::env::var("PROBE_COMPARE").as_deref() == Ok("0") {
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        println!(
+            "{}",
+            serde_json::json!({
+                "thread": thread, "stored_before": stored, "open_ms": open_ms,
+                "drawn_at_open": drawn_at_open, "catch_up_ms": caught_up_ms,
+                "catch_up_items": items, "got_snapshot": snapshot,
+            })
+        );
+        connection.close();
+        return;
+    }
     // A fresh window, as a client without a device copy gets it.
     let (fresh_conn, mut fresh_events) = Connection::start(config, &rt);
     fresh_conn.subscribe_thread(thread);

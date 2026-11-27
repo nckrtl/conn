@@ -28,24 +28,35 @@ fn vertical_fade(color: Hsla, opacity: f32) -> Background {
     )
 }
 
-/// Opacity of the line, in both the card sparkline and the expanded chart.
-const SERIES_STROKE_OPACITY: f32 = 0.70;
+/// Opacity of the card sparkline's line.
+const SPARKLINE_STROKE_OPACITY: f32 = 0.70;
 /// Conn's `<Fade opacity={0.22}>`: the top of the area gradient under the line, in both charts.
 const SERIES_AREA_OPACITY: f32 = 0.22;
 
-/// The single series' colours, shared by the card sparkline and the expanded chart so the two
-/// always match: the theme's muted foreground for the line and the area fade.
+/// The single series' colours. The area fade is the same subtle neutral in both charts. The
+/// card sparkline's line is muted, so the cards stay calm. The expanded chart's line is the
+/// theme's full foreground, so it stands out.
 struct SeriesColors {
     stroke: Hsla,
     area: Background,
 }
 
 impl SeriesColors {
-    fn from_tokens(tokens: &Tokens) -> Self {
-        let base = to_hsla(tokens.muted_foreground);
+    /// The calm, muted series of a card sparkline.
+    fn sparkline(tokens: &Tokens) -> Self {
+        let muted = to_hsla(tokens.muted_foreground);
         Self {
-            stroke: base.opacity(SERIES_STROKE_OPACITY),
-            area: vertical_fade(base, SERIES_AREA_OPACITY),
+            stroke: muted.opacity(SPARKLINE_STROKE_OPACITY),
+            area: vertical_fade(muted, SERIES_AREA_OPACITY),
+        }
+    }
+
+    /// The expanded chart's series: the full foreground line over the same neutral area fade.
+    /// The hover dot and the tooltip swatch use the line colour.
+    fn expanded(tokens: &Tokens) -> Self {
+        Self {
+            stroke: to_hsla(tokens.foreground),
+            area: vertical_fade(to_hsla(tokens.muted_foreground), SERIES_AREA_OPACITY),
         }
     }
 }
@@ -118,7 +129,7 @@ pub(super) fn render_sparkline(
     let SeriesColors {
         stroke: stroke_color,
         area: area_color,
-    } = SeriesColors::from_tokens(tokens);
+    } = SeriesColors::sparkline(tokens);
 
     let inner: AnyElement = if points.len() < 2 {
         div().size_full().into_any_element()
@@ -221,11 +232,10 @@ pub(super) fn render_trend_chart(
         .iter()
         .map(|&t| (t, format_insight_value(spec_id, t)))
         .collect();
-    // The same colours as the card sparkline, so the two charts match.
     let SeriesColors {
         stroke: series_color,
         area: area_color,
-    } = SeriesColors::from_tokens(tokens);
+    } = SeriesColors::expanded(tokens);
     let grid_color = to_hsla(surface.shell_chart_grid);
     let crosshair_color = to_hsla(tokens.muted_foreground).opacity(0.50);
     let ring_color = to_hsla(tokens.shell_card);
@@ -580,21 +590,43 @@ mod tests {
         for id in ["dark-ocean", "t3-code-light"] {
             let tokens = Tokens::derive(&conn_theme::theme_by_id(id).expect("a theme"));
             let muted = to_hsla(tokens.muted_foreground);
-            let colors = SeriesColors::from_tokens(&tokens);
+            let info = to_hsla(tokens.info).opacity(1.0);
+
+            let sparkline = SeriesColors::sparkline(&tokens);
             assert_eq!(
-                colors.stroke,
-                muted.opacity(SERIES_STROKE_OPACITY),
-                "{id}: the line is the muted foreground"
+                sparkline.stroke,
+                muted.opacity(SPARKLINE_STROKE_OPACITY),
+                "{id}: the sparkline line is the muted foreground"
             );
             assert_ne!(
-                colors.stroke.opacity(1.0),
-                to_hsla(tokens.info).opacity(1.0),
-                "{id}: the line is not the info blue"
+                sparkline.stroke.opacity(1.0),
+                info,
+                "{id}: the sparkline line is not the info blue"
             );
             assert_eq!(
-                colors.area,
+                sparkline.area,
                 vertical_fade(muted, SERIES_AREA_OPACITY),
-                "{id}: the area fades from the muted foreground"
+                "{id}: the sparkline area fades from the muted foreground"
+            );
+
+            let expanded = SeriesColors::expanded(&tokens);
+            assert_eq!(
+                expanded.stroke,
+                to_hsla(tokens.foreground),
+                "{id}: the expanded line is the full foreground"
+            );
+            assert_ne!(
+                expanded.stroke.opacity(1.0),
+                info,
+                "{id}: the expanded line is not the info blue"
+            );
+            assert_ne!(
+                expanded.stroke, sparkline.stroke,
+                "{id}: the expanded line stands out from the sparkline"
+            );
+            assert_eq!(
+                expanded.area, sparkline.area,
+                "{id}: both charts share the same subtle area fade"
             );
         }
     }

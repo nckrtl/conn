@@ -20,6 +20,8 @@ pub(crate) use self::composer_state::{
     local_branch_name_from_remote_ref, plan_approval_send, previous_worktree,
 };
 #[cfg(all(test, target_os = "macos"))]
+mod bottom_gap_tests;
+#[cfg(all(test, target_os = "macos"))]
 mod card_shots;
 #[cfg(all(test, target_os = "macos"))]
 mod card_tests;
@@ -96,6 +98,30 @@ const CHAT_LANE_PADDING_X_PX: f32 = 48.0;
 /// dividers' right end, as in the iOS timeline. A row that needs hover room extends its
 /// background with a negative margin instead of indenting its content.
 const TIMELINE_INSET_PX: f32 = 0.0;
+/// Space between the bottom of the last row's content and the composer lane's padding, the same
+/// in every state (Nick, 2026-11-27). The running "Thinking" row set it: its own 4px trailing
+/// padding plus 16px. Each last row gives up its own trailing space (see
+/// `ChatView::trailing_pad_px`), so a message, a user bubble or a work group sits as far from the
+/// composer as the "Thinking" row does.
+const TIMELINE_END_GAP_PX: f32 = 20.0;
+/// An assistant row's own space under its text: the text block's `py-0.5`, and the row's `pb`
+/// before work and otherwise.
+const ASSISTANT_TEXT_PAD_PX: f32 = 2.0;
+const ASSISTANT_ROW_PAD_BEFORE_WORK_PX: f32 = 16.0;
+const ASSISTANT_ROW_PAD_PX: f32 = 20.0;
+/// The hover-only actions row under a finished message keeps its place in the layout.
+const ASSISTANT_META_HEIGHT_PX: f32 = 6.0 + card_face::CARD_ACTION_BOX_PX;
+/// A user row's `pb` when it ends a group, and the hover-only actions row under its bubble
+/// (`pt-0.5` and the copy button), which keeps its place in the layout.
+const USER_ROW_PAD_PX: f32 = 16.0;
+const USER_ACTIONS_PAD_TOP_PX: f32 = 2.0;
+const USER_ACTIONS_HEIGHT_PX: f32 = USER_ACTIONS_PAD_TOP_PX + card_face::CARD_ACTION_BOX_PX;
+/// A work group's `pb` when its fold is open or live, and when it is a settled fold.
+const WORK_GROUP_OPEN_PAD_PX: f32 = 8.0;
+const WORK_GROUP_FOLD_PAD_PX: f32 = 12.0;
+/// The `pb` of a notice row, and of the "Working" row.
+const NOTICE_ROW_PAD_PX: f32 = 8.0;
+const WORKING_ROW_PAD_PX: f32 = 4.0;
 /// Work-log row: minimum height, icon size and icon-to-label gap (`min-h-6`, `size-4`). The
 /// icon box is exactly the icon wide, so the icon sits on the row's left edge.
 const WORK_ROW_MIN_HEIGHT_PX: f32 = 24.0;
@@ -2086,12 +2112,19 @@ impl ChatView {
                     } else {
                         markdown::render_blocks(id, &blocks, &self.tokens, &options)
                     };
+                    let body = div()
+                        .id(SharedString::from(format!("assistant-body-{id}")))
+                        .w_full()
+                        .min_w_0()
+                        .child(body);
+                    #[cfg(test)]
+                    let body = gpui_kit::TestSupportExt::test_support(body);
                     let mut inner = div()
                         .id(SharedString::from(format!("assistant-text-{id}")))
                         .w_full()
                         .min_w_0()
                         .px(px(TIMELINE_INSET_PX))
-                        .py(px(2.0))
+                        .py(px(ASSISTANT_TEXT_PAD_PX))
                         .child(body);
                     if *show_meta {
                         inner = inner.child(self.render_assistant_meta(
@@ -2119,7 +2152,11 @@ impl ChatView {
                         .group(group)
                         .w_full()
                         .min_w_0()
-                        .pb(px(if *followed_by_work { 16.0 } else { 20.0 }))
+                        .pb(px(if *followed_by_work {
+                            ASSISTANT_ROW_PAD_BEFORE_WORK_PX
+                        } else {
+                            ASSISTANT_ROW_PAD_PX
+                        }))
                         .child(inner);
                     #[cfg(test)]
                     let row = gpui_kit::TestSupportExt::test_support(row);
@@ -2180,9 +2217,70 @@ impl ChatView {
             outer = outer.pt(px(16.0));
         }
         if idx + 1 == items.len() {
-            outer = outer.pb(px(16.0 + self.composer_height_applied));
+            // The row's own trailing space counts toward the end gap, so every last row sits the
+            // same distance above the composer. A row with more trailing space than the gap (a
+            // message with its hover actions) reaches under the composer, which covers it.
+            let end_pad = TIMELINE_END_GAP_PX - self.trailing_pad_px(&items[idx])
+                + self.composer_height_applied;
+            outer = outer.pb(px(end_pad.max(0.0)));
         }
         outer.into_any_element()
+    }
+
+    /// The space a row keeps under its content in its own layout, which the end gap includes when
+    /// the row is last. An unlisted row counts as the "Working" row's 4px, so it keeps its place.
+    fn trailing_pad_px(&self, item: &VirtualItem) -> f32 {
+        match item {
+            VirtualItem::Assistant {
+                followed_by_work,
+                show_meta,
+                ..
+            } => {
+                let row_pad = if *followed_by_work {
+                    ASSISTANT_ROW_PAD_BEFORE_WORK_PX
+                } else {
+                    ASSISTANT_ROW_PAD_PX
+                };
+                let meta = if *show_meta {
+                    ASSISTANT_META_HEIGHT_PX
+                } else {
+                    0.0
+                };
+                ASSISTANT_TEXT_PAD_PX + meta + row_pad
+            }
+            VirtualItem::User {
+                grouped_with_next, ..
+            } => {
+                if *grouped_with_next {
+                    4.0
+                } else {
+                    USER_ROW_PAD_PX + USER_ACTIONS_HEIGHT_PX
+                }
+            }
+            VirtualItem::WorkGroup { id, has_active, .. } => {
+                if *has_active || self.expanded_ids.contains(id.as_str()) {
+                    WORK_GROUP_OPEN_PAD_PX
+                } else {
+                    WORK_GROUP_FOLD_PAD_PX
+                }
+            }
+            VirtualItem::Notice { row_idx } => {
+                // A warning is a one-line row whose container keeps the 4px.
+                let warning = matches!(
+                    self.cache.rows().get(*row_idx).map(|row| &row.entry),
+                    Some(TimelineEntry::Notice {
+                        level: NoticeLevel::Warning,
+                        ..
+                    })
+                );
+                if warning {
+                    WORKING_ROW_PAD_PX
+                } else {
+                    NOTICE_ROW_PAD_PX
+                }
+            }
+            _ => WORKING_ROW_PAD_PX,
+        }
     }
 
     /// Renders Conn's quiet top-of-timeline history pagination control (`TimelineHistoryControl`).
@@ -2644,7 +2742,11 @@ impl ChatView {
             .flex_col()
             .items_end()
             .w_full()
-            .pb(px(if grouped_with_next { 4.0 } else { 16.0 }));
+            .pb(px(if grouped_with_next {
+                4.0
+            } else {
+                USER_ROW_PAD_PX
+            }));
         if is_steer {
             row = row.child(self.render_steer_marker(id));
         }
@@ -2669,7 +2771,7 @@ impl ChatView {
                     .w_full()
                     .max_w(relative(0.8))
                     .pr(px(4.0))
-                    .pt(px(2.0))
+                    .pt(px(USER_ACTIONS_PAD_TOP_PX))
                     .child(actions),
             );
         }
@@ -2799,12 +2901,16 @@ impl ChatView {
             for row in rows {
                 list = list.child(self.render_work_entry(row, cx));
             }
-            container = container.pb(px(8.0)).child(list);
+            container = container.pb(px(WORK_GROUP_OPEN_PAD_PX)).child(list);
         } else {
             // Nick (#280, #290): a settled fold's separator needs the same air below as above it.
             // Above: 8px `pb-2` plus the label's half-leading (~4px), so 12px below.
             // An active group has no separator, so it keeps Conn's `pb-1.5` (6px).
-            container = container.pb(px(if has_active { 6.0 } else { 12.0 }));
+            container = container.pb(px(if has_active {
+                6.0
+            } else {
+                WORK_GROUP_FOLD_PAD_PX
+            }));
         }
 
         container.into_any_element()
@@ -2864,7 +2970,7 @@ impl ChatView {
             .w_full()
             .min_w_0()
             .pt(px(4.0))
-            .pb(px(8.0))
+            .pb(px(WORK_GROUP_OPEN_PAD_PX))
             .rounded(px(6.0))
             .cursor_pointer()
             .on_click(cx.listener(move |view, _, _, cx| {
@@ -3341,7 +3447,7 @@ impl ChatView {
                 )
                 .w_full()
                 .min_w_0()
-                .pb(px(8.0))
+                .pb(px(NOTICE_ROW_PAD_PX))
                 .child(
                     div()
                         .flex()
@@ -3378,7 +3484,7 @@ impl ChatView {
             .a11y_group(ax_id, format!("Notice: {}", ax_snippet(text)))
             .w_full()
             .min_w_0()
-            .pb(px(8.0))
+            .pb(px(NOTICE_ROW_PAD_PX))
             .child(
                 div()
                     .flex()
@@ -3546,7 +3652,7 @@ impl ChatView {
             .flex_col()
             .w_full()
             .min_w_0()
-            .pb(px(4.0))
+            .pb(px(WORKING_ROW_PAD_PX))
             .child(
                 div()
                     .w_full()
@@ -3574,32 +3680,34 @@ impl ChatView {
             );
 
         if !has_live_work_group {
-            col = col.child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .items_center()
-                    .gap(px(WORK_ICON_GAP_PX))
-                    .w_full()
-                    .min_w_0()
-                    .min_h(px(WORK_ROW_MIN_HEIGHT_PX))
-                    .pt(px(4.0))
-                    .pb(px(4.0))
-                    .px(px(TIMELINE_INSET_PX))
-                    .child(work_icon_box(
-                        SharedString::from("working-thinking-icon"),
-                        icons::icon(icons::BRAIN, 16.0, icon_muted),
-                    ))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_size(px(BODY_FONT_PX))
-                            .line_height(px(BODY_LINE_HEIGHT_PX))
-                            .text_color(muted)
-                            .child(shimmer_text("Thinking", muted, bright_fg)),
-                    ),
-            );
+            let thinking = div()
+                .id("timeline-thinking")
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(WORK_ICON_GAP_PX))
+                .w_full()
+                .min_w_0()
+                .min_h(px(WORK_ROW_MIN_HEIGHT_PX))
+                .pt(px(4.0))
+                .pb(px(4.0))
+                .px(px(TIMELINE_INSET_PX))
+                .child(work_icon_box(
+                    SharedString::from("working-thinking-icon"),
+                    icons::icon(icons::BRAIN, 16.0, icon_muted),
+                ))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(BODY_FONT_PX))
+                        .line_height(px(BODY_LINE_HEIGHT_PX))
+                        .text_color(muted)
+                        .child(shimmer_text("Thinking", muted, bright_fg)),
+                );
+            #[cfg(test)]
+            let thinking = gpui_kit::TestSupportExt::test_support(thinking);
+            col = col.child(thinking);
         }
 
         col.into_any_element()

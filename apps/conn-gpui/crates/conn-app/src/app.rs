@@ -48,6 +48,8 @@ mod reconnect_tests;
 mod send_pending;
 #[cfg(test)]
 mod send_pending_tests;
+#[cfg(test)]
+mod shell_event_tests;
 mod sidebar_keys;
 mod sidebar_more;
 mod thread_links;
@@ -270,6 +272,9 @@ pub(crate) struct ConnApp {
     geometry: ShellGeometry,
     offline: offline::Offline,
     shell: ShellState,
+    /// What the primary shell items applied since the app last caught up with them changed
+    /// ([`ConnApp::settle_shell`]): a burst of items is settled once.
+    pending_shell: Option<conn_state::ShellChange>,
     layout: LayoutState,
     active_workspace: Option<String>,
     /// What the thread sidebar remembers and does besides its lists: the Settled shelf, the message
@@ -776,6 +781,7 @@ impl ConnApp {
             tokens,
             geometry: ShellGeometry::default(),
             shell,
+            pending_shell: None,
             layout,
             active_workspace: rail_workspaces::saved_active_workspace(&orbit.workspaces),
             sidebar: sidebar_state,
@@ -1622,27 +1628,8 @@ impl ConnApp {
                         if app.connection_gen != generation {
                             return false;
                         }
-                        let mut status_changed = false;
-                        let mut shell_changed = false;
                         let shows = batch.iter().any(|event| app.event_shows(event));
-                        for event in batch {
-                            if matches!(
-                                event,
-                                ClientEvent::Status(_) | ClientEvent::BearerIssued(_)
-                            ) {
-                                status_changed = true;
-                            }
-                            shell_changed |= matches!(event, ClientEvent::Shell(_));
-                            app.apply_event(event, orbit_server_id.as_deref(), cx);
-                        }
-                        if shell_changed {
-                            app.expire_offline(cx);
-                            app.reconcile_offline(cx);
-                        }
-                        app.schedule_offline_save(cx);
-                        if status_changed {
-                            app.refresh_settings_orbit_info(cx);
-                        }
+                        app.apply_batch(batch, orbit_server_id.as_deref(), cx);
                         if shows {
                             app.sync_chat(cx);
                             cx.notify();
@@ -1656,6 +1643,104 @@ impl ConnApp {
             }
         })
         .detach();
+    }
+
+    /// Applies one batch of the primary connection's events. A run of shell items is applied
+    /// item by item but settled once ([`Self::settle_shell`]), before the next event of another
+    /// kind and at the end, so a burst re-merges the linked shells and refreshes the offline
+    /// cache once, not once per item.
+    fn apply_batch(
+        &mut self,
+        batch: Vec<ClientEvent>,
+        orbit_server_id: Option<&str>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let mut status_changed = false;
+        let mut shell_changed = false;
+        for event in batch {
+            match event {
+                ClientEvent::Shell(item) => {
+                    shell_changed = true;
+                    self.apply_shell_item(item);
+                }
+                event => {
+                    status_changed |=
+                        matches!(event, ClientEvent::Status(_) | ClientEvent::BearerIssued(_));
+                    self.settle_shell(cx);
+                    self.apply_event(event, orbit_server_id, cx);
+                }
+            }
+        }
+        self.settle_shell(cx);
+        if shell_changed {
+            self.offline_follow_shell(cx);
+        }
+        self.schedule_offline_save(cx);
+        if status_changed {
+            self.refresh_settings_orbit_info(cx);
+        }
+    }
+
+    /// Applies one primary shell item to the merged shell. [`Self::settle_shell`] catches up.
+    fn apply_shell_item(&mut self, item: conn_state::ShellStreamItem) {
+        let change = self.shell.apply(item);
+        match &mut self.pending_shell {
+            Some(pending) => {
+                pending.projects_changed |= change.projects_changed;
+                pending.snapshot_required |= change.snapshot_required;
+                pending.threads_changed.extend(change.threads_changed);
+            }
+            None => self.pending_shell = Some(change),
+        }
+    }
+
+    /// Catches up with the primary shell items applied since the last call: merges the linked
+    /// shells again only when the items need it, then does once what every item used to do.
+    fn settle_shell(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(change) = self.pending_shell.take() else {
+            return;
+        };
+        self.merge_after_primary_change(&change);
+        self.offline.shell_changed();
+        if self.shell.synchronized
+            && self
+                .layout
+                .selected_thread_id
+                .as_deref()
+                .is_some_and(|id| self.shell.find_thread(id).is_none())
+        {
+            self.unsubscribe_open_thread();
+            self.layout.selected_thread_id = None;
+        }
+        self.release_settled_drop();
+        if change.snapshot_required || !change.threads_changed.is_empty() {
+            self.drive_older_pages(cx);
+        }
+        if !change.threads_changed.is_empty() {
+            self.resubscribe_ended_threads();
+        }
+        if change.snapshot_required
+            && let Some(connection) = &self.connection
+        {
+            connection.subscribe_shell_with_idle_subagents();
+        }
+        if let Some(pending_id) = self.pending_open_thread.clone()
+            && self.shell.find_thread(&pending_id).is_some()
+        {
+            self.pending_open_thread = None;
+            self.select_thread(pending_id, cx);
+        } else if self.layout.selected_thread_id.is_none() && self.draft.is_none() {
+            let initial = self
+                .shell
+                .top_level_active_threads()
+                .next()
+                .or_else(|| self.shell.threads.iter().find(|t| self.shell.is_listed(t)))
+                .map(|first| (first.project_id.clone(), first.id.clone()));
+            if let Some((project_id, thread_id)) = initial {
+                self.layout.selected_project_id = Some(project_id);
+                self.open_thread(thread_id);
+            }
+        }
     }
 
     /// Whether `event` can change what the window shows. Items of the offline cache's background
@@ -1726,48 +1811,8 @@ impl ConnApp {
                 }
             }
             ClientEvent::Shell(item) => {
-                let change = self.shell.apply(item);
-                self.remerge_linked_shells();
-                self.offline.shell_changed();
-                if self.shell.synchronized
-                    && self
-                        .layout
-                        .selected_thread_id
-                        .as_deref()
-                        .is_some_and(|id| self.shell.find_thread(id).is_none())
-                {
-                    self.unsubscribe_open_thread();
-                    self.layout.selected_thread_id = None;
-                }
-                self.release_settled_drop();
-                if change.snapshot_required || !change.threads_changed.is_empty() {
-                    self.drive_older_pages(cx);
-                }
-                if !change.threads_changed.is_empty() {
-                    self.resubscribe_ended_threads();
-                }
-                if change.snapshot_required
-                    && let Some(connection) = &self.connection
-                {
-                    connection.subscribe_shell_with_idle_subagents();
-                }
-                if let Some(pending_id) = self.pending_open_thread.clone()
-                    && self.shell.find_thread(&pending_id).is_some()
-                {
-                    self.pending_open_thread = None;
-                    self.select_thread(pending_id, cx);
-                } else if self.layout.selected_thread_id.is_none() && self.draft.is_none() {
-                    let initial = self
-                        .shell
-                        .top_level_active_threads()
-                        .next()
-                        .or_else(|| self.shell.threads.iter().find(|t| self.shell.is_listed(t)))
-                        .map(|first| (first.project_id.clone(), first.id.clone()));
-                    if let Some((project_id, thread_id)) = initial {
-                        self.layout.selected_project_id = Some(project_id);
-                        self.open_thread(thread_id);
-                    }
-                }
+                self.apply_shell_item(item);
+                self.settle_shell(cx);
             }
             // A late item of a stream dropped with its reducer finds nobody to apply to.
             ClientEvent::Thread { thread_id, .. }
@@ -4428,6 +4473,18 @@ impl ConnApp {
     #[cfg(test)]
     pub(crate) fn right_panel_for_test(&self) -> &Entity<crate::panels::RightPanel> {
         &self.right_panel
+    }
+
+    /// One batch of server events, applied as the connection's batch loop applies it.
+    #[cfg(test)]
+    pub(crate) fn apply_batch_for_test(
+        &mut self,
+        batch: Vec<ClientEvent>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.apply_batch(batch, None, cx);
+        self.sync_chat(cx);
+        cx.notify();
     }
 
     /// One server event, applied as the connection's batch loop applies it.

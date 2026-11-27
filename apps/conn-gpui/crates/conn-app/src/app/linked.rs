@@ -19,8 +19,8 @@ use conn_desktop::orbit::linked::{
     LinkedPlanInput, confirm_gone_environments, plan_linked_environments,
 };
 use conn_desktop::orbit::{LinkedEnvironmentSettings, LinkedStore};
-use conn_state::ThreadState;
 use conn_state::environments::{LinkedShellSnapshot, LinkedShells, Origins};
+use conn_state::{ShellChange, ThreadState};
 use gpui_kit::Context;
 
 use super::ConnApp;
@@ -68,6 +68,17 @@ pub(super) struct LinkedEnvironments {
     scratch_roots: HashMap<String, String>,
     /// What the primary environment says it is, for its rows when the list spans environments.
     primary_machine: Option<String>,
+    /// How often the merged shell was rebuilt, for tests and the shell bench.
+    merges: MergeCounts,
+}
+
+/// How the merged shell caught up with changes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct MergeCounts {
+    /// Every environment merged again.
+    pub(super) full: u64,
+    /// Only the changed threads updated in place.
+    pub(super) in_place: u64,
 }
 
 fn now_ms() -> i64 {
@@ -135,6 +146,11 @@ impl LinkedEnvironments {
 
     pub(super) fn shell_for_cache(&self, env: &str) -> Option<&conn_state::ShellState> {
         self.shells.shell(env)
+    }
+
+    /// Every linked environment's shell, in order.
+    pub(super) fn cache_shells(&self) -> Vec<(&str, &conn_state::ShellState)> {
+        self.shells.iter().collect()
     }
 
     pub(super) fn cache_threads(
@@ -669,6 +685,102 @@ impl ConnApp {
             &mut self.shell,
             &self.linked.origins,
         );
+        self.linked.merges.full += 1;
+        // Rows may have moved between environments: the offline cache looks at every thread.
+        self.offline.note_all_threads();
+    }
+
+    /// Catches the merged shell up with primary shell items it already applied in place. Only a
+    /// snapshot, a project change or a thread a linked environment also holds merges again.
+    pub(super) fn merge_after_primary_change(&mut self, change: &ShellChange) {
+        if self
+            .linked
+            .shells
+            .primary_change_needs_merge(&self.shell, change)
+        {
+            self.remerge_linked_shells();
+        }
+        self.offline.note_change(change);
+    }
+
+    /// Catches the merged shell up with the linked environments' shell changes of one batch:
+    /// in place, thread by thread, unless a change needs every environment merged again.
+    fn merge_linked_changes(&mut self, changes: Vec<(String, ShellChange)>) {
+        if changes.iter().any(|(_, change)| change.projects_changed) {
+            self.remerge_linked_shells();
+            return;
+        }
+        let mut by_environment: Vec<(String, Vec<String>)> = Vec::new();
+        for (environment, change) in changes {
+            match by_environment.iter_mut().find(|(id, _)| *id == environment) {
+                Some((_, ids)) => ids.extend(change.threads_changed),
+                None => by_environment.push((environment, change.threads_changed)),
+            }
+        }
+        for (environment, ids) in by_environment {
+            if !self.linked.shells.update_merged(
+                &environment,
+                &ids,
+                &mut self.shell,
+                &mut self.linked.origins,
+            ) {
+                self.remerge_linked_shells();
+                return;
+            }
+            self.linked.merges.in_place += 1;
+            self.offline.note_threads(&ids);
+        }
+    }
+
+    /// Catches up with one batch's linked shell changes: the merged shell, the offline cache and
+    /// the Settled shelf, once for the whole batch.
+    fn settle_linked_changes(
+        &mut self,
+        changes: Vec<(String, ShellChange)>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if changes.is_empty() {
+            return;
+        }
+        self.merge_linked_changes(changes);
+        self.offline_follow_shell(cx);
+        self.drive_older_pages(cx);
+        // A thread started on a linked environment opens once it is listed.
+        if let Some(pending_id) = self.pending_open_thread.clone()
+            && self.shell.find_thread(&pending_id).is_some()
+        {
+            self.pending_open_thread = None;
+            self.select_thread(pending_id, cx);
+        }
+    }
+
+    /// Test helper: one batch of `environment_id`'s shell items, applied as its connection's
+    /// batch loop applies them.
+    #[cfg(test)]
+    pub(crate) fn apply_linked_shell_batch_for_test(
+        &mut self,
+        environment_id: &str,
+        items: Vec<conn_state::ShellStreamItem>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let changes = items
+            .into_iter()
+            .filter_map(|item| {
+                let change = self.linked.shells.apply(environment_id, item)?;
+                (change.projects_changed || !change.threads_changed.is_empty())
+                    .then(|| (environment_id.to_owned(), change))
+            })
+            .collect();
+        self.settle_linked_changes(changes, cx);
+        self.schedule_offline_save(cx);
+        self.sync_chat(cx);
+        cx.notify();
+    }
+
+    /// How often the merged shell was rebuilt or updated in place.
+    #[cfg(test)]
+    pub(super) fn merge_counts_for_test(&self) -> MergeCounts {
+        self.linked.merges
     }
 
     /// The projects the workspace editor offers, under the machine each lives on
@@ -1026,10 +1138,9 @@ impl ConnApp {
     }
 
     /// The Settled shelf pages every environment on its own cut: scopes each linked environment
-    /// to its projects in the shelf's scope, then reads the next older page of each one that has
-    /// one while the open shelf lists fewer rows than it shows, one page at a time per
-    /// environment (`useOlderSettledShelfGrowth`).
-    pub(super) fn drive_linked_older_pages(&mut self, cx: &mut Context<'_, Self>) {
+    /// to its projects in the shelf's scope (`useOlderSettledShelfGrowth`). Merges again only
+    /// when a scope changed.
+    pub(super) fn sync_linked_older_scopes(&mut self) {
         let environments: Vec<String> = self
             .linked
             .shells
@@ -1066,20 +1177,40 @@ impl ConnApp {
         if scope_changed {
             self.remerge_linked_shells();
         }
-        if !self.sidebar.settled_expanded {
-            return;
-        }
-        let visible = self.settled_visible_count();
-        let listed = crate::sidebar::thread_list::sidebar_lists(
-            &self.shell,
-            &self.orbit.workspaces,
-            self.active_workspace.as_deref(),
-            "",
-            &[],
-            None,
-        )
-        .listed_settled
-        .len();
+    }
+
+    /// Whether a linked environment has an older page to read once the open shelf lists fewer
+    /// rows than it shows.
+    pub(super) fn linked_older_page_possible(&self) -> bool {
+        self.linked
+            .shells
+            .environments()
+            .into_iter()
+            .any(|environment| {
+                self.linked
+                    .shells
+                    .next_older_page(&environment.id, 0, usize::MAX)
+                    .is_some()
+            })
+    }
+
+    /// Reads the next older page of each linked environment that has one while the open shelf
+    /// lists `listed` of the `visible` rows it shows, one page at a time per environment. Merges
+    /// again only when a read started, so the shelf's footer shows it.
+    pub(super) fn start_linked_older_pages(
+        &mut self,
+        listed: usize,
+        visible: usize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let environments: Vec<String> = self
+            .linked
+            .shells
+            .environments()
+            .into_iter()
+            .map(|environment| environment.id)
+            .collect();
+        let mut started = false;
         for environment in environments {
             let Some(connection) = self.linked_connection(&environment) else {
                 continue;
@@ -1094,6 +1225,7 @@ impl ConnApp {
             self.linked
                 .shells
                 .older_page_started(&environment, &request);
+            started = true;
             let payload = request.payload();
             cx.spawn(async move |this, cx| {
                 let result = connection
@@ -1122,7 +1254,9 @@ impl ConnApp {
             })
             .detach();
         }
-        self.remerge_linked_shells();
+        if started {
+            self.remerge_linked_shells();
+        }
     }
 
     /// Drops every linked environment: the primary connection changed, so the old list is stale.
@@ -1406,24 +1540,13 @@ impl ConnApp {
                     batch.push(more);
                 }
                 let alive = this.update(cx, |app, cx| {
-                    let mut shells_changed = false;
                     let shows = batch.iter().any(|event| app.event_shows(&event.event));
-                    for event in batch {
-                        shells_changed |= app.apply_linked_event(event, cx);
-                    }
-                    if shells_changed {
-                        app.remerge_linked_shells();
-                        app.expire_offline(cx);
-                        app.reconcile_offline(cx);
-                        app.drive_older_pages(cx);
-                        // A thread started on a linked environment opens once it is listed.
-                        if let Some(pending_id) = app.pending_open_thread.clone()
-                            && app.shell.find_thread(&pending_id).is_some()
-                        {
-                            app.pending_open_thread = None;
-                            app.select_thread(pending_id, cx);
-                        }
-                    }
+                    let changes: Vec<(String, ShellChange)> = batch
+                        .into_iter()
+                        .filter_map(|event| app.apply_linked_event(event, cx))
+                        .collect();
+                    let shells_changed = !changes.is_empty();
+                    app.settle_linked_changes(changes, cx);
                     app.schedule_offline_save(cx);
                     app.schedule_linked_shell_save(cx);
                     if shows || shells_changed {
@@ -1439,8 +1562,13 @@ impl ConnApp {
         .detach();
     }
 
-    /// Applies one event of a linked environment's connection. Returns whether its shell changed.
-    fn apply_linked_event(&mut self, event: EnvironmentEvent, cx: &mut Context<'_, Self>) -> bool {
+    /// Applies one event of a linked environment's connection. Returns how its shell changed, if
+    /// it did, with the environment.
+    fn apply_linked_event(
+        &mut self,
+        event: EnvironmentEvent,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<(String, ShellChange)> {
         let EnvironmentEvent {
             environment_id,
             event,
@@ -1452,7 +1580,7 @@ impl ConnApp {
             .as_ref()
             .is_some_and(|set| set.contains(&environment_id))
         {
-            return false;
+            return None;
         }
         match event {
             ClientEvent::Status(status) => {
@@ -1471,7 +1599,7 @@ impl ConnApp {
                     }
                 }
                 self.linked.statuses.insert(environment_id, status);
-                false
+                None
             }
             ClientEvent::BearerIssued(token) => {
                 let url = self
@@ -1490,12 +1618,10 @@ impl ConnApp {
                     .sessions
                     .record_linked_bearer(environment_id, url, label, token);
                 self.orbit.persist_sessions();
-                false
+                None
             }
             ClientEvent::Shell(item) => {
-                let Some(change) = self.linked.shells.apply(&environment_id, item) else {
-                    return false;
-                };
+                let change = self.linked.shells.apply(&environment_id, item)?;
                 if change.snapshot_required
                     && let Some(connection) = self.linked_connection(&environment_id)
                 {
@@ -1505,20 +1631,21 @@ impl ConnApp {
                     self.resubscribe_ended_threads();
                 }
                 let changed = change.projects_changed || !change.threads_changed.is_empty();
-                if changed {
-                    self.linked.dirty.insert(environment_id);
+                if !changed {
+                    return None;
                 }
-                changed
+                self.linked.dirty.insert(environment_id.clone());
+                Some((environment_id, change))
             }
             // A late item of a stream dropped with its reducer finds nobody to apply to.
             ClientEvent::Thread { thread_id, .. }
                 if self.thread_item_is_orphaned(Some(&environment_id), &thread_id) =>
             {
-                false
+                None
             }
             ClientEvent::Thread { thread_id, item } => {
                 self.apply_cache_stream(&environment_id, &thread_id, item);
-                false
+                None
             }
             ClientEvent::StreamEnded { tag, key, error } => {
                 // A stream nobody wants any more (closed thread, dropped prefetch) stays down.
@@ -1532,7 +1659,7 @@ impl ConnApp {
                     self.ended_threads.insert(key);
                     self.resubscribe_ended_threads();
                 }
-                false
+                None
             }
             ClientEvent::ServerConfig(event) => {
                 if let conn_contract::ServerConfigStreamEvent::Snapshot(snapshot) = &*event {
@@ -1564,7 +1691,7 @@ impl ConnApp {
                     self.push_server_config(cx);
                 }
                 cx.notify();
-                false
+                None
             }
             ClientEvent::PanelRequest(request) => {
                 if let Some(origin) = self.linked_connection(&environment_id) {
@@ -1575,9 +1702,9 @@ impl ConnApp {
                         cx,
                     );
                 }
-                false
+                None
             }
-            ClientEvent::Annotations { .. } => false,
+            ClientEvent::Annotations { .. } => None,
         }
     }
 }

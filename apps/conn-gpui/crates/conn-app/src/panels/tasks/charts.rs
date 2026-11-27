@@ -28,6 +28,28 @@ fn vertical_fade(color: Hsla, opacity: f32) -> Background {
     )
 }
 
+/// Opacity of the line, in both the card sparkline and the expanded chart.
+const SERIES_STROKE_OPACITY: f32 = 0.70;
+/// Conn's `<Fade opacity={0.22}>`: the top of the area gradient under the line, in both charts.
+const SERIES_AREA_OPACITY: f32 = 0.22;
+
+/// The single series' colours, shared by the card sparkline and the expanded chart so the two
+/// always match: the theme's muted foreground for the line and the area fade.
+struct SeriesColors {
+    stroke: Hsla,
+    area: Background,
+}
+
+impl SeriesColors {
+    fn from_tokens(tokens: &Tokens) -> Self {
+        let base = to_hsla(tokens.muted_foreground);
+        Self {
+            stroke: base.opacity(SERIES_STROKE_OPACITY),
+            area: vertical_fade(base, SERIES_AREA_OPACITY),
+        }
+    }
+}
+
 use super::format::{TasksSurfaceColors, format_chart_date_label};
 use crate::panels::chrome::{UI_LINE_HEIGHT_PX, UI_TEXT_PX};
 use crate::panels::color::to_hsla;
@@ -93,10 +115,10 @@ pub(super) fn render_sparkline(
     height: f32,
     tokens: &Tokens,
 ) -> AnyElement {
-    let base = to_hsla(tokens.muted_foreground);
-    let stroke_color = base.opacity(0.70);
-    // Conn's `<Fade opacity={0.22}>`: a vertical 22%→0% gradient under the line.
-    let area_color = vertical_fade(base, 0.22);
+    let SeriesColors {
+        stroke: stroke_color,
+        area: area_color,
+    } = SeriesColors::from_tokens(tokens);
 
     let inner: AnyElement = if points.len() < 2 {
         div().size_full().into_any_element()
@@ -199,9 +221,11 @@ pub(super) fn render_trend_chart(
         .iter()
         .map(|&t| (t, format_insight_value(spec_id, t)))
         .collect();
-    let series_color = to_hsla(tokens.info);
-    // Conn's `<Fade opacity={0.18}>` per series.
-    let area_color = vertical_fade(series_color, 0.18);
+    // The same colours as the card sparkline, so the two charts match.
+    let SeriesColors {
+        stroke: series_color,
+        area: area_color,
+    } = SeriesColors::from_tokens(tokens);
     let grid_color = to_hsla(surface.shell_chart_grid);
     let crosshair_color = to_hsla(tokens.muted_foreground).opacity(0.50);
     let ring_color = to_hsla(tokens.shell_card);
@@ -549,6 +573,30 @@ mod tests {
             Some(0),
             "single point always maps to 0"
         );
+    }
+
+    #[test]
+    fn the_series_is_neutral_not_the_info_blue_in_every_theme() {
+        for id in ["dark-ocean", "t3-code-light"] {
+            let tokens = Tokens::derive(&conn_theme::theme_by_id(id).expect("a theme"));
+            let muted = to_hsla(tokens.muted_foreground);
+            let colors = SeriesColors::from_tokens(&tokens);
+            assert_eq!(
+                colors.stroke,
+                muted.opacity(SERIES_STROKE_OPACITY),
+                "{id}: the line is the muted foreground"
+            );
+            assert_ne!(
+                colors.stroke.opacity(1.0),
+                to_hsla(tokens.info).opacity(1.0),
+                "{id}: the line is not the info blue"
+            );
+            assert_eq!(
+                colors.area,
+                vertical_fade(muted, SERIES_AREA_OPACITY),
+                "{id}: the area fades from the muted foreground"
+            );
+        }
     }
 
     #[test]

@@ -23,13 +23,14 @@ use crate::a11y::ConnA11yExt as _;
 use crate::panels::chrome::ConnTooltipExt as _;
 
 /// Shell corner radius (`rounded-xl`).
-const SHELL_RADIUS_PX: f32 = 12.0;
+pub(super) const SHELL_RADIUS_PX: f32 = 12.0;
 /// Panel corner radius.
 const PANEL_RADIUS_PX: f32 = 9.0;
-/// Model row corner radius.
+/// Model row corner radius. A row sits 7px inside the panel's curve, so the concentric rule would
+/// square it off; it keeps the lab's 8px.
 const ROW_RADIUS_PX: f32 = 8.0;
 /// Space between the shell border and the rail or panel, and between the rail and the panel.
-const SHELL_INSET_PX: f32 = 3.0;
+pub(super) const SHELL_INSET_PX: f32 = 3.0;
 const SHELL_BORDER_PX: f32 = 1.0;
 const PANEL_BORDER_PX: f32 = 1.0;
 /// Provider rail: 40px wide, `1px 2px` padding, 4px gap, so each tile is 36px square.
@@ -38,8 +39,26 @@ const RAIL_PAD_X_PX: f32 = 2.0;
 const RAIL_PAD_Y_PX: f32 = 1.0;
 const RAIL_GAP_PX: f32 = 4.0;
 const RAIL_TILE_PX: f32 = RAIL_WIDTH_PX - 2.0 * RAIL_PAD_X_PX;
-/// Search row: 43px with its bottom border.
-pub(super) const SEARCH_ROW_HEIGHT_PX: f32 = 43.0;
+/// Rail tile radius, concentric with the shell: the shell radius minus the inset between the shell
+/// and the tile (the shell inset plus the rail padding on the tighter axis). The panel follows the
+/// same rule, so every rail item, ★ and providers alike, uses it.
+pub(super) const RAIL_TILE_RADIUS_PX: f32 =
+    SHELL_RADIUS_PX - (SHELL_INSET_PX + min_f32(RAIL_PAD_X_PX, RAIL_PAD_Y_PX));
+/// Search row, including its bottom border. The first model row sits one list padding below it, so
+/// its icon centre meets the first provider tile's centre: the favorites tile and its gap come
+/// first in the rail, the search row and the list padding come first in the panel.
+pub(super) const SEARCH_ROW_HEIGHT_PX: f32 =
+    RAIL_PAD_Y_PX + RAIL_TILE_PX + RAIL_GAP_PX + RAIL_TILE_PX / 2.0
+        - PANEL_BORDER_PX
+        - LIST_PAD_PX
+        - MODEL_ROW_HEIGHT_PX / 2.0;
+/// Model list padding and row height.
+const LIST_PAD_PX: f32 = 6.0;
+const MODEL_ROW_HEIGHT_PX: f32 = 32.0;
+
+const fn min_f32(a: f32, b: f32) -> f32 {
+    if a < b { a } else { b }
+}
 /// Provider and favorites glyphs: the rail and the model rows draw them the same size (#327).
 const PROVIDER_ICON_PX: f32 = 16.0;
 
@@ -231,7 +250,7 @@ fn rail_tile(
         .items_center()
         .justify_center()
         .size(px(RAIL_TILE_PX))
-        .rounded(px(6.0))
+        .rounded(px(RAIL_TILE_RADIUS_PX))
         .when(pressed, move |el| el.bg(selected))
         .when(!pressed, move |el| el.hover(move |s| s.bg(hover)))
 }
@@ -349,7 +368,7 @@ pub(super) fn render_model_picker(
         .w_full()
         .h(px(SEARCH_ROW_HEIGHT_PX))
         .px(px(10.0))
-        .py(px(8.0))
+        .py(px(6.0))
         .border_b_1()
         .border_color(line)
         .child(icons::icon(ICON_SEARCH, 14.0, muted))
@@ -369,7 +388,7 @@ pub(super) fn render_model_picker(
         .flex()
         .flex_col()
         .gap(px(2.0))
-        .p(px(6.0))
+        .p(px(LIST_PAD_PX))
         .flex_1()
         .min_h_0()
         .overflow_y_scroll();
@@ -474,7 +493,7 @@ pub(super) fn render_model_picker(
                 .gap(px(8.0))
                 .w_full()
                 .min_w_0()
-                .h(px(32.0))
+                .h(px(MODEL_ROW_HEIGHT_PX))
                 .px(px(8.0))
                 .rounded(px(ROW_RADIUS_PX))
                 .cursor_pointer()

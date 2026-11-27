@@ -17,6 +17,8 @@ mod drafts;
 mod footer;
 mod menus;
 mod model_picker;
+#[cfg(test)]
+mod model_picker_layout_tests;
 mod picker_settings;
 mod popovers;
 mod stash;

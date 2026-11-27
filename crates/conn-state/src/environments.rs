@@ -428,6 +428,129 @@ impl Origins {
 
 #[cfg(test)]
 mod tests {
+    /// Measures what saving a shell costs. `cargo test -p conn-state --release -- --ignored
+    /// --nocapture save_costs` prints the numbers.
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn save_costs() {
+        use std::time::Instant;
+        let build = |prefix: &str, threads: usize| {
+            let projects: Vec<crate::ProjectShell> = (0..8)
+                .map(|n| {
+                    conn_contract::from_json(serde_json::json!({
+                        "id": format!("{prefix}-p{n}"), "title": "P", "workspaceRoot": "/w",
+                        "defaultModelSelection": null, "scripts": [],
+                        "createdAt": "2026-11-20T09:00:00.000Z",
+                        "updatedAt": "2026-11-22T15:00:00.000Z"
+                    }))
+                    .expect("project")
+                })
+                .collect();
+            let threads: Vec<crate::ThreadShell> = (0..threads)
+                .map(|n| {
+                    conn_contract::from_json(crate::test_threads::thread_json(
+                        &format!("{prefix}-t{n}"),
+                        &format!("{prefix}-p{}", n % 8),
+                        |t| {
+                            t["title"] = serde_json::json!(format!(
+                                "Review the offline cache save path for thread {n}, part {}",
+                                n % 17
+                            ));
+                        },
+                    ))
+                    .expect("thread")
+                })
+                .collect();
+            ShellState::from_parts(projects, threads, Vec::new(), Some(1))
+        };
+        let primary = build("a", 3000);
+        let linked = build("b", 1750);
+        let mut merged = LinkedShells::default();
+        merged.ensure("b", "b");
+        merged.restore("b", linked.clone());
+        let merged = merged.merged("a", "a", &primary);
+        let origins = merged.origins;
+        let shell = merged.shell;
+        println!("merged shell: {} threads", shell.threads.len());
+        let time = |label: &str, mut work: Box<dyn FnMut() -> usize>| {
+            let mut samples = Vec::new();
+            let mut out = 0;
+            for _ in 0..30 {
+                let start = Instant::now();
+                out = work();
+                samples.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            samples.sort_by(f64::total_cmp);
+            println!("{label}: median {:.2} ms, {out}", samples[15]);
+        };
+        let (s, o) = (shell, origins);
+        time(
+            "primary capture on the main thread, one save (skipped when nothing changed)",
+            Box::new(move || {
+                let mut p = LinkedShellSnapshot::capture("a", "a", &s);
+                p.projects.retain(|x| !o.is_linked_project(&x.id));
+                p.threads.retain(|x| !o.is_linked_thread(&x.id));
+                p.archived_threads.retain(|x| !o.is_linked_thread(&x.id));
+                p.threads.len()
+            }),
+        );
+        let snapshot = LinkedShellSnapshot::capture("a", "a", &primary);
+        let bytes = snapshot.to_json().expect("json").len();
+        println!("primary shell file: {bytes} bytes");
+        let linked_bytes = LinkedShellSnapshot::capture("b", "b", &linked)
+            .to_json()
+            .expect("json")
+            .len();
+        // One minute: a thread of the linked environment changes the linked shell every second,
+        // and the primary shell's sequence moves every second (its threads do not change).
+        // Old: the primary writes every 30 s whatever changed; a linked shell writes 3 s after
+        // its first unsaved change. New: the primary writes only for a thread or project change,
+        // a linked shell at most every 30 s.
+        let (mut old_bytes, mut new_bytes) = (0_usize, 0_usize);
+        let (mut old_saves, mut new_saves) = (0, 0);
+        let (mut linked_old_at, mut linked_new_at) = (None::<u32>, None::<u32>);
+        for second in 0..60_u32 {
+            if second % 30 == 0 {
+                old_bytes += bytes;
+                old_saves += 1;
+            }
+            if linked_old_at.is_none_or(|at| second >= at + 3) {
+                old_bytes += linked_bytes;
+                old_saves += 1;
+                linked_old_at = Some(second);
+            }
+            if linked_new_at.is_none_or(|at| second >= at + 30) {
+                new_bytes += linked_bytes;
+                new_saves += 1;
+                linked_new_at = Some(second);
+            }
+        }
+        println!(
+            "one minute, active linked thread: old {old_saves} shell writes, {} KiB; new {new_saves} shell writes, {} KiB",
+            old_bytes / 1024,
+            new_bytes / 1024
+        );
+        let linked_snapshot = LinkedShellSnapshot::capture("b", "b", &linked);
+        println!(
+            "linked shell file: {} bytes",
+            linked_snapshot.to_json().expect("json").len()
+        );
+        let l = linked_snapshot.clone();
+        time(
+            "linked serialize, old (Vec<u8>, then write)",
+            Box::new(move || l.to_json().expect("json").len()),
+        );
+        let l = linked_snapshot;
+        time(
+            "linked serialize, new (buffered writer)",
+            Box::new(move || {
+                let mut writer = std::io::BufWriter::with_capacity(256 * 1024, std::io::sink());
+                serde_json::to_writer(&mut writer, &l).expect("json");
+                0
+            }),
+        );
+    }
+
     use conn_contract::{OrchestrationV2ShellStreamItem, from_json};
     use serde_json::{Value, json};
 

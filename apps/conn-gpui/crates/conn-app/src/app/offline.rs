@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
-use conn_cache::{Message, MessageCache, fetch_history_prefix};
+use conn_cache::{Message, MessageCache, TailChange, TailMarks, fetch_history_prefix};
 use conn_client::Connection;
 use conn_state::environments::LinkedShellSnapshot;
 use conn_state::{ShellState, ThreadShell, ThreadState, TimelineEntry};
@@ -70,6 +70,9 @@ pub(super) struct Offline {
     lifetime: Arc<()>,
     snapshot_cursors: HashMap<ThreadKey, String>,
     commits: HashMap<ThreadKey, Commit>,
+    /// The live tail each thread's cache rows were last written from, once a write is confirmed.
+    /// The next save writes only the rows that differ.
+    saved_tails: HashMap<ThreadKey, TailMarks>,
     serial: u64,
     backfilling: bool,
     shell_dirty: bool,
@@ -83,7 +86,7 @@ pub(super) struct Offline {
 /// How often the whole shell snapshot (thousands of threads, megabytes of JSON) may be written.
 /// A running thread changes the shell every few seconds; the snapshot only seeds the next launch,
 /// and quitting writes the latest one.
-const SHELL_SAVE_INTERVAL: Duration = Duration::from_secs(30);
+pub(super) const SHELL_SAVE_INTERVAL: Duration = Duration::from_secs(30);
 
 fn key(value: &str) -> String {
     format!("{:x}", Sha256::digest(value.as_bytes()))
@@ -153,6 +156,7 @@ impl Offline {
     pub(super) fn forget_environment(&mut self, env: &str) {
         self.disconnected(env);
         self.subscriptions.retain(|(owner, _), _| owner != env);
+        self.saved_tails.retain(|(owner, _), _| owner != env);
     }
 
     pub(super) fn watching(&self, env: Option<&str>, id: &str) -> bool {
@@ -211,6 +215,17 @@ impl Offline {
         self.shell_dirty = true;
     }
 
+    /// Takes what finished writes report: only a confirmed write moves a chat's baseline. A
+    /// skipped or failed one leaves the next save to write the whole tail again.
+    fn saved(&mut self, stored: Vec<(ThreadKey, Option<TailMarks>)>) {
+        for (key, tail) in stored {
+            match tail {
+                Some(tail) => self.saved_tails.insert(key, tail),
+                None => self.saved_tails.remove(&key),
+            };
+        }
+    }
+
     /// How long the dirty shell must still wait before it may be written; zero when it may now.
     fn shell_save_wait(&self, now: Instant) -> Duration {
         self.shell_saved_at.map_or(Duration::ZERO, |at| {
@@ -228,13 +243,44 @@ enum Commit {
     },
 }
 
+/// The rows of a chat's live tail that a save writes.
+enum ChatRows {
+    /// The whole tail, in order, each row written again and moved to the end.
+    Tail(Vec<Message>),
+    /// The rows of the tail that are new or changed since the last confirmed write. They keep
+    /// their places in the cache, and new ones go last.
+    Changed(Vec<Message>),
+}
+
+impl ChatRows {
+    fn len(&self) -> usize {
+        match self {
+            Self::Tail(rows) | Self::Changed(rows) => rows.len(),
+        }
+    }
+}
+
 enum Save {
     Shell(PathBuf, LinkedShellSnapshot),
     Deadlines(Vec<(ThreadKey, i64)>),
-    Chat(ThreadKey, Vec<Message>, Option<Commit>, Option<Weak<u64>>),
+    Chat {
+        key: ThreadKey,
+        rows: ChatRows,
+        commit: Option<Commit>,
+        snapshot: Option<Weak<u64>>,
+        /// The tail these rows come from. Once written, the next save compares with it.
+        tail: TailMarks,
+    },
     TaskLinks(ThreadKey, conn_state::ThreadTaskLinks, Option<Weak<u64>>),
     Remove(String, String),
     Outline(String, String, String),
+}
+
+/// What a save leaves for the next one.
+enum Stored {
+    Nothing,
+    /// A chat's cache rows now match this tail.
+    Tail(TailMarks),
 }
 
 fn write_json(path: &Path, value: &impl serde::Serialize) -> io::Result<()> {
@@ -252,7 +298,7 @@ fn write_json(path: &Path, value: &impl serde::Serialize) -> io::Result<()> {
     Ok(())
 }
 
-fn merge_chat(db: &MessageCache, env: &str, id: &str, messages: &[Message]) -> io::Result<()> {
+fn merge_chat(db: &MessageCache, env: &str, id: &str, messages: &[Message]) -> io::Result<u64> {
     let rows = messages
         .iter()
         .map(|message| (message.id(), message))
@@ -260,6 +306,54 @@ fn merge_chat(db: &MessageCache, env: &str, id: &str, messages: &[Message]) -> i
     crate::live::RT
         .block_on(db.merge(env, id, &rows))
         .map_err(io::Error::other)
+}
+
+/// Writes only these rows: the new ones, and the changed ones in the places they are stored.
+fn upsert_chat(db: &MessageCache, env: &str, id: &str, messages: &[Message]) -> io::Result<u64> {
+    let rows = messages
+        .iter()
+        .map(|message| (message.id(), message))
+        .collect::<Vec<_>>();
+    crate::live::RT
+        .block_on(db.upsert(env, id, &rows))
+        .map_err(io::Error::other)
+}
+
+/// What a save writes of a thread's live tail: only the rows that differ from the tail the cache
+/// holds (`saved`), or the whole tail when there is none, `whole` asks for it, or the rows moved.
+/// `None` when the cache is current. Copies only the rows it writes.
+fn plan_chat(
+    entries: &[TimelineEntry],
+    saved: Option<&TailMarks>,
+    whole: bool,
+) -> Option<(ChatRows, TailMarks)> {
+    let mut window: Vec<_> = entries
+        .iter()
+        .rev()
+        .filter_map(|entry| Some((entry, Message::fingerprint(entry)?)))
+        .take(conn_cache::MESSAGE_CAP)
+        .collect();
+    window.reverse();
+    let tail: Vec<(&str, u64)> = window.iter().map(|&(_, mark)| mark).collect();
+    let change = match saved {
+        Some(saved) if !whole => saved.diff(&tail),
+        _ => TailChange::Whole,
+    };
+    let rows = match change {
+        TailChange::Nothing => return None,
+        TailChange::Rows(rows) => ChatRows::Changed(
+            rows.into_iter()
+                .filter_map(|row| Message::capture(window[row].0))
+                .collect(),
+        ),
+        TailChange::Whole => ChatRows::Tail(
+            window
+                .iter()
+                .filter_map(|&(entry, _)| Message::capture(entry))
+                .collect(),
+        ),
+    };
+    Some((rows, TailMarks::new(&tail)))
 }
 
 // The previous local spike wrote one JSON array per thread. Import it before the
@@ -313,47 +407,71 @@ fn replace_messages(db: &MessageCache, env: &str, id: &str, rows: &[Message]) ->
         .map_err(io::Error::other)
 }
 
-fn save(dir: &Path, db: Option<&MessageCache>, write: Save) -> io::Result<()> {
+fn save(dir: &Path, db: Option<&MessageCache>, write: Save) -> io::Result<Stored> {
     match write {
-        Save::Shell(path, snapshot) => write_json(&path, &snapshot),
-        Save::Deadlines(records) => write_json(&dir.join("settlement-deadlines"), &records),
-        Save::Chat((env, id), messages, commit, snapshot) => {
+        Save::Shell(path, snapshot) => write_json(&path, &snapshot).map(|()| Stored::Nothing),
+        Save::Deadlines(records) => {
+            write_json(&dir.join("settlement-deadlines"), &records).map(|()| Stored::Nothing)
+        }
+        Save::Chat {
+            key: (env, id),
+            rows: messages,
+            commit,
+            snapshot,
+            tail,
+        } => {
             if snapshot.is_some_and(|snapshot| snapshot.strong_count() == 0) {
-                return Ok(());
+                return Ok(Stored::Nothing);
             }
-            if let Some(db) = db {
-                import_legacy(db, &env, &id, &dir.join(key(&env)).join(key(&id)))?;
-                let receipt = dir.join(key(&env)).join(key(&id)).with_extension("prefix");
-                match commit {
-                    Some(Commit::Replace) => {
-                        remove_legacy(&receipt)?;
-                        replace_messages(db, &env, &id, &messages)?;
-                    }
-                    Some(Commit::Prefix {
-                        anchor,
-                        mut rows,
-                        stamp,
-                    }) => {
-                        if let Some(anchor) = anchor {
-                            if !crate::live::RT
-                                .block_on(db.merge_prefix(&env, &id, &anchor, &rows, &messages))
-                                .map_err(io::Error::other)?
-                            {
-                                return Ok(());
-                            }
-                        } else {
-                            rows.extend(messages);
-                            replace_messages(db, &env, &id, &rows)?;
+            let Some(db) = db else {
+                return Ok(Stored::Nothing);
+            };
+            import_legacy(db, &env, &id, &dir.join(key(&env)).join(key(&id)))?;
+            let receipt = dir.join(key(&env)).join(key(&id)).with_extension("prefix");
+            let written = messages.len();
+            let messages = match messages {
+                ChatRows::Changed(messages) => {
+                    debug_assert!(commit.is_none(), "a commit rewrites the whole tail");
+                    upsert_chat(db, &env, &id, &messages)?;
+                    conn_client::perf_log!(
+                        "offline.chat-save thread={id} rows={written} whole=false"
+                    );
+                    return Ok(Stored::Tail(tail));
+                }
+                ChatRows::Tail(messages) => messages,
+            };
+            match commit {
+                Some(Commit::Replace) => {
+                    remove_legacy(&receipt)?;
+                    replace_messages(db, &env, &id, &messages)?;
+                }
+                Some(Commit::Prefix {
+                    anchor,
+                    mut rows,
+                    stamp,
+                }) => {
+                    if let Some(anchor) = anchor {
+                        if !crate::live::RT
+                            .block_on(db.merge_prefix(&env, &id, &anchor, &rows, &messages))
+                            .map_err(io::Error::other)?
+                        {
+                            return Ok(Stored::Nothing);
                         }
-                        if let Some(parent) = receipt.parent() {
-                            std::fs::create_dir_all(parent)?;
-                        }
-                        std::fs::write(receipt, stamp)?;
+                    } else {
+                        rows.extend(messages);
+                        replace_messages(db, &env, &id, &rows)?;
                     }
-                    None => merge_chat(db, &env, &id, &messages)?,
+                    if let Some(parent) = receipt.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    std::fs::write(receipt, stamp)?;
+                }
+                None => {
+                    merge_chat(db, &env, &id, &messages)?;
                 }
             }
-            Ok(())
+            conn_client::perf_log!("offline.chat-save thread={id} rows={written} whole=true");
+            Ok(Stored::Tail(tail))
         }
         Save::TaskLinks((env, id), links, snapshot) => {
             if let Some(db) = db
@@ -363,7 +481,7 @@ fn save(dir: &Path, db: Option<&MessageCache>, write: Save) -> io::Result<()> {
                     .block_on(db.save_task_links(&env, &id, &links))
                     .map_err(io::Error::other)?;
             }
-            Ok(())
+            Ok(Stored::Nothing)
         }
         Save::Outline(env, id, markers) => {
             if let Some(db) = db {
@@ -371,7 +489,7 @@ fn save(dir: &Path, db: Option<&MessageCache>, write: Save) -> io::Result<()> {
                     .block_on(db.save_outline(&env, &id, &markers))
                     .map_err(io::Error::other)?;
             }
-            Ok(())
+            Ok(Stored::Nothing)
         }
         Save::Remove(env, id) => {
             if let Some(db) = db {
@@ -382,9 +500,39 @@ fn save(dir: &Path, db: Option<&MessageCache>, write: Save) -> io::Result<()> {
                     .block_on(db.remove(&env, &id))
                     .map_err(io::Error::other)?;
             }
-            Ok(())
+            Ok(Stored::Nothing)
         }
     }
+}
+
+/// Runs the writes in order, reporting each chat's outcome: the tail its rows now match, or
+/// `None` when its write failed or was skipped as stale.
+fn run_saves(
+    dir: &Path,
+    db: Option<&MessageCache>,
+    writes: Vec<Save>,
+) -> Vec<(ThreadKey, Option<TailMarks>)> {
+    let mut stored = Vec::new();
+    for value in writes {
+        let chat = match &value {
+            Save::Chat { key, .. } => Some(key.clone()),
+            _ => None,
+        };
+        let outcome = save(dir, db, value);
+        if let Err(e) = &outcome {
+            eprintln!("offline thread cache: {e}");
+        }
+        if let Some(chat) = chat {
+            stored.push((
+                chat,
+                match outcome {
+                    Ok(Stored::Tail(tail)) => Some(tail),
+                    _ => None,
+                },
+            ));
+        }
+    }
+    stored
 }
 
 fn capture_chat(entries: &[TimelineEntry]) -> Vec<Message> {
@@ -446,6 +594,7 @@ impl ConnApp {
         if rollback {
             let key = (env.to_owned(), id.to_owned());
             if self.offline.snapshots.remove(&key).is_some() {
+                self.offline.saved_tails.remove(&key);
                 self.offline.commits.remove(&key);
                 self.offline.backfills.retain(|job| job.key != key);
                 if let Some(connection) = self.offline.subscriptions.get(&key) {
@@ -601,6 +750,8 @@ impl ConnApp {
         self.offline.serial = self.offline.serial.wrapping_add(1);
         let serial = self.offline.serial;
         self.offline.snapshots.insert(key.clone(), Arc::new(serial));
+        // The snapshot is the server's thread now: its next write starts from the whole tail.
+        self.offline.saved_tails.remove(&key);
         self.offline.commits.remove(&key);
         self.offline.backfills.retain(|job| job.key != key);
         let Some(state) = self.cache_state(&key) else {
@@ -1121,7 +1272,8 @@ impl ConnApp {
         let now = Instant::now();
         let shell_due =
             self.offline.shell_dirty && (flush || self.offline.shell_save_wait(now).is_zero());
-        if shell_due {
+        // A shell that has not synced yet is not saved. The change waits for it.
+        if shell_due && self.shell.synchronized {
             self.offline.shell_dirty = false;
         }
         if shell_due
@@ -1149,6 +1301,7 @@ impl ConnApp {
             if self.offline.expired.contains(&key)
                 || self.cache_shell(&env, &id).is_some_and(expired)
             {
+                self.offline.saved_tails.remove(&key);
                 writes.push(Save::Remove(env, id));
             } else if let Some(state) = self.cache_state(&key)
                 && state.sequence.is_some()
@@ -1162,12 +1315,23 @@ impl ConnApp {
                 ));
                 if chats.contains(&key) {
                     let start = state.history_prefix_len();
-                    writes.push(Save::Chat(
-                        key.clone(),
-                        capture_chat(&state.entries[start..]),
-                        self.offline.commits.remove(&key),
-                        snapshot,
-                    ));
+                    // A snapshot or backfill replaces what is stored: write the whole tail.
+                    let whole = self.offline.commits.contains_key(&key);
+                    let plan = plan_chat(
+                        &state.entries[start..],
+                        self.offline.saved_tails.get(&key),
+                        whole,
+                    );
+                    let commit = self.offline.commits.remove(&key);
+                    if let Some((rows, tail)) = plan {
+                        writes.push(Save::Chat {
+                            key,
+                            rows,
+                            commit,
+                            snapshot,
+                            tail,
+                        });
+                    }
                 }
             }
         }
@@ -1219,9 +1383,10 @@ impl ConnApp {
         cx: &mut Context<'_, Self>,
     ) -> impl std::future::Future<Output = ()> + use<> {
         let offline = self.offline_on_quit();
+        let linked = self.linked_on_quit();
         let panels = self.thread_panels_on_quit(cx);
         async move {
-            futures::future::join(offline, panels).await;
+            futures::future::join3(offline, linked, panels).await;
         }
     }
 
@@ -1297,29 +1462,34 @@ impl ConnApp {
                 let refresh = writes
                     .iter()
                     .filter_map(|value| match value {
-                        Save::Chat(key, _, Some(Commit::Prefix { .. }), _) => Some(key.clone()),
+                        Save::Chat {
+                            key,
+                            commit: Some(Commit::Prefix { .. }),
+                            ..
+                        } => Some(key.clone()),
                         _ => None,
                     })
                     .collect::<Vec<_>>();
                 let lifetime = lifetime.clone();
-                cx.background_executor()
+                // Which tail each chat's rows now match, or none when its write did not land.
+                let stored = cx
+                    .background_executor()
                     .spawn(async move {
                         // A previous connection generation may still be draining its last write.
                         let _guard = CACHE_WRITER
                             .lock()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
                         if lifetime.strong_count() == 0 {
-                            return;
+                            return Vec::new();
                         }
-                        for value in writes {
-                            if let Err(e) = save(&dir, db.as_ref(), value) {
-                                eprintln!("offline thread cache: {e}");
-                            }
-                        }
+                        run_saves(&dir, db.as_ref(), writes)
                     })
                     .await;
                 let _ = this.update(cx, |app, cx| {
                     if app.connection_gen == generation {
+                        // Only a confirmed write moves the baseline: a skipped or failed one
+                        // leaves the next save to write the whole tail again.
+                        app.offline.saved(stored);
                         for (env, id) in refresh {
                             if app.cache_env(&id) == Some(&env)
                                 && app.layout.selected_thread_id.as_ref() == Some(&id)
@@ -1396,6 +1566,217 @@ mod tests {
             snapshot.threads.len(),
             kitchen_sink_shell().threads.len(),
             "the buffered write holds the whole shell"
+        );
+    }
+
+    /// An item that only moves the sequence leaves the saved shell as it is, and a shell that
+    /// has not synced waits for it instead of losing the change.
+    #[gpui_kit::test]
+    fn the_shell_is_saved_again_only_when_a_thread_or_project_changed(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use crate::ui_tests::{kitchen_sink_shell, mount_app};
+
+        let dir = tempfile::tempdir().expect("cache directory");
+        let (_, app) = mount_app(cx);
+        cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                app.offline.dir = Some(dir.path().to_owned());
+                app.server_url = Some("http://test.local".into());
+                let mut shell = kitchen_sink_shell();
+                shell.synchronized = true;
+                let thread = shell.threads[0].clone();
+                app.set_shell(shell, cx);
+                app.offline.shell_dirty = false;
+
+                let item = |value: serde_json::Value| {
+                    conn_client::ClientEvent::Shell(
+                        conn_contract::from_json(value).expect("shell item"),
+                    )
+                };
+                app.apply_event_for_test(
+                    item(serde_json::json!({
+                        "kind": "project.removed", "sequence": 90_001, "projectId": "nobody-has-it"
+                    })),
+                    cx,
+                );
+                app.apply_event_for_test(
+                    item(serde_json::json!({ "kind": "synchronized", "sequence": 90_002 })),
+                    cx,
+                );
+                assert!(
+                    !app.offline.shell_dirty,
+                    "only the sequence moved: nothing to write"
+                );
+                app.apply_event_for_test(
+                    item(serde_json::json!({
+                        "kind": "thread.updated", "sequence": 90_003, "location": "active",
+                        "thread": serde_json::to_value(&thread).expect("thread JSON")
+                    })),
+                    cx,
+                );
+                assert!(app.offline.shell_dirty, "a thread changed");
+
+                app.shell.synchronized = false;
+                assert_eq!(shell_writes(&app.pending_saves(false)), 0, "not synced yet");
+                assert!(app.offline.shell_dirty, "the change waits for the sync");
+                app.shell.synchronized = true;
+                assert_eq!(shell_writes(&app.pending_saves(false)), 1);
+                assert!(!app.offline.shell_dirty);
+            });
+        });
+    }
+
+    fn messages(range: std::ops::Range<usize>) -> Vec<TimelineEntry> {
+        range
+            .flat_map(|n| {
+                [
+                    TimelineEntry::User {
+                        id: format!("u{n}"),
+                        text: format!("question {n}"),
+                        created_by_agent: false,
+                        sender: None,
+                        created_at: None,
+                        attachments: Vec::new(),
+                        is_steer: false,
+                        review_comments: Vec::new(),
+                        run_id: None,
+                    },
+                    TimelineEntry::Assistant {
+                        id: format!("a{n}"),
+                        markdown: format!("answer {n}"),
+                        streaming: false,
+                        created_at: None,
+                        run_id: None,
+                        status: conn_state::ItemStatus::Completed,
+                    },
+                ]
+            })
+            .collect()
+    }
+
+    fn chat_rows(writes: &[Save]) -> Vec<(bool, usize)> {
+        writes
+            .iter()
+            .filter_map(|write| match write {
+                Save::Chat { rows, .. } => Some((matches!(rows, ChatRows::Tail(_)), rows.len())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A thread that streams writes the rows that changed, and the cache reopens as it would
+    /// had every flush written the whole tail.
+    #[gpui_kit::test]
+    fn a_streaming_thread_writes_only_its_changed_rows_and_reopens_the_same(
+        cx: &mut gpui_kit::TestAppContext,
+    ) {
+        use crate::ui_tests::mount_app;
+
+        let dir = tempfile::tempdir().expect("cache directory");
+        let db = crate::live::RT
+            .block_on(MessageCache::open(&dir.path().join("messages.sqlite3")))
+            .expect("cache");
+        let whole = crate::live::RT
+            .block_on(MessageCache::open(&dir.path().join("whole.sqlite3")))
+            .expect("a cache that is written whole");
+        let env = "http://test.local";
+        let (_, app) = mount_app(cx);
+        cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                app.offline.dir = Some(dir.path().to_owned());
+                app.offline.db = Some(db.clone());
+                app.server_url = Some(env.into());
+                app.offline.owners.insert("t".into(), env.into());
+                let mut state = ThreadState::new("t");
+                state.sequence = Some(1);
+                state.entries = messages(0..150);
+                app.threads.insert("t".into(), state);
+                let flush = |app: &mut ConnApp, expect: &[(bool, usize)]| {
+                    app.offline.changed(env, "t");
+                    let writes = app.pending_saves(false);
+                    assert_eq!(chat_rows(&writes), expect);
+                    let stored = run_saves(dir.path(), Some(&db), writes);
+                    app.offline.saved(stored);
+                    let tail = capture_chat(&app.threads["t"].entries);
+                    merge_chat(&whole, env, "t", &tail).expect("the whole tail");
+                    let one = crate::live::RT.block_on(db.recent(env, "t")).expect("rows");
+                    let all = crate::live::RT
+                        .block_on(whole.recent(env, "t"))
+                        .expect("rows");
+                    assert_eq!(
+                        one, all,
+                        "the cache reopens as a whole-tail write leaves it"
+                    );
+                };
+                // The first write has nothing to compare with.
+                flush(app, &[(true, 300)]);
+                // A flush with nothing changed writes no row.
+                flush(app, &[]);
+                // Tokens arrive: one row changes.
+                let entries = &mut app.threads.get_mut("t").expect("thread").entries;
+                if let Some(TimelineEntry::Assistant { markdown, .. }) = entries.last_mut() {
+                    markdown.push_str(" and more");
+                }
+                flush(app, &[(false, 1)]);
+                // A new prompt and the start of its answer: two rows are new.
+                app.threads
+                    .get_mut("t")
+                    .expect("thread")
+                    .entries
+                    .extend(messages(150..151));
+                flush(app, &[(false, 2)]);
+                // A row goes back to an older state: the rows moved, so the tail is written whole.
+                app.threads.get_mut("t").expect("thread").entries.remove(10);
+                flush(app, &[(true, 301)]);
+                // A snapshot starts over from the whole tail.
+                app.offline_snapshot(env.to_owned(), "t");
+                flush(app, &[(true, 301)]);
+                cx.notify();
+            });
+        });
+    }
+
+    /// A write that did not land leaves the baseline alone, so the next save writes the whole
+    /// tail again instead of trusting rows that are not stored.
+    #[test]
+    fn a_failed_or_stale_chat_write_moves_no_baseline() {
+        let dir = tempfile::tempdir().expect("cache directory");
+        let db = crate::live::RT
+            .block_on(MessageCache::open(&dir.path().join("messages.sqlite3")))
+            .expect("cache");
+        let entries = messages(0..3);
+        let (rows, tail) = plan_chat(&entries, None, false).expect("a first write");
+        let key = ("env".to_owned(), "t".to_owned());
+        let current = Arc::new(1);
+        let write = |snapshot: Weak<u64>, rows, tail| Save::Chat {
+            key: key.clone(),
+            rows,
+            commit: None,
+            snapshot: Some(snapshot),
+            tail,
+        };
+        let stale = Arc::new(2);
+        let weak = Arc::downgrade(&stale);
+        drop(stale);
+        let outcome = run_saves(dir.path(), Some(&db), vec![write(weak, rows, tail)]);
+        assert!(
+            matches!(outcome.as_slice(), [(_, None)]),
+            "skipped as stale"
+        );
+        let (rows, tail) = plan_chat(&entries, None, false).expect("a first write");
+        let outcome = run_saves(
+            dir.path(),
+            Some(&db),
+            vec![write(Arc::downgrade(&current), rows, tail)],
+        );
+        assert!(matches!(outcome.as_slice(), [(_, Some(_))]), "written");
+        let Some((_, Some(marks))) = outcome.into_iter().next() else {
+            unreachable!("matched above")
+        };
+        assert!(
+            plan_chat(&entries, Some(&marks), false).is_none(),
+            "stored rows are current"
         );
     }
 
@@ -1573,12 +1954,13 @@ mod tests {
         assert_eq!(reopened.entries[99].id(), "1049");
         assert_eq!(reopened.sequence, None);
         let generation = Arc::new(1);
-        let stale = Save::Chat(
-            ("env".to_owned(), "t".to_owned()),
-            Vec::new(),
-            Some(Commit::Replace),
-            Some(Arc::downgrade(&generation)),
-        );
+        let stale = Save::Chat {
+            key: ("env".to_owned(), "t".to_owned()),
+            rows: ChatRows::Tail(Vec::new()),
+            commit: Some(Commit::Replace),
+            snapshot: Some(Arc::downgrade(&generation)),
+            tail: TailMarks::default(),
+        };
         drop(generation);
         save(dir.path(), Some(&db), stale).expect("discard stale write");
         assert_eq!(

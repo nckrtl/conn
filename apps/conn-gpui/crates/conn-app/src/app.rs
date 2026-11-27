@@ -1728,7 +1728,11 @@ impl ConnApp {
             ClientEvent::Shell(item) => {
                 let change = self.shell.apply(item);
                 self.remerge_linked_shells();
-                self.offline.shell_changed();
+                // The saved shell holds threads and projects. An item that only moves the
+                // sequence is not worth rewriting megabytes for.
+                if change.projects_changed || !change.threads_changed.is_empty() {
+                    self.offline.shell_changed();
+                }
                 if self.shell.synchronized
                     && self
                         .layout

@@ -24,6 +24,10 @@ const MAX_REPLAY_EVENTS: usize = 128;
 /// replay larger than this, as stored payloads or as sent items, gets a snapshot too.
 const MAX_REPLAY_BYTES: u64 = 1_048_576;
 const LIVE_READ_BATCH: usize = 256;
+/// A `changesAfterSequence` opening sends changes up to this many rows and events, or this
+/// many bytes of stored events; past either, the bounded snapshot replaces the client's rows.
+const CHANGES_MAX_ITEMS: usize = 256;
+const CHANGES_MAX_BYTES: u64 = 512 * 1024;
 
 fn shell_error(message: impl Into<String>) -> Result<GetShellSnapshotError, String> {
     contract_error(
@@ -185,9 +189,18 @@ pub(crate) async fn subscribe_thread(
             let imported = store.imported_through();
             // Rows a client holds are patched by changed rows unless the server now hides some
             // (a rollback) or the thread was created again; then the snapshot below replaces them.
+            // A long gap gets the newest window instead: changes grow with time away, a window
+            // does not. A deleted thread keeps the changes, which end in `thread.deleted`.
             if let Some(after) = changes_after.filter(|after| can_replay(*after, high, imported))
                 && store.thread_known(&id)?
                 && !store.thread_changes_need_reset(&id, after)?
+                && (!store.thread_exists(&id)?
+                    || store.thread_changes_fit(
+                        &id,
+                        after,
+                        CHANGES_MAX_ITEMS,
+                        CHANGES_MAX_BYTES,
+                    )?)
             {
                 return Ok(Some((vec![], after, Some(after))));
             }

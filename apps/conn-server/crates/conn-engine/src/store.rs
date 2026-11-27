@@ -195,6 +195,17 @@ const ROW_EVENT_TYPES: &str =
   'checkpoint.captured','context-handoff.updated','context-transfer.created',
   'context-transfer.updated'";
 
+/// The sequences of a thread's rows changed after `?2` and of its rowless events after it,
+/// each input bounded to its first `?3` by sequence.
+fn changed_seqs() -> String {
+    format!(
+        "SELECT seq FROM (SELECT seq FROM entities INDEXED BY entities_by_seq
+           WHERE thread_id = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3)
+         UNION SELECT seq FROM (SELECT seq FROM events WHERE thread_id = ?1 AND seq > ?2
+           AND type NOT IN ({ROW_EVENT_TYPES}) ORDER BY seq LIMIT ?3)"
+    )
+}
+
 /// The projection collection an event type replaces an entity in. One line per event kind.
 fn collection_of(event_type: &str) -> Option<&'static str> {
     Some(match event_type {
@@ -1912,10 +1923,8 @@ impl Store {
         limit: usize,
     ) -> StoreResult<Vec<(u64, Value)>> {
         let sql = format!(
-            "SELECT seq, event FROM events WHERE seq IN (
-               SELECT seq FROM entities INDEXED BY entities_by_seq WHERE thread_id = ?1 AND seq > ?2
-               UNION SELECT seq FROM events WHERE thread_id = ?1 AND seq > ?2 AND type NOT IN ({ROW_EVENT_TYPES}))
-             ORDER BY seq LIMIT ?3"
+            "SELECT seq, event FROM events WHERE seq IN ({}) ORDER BY seq LIMIT ?3",
+            changed_seqs()
         );
         let mut stmt = self.conn.prepare(&sql).map_err(err)?;
         let rows = stmt
@@ -1929,6 +1938,32 @@ impl Store {
             })
             .collect::<StoreResult<Vec<_>>>()?;
         Ok(rows)
+    }
+
+    /// Whether the changes after `after` fit a catch-up: at most `max_items` changed rows and
+    /// rowless events, and at most `max_bytes` of their stored events. Reads at most
+    /// `max_items + 1` events, so a long gap costs no more than a short one to judge.
+    pub(crate) fn thread_changes_fit(
+        &self,
+        thread_id: &str,
+        after: u64,
+        max_items: usize,
+        max_bytes: u64,
+    ) -> StoreResult<bool> {
+        let sql = format!(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(event AS BLOB))), 0) FROM (
+               SELECT event FROM events WHERE seq IN ({}) ORDER BY seq LIMIT ?3)",
+            changed_seqs()
+        );
+        let (items, bytes): (i64, i64) = self
+            .conn
+            .query_row(
+                &sql,
+                params![thread_id, after as i64, (max_items + 1) as i64],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(err)?;
+        Ok(items as usize <= max_items && bytes as u64 <= max_bytes)
     }
 
     /// Whether rows a client holds as of `after` can no longer be patched by changed rows: a
@@ -3970,11 +4005,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let store = Store::open(&dir.join("engine.sqlite")).unwrap();
-        let sql = format!(
-            "SELECT seq FROM entities INDEXED BY entities_by_seq WHERE thread_id = ?1 AND seq > ?2
-             UNION SELECT seq FROM events WHERE thread_id = ?1 AND seq > ?2 AND type NOT IN ({ROW_EVENT_TYPES})"
-        );
-        let plan = store.query_plan(&sql, rusqlite::params!["t", 0]).join("\n");
+        let sql = changed_seqs();
+        let plan = store
+            .query_plan(&sql, rusqlite::params!["t", 0, 10])
+            .join("\n");
         assert!(plan.contains("rowless_events_by_thread"), "{plan}");
         assert!(plan.contains("entities_by_seq"), "{plan}");
     }

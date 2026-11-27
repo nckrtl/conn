@@ -1633,9 +1633,9 @@ async fn a_resume_bounds_stored_payloads_and_coalesced_items_as_t3() {
     assert_eq!(resume(after).await[0]["kind"], "snapshot");
 }
 
-/// `changesAfterSequence` (`wire.md`): a gap past T3's replay limit gets each changed row's
-/// last event once, in order, then `synchronized` and live events; a rollback after the
-/// cursor gets the bounded snapshot instead.
+/// `changesAfterSequence` (`wire.md`): a gap past T3's replay limit but within the changes
+/// budget gets each changed row's last event once, in order, then `synchronized` and live
+/// events; a longer gap, a rollback or a foreign cursor gets the bounded snapshot instead.
 #[tokio::test(flavor = "current_thread")]
 async fn a_changes_resume_sends_each_changed_row_once_and_resets_on_a_rollback() {
     let db = TempDb::new("changes");
@@ -1649,7 +1649,7 @@ async fn a_changes_resume_sends_each_changed_row_once_and_resets_on_a_rollback()
     dispatch(&engine, message("t1", "m0", "first")).await;
     until_run_ends(&mut live).await;
     let after = engine.inner().db(|s| s.high_water()).await;
-    for turn in 1..=20 {
+    for turn in 1..=9 {
         dispatch(&engine, message("t1", &format!("m{turn}"), "again")).await;
         until_run_ends(&mut live).await;
     }
@@ -1722,7 +1722,7 @@ async fn a_changes_resume_sends_each_changed_row_once_and_resets_on_a_rollback()
         })
         .await
         .unwrap();
-    assert!(stored.len() >= 40, "two items a turn: {}", stored.len());
+    assert!(stored.len() >= 16, "two items a turn: {}", stored.len());
     for row in &stored {
         let sent = items
             .iter()
@@ -1745,6 +1745,24 @@ async fn a_changes_resume_sends_each_changed_row_once_and_resets_on_a_rollback()
         .unwrap();
     assert_eq!(next(&mut plain).await["kind"], "snapshot");
     drop(plain);
+
+    // A long gap (past 256 changed rows) gets the newest window: changes grow with time away.
+    let short = engine.inner().db(|s| s.high_water()).await;
+    for turn in 22..=60 {
+        dispatch(&engine, message("t1", &format!("m{turn}"), "long")).await;
+        until_run_ends(&mut live).await;
+    }
+    let mut long = subscribe(json!({"threadId": "t1", "changesAfterSequence": short,
+        "acceptBoundedSnapshot": true, "requestCompletionMarker": true}))
+    .await
+    .unwrap();
+    assert_eq!(
+        next(&mut long).await["kind"],
+        "snapshot",
+        "a long gap gets the window"
+    );
+    assert_eq!(next(&mut long).await["kind"], "synchronized");
+    drop(long);
 
     // A run rolled back after the cursor: the rows cannot be patched, so a fresh window.
     let latest = engine.inner().db(|s| s.high_water()).await;

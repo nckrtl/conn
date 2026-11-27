@@ -19,7 +19,6 @@ use conn_desktop::orbit::linked::{
     LinkedPlanInput, confirm_gone_environments, plan_linked_environments,
 };
 use conn_desktop::orbit::{LinkedEnvironmentSettings, LinkedStore};
-use conn_state::ThreadState;
 use conn_state::environments::{LinkedShellSnapshot, LinkedShells, Origins};
 use gpui_kit::Context;
 
@@ -50,8 +49,6 @@ pub(super) struct LinkedEnvironments {
     pair_attempted_at_ms: HashMap<String, i64>,
     /// Where each linked environment answers, for the chat's per-environment draft key.
     urls: HashMap<String, String>,
-    /// The environment the open thread's subscription lives on; `None` is the primary one.
-    subscribed_env: Option<String>,
     /// A child opened from its parent before the linked shell lists it.
     opened_child: Option<(String, String)>,
     /// The General scratch project a linked environment made before its shell lists it.
@@ -134,26 +131,6 @@ impl LinkedEnvironments {
 
     pub(super) fn shell_for_cache(&self, env: &str) -> Option<&conn_state::ShellState> {
         self.shells.shell(env)
-    }
-
-    pub(super) fn cache_threads(
-        &self,
-        predicate: impl Fn(&conn_state::ThreadShell) -> bool,
-    ) -> Vec<(String, String)> {
-        let mut keys = Vec::new();
-        for env in self.shells.environments() {
-            if let Some(shell) = self.shells.shell(&env.id) {
-                keys.extend(
-                    shell
-                        .threads
-                        .iter()
-                        .chain(&shell.archived_threads)
-                        .filter(|t| predicate(t))
-                        .map(|t| (env.id.clone(), t.id.clone())),
-                );
-            }
-        }
-        keys
     }
 
     /// Lists `environment_id` again from its saved snapshot (it was switched back on).
@@ -353,15 +330,6 @@ impl ConnApp {
         matches!(status, Some(ConnectionStatus::Connected))
     }
 
-    pub(super) fn cache_environment_connected(&self, env: &str) -> bool {
-        let status = if self.server_url.as_deref() == Some(env) {
-            self.status.as_ref()
-        } else {
-            self.linked.statuses.get(env)
-        };
-        matches!(status, Some(ConnectionStatus::Connected))
-    }
-
     /// The connection of the environment `thread_id` lives on.
     pub(crate) fn connection_for_thread(&self, thread_id: &str) -> Option<Connection> {
         match self.linked_environment_of_thread(thread_id) {
@@ -543,43 +511,6 @@ impl ConnApp {
         });
         self.right_panel
             .update(cx, |panel, cx| panel.set_connection(Some(connection), cx));
-    }
-
-    /// Subscribes the open thread's timeline on its environment's connection, after ending the
-    /// previous subscription on the connection it lives on.
-    pub(super) fn subscribe_open_thread(&mut self, thread_id: &str) {
-        self.unsubscribe_open_thread();
-        let environment = self
-            .linked_environment_of_thread(thread_id)
-            .map(str::to_owned);
-        let Some(connection) = self.connection_for_thread(thread_id) else {
-            return;
-        };
-        self.threads
-            .entry(thread_id.to_owned())
-            .or_insert_with(|| ThreadState::new(thread_id.to_owned()));
-        connection.subscribe_thread(thread_id);
-        self.subscribed_thread_id = Some(thread_id.to_owned());
-        self.linked.subscribed_env = environment;
-    }
-
-    /// Ends the open thread's subscription on the connection it was made on.
-    pub(super) fn unsubscribe_open_thread(&mut self) {
-        let Some(previous) = self.subscribed_thread_id.take() else {
-            return;
-        };
-        let owner = self.linked.subscribed_env.take();
-        let connection = match &owner {
-            Some(environment) => self.linked_connection(environment),
-            None => self.connection.clone(),
-        };
-        if let Some(connection) = connection
-            && !self
-                .offline
-                .watching(owner.as_deref().or(self.server_url.as_deref()), &previous)
-        {
-            connection.unsubscribe_thread(&previous);
-        }
     }
 
     /// Merges the linked environments' shells into `self.shell` again. Call after the primary
@@ -816,8 +747,8 @@ impl ConnApp {
             self.linked.restore_cached(environment_id);
         } else {
             if let Some(set) = self.linked.set.as_mut() {
-                self.offline.disconnected(environment_id);
                 set.disconnect(environment_id);
+                self.stop_engine(environment_id);
             }
             self.linked.statuses.remove(environment_id);
             self.linked.shells.remove(environment_id);
@@ -1075,7 +1006,6 @@ impl ConnApp {
         self.linked.machines.clear();
         self.linked.configs.clear();
         self.linked.scratch_roots.clear();
-        self.linked.subscribed_env = None;
         self.linked.chat_env = None;
     }
 
@@ -1125,8 +1055,8 @@ impl ConnApp {
                 continue;
             }
             if let Some(set) = self.linked.set.as_mut() {
-                self.offline.disconnected(environment_id);
                 set.disconnect(environment_id);
+                self.stop_engine(environment_id);
             }
             self.linked.statuses.remove(environment_id);
             // An asleep or unreachable environment keeps listing its saved threads; one the user
@@ -1152,8 +1082,8 @@ impl ConnApp {
         self.linked.missing_since_ms = verdict.missing_since_ms;
         for environment_id in &verdict.gone {
             if let Some(set) = self.linked.set.as_mut() {
-                self.offline.disconnected(environment_id);
                 set.disconnect(environment_id);
+                self.stop_engine(environment_id);
             }
             changed |= self.linked.shells.remove(environment_id);
             self.linked.statuses.remove(environment_id);
@@ -1309,16 +1239,18 @@ impl ConnApp {
             .insert(environment_id.clone(), config.http_base_url.to_string());
         self.linked.shells.ensure(&environment_id, &label);
         let device_name = self.device_name();
-        if let Some(set) = self.linked.set.as_mut() {
-            // Its threads' agents drive their panels here too (`startAgentPanelRequests`
-            // follows every connected environment).
-            set.connect(EnvironmentTarget {
-                environment_id,
-                label,
-                config,
-            })
-            .subscribe_panel_requests(Some(device_name));
-        }
+        let Some(set) = self.linked.set.as_mut() else {
+            return;
+        };
+        // Its threads' agents drive their panels here too (`startAgentPanelRequests`
+        // follows every connected environment).
+        let connection = set.connect(EnvironmentTarget {
+            environment_id: environment_id.clone(),
+            label,
+            config,
+        });
+        connection.subscribe_panel_requests(Some(device_name));
+        self.start_engine(&environment_id, connection, cx);
     }
 
     fn pump_linked_events(
@@ -1339,8 +1271,7 @@ impl ConnApp {
                     }
                     if shells_changed {
                         app.remerge_linked_shells();
-                        app.expire_offline(cx);
-                        app.reconcile_offline(cx);
+                        app.schedule_kept(cx);
                         app.drive_older_pages(cx);
                         // A thread started on a linked environment opens once it is listed.
                         if let Some(pending_id) = app.pending_open_thread.clone()
@@ -1350,7 +1281,6 @@ impl ConnApp {
                             app.select_thread(pending_id, cx);
                         }
                     }
-                    app.schedule_offline_save(cx);
                     app.schedule_linked_shell_save(cx);
                     app.sync_chat(cx);
                     cx.notify();
@@ -1381,7 +1311,7 @@ impl ConnApp {
         match event {
             ClientEvent::Status(status) => {
                 if !matches!(status, ConnectionStatus::Connected) {
-                    self.offline.disconnected(&environment_id);
+                    self.linked_shell_synced(&environment_id, false);
                 }
                 if let ConnectionStatus::Failed(message) = &status
                     && is_auth_failure(message)
@@ -1390,8 +1320,8 @@ impl ConnApp {
                     self.orbit.sessions.remove_bearer(&environment_id);
                     self.orbit.persist_sessions();
                     if let Some(set) = self.linked.set.as_mut() {
-                        self.offline.disconnected(&environment_id);
                         set.disconnect(&environment_id);
+                        self.stop_engine(&environment_id);
                     }
                 }
                 self.linked.statuses.insert(environment_id, status);
@@ -1417,9 +1347,17 @@ impl ConnApp {
                 false
             }
             ClientEvent::Shell(item) => {
+                let synchronized = matches!(
+                    item,
+                    conn_contract::OrchestrationV2ShellStreamItem::Synchronized(_)
+                );
                 let Some(change) = self.linked.shells.apply(&environment_id, item) else {
                     return false;
                 };
+                if synchronized {
+                    self.linked_shell_synced(&environment_id, true);
+                    self.schedule_kept(cx);
+                }
                 if change.snapshot_required
                     && let Some(connection) = self.linked_connection(&environment_id)
                 {
@@ -1435,11 +1373,15 @@ impl ConnApp {
                 changed
             }
             ClientEvent::Thread { thread_id, item } => {
-                self.apply_cache_stream(&environment_id, &thread_id, item);
+                self.apply_thread_item(Some(&environment_id), &thread_id, item);
+                false
+            }
+            ClientEvent::ThreadStale { thread_id } => {
+                self.thread_stale(Some(&environment_id), &thread_id);
                 false
             }
             ClientEvent::StreamEnded { tag, key, error } => {
-                if tag == "orchestration.subscribeThread" && self.threads.contains_key(&key) {
+                if tag == "orchestration.subscribeThread" && self.keeps_stream(&key) {
                     if let Some(error) = error {
                         eprintln!("thread stream {key} ended: {error}");
                     }

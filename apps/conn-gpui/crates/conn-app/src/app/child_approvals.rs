@@ -3,12 +3,12 @@
 //! The shell stream only says that a child waits on an approval (`pendingRuntimeRequest`); the
 //! command it asks about lives in the child's own thread stream. As Conn does
 //! (`childThreadApprovalsAtom`: "only children asking for approval need a detail subscription"),
-//! the app subscribes to a child's thread stream while it asks, reads the approval from that
-//! thread's state, and answers on the child thread.
+//! the app opens a child in its environment's thread engine while it asks (a child that asks is
+//! unsettled, so the engine keeps its stream already), reads the approval from that thread's
+//! state, and answers on the child thread.
 
 use std::collections::{HashMap, HashSet};
 
-use conn_client::Connection;
 use gpui_kit::Context;
 
 use super::ConnApp;
@@ -17,17 +17,10 @@ use crate::chat::ChildApprovalCard;
 /// What the app keeps between syncs.
 #[derive(Default)]
 pub(super) struct ChildApprovals {
-    /// Child threads subscribed for their approvals, with the connection each runs on.
-    subscribed: HashMap<String, ChildSubscription>,
-    /// The open thread's subscription at the last sync. Opening another thread ends it.
-    last_open: Option<String>,
+    /// Children open for their approvals, and whether each one's detail has caught up.
+    open: HashMap<String, bool>,
     /// Why the last answer to a request failed, by request id, until its card goes.
     errors: HashMap<String, String>,
-}
-
-struct ChildSubscription {
-    connection: Connection,
-    ready: bool,
 }
 
 /// On a new subscription, the cached detail can still describe a previous approval.
@@ -61,16 +54,13 @@ fn plan_subscriptions(wanted: &[&str], subscribed: &[&str]) -> (Vec<String>, Vec
 }
 
 impl ConnApp {
-    /// Keeps the child subscriptions in step with the shell and returns the cards of the open
-    /// thread's pending child approvals. Runs on every event batch.
-    pub(super) fn sync_child_approvals(&mut self) -> Vec<ChildApprovalCard> {
-        // Opening another thread ended the previous one's stream, a child's included.
-        if self.child_approvals.last_open != self.subscribed_thread_id {
-            if let Some(previous) = self.child_approvals.last_open.take() {
-                self.child_approvals.subscribed.remove(&previous);
-            }
-            self.child_approvals.last_open = self.subscribed_thread_id.clone();
-        }
+    /// Opens the children of the open thread that ask for approval (and closes the ones that
+    /// stopped asking), opens the selected thread, and returns the cards of the pending child
+    /// approvals. Runs on every chat sync.
+    pub(super) fn sync_child_approvals(
+        &mut self,
+        cx: &mut Context<'_, Self>,
+    ) -> Vec<ChildApprovalCard> {
         let mut children = match self.layout.selected_thread_id.as_deref() {
             Some(thread_id) if self.draft.is_none() => self.shell.child_approval_threads(thread_id),
             _ => Vec::new(),
@@ -78,49 +68,38 @@ impl ConnApp {
         let wanted: Vec<&str> = children.iter().map(|child| child.id.as_str()).collect();
         let current: Vec<&str> = self
             .child_approvals
-            .subscribed
+            .open
             .keys()
             .map(String::as_str)
             .collect();
         let (add, stale) = plan_subscriptions(&wanted, &current);
         for id in stale {
-            let subscription = self.child_approvals.subscribed.remove(&id);
-            // The open thread keeps its own stream.
-            if let Some(subscription) = subscription
-                && self.subscribed_thread_id.as_deref() != Some(id.as_str())
-                && !self.offline.watching(self.cache_env(&id), &id)
-            {
-                subscription.connection.unsubscribe_thread(&id);
-            }
+            self.child_approvals.open.remove(&id);
         }
         for id in add {
-            let Some(connection) = self.connection_for_thread(&id) else {
-                continue;
-            };
-            self.threads
-                .entry(id.clone())
-                .or_insert_with(|| conn_state::ThreadState::new(id.clone()));
-            connection.subscribe_thread(&id);
-            self.child_approvals.subscribed.insert(
-                id,
-                ChildSubscription {
-                    connection,
-                    ready: false,
-                },
-            );
+            self.child_approvals.open.insert(id, false);
         }
+        let open: Vec<String> = self.child_approvals.open.keys().cloned().collect();
+        self.sync_open_threads(&open, cx);
 
-        children.retain(|child| {
-            let Some(subscription) = self.child_approvals.subscribed.get_mut(&child.id) else {
-                return false;
-            };
-            detail_ready(
-                &mut subscription.ready,
-                &child.request_id,
-                self.threads.get(&child.id),
-            )
-        });
-        let approvals = conn_state::child_approvals(&children, &self.threads);
+        let shown: HashSet<String> = children
+            .iter()
+            .filter(|child| {
+                let mut ready = self
+                    .child_approvals
+                    .open
+                    .get(&child.id)
+                    .copied()
+                    .unwrap_or(false);
+                detail_ready(&mut ready, &child.request_id, self.thread(&child.id))
+            })
+            .map(|child| child.id.clone())
+            .collect();
+        for id in &shown {
+            self.child_approvals.open.insert(id.clone(), true);
+        }
+        children.retain(|child| shown.contains(&child.id));
+        let approvals = conn_state::child_approvals_with(&children, |id| self.thread(id));
         self.child_approvals
             .errors
             .retain(|request_id, _| approvals.iter().any(|a| &a.request_id == request_id));

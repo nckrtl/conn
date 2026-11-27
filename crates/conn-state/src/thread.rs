@@ -453,9 +453,18 @@ pub fn child_approvals(
     children: &[crate::shell::ChildApprovalThread],
     threads: &HashMap<String, ThreadState>,
 ) -> Vec<ChildApproval> {
+    child_approvals_with(children, |id| threads.get(id))
+}
+
+/// [`child_approvals`] for a client that keeps thread states elsewhere than one map.
+#[must_use]
+pub fn child_approvals_with<'a>(
+    children: &[crate::shell::ChildApprovalThread],
+    thread: impl Fn(&str) -> Option<&'a ThreadState>,
+) -> Vec<ChildApproval> {
     let mut approvals = Vec::new();
     for child in children {
-        let Some(thread) = threads.get(&child.id) else {
+        let Some(thread) = thread(&child.id) else {
             continue;
         };
         for approval in thread.pending_approvals() {

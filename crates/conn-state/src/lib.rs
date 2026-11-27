@@ -134,8 +134,8 @@ pub use crate::thread::{
     AgentMessageSender, ApprovalDetails, ChildApproval, EntryTiming, ItemStatus, NoticeLevel,
     PendingApproval, PendingRequest, RunStatus, RunTiming, SecretRequestStatus, SubagentModel,
     SubagentRecord, ThreadContextWindowSnapshot, ThreadState, TimelineEntry, TurnAgents,
-    TurnCheckpointSummary, TurnItemStatus, child_approvals, parse_iso8601_epoch_ms,
-    request_kind_label, turn_item_detail,
+    TurnCheckpointSummary, TurnItemStatus, child_approvals, child_approvals_with,
+    parse_iso8601_epoch_ms, request_kind_label, turn_item_detail,
 };
 pub use crate::timeline::{
     LocalDateTime, PLAN_PREVIEW_MAX_LINES, SubagentTone, TurnCheckpointFile, TurnDiffRow,

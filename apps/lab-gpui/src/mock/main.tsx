@@ -24,6 +24,13 @@ import { Icon, Tool } from "./Icon";
 import { SidePanel } from "./Panel";
 import { LabProjectContext } from "./LabProjectContext";
 import { ThreadDetails } from "./ThreadDetails";
+import {
+  QUEUED_FIXTURE,
+  QueueTray,
+  type ForcedHover,
+  type PendingSend,
+  type QueuedMessage,
+} from "./QueueTray";
 import { walkthroughReveal, type FileLocation, type FileSelection } from "./FilesPanel";
 import {
   comparisonThreads,
@@ -32,9 +39,12 @@ import {
   filesThread,
   imageGallery,
   panels,
+  queueThread,
+  backgroundThread,
   tasks,
   type Panel,
 } from "./fixtures";
+import { BackgroundWorkFeed } from "./BackgroundWork";
 import "./desktop.css";
 
 const ThreadCardFeed = lazy(() => import("./ThreadCardFeed"));
@@ -82,6 +92,40 @@ function panelUrl(id: string, panel: Panel | null, location: PanelLocation = {})
   }
   return url;
 }
+/** `?queue=N` queued rows (the queue thread defaults to 2), `?pending=sending|offline`. */
+function readQueue(threadId: string): { rows: QueuedMessage[]; pending: PendingSend[] } {
+  const params = new URLSearchParams(location.search);
+  const count = Number.parseInt(params.get("queue") ?? "", 10);
+  const rows = Array.from(
+    { length: Number.isNaN(count) ? (threadId === queueThread.id ? 2 : 0) : Math.max(0, count) },
+    (_, i) => ({ id: "queued-" + (i + 1), text: QUEUED_FIXTURE[i % QUEUED_FIXTURE.length]! }),
+  );
+  const state = params.get("pending");
+  const pending: PendingSend[] =
+    state === "sending" || state === "offline"
+      ? [
+          {
+            id: "pending-1",
+            text: "Also check the Database panel in light mode.",
+            status: state === "offline" ? "Waiting for connection" : "Sending…",
+          },
+        ]
+      : [];
+  return { rows, pending };
+}
+/** `?queue-hover=2` hovers the second row; `2:steer|remove|more` hovers its button, `2:menu`
+ * opens its ⋯ menu. */
+function readForcedHover(): ForcedHover | undefined {
+  const [row, part] = (new URLSearchParams(location.search).get("queue-hover") ?? "").split(":");
+  const index = Number.parseInt(row ?? "", 10);
+  if (!index) return undefined;
+  return part === "menu"
+    ? { row: index, button: "more", menu: true }
+    : {
+        row: index,
+        button: part === "steer" || part === "remove" || part === "more" ? part : undefined,
+      };
+}
 const locationLabel = (range: FileLocation) =>
   range.path + "#L" + range.start + (range.end !== range.start ? "–L" + range.end : "");
 
@@ -119,7 +163,10 @@ function DesktopLab() {
   const [opaque, setOpaque] = useState(false);
   const [context, setContext] = useState(false);
   const nextMessage = useRef(0);
-  const draftExample = new URLSearchParams(location.search).get("stage") === "composer";
+  const stage = new URLSearchParams(location.search).get("stage");
+  const draftExample = stage === "composer";
+  // `?stage=general`: a new General thread's draft (GPUI `render_draft_hero`).
+  const generalDraft = stage === "general";
   const [draftImages, setDraftImages] = useState<SampleImage[]>(() =>
     draftExample ? sampleImages : [],
   );
@@ -130,6 +177,32 @@ function DesktopLab() {
       { id: string; text: string; images: SampleImage[]; selections: FileSelection[] }[]
     >
   >({});
+  const [queues, setQueues] = useState<Record<string, QueuedMessage[]>>({});
+  const [editingQueued, setEditingQueued] = useState<{ id: string; text: string }>();
+  const fixtureQueue = readQueue(thread.id);
+  const queue = queues[thread.id] ?? fixtureQueue.rows;
+  const running = queue.length > 0 || fixtureQueue.pending.length > 0;
+  function setQueue(next: QueuedMessage[]) {
+    setQueues((all) => ({ ...all, [thread.id]: next }));
+  }
+  function moveQueued(id: string, step: -1 | 1) {
+    const from = queue.findIndex((row) => row.id === id);
+    const to = from + step;
+    if (from < 0 || to < 0 || to >= queue.length) return;
+    const next = [...queue];
+    next.splice(to, 0, next.splice(from, 1)[0]!);
+    setQueue(next);
+  }
+  function send(text: string, images: SampleImage[], sentSelections: FileSelection[]) {
+    const id = String(++nextMessage.current);
+    setSent((current) => ({
+      ...current,
+      [thread.id]: [
+        ...(current[thread.id] ?? []),
+        { id, text, images, selections: sentSelections },
+      ],
+    }));
+  }
   const end = useRef<HTMLDivElement>(null);
   const timeline = useRef<HTMLDivElement>(null);
   const chatDock = useRef<HTMLDivElement>(null);
@@ -431,9 +504,10 @@ function DesktopLab() {
           />
         )}
         <article className="chat-card">
-          <div className="chat-thread">
+          <div className="chat-thread" data-hero={generalDraft || undefined}>
             <div className="timeline" ref={timeline}>
-              <div className="messages">
+              {generalDraft && <h1 className="draft-heading">What should we work on?</h1>}
+              <div className="messages" hidden={generalDraft}>
                 {thread.id === "delegation-smoke" ? (
                   <>
                     <button
@@ -455,6 +529,13 @@ function DesktopLab() {
                   <Suspense fallback={null}>
                     <ThreadCardFeed theme={theme} onOpenTask={selectTask} />
                   </Suspense>
+                ) : thread.id === queueThread.id ? (
+                  <>
+                    <p className="bubble">{thread.prompt}</p>
+                    <div className="worked">
+                      Working for 12s <Icon name="chevron-right" />
+                    </div>
+                  </>
                 ) : thread.id === "image-layouts" ? (
                   <ImageLayoutExamples />
                 ) : gallery ? (
@@ -463,6 +544,7 @@ function DesktopLab() {
                   <p className="bubble">{thread.prompt}</p>
                 )}
                 {thread.reply && <p className="assistant-reply">{thread.reply}</p>}
+                {thread.id === backgroundThread.id && <BackgroundWorkFeed />}
                 {thread.id === filesThread.id && sourceLink(walkthroughReveal)}
                 {thread.id === "image-attachments" && (
                   <p>
@@ -512,13 +594,33 @@ function DesktopLab() {
             </div>
             <div className="chat-dock" ref={chatDock}>
               <Composer
-                key={thread.id}
+                key={thread.id + ":" + (editingQueued?.id ?? "")}
                 agentSmoke={thread.id === "delegation-smoke"}
+                running={running}
+                editing={editingQueued}
                 abovePrompt={
-                  thread.id === "stalled-threads" && (
+                  thread.id === "stalled-threads" ? (
                     <Suspense fallback={null}>
                       <DesktopRequestDock theme={theme} />
                     </Suspense>
+                  ) : (
+                    <QueueTray
+                      rows={queue}
+                      pending={fixtureQueue.pending}
+                      forced={readForcedHover()}
+                      editing={editingQueued?.id}
+                      onSteer={(id) => {
+                        const row = queue.find((r) => r.id === id);
+                        setQueue(queue.filter((r) => r.id !== id));
+                        if (row) send(row.text, [], []);
+                      }}
+                      onRemove={(id) => setQueue(queue.filter((r) => r.id !== id))}
+                      onMove={moveQueued}
+                      onEdit={(id) => {
+                        const row = queue.find((r) => r.id === id);
+                        setEditingQueued(row ? { id: row.id, text: row.text } : undefined);
+                      }}
+                    />
                   )
                 }
                 attachments={
@@ -555,18 +657,25 @@ function DesktopLab() {
                     </>
                   ) : null
                 }
-                onSend={(message) => {
+                onSend={(message, followUp) => {
+                  if (editingQueued) {
+                    setQueue(
+                      queue.map((row) =>
+                        row.id === editingQueued.id ? { ...row, text: message } : row,
+                      ),
+                    );
+                    setEditingQueued(undefined);
+                    return;
+                  }
+                  // While a turn runs, a follow-up waits in the tray unless Steer is chosen.
+                  if (running && followUp === "Queue") {
+                    setQueue([...queue, { id: "queued-" + ++nextMessage.current, text: message }]);
+                    return;
+                  }
                   const images = gallery ? draftImages : [];
                   if (images.length) setDraftImages([]);
                   if (selections.length) setDraftSelections((all) => ({ ...all, [thread.id]: [] }));
-                  const id = String(++nextMessage.current);
-                  setSent((current) => ({
-                    ...current,
-                    [thread.id]: [
-                      ...(current[thread.id] ?? []),
-                      { id, text: message, images, selections },
-                    ],
-                  }));
+                  send(message, images, selections);
                 }}
               />
               {context && (

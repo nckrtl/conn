@@ -1707,9 +1707,7 @@ impl McpPanel {
         let decoded = decode_base64(base64_data).and_then(|bytes| {
             let mut rgba = fit_result_image(image::load_from_memory(&bytes).ok()?.to_rgba8());
             // GPUI `RenderImage` expects premultiplied BGRA pixel order inside `RgbaImage`.
-            for pixel in rgba.as_chunks_mut::<4>().0 {
-                pixel.swap(0, 2);
-            }
+            conn_image_cache::pixels::swap_red_blue(&mut rgba);
             Some(Arc::new(RenderImage::new(vec![image::Frame::new(rgba)])))
         });
         if self.image_cache.len() >= RESULT_IMAGE_CACHE {
@@ -1763,11 +1761,11 @@ pub(super) fn fit_result_image(picture: image::RgbaImage) -> image::RgbaImage {
         return picture;
     }
     let fit = |side: u32| ((f64::from(side) * scale).round() as u32).max(1);
-    image::imageops::resize(
+    // Optimized even in a dev build: this runs on the UI thread.
+    conn_image_cache::pixels::crop_resize(
         &picture,
-        fit(width),
-        fit(height),
-        image::imageops::FilterType::Triangle,
+        (0, 0, width, height),
+        (fit(width), fit(height)),
     )
 }
 

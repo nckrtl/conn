@@ -35,6 +35,7 @@ mod draft_hero;
 mod embedded_document;
 mod embedded_mount;
 mod icons;
+pub(crate) mod image_store;
 pub(crate) mod image_viewer;
 #[cfg(test)]
 mod image_viewer_shots;
@@ -65,7 +66,9 @@ pub(crate) mod thread_links;
 mod thumb_cache;
 
 /// A sent image thumbnail: attachment id and decode size.
-type ThumbKey = (String, thumb_cache::TargetPx);
+/// A decoded thumbnail: the environment (server URL) the attachment lives on, its id, and the
+/// size it decoded at.
+type ThumbKey = (Option<String>, String, thumb_cache::TargetPx);
 mod timeline_cards;
 mod timeline_spacing;
 #[cfg(test)]
@@ -385,6 +388,13 @@ pub(crate) struct ChatView {
     /// rendering, bounded by [`thumb_cache::THUMB_BUDGET_BYTES`]).
     attachment_thumbs:
         std::cell::RefCell<thumb_cache::ByteLru<ThumbKey, attachment_thumb::SentImage>>,
+    /// Where attachment bytes are kept on disk, so a picture downloads once.
+    image_store: image_store::ImageStore,
+    /// Attachments a hover is downloading to disk now, by environment and id.
+    warming: HashSet<(String, String)>,
+    /// Gallery tiles that painted a picture in the last render (tests read it).
+    #[cfg(test)]
+    ready_tiles: std::cell::Cell<usize>,
     /// Thumbnail loads waiting or running, at most [`thumb_cache::LOAD_CONCURRENCY`] at once.
     thumb_loads: std::cell::RefCell<thumb_cache::LoadQueue<ThumbKey, attachment_thumb::ThumbJob>>,
     /// The cancel flags of started thumbnail loads, by request.
@@ -638,6 +648,10 @@ impl ChatView {
             attachment_thumbs: std::cell::RefCell::new(thumb_cache::ByteLru::new(
                 thumb_cache::THUMB_BUDGET_BYTES,
             )),
+            image_store: image_store::ImageStore::shared(),
+            warming: HashSet::new(),
+            #[cfg(test)]
+            ready_tiles: std::cell::Cell::new(0),
             thumb_loads: std::cell::RefCell::new(thumb_cache::LoadQueue::new(
                 thumb_cache::LOAD_CONCURRENCY,
             )),
@@ -675,6 +689,32 @@ impl ChatView {
         }
     }
 
+    /// Test helper: keeps attachment bytes in `store` from now on.
+    #[cfg(test)]
+    pub(crate) fn set_image_store_for_test(&mut self, store: image_store::ImageStore) {
+        self.image_store = store;
+    }
+
+    /// Test helper: drops every decoded thumbnail, as a restart does.
+    #[cfg(test)]
+    pub(crate) fn drop_thumbs_for_test(&mut self, cx: &mut Context<'_, Self>) {
+        self.cancel_thumb_loads(cx);
+        for image in self.attachment_thumbs.get_mut().clear() {
+            image.release(cx);
+        }
+    }
+
+    /// Test helper: gallery tiles that painted a picture in the last render.
+    #[cfg(test)]
+    pub(crate) fn ready_tiles_for_test(&self) -> usize {
+        self.ready_tiles.get()
+    }
+
+    /// Where this chat keeps attachment bytes on disk.
+    pub(crate) fn image_store(&self) -> image_store::ImageStore {
+        self.image_store.clone()
+    }
+
     /// Replaces the active theme tokens and triggers a repaint.
     /// Updates the live `conn-server` connection inside the composer (for Orbit Node/Instance switching).
     pub(crate) fn set_connection(
@@ -693,7 +733,7 @@ impl ChatView {
         }
         self.connected = connection.is_some();
         self.connection = connection.clone();
-        self.clear_thumbs(cx);
+        self.cancel_thumb_loads(cx);
         // The environment key names the server, so each draft's files upload to its own one.
         let server = self.environment_key.clone();
         self.composer

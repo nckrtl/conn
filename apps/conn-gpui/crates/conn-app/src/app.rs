@@ -541,8 +541,14 @@ impl ConnApp {
             }
         };
 
-        let chat =
-            cx.new(|cx| crate::chat::ChatView::new(tokens.clone(), connection.clone(), window, cx));
+        let chat = cx.new(|cx| {
+            let mut chat =
+                crate::chat::ChatView::new(tokens.clone(), connection.clone(), window, cx);
+            // The startup server is the primary environment: its key scopes banner dismissals,
+            // drafts' uploads and kept attachment bytes, as a later connect sets it.
+            chat.set_environment_key(server_url.clone());
+            chat
+        });
         cx.subscribe_in(
             &chat,
             window,
@@ -1318,11 +1324,17 @@ impl ConnApp {
         // The thread's own connection: a linked environment's attachments live on that
         // environment, not on the primary connection. Stepping through the gallery reuses it.
         let connection = self.context_connection();
+        let environment = self
+            .context_server_url(self.context_environment().as_deref())
+            .map(str::to_owned);
+        let store = self.chat.read(cx).image_store();
         let tokens = self.tokens.clone();
         let open = ViewerOpen {
             items,
             index,
             connection,
+            environment,
+            store,
             thread_id,
             return_focus,
         };

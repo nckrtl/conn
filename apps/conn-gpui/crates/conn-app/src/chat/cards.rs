@@ -55,6 +55,15 @@ pub(super) fn subagent_summary_key(entry_id: &str) -> String {
 const AUTO_ADVANCE_DELAY: Duration = Duration::from_millis(200);
 /// Conn's `ANCHORED_COPY_TOAST_TIMEOUT_MS`: how long a Copy button shows its check.
 const COPY_CONFIRM_DURATION: Duration = Duration::from_millis(1_000);
+
+/// Images a hover warms at most: the newest of the thread.
+const WARM_MAX_IMAGES: usize = 12;
+
+/// How long saving an attachment waits for the server: a whole file may be large.
+const SAVE_DEADLINES: conn_client::FetchDeadlines = conn_client::FetchDeadlines {
+    rpc: Duration::from_secs(30),
+    download: Duration::from_secs(600),
+};
 /// Conn's `SECRET_REQUEST_DEFAULT_PLACEHOLDER`.
 const SECRET_DEFAULT_PLACEHOLDER: &str = "Paste the secret";
 /// Indentation per directory level in the lab's changed-files tree.
@@ -236,16 +245,23 @@ impl ChatView {
         image: &conn_contract::ChatImageAttachment,
         target: super::thumb_cache::TargetPx,
         cx: &mut Context<'_, Self>,
-    ) -> Option<gpui_kit::ImageSource> {
-        use super::attachment_thumb::{SentImage, ThumbJob};
-        self.connection.as_ref()?;
-        let key = (image.id.clone(), target);
+    ) -> super::attachment_thumb::TileImage {
+        use super::attachment_thumb::{SentImage, ThumbJob, TileImage};
+        if self.connection.is_none() {
+            return TileImage::Missing;
+        }
+        let key = (self.environment_key.clone(), image.id.clone(), target);
         let mut thumbs = self.attachment_thumbs.borrow_mut();
         if let Some(entry) = thumbs.get(&key) {
             if matches!(entry, SentImage::Loading(_)) {
                 self.thumb_loads.borrow_mut().touch(&key);
             }
-            return entry.source();
+            let tile = entry.tile();
+            #[cfg(test)]
+            if matches!(tile, TileImage::Ready(_)) {
+                self.ready_tiles.set(self.ready_tiles.get() + 1);
+            }
+            return tile;
         }
         let request = self.next_thumb_request.get();
         self.next_thumb_request.set(request + 1);
@@ -261,7 +277,7 @@ impl ChatView {
         if let Some(start) = start {
             self.start_thumb(start, cx);
         }
-        None
+        TileImage::Loading
     }
 
     /// Downloads and decodes one thumbnail; its permit in [`Self::thumb_loads`] is taken. The
@@ -278,14 +294,20 @@ impl ChatView {
             .borrow_mut()
             .insert(request, cancel.clone());
         let connection = self.connection.clone();
+        let store = self.image_store.clone();
         let svg_renderer = cx.svg_renderer();
-        let target = key.1;
+        let environment = key.0.clone();
+        let target = key.2;
         cx.spawn(async move |this, cx| {
             let bytes = match connection {
-                Some(connection) if !cancel.load(Ordering::Relaxed) => connection
-                    .fetch_attachment_bytes_within(
+                Some(connection) if !cancel.load(Ordering::Relaxed) => store
+                    .attachment_bytes(
+                        cx.background_executor(),
+                        &connection,
+                        environment.as_deref(),
                         &job.attachment_id,
                         super::thumb_cache::LOAD_DEADLINES,
+                        None,
                     )
                     .await
                     .ok(),
@@ -338,6 +360,8 @@ impl ChatView {
     /// tiles not drawn since the last call. Runs once per chat render, before the timeline
     /// lays out its rows.
     pub(super) fn sweep_thumb_loads(&mut self, cx: &mut Context<'_, Self>) {
+        #[cfg(test)]
+        self.ready_tiles.set(0);
         for old in self.attachment_thumbs.get_mut().begin_frame() {
             old.release(cx);
         }
@@ -355,14 +379,71 @@ impl ChatView {
         }
     }
 
-    /// Cancels every thumbnail load and drops every thumbnail (reconnect). Running work keeps
-    /// its permit until it returns.
-    pub(super) fn clear_thumbs(&mut self, cx: &mut Context<'_, Self>) {
+    /// Downloads to disk the newest [`WARM_MAX_IMAGES`] of `ids` that are not there yet, one at
+    /// a time, so the thread they belong to opens without waiting on the network. Nothing is
+    /// decoded: the pixels decode when the thread shows them. A sidebar hover calls it.
+    pub(crate) fn warm_attachments(
+        &mut self,
+        environment: String,
+        connection: conn_client::Connection,
+        ids: Vec<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if !self.image_store.enabled() {
+            return;
+        }
+        let ids: Vec<String> = ids
+            .into_iter()
+            .rev()
+            .filter(|id| self.warming.insert((environment.clone(), id.clone())))
+            .take(WARM_MAX_IMAGES)
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        let store = self.image_store.clone();
+        cx.spawn(async move |this, cx| {
+            for id in &ids {
+                let (check, env, key) = (store.clone(), environment.clone(), id.clone());
+                let cached = cx
+                    .background_executor()
+                    .spawn(async move { check.contains(&env, &key) })
+                    .await;
+                if !cached {
+                    let _ = store
+                        .attachment_bytes(
+                            cx.background_executor(),
+                            &connection,
+                            Some(&environment),
+                            id,
+                            super::thumb_cache::LOAD_DEADLINES,
+                            None,
+                        )
+                        .await;
+                }
+            }
+            let _ = this.update(cx, |view, _| {
+                for id in ids {
+                    view.warming.remove(&(environment.clone(), id));
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Cancels every thumbnail load (reconnect or another environment). Decoded thumbnails stay:
+    /// their keys name their environment, so they never show for another server, and a thread
+    /// opened again shows them at once. Running work keeps its permit until it returns.
+    pub(super) fn cancel_thumb_loads(&mut self, cx: &mut Context<'_, Self>) {
         let _running = self.thumb_loads.get_mut().clear();
         for (_, cancel) in self.thumb_cancels.get_mut().drain() {
             cancel.store(true, Ordering::Relaxed);
         }
-        for image in self.attachment_thumbs.get_mut().clear() {
+        // A thumbnail with no environment cannot tell servers apart, so it goes too.
+        let thumbs = self.attachment_thumbs.get_mut();
+        for image in thumbs.retain(|(environment, ..), entry| {
+            environment.is_some() && matches!(entry, super::attachment_thumb::SentImage::Ready(_))
+        }) {
             image.release(cx);
         }
     }
@@ -703,6 +784,8 @@ impl ChatView {
             .unwrap_or_else(std::env::temp_dir);
         let prompt = cx.prompt_for_new_path(&directory, Some(&file_name));
         let id = id.to_owned();
+        let store = self.image_store.clone();
+        let environment = self.environment_key.clone();
         cx.spawn(async move |this, cx| {
             let outcome: Result<(), String> = async {
                 let chosen = match prompt.await {
@@ -711,8 +794,15 @@ impl ChatView {
                     Ok(Ok(None)) | Err(_) => return Ok(()),
                     Ok(Err(err)) => return Err(err.to_string()),
                 };
-                let bytes = connection
-                    .fetch_attachment_bytes(&id)
+                let bytes = store
+                    .attachment_bytes(
+                        cx.background_executor(),
+                        &connection,
+                        environment.as_deref(),
+                        &id,
+                        SAVE_DEADLINES,
+                        None,
+                    )
                     .await
                     .map_err(|err| err.to_string())?;
                 cx.background_executor()

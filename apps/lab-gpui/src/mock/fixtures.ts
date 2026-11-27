@@ -243,12 +243,37 @@ export const filesThread: Thread = {
   reply:
     "The controller passes the order to the Blade view. Here is where the template displays its total.",
 };
+/** A running turn with follow-ups in the queue tray (`?queue=`, `?pending=`). */
+export const queueThread: Thread = {
+  id: "queued-follow-ups",
+  title: "Queued follow-ups",
+  project: "conn",
+  branch: "main",
+  age: "now",
+  waiting: true,
+  provider: "claude",
+  prompt: "Run the whole test suite and fix what breaks.",
+  reply: "",
+};
+/** Finished background commands, notices and warnings (`?work=`, `?expanded=1`). */
+export const backgroundThread: Thread = {
+  id: "background-commands",
+  title: "Background commands",
+  project: "conn",
+  branch: "main",
+  age: "now",
+  provider: "claude",
+  prompt: "Rebuild the dev app and tell me when it is up.",
+  reply: "The rebuild runs in the background. I will report when it ends.",
+};
 export const comparisonThreads = [
   ...capturedThreads.slice(0, 4),
   delegationThread,
   ...capturedThreads.slice(4),
   ...threads.filter((t) => t !== delegationThread),
   filesThread,
+  queueThread,
+  backgroundThread,
   imageGallery,
   {
     ...imageGallery,

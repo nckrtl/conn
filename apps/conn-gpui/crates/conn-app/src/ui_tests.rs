@@ -44,6 +44,8 @@ mod image_viewer;
 mod preview_host;
 mod queue_tray;
 #[cfg(target_os = "macos")]
+mod render_redraws;
+#[cfg(target_os = "macos")]
 mod selection_perf;
 mod terminal_environment;
 

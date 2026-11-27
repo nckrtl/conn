@@ -45,6 +45,7 @@ mod preview;
 mod rail_workspaces;
 #[cfg(test)]
 mod reconnect_tests;
+mod regions;
 mod send_pending;
 #[cfg(test)]
 mod send_pending_tests;
@@ -408,6 +409,10 @@ pub(crate) struct ConnApp {
     pub(crate) thread_hover: ThreadHoverState,
     /// Ticks relative times and live elapsed labels (`useNowSecond` / `useNowMinute`).
     _sidebar_clock: Option<gpui_kit::Task<()>>,
+    /// The sidebar and the header as cached views (`app/regions.rs`).
+    regions: regions::ShellRegions,
+    /// Whether the jump numbers showed when the sidebar last drew.
+    sidebar_jump_hints_shown: bool,
     /// Whether the sidebar project-scope filter popover is open.
     sidebar_filter_menu_open: bool,
     /// When true, replaces translucent shell fills with opaque `sidebar`/`shell_card`.
@@ -772,6 +777,7 @@ impl ConnApp {
             offline::Offline::default()
         };
         let (preview_ui_tx, preview_ui_rx) = tokio::sync::mpsc::unbounded_channel();
+        let regions = regions::ShellRegions::new(cx);
         let mut app = Self {
             tokens,
             geometry: ShellGeometry::default(),
@@ -854,6 +860,8 @@ impl ConnApp {
             header_menu_generation: 0,
             thread_details: ThreadDetailsState::default(),
             _sidebar_clock: None,
+            regions,
+            sidebar_jump_hints_shown: false,
             sidebar_filter_menu_open: false,
             reduce_transparency: false,
             persist_composer_context_strip: false,
@@ -5714,12 +5722,17 @@ impl ConnApp {
                         app.settle_drafts(cx);
                     }
                     let minute = now / 60;
-                    if minute != last_minute {
+                    let new_minute = minute != last_minute;
+                    if new_minute {
                         app.expire_offline(cx);
                     }
-                    if live || app.thread_details.open || minute != last_minute {
+                    if app.thread_details.open || new_minute {
                         last_minute = minute;
                         cx.notify();
+                    } else if live {
+                        // Only the sidebar's elapsed labels moved: the header, the chat and the
+                        // panels keep their frame.
+                        app.regions.sidebar.update(cx, |_, cx| cx.notify());
                     }
                 });
                 if alive.is_err() {
@@ -6150,8 +6163,9 @@ impl ConnApp {
         &self.tokens
     }
 
-    fn render_chat_column(&self, viewport_h: f32, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let header = render_chat_header(
+    /// The thread header: the [`regions::ShellRegion`] that draws it renders through here.
+    pub(crate) fn render_header_region(&self, cx: &mut Context<'_, Self>) -> gpui_kit::AnyElement {
+        render_chat_header(
             &ChatHeaderProps {
                 shell: &self.shell,
                 layout: &self.layout,
@@ -6164,7 +6178,12 @@ impl ConnApp {
                 geometry: &self.geometry,
             },
             cx,
-        );
+        )
+        .into_any_element()
+    }
+
+    fn render_chat_column(&self, viewport_h: f32, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let header = regions::header_region(&self.regions.header, self.geometry.header_height_px);
 
         let join = CardJoin {
             left: self.layout.sidebar_open,
@@ -7978,12 +7997,170 @@ fn agent_panel_tab(panel: conn_contract::AgentPanelKind) -> RightPanelTab {
     }
 }
 
+impl ConnApp {
+    /// The workspace rail and the thread sidebar: the [`regions::ShellRegion`] that draws them
+    /// renders through here. What the sidebar shows that changes the app (a held drop the server
+    /// has shown through, the ranked message matches) is settled here, as it is drawn.
+    pub(crate) fn render_sidebar_region(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> gpui_kit::AnyElement {
+        if !self.layout.sidebar_open {
+            return div().into_any_element();
+        }
+        // What the sidebar draws that changes the app: a drop the server has shown through ends,
+        // the search ranks what it found, and the shelf starts its scope.
+        self.release_settled_drop();
+        let search_text = self.sidebar_search_query(cx);
+        if !search_text.trim().is_empty() {
+            self.refresh_message_matches(&search_text);
+        }
+        let shelf_scope = self.settled_scope_key();
+        let shelf_visible = self.sidebar.visible_count(&shelf_scope);
+        let shelf_more = self.older_more_state();
+        // A held row shows the lists as they would be with it dropped where it is.
+        let drag_view = self.sidebar.drag.as_ref().map(|drag| {
+            let projection = match &drag.target {
+                Some(target) => conn_state::sidebar_drag::project(
+                    &drag.id,
+                    target,
+                    &drag.pinned,
+                    &drag.active,
+                    &drag.settled,
+                    // The held row shows in the shelf where it would settle, closed or not.
+                    true,
+                ),
+                None => conn_state::sidebar_drag::Projection {
+                    pinned: drag.pinned.clone(),
+                    active: drag.active.clone(),
+                    settled: drag.settled.clone(),
+                },
+            };
+            (
+                drag.id.clone(),
+                drag.from,
+                drag.target.as_ref().map(|t| t.section),
+                projection,
+            )
+        });
+        let draft_rows = self.sidebar_draft_rows(cx);
+        let draft_sidebar = DraftSidebar {
+            rows: draft_rows
+                .iter()
+                .map(|row| DraftRowView {
+                    row,
+                    project: self.shell.project(&row.project_id),
+                })
+                .collect(),
+            undo: self
+                .discard_failure
+                .map(UndoNotice::Failed)
+                .or_else(|| self.discards.notice().map(UndoNotice::Undoable)),
+            undo_focus: &self.undo_focus,
+            unsent_threads: self.sidebar_unsent_threads(cx),
+        };
+        self.sidebar_jump_hints_shown = self.jump_hints_visible(window, cx);
+        let jump_order = self.jump_hint_order(window, cx);
+        let hover_open_for = self
+            .thread_hover
+            .open_for()
+            .filter(|_| !self.thread_hover_suppressed());
+        let hover_environment_label = self.hover_environment_label(hover_open_for);
+        let hover_server_config = self.active_server_config();
+        let machine_icons = self.linked.machine_icons();
+        let scratch_projects = self.scratch_project_ids();
+        div()
+            .flex()
+            .flex_row()
+            .size_full()
+            .child(render_workspace_rail(
+                &self.orbit.workspaces,
+                &self.workspace_images,
+                self.active_workspace.as_deref(),
+                &self.tokens,
+                &self.geometry,
+                &self.rail_gesture,
+                cx,
+            ))
+            .child(render_thread_sidebar(
+                &self.shell,
+                &self.layout,
+                &self.orbit.workspaces,
+                self.active_workspace.as_deref(),
+                &draft_sidebar,
+                &SidebarMarks {
+                    jump_order: &jump_order,
+                    selection: &self.thread_selection,
+                    shelf: crate::sidebar::thread_list::ShelfMarks {
+                        expanded: self.sidebar.settled_expanded,
+                        visible_count: shelf_visible,
+                        more: shelf_more,
+                    },
+                    search: crate::sidebar::thread_list::SearchMarks {
+                        order: &self.sidebar.search.order,
+                        excerpts: &self.sidebar.search.excerpts,
+                        matched_query: &self.sidebar.search.matched_query,
+                        pending: self.sidebar.search.pending(),
+                        failed: self.sidebar.search.failed(),
+                    },
+                    pending_drop: self
+                        .sidebar
+                        .pending_drop
+                        .as_ref()
+                        .map(|p| (&p.drop, &p.thread)),
+                    drag: drag_view.as_ref().map(|(held, from, target, projection)| {
+                        crate::sidebar::thread_list::DragMarks {
+                            held,
+                            from: *from,
+                            target: *target,
+                            pinned: &projection.pinned,
+                            active: &projection.active,
+                            settled: &projection.settled,
+                        }
+                    }),
+                    sweep: self.sidebar.sweep.as_ref().map(|sweep| {
+                        crate::sidebar::thread_list::SweepMarks {
+                            keys: &sweep.keys,
+                            action: sweep.action,
+                        }
+                    }),
+                },
+                &self.sidebar_search_input,
+                self.sidebar_search_highlight.as_deref(),
+                self.renaming_thread_id
+                    .as_deref()
+                    .filter(|_| !self.rename_in_header),
+                &self.rename_input,
+                self.sidebar_filter_menu_open,
+                &ThreadHoverView {
+                    open_for: hover_open_for,
+                    environment_label: hover_environment_label.as_deref(),
+                    catalog: hover_server_config.catalog(),
+                    origins: Some(self.linked.origins()),
+                    machine_icons: &machine_icons,
+                    scratch_projects: &scratch_projects,
+                    primary_machine_icon: self.primary_machine_icon(),
+                    rect: self.thread_hover.row_rect(),
+                },
+                &mut self.sidebar_tree,
+                &self.tokens,
+                &self.geometry,
+                window,
+                cx,
+            ))
+            .into_any_element()
+    }
+}
+
 impl Render for ConnApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.sync_details_task_history(cx);
         self.sync_details_schedules(cx);
         self.refresh_workspace_images();
         RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(test)]
+        crate::render_stats::rendered(|c| &mut c.root);
         // Another thread on screen drops the viewer, as web drops its preview.
         if self.image_viewer.as_ref().is_some_and(|viewer| {
             viewer.read(cx).thread_id() != self.layout.selected_thread_id.as_deref()
@@ -8125,57 +8302,6 @@ impl Render for ConnApp {
             .line_height(px(self.geometry.ui_line_height_px))
             .text_color(hsla(self.tokens.foreground));
 
-        // What the sidebar draws that changes the app: a drop the server has shown through ends,
-        // the search ranks what it found, and the shelf starts its scope.
-        self.release_settled_drop();
-        let search_text = self.sidebar_search_query(cx);
-        if !search_text.trim().is_empty() {
-            self.refresh_message_matches(&search_text);
-        }
-        let shelf_scope = self.settled_scope_key();
-        let shelf_visible = self.sidebar.visible_count(&shelf_scope);
-        let shelf_more = self.older_more_state();
-        // A held row shows the lists as they would be with it dropped where it is.
-        let drag_view = self.sidebar.drag.as_ref().map(|drag| {
-            let projection = match &drag.target {
-                Some(target) => conn_state::sidebar_drag::project(
-                    &drag.id,
-                    target,
-                    &drag.pinned,
-                    &drag.active,
-                    &drag.settled,
-                    // The held row shows in the shelf where it would settle, closed or not.
-                    true,
-                ),
-                None => conn_state::sidebar_drag::Projection {
-                    pinned: drag.pinned.clone(),
-                    active: drag.active.clone(),
-                    settled: drag.settled.clone(),
-                },
-            };
-            (
-                drag.id.clone(),
-                drag.from,
-                drag.target.as_ref().map(|t| t.section),
-                projection,
-            )
-        });
-        let draft_rows = self.sidebar_draft_rows(cx);
-        let draft_sidebar = DraftSidebar {
-            rows: draft_rows
-                .iter()
-                .map(|row| DraftRowView {
-                    row,
-                    project: self.shell.project(&row.project_id),
-                })
-                .collect(),
-            undo: self
-                .discard_failure
-                .map(UndoNotice::Failed)
-                .or_else(|| self.discards.notice().map(UndoNotice::Undoable)),
-            undo_focus: &self.undo_focus,
-            unsent_threads: self.sidebar_unsent_threads(cx),
-        };
         if std::mem::take(&mut self.reveal_open_row)
             && let Some(open) = self.layout.selected_thread_id.clone()
         {
@@ -8188,92 +8314,11 @@ impl Render for ConnApp {
                 });
             });
         }
-        let jump_order = self.jump_hint_order(window, cx);
-        let hover_open_for = self
-            .thread_hover
-            .open_for()
-            .filter(|_| !self.thread_hover_suppressed());
-        let hover_environment_label = self.hover_environment_label(hover_open_for);
-        let hover_server_config = self.active_server_config();
-        let machine_icons = self.linked.machine_icons();
-        let scratch_projects = self.scratch_project_ids();
+        self.sync_sidebar_inputs(window, cx);
         if self.layout.sidebar_open {
+            let width = crate::shell::WORKSPACE_RAIL_WIDTH_PX + self.layout.sidebar_width;
             root = root
-                .child(render_workspace_rail(
-                    &self.orbit.workspaces,
-                    &self.workspace_images,
-                    self.active_workspace.as_deref(),
-                    &self.tokens,
-                    &self.geometry,
-                    &self.rail_gesture,
-                    cx,
-                ))
-                .child(render_thread_sidebar(
-                    &self.shell,
-                    &self.layout,
-                    &self.orbit.workspaces,
-                    self.active_workspace.as_deref(),
-                    &draft_sidebar,
-                    &SidebarMarks {
-                        jump_order: &jump_order,
-                        selection: &self.thread_selection,
-                        shelf: crate::sidebar::thread_list::ShelfMarks {
-                            expanded: self.sidebar.settled_expanded,
-                            visible_count: shelf_visible,
-                            more: shelf_more,
-                        },
-                        search: crate::sidebar::thread_list::SearchMarks {
-                            order: &self.sidebar.search.order,
-                            excerpts: &self.sidebar.search.excerpts,
-                            matched_query: &self.sidebar.search.matched_query,
-                            pending: self.sidebar.search.pending(),
-                            failed: self.sidebar.search.failed(),
-                        },
-                        pending_drop: self
-                            .sidebar
-                            .pending_drop
-                            .as_ref()
-                            .map(|p| (&p.drop, &p.thread)),
-                        drag: drag_view.as_ref().map(|(held, from, target, projection)| {
-                            crate::sidebar::thread_list::DragMarks {
-                                held,
-                                from: *from,
-                                target: *target,
-                                pinned: &projection.pinned,
-                                active: &projection.active,
-                                settled: &projection.settled,
-                            }
-                        }),
-                        sweep: self.sidebar.sweep.as_ref().map(|sweep| {
-                            crate::sidebar::thread_list::SweepMarks {
-                                keys: &sweep.keys,
-                                action: sweep.action,
-                            }
-                        }),
-                    },
-                    &self.sidebar_search_input,
-                    self.sidebar_search_highlight.as_deref(),
-                    self.renaming_thread_id
-                        .as_deref()
-                        .filter(|_| !self.rename_in_header),
-                    &self.rename_input,
-                    self.sidebar_filter_menu_open,
-                    &ThreadHoverView {
-                        open_for: hover_open_for,
-                        environment_label: hover_environment_label.as_deref(),
-                        catalog: hover_server_config.catalog(),
-                        origins: Some(self.linked.origins()),
-                        machine_icons: &machine_icons,
-                        scratch_projects: &scratch_projects,
-                        primary_machine_icon: self.primary_machine_icon(),
-                        rect: self.thread_hover.row_rect(),
-                    },
-                    &mut self.sidebar_tree,
-                    &self.tokens,
-                    &self.geometry,
-                    window,
-                    cx,
-                ))
+                .child(regions::sidebar_region(&self.regions.sidebar, width))
                 .child(self.render_seam(false, viewport_w, cx));
         }
 

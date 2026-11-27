@@ -75,6 +75,8 @@ pub(crate) fn render_chat_header(
     props: &ChatHeaderProps<'_>,
     cx: &mut Context<'_, ConnApp>,
 ) -> gpui_kit::Stateful<gpui_kit::Div> {
+    #[cfg(test)]
+    crate::render_stats::rendered(|c| &mut c.header);
     let (shell, layout, draft_project_id, tokens, geometry) = (
         props.shell,
         props.layout,

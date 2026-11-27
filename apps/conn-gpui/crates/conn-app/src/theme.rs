@@ -6,6 +6,12 @@
 use conn_theme::{Appearance, Rgba as ThemeRgba, Tokens};
 use gpui_kit::{App, Hsla, Rgba as GpuiRgba, px};
 
+/// Reduce transparency: the shell paints opaque panel colors instead of its translucent fills.
+pub(crate) fn reduce_transparency(tokens: &mut Tokens) {
+    tokens.shell_fill = tokens.sidebar;
+    tokens.shell_inner_fill = tokens.shell_card;
+}
+
 /// Converts a `conn_theme::Rgba` into a GPUI `Rgba`.
 #[must_use]
 pub(crate) fn gpui_rgba(color: ThemeRgba) -> GpuiRgba {
@@ -27,6 +33,38 @@ pub(crate) fn hsla(color: ThemeRgba) -> Hsla {
 #[must_use]
 pub(crate) fn hsla_alpha(color: ThemeRgba, alpha: f32) -> Hsla {
     hsla(color.with_alpha(alpha))
+}
+
+/// Fill alpha of a disabled primary button in a dark theme.
+pub(crate) const DISABLED_PRIMARY_FILL_ALPHA_DARK: f32 = 0.40;
+/// Fill alpha of a disabled primary button in a light theme.
+pub(crate) const DISABLED_PRIMARY_FILL_ALPHA_LIGHT: f32 = 0.35;
+/// Label alpha of a disabled primary button.
+pub(crate) const DISABLED_PRIMARY_LABEL_ALPHA: f32 = 0.60;
+
+/// The colours of a disabled primary button: the primary colour at reduced opacity for the fill
+/// and a muted primary-foreground for the label, never fully transparent. It reads as the primary
+/// action, not available yet. Every primary button uses this one rule when disabled; it also
+/// takes the pointer cursor and the hover change away (Nick, 2026-11-26).
+#[must_use]
+pub(crate) fn disabled_primary_colors(tokens: &Tokens) -> (ThemeRgba, ThemeRgba) {
+    let fill_alpha = match tokens.appearance {
+        Appearance::Dark => DISABLED_PRIMARY_FILL_ALPHA_DARK,
+        Appearance::Light => DISABLED_PRIMARY_FILL_ALPHA_LIGHT,
+    };
+    (
+        tokens.primary.with_alpha(fill_alpha),
+        tokens
+            .primary_foreground
+            .with_alpha(DISABLED_PRIMARY_LABEL_ALPHA),
+    )
+}
+
+/// [`disabled_primary_colors`] as GPUI colours: `(fill, label)`.
+#[must_use]
+pub(crate) fn disabled_primary(tokens: &Tokens) -> (Hsla, Hsla) {
+    let (fill, label) = disabled_primary_colors(tokens);
+    (hsla(fill), hsla(label))
 }
 
 /// The app's monospace family: JetBrains Mono (embedded and registered by `crate::fonts`).
@@ -98,4 +136,51 @@ pub(crate) fn apply_kit_theme(tokens: &Tokens, cx: &mut App) {
         c.selection = selection_highlight(tokens);
     });
     crate::editor_settings::apply(tokens, cx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tokens_of(theme_id: &str) -> Tokens {
+        let theme = conn_theme::theme_by_id(theme_id).expect("a built-in theme");
+        Tokens::derive(&theme)
+    }
+
+    #[test]
+    fn a_disabled_primary_button_keeps_a_non_transparent_primary_fill() {
+        for (theme_id, fill_alpha) in [("dark-ocean", 0.40), ("t3-code-light", 0.35)] {
+            let tokens = tokens_of(theme_id);
+            let (fill, label) = disabled_primary_colors(&tokens);
+            // The fill is the primary colour itself at reduced opacity, never fully clear.
+            assert_eq!(
+                (fill.r, fill.g, fill.b),
+                (tokens.primary.r, tokens.primary.g, tokens.primary.b),
+                "{theme_id}: fill colour"
+            );
+            assert!((fill.a - fill_alpha).abs() < 1e-6, "{theme_id}: {fill:?}");
+            assert!(fill.a > 0.0 && fill.a < tokens.primary.a);
+            // The label is the primary foreground, muted.
+            assert_eq!(
+                (label.r, label.g, label.b),
+                (
+                    tokens.primary_foreground.r,
+                    tokens.primary_foreground.g,
+                    tokens.primary_foreground.b
+                ),
+                "{theme_id}: label colour"
+            );
+            assert!((label.a - DISABLED_PRIMARY_LABEL_ALPHA).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn a_disabled_primary_button_is_lighter_than_an_enabled_one() {
+        for theme_id in ["dark-ocean", "t3-code-light"] {
+            let tokens = tokens_of(theme_id);
+            let (fill, label) = disabled_primary(&tokens);
+            assert!(fill.a < hsla(tokens.primary).a, "{theme_id}");
+            assert!(label.a < hsla(tokens.primary_foreground).a, "{theme_id}");
+        }
+    }
 }

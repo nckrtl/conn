@@ -80,6 +80,59 @@ pub fn send_message(
     working: bool,
     steer_target_run_id: Option<&str>,
 ) -> Result<OrchestrationV2Command, serde_json::Error> {
+    send_message_with_ids(
+        thread_id,
+        text,
+        attachments,
+        working,
+        steer_target_run_id,
+        &MessageIds::new(),
+    )
+}
+
+/// The ids of one `message.dispatch`. Sending the same message again with the same ids is safe:
+/// the server keeps a receipt for each `commandId` and answers a repeat from it, so the message
+/// lands once.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MessageIds {
+    /// `commandId`, the key of the server's receipt.
+    pub command_id: String,
+    /// `messageId`, the id the message gets in the thread.
+    pub message_id: String,
+}
+
+impl MessageIds {
+    /// Fresh ids for a new message.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            command_id: new_id("cmd"),
+            message_id: new_id("msg"),
+        }
+    }
+}
+
+impl Default for MessageIds {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// [`send_message`] with the given `ids`, for a resend of a message whose first send may have
+/// landed.
+///
+/// # Errors
+///
+/// Returns [`serde_json::Error`] if the command payload cannot be decoded as
+/// [`OrchestrationV2Command`].
+pub fn send_message_with_ids(
+    thread_id: &str,
+    text: &str,
+    attachments: &[ChatAttachment],
+    working: bool,
+    steer_target_run_id: Option<&str>,
+    ids: &MessageIds,
+) -> Result<OrchestrationV2Command, serde_json::Error> {
     let dispatch_mode = match steer_target_run_id {
         Some(target) if working => json!({ "type": "steer_active", "targetRunId": target }),
         _ if working => json!({ "type": "queue_after_active" }),
@@ -91,9 +144,9 @@ pub fn send_message(
         "type": "message.dispatch",
         "createdBy": "user",
         "creationSource": "web",
-        "commandId": new_id("cmd"),
+        "commandId": ids.command_id,
         "threadId": thread_id,
-        "messageId": new_id("msg"),
+        "messageId": ids.message_id,
         "text": text,
         "attachments": attachments_json,
         "dispatchMode": dispatch_mode,
@@ -480,6 +533,28 @@ pub fn cancel_queued_run(
     }))
 }
 
+/// `queued-run.reorder`: move a queued run to sit right before `before_run_id`, or to the end of
+/// the queue when `before_run_id` is `None`. The server renumbers the queue and delivers it in
+/// that order.
+///
+/// # Errors
+///
+/// Returns [`serde_json::Error`] if the command payload cannot be decoded as
+/// [`OrchestrationV2Command`].
+pub fn reorder_queued_run(
+    thread_id: &str,
+    run_id: &str,
+    before_run_id: Option<&str>,
+) -> Result<OrchestrationV2Command, serde_json::Error> {
+    conn_contract::from_json(json!({
+        "type": "queued-run.reorder",
+        "commandId": new_id("cmd"),
+        "threadId": thread_id,
+        "runId": run_id,
+        "beforeRunId": before_run_id,
+    }))
+}
+
 /// `thread.interaction-mode.set`: switch the thread between `"default"` and `"plan"`.
 ///
 /// # Errors
@@ -798,6 +873,14 @@ mod tests {
             "queued-run.cancel decodes"
         );
         assert!(
+            reorder_queued_run("t1", "run-q1", Some("run-q2")).is_ok(),
+            "queued-run.reorder before another run decodes"
+        );
+        assert!(
+            reorder_queued_run("t1", "run-q1", None).is_ok(),
+            "queued-run.reorder to the end decodes"
+        );
+        assert!(
             set_model_selection("t1", "claudeAgent", "haiku", None).is_ok(),
             "thread.model-selection.set decodes"
         );
@@ -918,6 +1001,27 @@ mod tests {
     }
 
     #[test]
+    fn a_resend_with_the_same_ids_is_the_same_command() {
+        let ids = MessageIds::new();
+        let first = send_message_with_ids("t-1", "hi", &[], false, None, &ids).expect("command");
+        let again = send_message_with_ids("t-1", "hi", &[], false, None, &ids).expect("command");
+        assert_eq!(
+            conn_contract::to_json(&first),
+            conn_contract::to_json(&again)
+        );
+        let json = conn_contract::to_json(&first);
+        assert_eq!(json["commandId"], json!(ids.command_id));
+        assert_eq!(json["messageId"], json!(ids.message_id));
+
+        let fresh = send_message("t-1", "hi", &[], false, None).expect("command");
+        assert_ne!(
+            conn_contract::to_json(&fresh)["commandId"],
+            json["commandId"]
+        );
+        assert_ne!(MessageIds::new(), MessageIds::new());
+    }
+
+    #[test]
     fn launch_payload_decodes_as_contract_input() {
         for strategy in [
             WorkspaceStrategyChoice::Local,
@@ -982,6 +1086,22 @@ mod tests {
             serde_json::to_value(&settings).is_ok_and(|v| v["omitProviders"] == true),
             "the config stream carries the result"
         );
+    }
+
+    #[test]
+    fn a_queue_reorder_names_the_run_to_move_and_the_run_it_goes_before() {
+        let wire = |before| {
+            reorder_queued_run("t1", "run-a", before)
+                .and_then(serde_json::to_value)
+                .expect("a reorder command")
+        };
+        let before_b = wire(Some("run-b"));
+        assert_eq!(before_b["type"], "queued-run.reorder");
+        assert_eq!(before_b["threadId"], "t1");
+        assert_eq!(before_b["runId"], "run-a");
+        assert_eq!(before_b["beforeRunId"], "run-b");
+        // `null` is how the server is told to move the run to the end of the queue.
+        assert!(wire(None)["beforeRunId"].is_null());
     }
 
     #[test]

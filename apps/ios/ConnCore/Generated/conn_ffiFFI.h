@@ -243,6 +243,27 @@ typedef void (*UniffiForeignFutureCompleteVoid)(uint64_t, UniffiForeignFutureRes
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_FFI_IMAGE_CODEC_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_FFI_IMAGE_CODEC_METHOD0
+typedef void (*UniffiCallbackInterfaceFfiImageCodecMethod0)(uint64_t, RustBuffer, RustBuffer* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_FFI_IMAGE_CODEC_METHOD1
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_FFI_IMAGE_CODEC_METHOD1
+typedef void (*UniffiCallbackInterfaceFfiImageCodecMethod1)(uint64_t, RustBuffer, uint32_t, uint32_t, RustBuffer, int8_t, RustBuffer* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
+#ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_FFI_UPLOAD_LISTENER_METHOD0
+#define UNIFFI_FFIDEF_CALLBACK_INTERFACE_FFI_UPLOAD_LISTENER_METHOD0
+typedef void (*UniffiCallbackInterfaceFfiUploadListenerMethod0)(uint64_t, RustBuffer, RustBuffer, void* _Nonnull, 
+        RustCallStatus *_Nonnull uniffiCallStatus
+    );
+
+#endif
 #ifndef UNIFFI_FFIDEF_CALLBACK_INTERFACE_CORE_LISTENER_METHOD0
 #define UNIFFI_FFIDEF_CALLBACK_INTERFACE_CORE_LISTENER_METHOD0
 typedef void (*UniffiCallbackInterfaceCoreListenerMethod0)(uint64_t, RustBuffer, void* _Nonnull, 
@@ -376,6 +397,25 @@ typedef void (*UniffiCallbackInterfaceSessionListenerMethod6)(uint64_t, uint64_t
     );
 
 #endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_FFI_IMAGE_CODEC
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_FFI_IMAGE_CODEC
+typedef struct UniffiVTableCallbackInterfaceFfiImageCodec {
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
+    UniffiCallbackInterfaceFfiImageCodecMethod0 _Nonnull inspect;
+    UniffiCallbackInterfaceFfiImageCodecMethod1 _Nonnull encode;
+} UniffiVTableCallbackInterfaceFfiImageCodec;
+
+#endif
+#ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_FFI_UPLOAD_LISTENER
+#define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_FFI_UPLOAD_LISTENER
+typedef struct UniffiVTableCallbackInterfaceFfiUploadListener {
+    UniffiCallbackInterfaceFree _Nonnull uniffiFree;
+    UniffiCallbackInterfaceClone _Nonnull uniffiClone;
+    UniffiCallbackInterfaceFfiUploadListenerMethod0 _Nonnull onUpload;
+} UniffiVTableCallbackInterfaceFfiUploadListener;
+
+#endif
 #ifndef UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_CORE_LISTENER
 #define UNIFFI_FFIDEF_V_TABLE_CALLBACK_INTERFACE_CORE_LISTENER
 typedef struct UniffiVTableCallbackInterfaceCoreListener {
@@ -427,6 +467,51 @@ typedef struct UniffiVTableCallbackInterfaceSessionListener {
 } UniffiVTableCallbackInterfaceSessionListener;
 
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CLONE_FFIIMAGECODEC
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CLONE_FFIIMAGECODEC
+uint64_t uniffi_conn_ffi_fn_clone_ffiimagecodec(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FREE_FFIIMAGECODEC
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FREE_FFIIMAGECODEC
+void uniffi_conn_ffi_fn_free_ffiimagecodec(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_INIT_CALLBACK_VTABLE_FFIIMAGECODEC
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_INIT_CALLBACK_VTABLE_FFIIMAGECODEC
+void uniffi_conn_ffi_fn_init_callback_vtable_ffiimagecodec(const UniffiVTableCallbackInterfaceFfiImageCodec* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_FFIIMAGECODEC_INSPECT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_FFIIMAGECODEC_INSPECT
+RustBuffer uniffi_conn_ffi_fn_method_ffiimagecodec_inspect(uint64_t ptr, RustBuffer bytes, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_FFIIMAGECODEC_ENCODE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_FFIIMAGECODEC_ENCODE
+RustBuffer uniffi_conn_ffi_fn_method_ffiimagecodec_encode(uint64_t ptr, RustBuffer bytes, uint32_t width, uint32_t height, RustBuffer jpeg_quality, int8_t png, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CLONE_FFIUPLOADLISTENER
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CLONE_FFIUPLOADLISTENER
+uint64_t uniffi_conn_ffi_fn_clone_ffiuploadlistener(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FREE_FFIUPLOADLISTENER
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FREE_FFIUPLOADLISTENER
+void uniffi_conn_ffi_fn_free_ffiuploadlistener(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_INIT_CALLBACK_VTABLE_FFIUPLOADLISTENER
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_INIT_CALLBACK_VTABLE_FFIUPLOADLISTENER
+void uniffi_conn_ffi_fn_init_callback_vtable_ffiuploadlistener(const UniffiVTableCallbackInterfaceFfiUploadListener* _Nonnull vtable
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_FFIUPLOADLISTENER_ON_UPLOAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_FFIUPLOADLISTENER_ON_UPLOAD
+void uniffi_conn_ffi_fn_method_ffiuploadlistener_on_upload(uint64_t ptr, RustBuffer id, RustBuffer status, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CLONE_CONNCORE
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CLONE_CONNCORE
 uint64_t uniffi_conn_ffi_fn_clone_conncore(uint64_t handle, RustCallStatus *_Nonnull out_status
@@ -440,6 +525,31 @@ void uniffi_conn_ffi_fn_free_conncore(uint64_t handle, RustCallStatus *_Nonnull 
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CONSTRUCTOR_CONNCORE_CONNECT
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_CONSTRUCTOR_CONNCORE_CONNECT
 uint64_t uniffi_conn_ffi_fn_constructor_conncore_connect(RustBuffer server_url, RustBuffer credential, uint64_t listener, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_ATTACH_UPLOAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_ATTACH_UPLOAD
+void uniffi_conn_ffi_fn_method_conncore_attach_upload(uint64_t ptr, RustBuffer file, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_DROP_UPLOAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_DROP_UPLOAD
+void uniffi_conn_ffi_fn_method_conncore_drop_upload(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_RETRY_UPLOAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_RETRY_UPLOAD
+void uniffi_conn_ffi_fn_method_conncore_retry_upload(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SET_UPLOAD_HANDLERS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_SET_UPLOAD_HANDLERS
+void uniffi_conn_ffi_fn_method_conncore_set_upload_handlers(uint64_t ptr, uint64_t listener, uint64_t codec, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_UPLOAD_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_UPLOAD_STATUS
+RustBuffer uniffi_conn_ffi_fn_method_conncore_upload_status(uint64_t ptr, RustBuffer id, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNCORE_ANSWER_SECRET_REQUEST
@@ -1564,6 +1674,54 @@ uint16_t uniffi_conn_ffi_checksum_func_custom_theme_tokens(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_THEME_TOKENS
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_THEME_TOKENS
 uint16_t uniffi_conn_ffi_checksum_func_theme_tokens(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_FFIIMAGECODEC_INSPECT
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_FFIIMAGECODEC_INSPECT
+uint16_t uniffi_conn_ffi_checksum_method_ffiimagecodec_inspect(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_FFIIMAGECODEC_ENCODE
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_FFIIMAGECODEC_ENCODE
+uint16_t uniffi_conn_ffi_checksum_method_ffiimagecodec_encode(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_FFIUPLOADLISTENER_ON_UPLOAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_FFIUPLOADLISTENER_ON_UPLOAD
+uint16_t uniffi_conn_ffi_checksum_method_ffiuploadlistener_on_upload(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_ATTACH_UPLOAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_ATTACH_UPLOAD
+uint16_t uniffi_conn_ffi_checksum_method_conncore_attach_upload(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_DROP_UPLOAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_DROP_UPLOAD
+uint16_t uniffi_conn_ffi_checksum_method_conncore_drop_upload(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_RETRY_UPLOAD
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_RETRY_UPLOAD
+uint16_t uniffi_conn_ffi_checksum_method_conncore_retry_upload(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SET_UPLOAD_HANDLERS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_SET_UPLOAD_HANDLERS
+uint16_t uniffi_conn_ffi_checksum_method_conncore_set_upload_handlers(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_UPLOAD_STATUS
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNCORE_UPLOAD_STATUS
+uint16_t uniffi_conn_ffi_checksum_method_conncore_upload_status(void
     
 );
 #endif

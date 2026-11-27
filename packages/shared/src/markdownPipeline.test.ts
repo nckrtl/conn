@@ -441,6 +441,40 @@ it("preserves in-app thread links through the shared Markdown sanitizer", () => 
   expect(JSON.stringify(tree)).not.toContain("javascript:");
 });
 
+it("preserves conn://thread links through the shared Markdown sanitizer", () => {
+  const processor = unified()
+    .use(remarkParse)
+    .use(CHAT_MARKDOWN_REMARK_PLUGINS)
+    .use(remarkRehype, { allowDangerousHtml: true })
+    .use(CHAT_MARKDOWN_REHYPE_PLUGINS);
+  const tree = processor.runSync(
+    processor.parse(
+      '[Open thread](conn://thread/environment/thread-1)\n\n<conn://thread/environment/thread:a%3A1>\n\n<a href="javascript:alert(1)">Unsafe</a>',
+    ),
+  );
+  expect(tree.children[0]).toMatchObject({
+    tagName: "p",
+    children: [
+      {
+        tagName: "a",
+        properties: { href: "conn://thread/environment/thread-1" },
+        children: [{ type: "text", value: "Open thread" }],
+      },
+    ],
+  });
+  expect(tree.children[2]).toMatchObject({
+    tagName: "p",
+    children: [
+      {
+        tagName: "a",
+        properties: { href: "conn://thread/environment/thread:a%3A1" },
+        children: [{ type: "text", value: "conn://thread/environment/thread:a%3A1" }],
+      },
+    ],
+  });
+  expect(JSON.stringify(tree)).not.toContain("javascript:");
+});
+
 it("builds the tree rehype-raw builds for markdown without HTML", () => {
   type Node = {
     type: string;

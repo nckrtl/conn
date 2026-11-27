@@ -281,6 +281,12 @@ impl CodexSession {
         {
             let mut state = inner.lock();
             state.mapper.begin_turn(native, input);
+            if params["input"]
+                .as_array()
+                .is_some_and(|items| !items.is_empty())
+            {
+                state.mapper.mark_prompt_sent(native);
+            }
             state.capacity = Some(capacity::Capacity::new(input, &params));
             state.sent_context = params["additionalContext"].clone();
             state.sent_app_notes = Some((
@@ -1253,7 +1259,12 @@ async fn drive(inner: std::sync::Weak<Inner>, mut rx: mpsc::Receiver<SessionMsg>
                     None
                 }
             };
-            if let Some(context) = context {
+            if let Some(context) = context
+                && !inner
+                    .server
+                    .version()
+                    .is_some_and(|v| crate::client::newer_minor(&v, "0.170"))
+            {
                 let items: Vec<_> = context.iter().map(|(key, entry)| {
                     let external = entry["kind"] == "untrusted";
                     let tag = if external {format!("external_{key}")} else {key.clone()};

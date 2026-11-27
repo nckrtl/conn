@@ -48,6 +48,7 @@ final class CoreStore {
     private(set) var openThreadId: String?
     private(set) var offlineReader: OfflineReader?
     @ObservationIgnored let imageThumbnails = AttachmentThumbnails()
+    @ObservationIgnored let uploads = ComposerUploads()
     private var readerConnection: UInt64?
     var lastError: String?
     /// A thread to show, set by a `conn://thread/...` URL or a push tap; the workspace consumes it.
@@ -64,6 +65,7 @@ final class CoreStore {
     func composerDraft(_ key: ComposerDraftKey, initialText: String = "") -> ComposerDraft {
         if let existing = drafts[key] { return existing }
         let draft = ComposerDraft(text: initialText)
+        draft.uploads = uploads
         drafts[key] = draft
         return draft
     }
@@ -415,7 +417,7 @@ final class CoreStore {
         let sentText = draft.text
         let sentFiles = draft.files
         let text = sentText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let files = sentFiles.map { FfiComposerFile(path: $0.url.path, name: $0.name, mimeType: $0.mime) }
+        let files = sentFiles.map(\.ffi)
         let reply: Bool = if case .reply = target { true } else { false }
         let uploads = sentFiles.indices.map { "pending:\(key):\($0)" }
         if reply {
@@ -553,7 +555,7 @@ final class CoreStore {
         do {
             try await core.editQueuedMessage(
                 threadId: threadId, runId: edit.runId, text: text, keptAttachmentIds: kept,
-                files: newFiles.map { FfiComposerFile(path: $0.url.path, name: $0.name, mimeType: $0.mime) })
+                files: newFiles.map(\.ffi))
         } catch {
             queuedOverrides[edit.runId] = nil
             if draft.queuedEdit == nil, draft.text == edit.savedText {
@@ -882,6 +884,11 @@ final class CoreStore {
             break
         }
         updateWorkspaceVisibility()
+        if case .live = newState.phase, let core {
+            uploads.use(core, connection: newState.connectionId)
+        } else {
+            uploads.use(nil, connection: nil)
+        }
         if newState.offlineReady, readerConnection != newState.connectionId, let reader = session?.offlineReader() {
             showOffline(reader, connection: newState.connectionId)
         }

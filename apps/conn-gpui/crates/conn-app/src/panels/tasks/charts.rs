@@ -28,6 +28,39 @@ fn vertical_fade(color: Hsla, opacity: f32) -> Background {
     )
 }
 
+/// Opacity of the card sparkline's line.
+const SPARKLINE_STROKE_OPACITY: f32 = 0.70;
+/// Conn's `<Fade opacity={0.22}>`: the top of the area gradient under the line, in both charts.
+const SERIES_AREA_OPACITY: f32 = 0.22;
+
+/// The single series' colours. The area fade is the same subtle neutral in both charts. The
+/// card sparkline's line is muted, so the cards stay calm. The expanded chart's line is the
+/// theme's full foreground, so it stands out.
+struct SeriesColors {
+    stroke: Hsla,
+    area: Background,
+}
+
+impl SeriesColors {
+    /// The calm, muted series of a card sparkline.
+    fn sparkline(tokens: &Tokens) -> Self {
+        let muted = to_hsla(tokens.muted_foreground);
+        Self {
+            stroke: muted.opacity(SPARKLINE_STROKE_OPACITY),
+            area: vertical_fade(muted, SERIES_AREA_OPACITY),
+        }
+    }
+
+    /// The expanded chart's series: the full foreground line over the same neutral area fade.
+    /// The hover dot and the tooltip swatch use the line colour.
+    fn expanded(tokens: &Tokens) -> Self {
+        Self {
+            stroke: to_hsla(tokens.foreground),
+            area: vertical_fade(to_hsla(tokens.muted_foreground), SERIES_AREA_OPACITY),
+        }
+    }
+}
+
 use super::format::{TasksSurfaceColors, format_chart_date_label};
 use crate::panels::chrome::{UI_LINE_HEIGHT_PX, UI_TEXT_PX};
 use crate::panels::color::to_hsla;
@@ -93,10 +126,10 @@ pub(super) fn render_sparkline(
     height: f32,
     tokens: &Tokens,
 ) -> AnyElement {
-    let base = to_hsla(tokens.muted_foreground);
-    let stroke_color = base.opacity(0.70);
-    // Conn's `<Fade opacity={0.22}>`: a vertical 22%→0% gradient under the line.
-    let area_color = vertical_fade(base, 0.22);
+    let SeriesColors {
+        stroke: stroke_color,
+        area: area_color,
+    } = SeriesColors::sparkline(tokens);
 
     let inner: AnyElement = if points.len() < 2 {
         div().size_full().into_any_element()
@@ -199,9 +232,10 @@ pub(super) fn render_trend_chart(
         .iter()
         .map(|&t| (t, format_insight_value(spec_id, t)))
         .collect();
-    let series_color = to_hsla(tokens.info);
-    // Conn's `<Fade opacity={0.18}>` per series.
-    let area_color = vertical_fade(series_color, 0.18);
+    let SeriesColors {
+        stroke: series_color,
+        area: area_color,
+    } = SeriesColors::expanded(tokens);
     let grid_color = to_hsla(surface.shell_chart_grid);
     let crosshair_color = to_hsla(tokens.muted_foreground).opacity(0.50);
     let ring_color = to_hsla(tokens.shell_card);
@@ -549,6 +583,52 @@ mod tests {
             Some(0),
             "single point always maps to 0"
         );
+    }
+
+    #[test]
+    fn the_series_is_neutral_not_the_info_blue_in_every_theme() {
+        for id in ["dark-ocean", "t3-code-light"] {
+            let tokens = Tokens::derive(&conn_theme::theme_by_id(id).expect("a theme"));
+            let muted = to_hsla(tokens.muted_foreground);
+            let info = to_hsla(tokens.info).opacity(1.0);
+
+            let sparkline = SeriesColors::sparkline(&tokens);
+            assert_eq!(
+                sparkline.stroke,
+                muted.opacity(SPARKLINE_STROKE_OPACITY),
+                "{id}: the sparkline line is the muted foreground"
+            );
+            assert_ne!(
+                sparkline.stroke.opacity(1.0),
+                info,
+                "{id}: the sparkline line is not the info blue"
+            );
+            assert_eq!(
+                sparkline.area,
+                vertical_fade(muted, SERIES_AREA_OPACITY),
+                "{id}: the sparkline area fades from the muted foreground"
+            );
+
+            let expanded = SeriesColors::expanded(&tokens);
+            assert_eq!(
+                expanded.stroke,
+                to_hsla(tokens.foreground),
+                "{id}: the expanded line is the full foreground"
+            );
+            assert_ne!(
+                expanded.stroke.opacity(1.0),
+                info,
+                "{id}: the expanded line is not the info blue"
+            );
+            assert_ne!(
+                expanded.stroke, sparkline.stroke,
+                "{id}: the expanded line stands out from the sparkline"
+            );
+            assert_eq!(
+                expanded.area, sparkline.area,
+                "{id}: both charts share the same subtle area fade"
+            );
+        }
     }
 
     #[test]

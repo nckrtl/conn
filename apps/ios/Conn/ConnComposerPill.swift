@@ -17,6 +17,7 @@ struct ConnComposerPill<Trailing: View>: View {
     @ViewBuilder let trailing: () -> Trailing
 
     @Environment(\.connTheme) private var theme
+    @Environment(\.composerResize) private var composerResize
 
     @State private var showingPhotos = false
     @State private var showingFiles = false
@@ -24,14 +25,23 @@ struct ConnComposerPill<Trailing: View>: View {
     @State private var sendAfterDictation = false
     @State private var selection: TextSelection?
     @State private var keyboardUp = false
+    /// The row's width and the trailing controls' width, for the text's room in one row.
+    @State private var rowWidth: CGFloat = 0
+    @State private var trailingWidth: CGFloat = 0
     @FocusState private var inputFocused: Bool
 
     private static var control: CGFloat { 44 }
     /// The standard spring without bounce, for the collapsed/expanded switch and the keyboard gap.
     private static var spring: Animation { .spring(duration: 0.4, bounce: 0) }
 
-    /// Lab `data-expanded`: the text view has focus, or the draft has text or an attachment.
-    private var expanded: Bool { inputFocused || !draft.text.isEmpty || !draft.files.isEmpty || draft.queuedEdit != nil }
+    /// Lab `data-expanded`: the text would reach the controls, so it takes its own line above
+    /// them. Focus alone never changes the layout: the box keeps its height as the keyboard opens.
+    private var expanded: Bool {
+        let leading: CGFloat = hasLeadingControl ? Self.control : 0
+        let room = rowWidth - leading - trailingWidth
+            - ComposerInputMetrics.leadingInset(expanded: false, hasLeadingControl: hasLeadingControl)
+        return ComposerInputMetrics.wraps(draft.text.isEmpty ? fieldPlaceholder : draft.text, in: room)
+    }
 
     var body: some View {
         let _ = BodyCount.tick("Composer")
@@ -50,12 +60,14 @@ struct ConnComposerPill<Trailing: View>: View {
                 ScrollView(.horizontal) {
                     HStack(spacing: 10) {
                         ForEach(draft.files) { file in
+                            let upload = draft.uploads?.statuses[file.uploadId]
+                            let retry: () -> Void = { draft.uploads?.retry(file) }
                             if file.isImage {
-                                ComposerImageThumbnail(file: file, locked: draft.locked) {
+                                ComposerImageThumbnail(file: file, upload: upload, locked: draft.locked, retry: retry) {
                                     draft.files.removeAll { $0.id == file.id }
                                 }
                             } else {
-                                ComposerFileChip(file: file, locked: draft.locked) {
+                                ComposerFileChip(file: file, upload: upload, locked: draft.locked, retry: retry) {
                                     draft.files.removeAll { $0.id == file.id }
                                 }
                             }
@@ -115,46 +127,64 @@ struct ConnComposerPill<Trailing: View>: View {
                         .accessibilityLabel("Add attachment")
                         .composerSlot(.leading)
                     }
-                    TextField(
-                        fieldPlaceholder, text: $draft.text, selection: $selection,
-                        prompt: Text(fieldPlaceholder).foregroundStyle(theme.placeholder),
-                        axis: .vertical
-                    )
-                        .textFieldStyle(.plain)
+                    // A hidden copy of the text sizes the field. The text field reports the height
+                    // of its last UIKit layout, so after a width change (one row to two) it stayed
+                    // a line too tall until the next keystroke.
+                    Text(sizingText)
                         .font(.system(size: ComposerInputMetrics.fontSize))
                         .lineSpacing(ComposerInputMetrics.lineSpacing)
-                        .tint(theme.foreground)
                         .lineLimit(1...maxLines)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .hidden()
+                        .accessibilityHidden(true)
+                        .overlay(alignment: .topLeading) {
+                            TextField(
+                                fieldPlaceholder, text: $draft.text, selection: $selection,
+                                prompt: Text(fieldPlaceholder).foregroundStyle(theme.placeholder),
+                                axis: .vertical
+                            )
+                            .textFieldStyle(.plain)
+                            .font(.system(size: ComposerInputMetrics.fontSize))
+                            .lineSpacing(ComposerInputMetrics.lineSpacing)
+                            .tint(theme.foreground)
+                            .lineLimit(1...maxLines)
+                            .frame(maxHeight: .infinity, alignment: .topLeading)
+                            .focused($inputFocused)
+                        }
                         .padding(.top, ComposerInputMetrics.topInset(expanded: expanded))
                         .padding(.bottom, ComposerInputMetrics.bottomInset(expanded: expanded))
                         .padding(.leading, ComposerInputMetrics.leadingInset(
                             expanded: expanded, hasLeadingControl: hasLeadingControl
                         ))
-                        .padding(.trailing, expanded ? 12 : 0)
-                        .focused($inputFocused)
+                        .padding(.trailing, expanded ? ComposerInputMetrics.expandedTrailingInset : 0)
                         .composerSlot(.field)
 
-                    if dictation.isActive {
-                        dictationControls.composerSlot(.trailing)
-                    } else {
-                        HStack(spacing: 0) {
-                            trailing().frame(minHeight: Self.control)
-                            // Conn mobile keeps the mic beside stop while the agent works, so a follow-up
-                            // can be dictated and queued; it is only disabled while the draft is locked.
-                            micButton.disabled(draft.locked).opacity(draft.locked ? 0.4 : 1)
-                            if draft.locked {
-                                ProgressView()
-                                    .frame(width: Self.control, height: Self.control)
-                                    .accessibilityLabel(draft.sending ? "Sending" : "Adding attachment")
-                            } else {
-                                actionButton
+                    Group {
+                        if dictation.isActive {
+                            dictationControls
+                        } else {
+                            HStack(spacing: 0) {
+                                trailing().frame(minHeight: Self.control)
+                                // Conn mobile keeps the mic beside stop while the agent works, so a follow-up
+                                // can be dictated and queued; it is only disabled while the draft is locked.
+                                micButton.disabled(draft.locked).opacity(draft.locked ? 0.4 : 1)
+                                if draft.locked {
+                                    ProgressView()
+                                        .frame(width: Self.control, height: Self.control)
+                                        .accessibilityLabel(draft.sending ? "Sending" : "Adding attachment")
+                                } else {
+                                    actionButton
+                                }
                             }
                         }
-                        .composerSlot(.trailing)
                     }
+                    .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { trailingWidth = $0 }
+                    .composerSlot(.trailing)
                 }
+                .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { rowWidth = $0 }
             }
-            .padding(.horizontal, 4)
+            // Keyboard up the sheet is wider than the pill, so the controls move out with it.
+            .padding(.horizontal, keyboardUp ? ComposerSheet.controlsInset : 4)
             .padding(.vertical, 2)
             .foregroundStyle(theme.foreground)
             // The pill and the sheet are one Liquid Glass surface in two shapes, applied to the
@@ -172,6 +202,8 @@ struct ConnComposerPill<Trailing: View>: View {
             .padding(.bottom, keyboardUp ? -ComposerSheet.bottomBleed : 0)
         }
         .animation(Self.spring, value: expanded)
+        // A UIKit host resizes on the same spring, so the box grows from its bottom edge.
+        .onChange(of: expanded) { composerResize(Self.spring) }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillChangeFrameNotification)) { note in
             setKeyboardUp(KeyboardOverlap.isUp(note), note)
         }
@@ -231,6 +263,13 @@ struct ConnComposerPill<Trailing: View>: View {
 
     private var hasLeadingControl: Bool {
         dictation.isActive ? dictation.phase != .transcribing : allowsAttachments && limits.images
+    }
+
+    /// The field's text for sizing: the placeholder when empty, and a trailing line break keeps
+    /// its empty last line.
+    private var sizingText: String {
+        if draft.text.isEmpty { return fieldPlaceholder }
+        return draft.text.last?.isNewline == true ? draft.text + " " : draft.text
     }
 
     private var fieldPlaceholder: String {
@@ -420,11 +459,11 @@ enum ComposerInputMetrics {
     static func lineSpacing(natural: CGFloat) -> CGFloat { max(0, lineBox - natural) }
     private static func halfLeading(natural: CGFloat) -> CGFloat { lineSpacing(natural: natural) / 2 }
 
-    /// Collapsed: the line box centred in the 44 pt control. Expanded: the lab's 10 above, 2 below.
+    /// Collapsed: the line box centred in the 44 pt control. Expanded: the lab's 14 above, 2 below.
     private static var collapsedPad: CGFloat { (44 - lineBox) / 2 }
 
     static func topInset(expanded: Bool, natural: CGFloat? = nil) -> CGFloat {
-        (expanded ? 10 : collapsedPad) + halfLeading(natural: natural ?? naturalLineHeight)
+        (expanded ? 14 : collapsedPad) + halfLeading(natural: natural ?? naturalLineHeight)
     }
 
     static func bottomInset(expanded: Bool, natural: CGFloat? = nil) -> CGFloat {
@@ -432,8 +471,25 @@ enum ComposerInputMetrics {
     }
 
     /// Collapsed with a + keeps the glyph's own inset as the gap (lab `padding-inline-start: 2px`).
+    /// Expanded, the text starts where the + glyph is drawn: 12 pt into its 44 pt target, plus
+    /// the glyph's own 3 pt inset.
     static func leadingInset(expanded: Bool, hasLeadingControl: Bool) -> CGFloat {
-        !expanded && hasLeadingControl ? 2 : 12
+        if expanded { return 15 }
+        return hasLeadingControl ? 2 : 12
+    }
+
+    static let expandedTrailingInset: CGFloat = 12
+
+    /// Whether `text` needs more than one line in `room` points: a line break, or a line wider
+    /// than the room less 12 pt of slack, so the layout switches before the text view itself
+    /// would wrap at the one-row width.
+    static func wraps(_ text: String, in room: CGFloat) -> Bool {
+        guard room > 0 else { return false }
+        if text.contains(where: \.isNewline) { return true }
+        // Even the narrowest glyphs put this many characters past any one-row width.
+        if text.utf16.count > 400 { return true }
+        let width = (text as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: fontSize)]).width
+        return width > room - 12
     }
 }
 
@@ -447,6 +503,8 @@ enum ComposerSheet {
     /// The screens' gap between the composer and the safe area or keyboard.
     static let bottomGutter: CGFloat = 2
     static let topRadius: CGFloat = 28
+    /// The sheet's content inset, against the pill's 4: its controls sit 6 pt further out.
+    static let controlsInset: CGFloat = -2
     static let keyboardCover: CGFloat = 28
     static var bottomBleed: CGFloat { bottomGutter + keyboardCover }
 }
@@ -473,7 +531,9 @@ private struct ComposerSheetEdge: View {
 /// remove target is 44 pt. The picture is decoded once, at thumbnail size, off the main thread.
 private struct ComposerImageThumbnail: View {
     let file: ComposerFile
+    let upload: FfiUploadStatus?
     let locked: Bool
+    let retry: () -> Void
     let remove: () -> Void
     @Environment(\.connTheme) private var theme
     @Environment(\.displayScale) private var displayScale
@@ -492,7 +552,16 @@ private struct ComposerImageThumbnail: View {
                         .scaledToFill()
                 }
             }
+            .overlay { uploadOverlay }
             .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .overlay {
+                if case .failed = upload {
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .strokeBorder(theme.destructive, lineWidth: 1.5)
+                }
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .onTapGesture { if case .failed = upload { retry() } }
             .overlay(alignment: .topTrailing) {
                 Button(action: remove) {
                     ThreadGlyph(name: "close", size: 10)
@@ -509,6 +578,27 @@ private struct ComposerImageThumbnail: View {
             }
             .task(id: file.id) { image = await Self.thumbnail(of: file.url, pixels: Self.side * displayScale * 2) }
             .accessibilityElement(children: .contain)
+            .accessibilityLabel(uploadAccessibilityLabel(file.name, upload))
+            .accessibilityAction(named: "Retry upload") { if case .failed = upload { retry() } }
+    }
+
+    /// Lab `.m-upload-ring` / `.m-upload-retry`: the picture dims under a still ring, or the
+    /// retry glyph once it failed.
+    @ViewBuilder private var uploadOverlay: some View {
+        switch upload {
+        case let .uploading(progress):
+            ZStack {
+                Color.black.opacity(0.45)
+                UploadRing(progress: progress, side: 24).foregroundStyle(.white)
+            }
+        case .failed:
+            ZStack {
+                Color.black.opacity(0.45)
+                ThreadGlyph(name: "refresh", size: 18).foregroundStyle(.white)
+            }
+        default:
+            EmptyView()
+        }
     }
 
     private static func thumbnail(of url: URL, pixels: CGFloat) async -> UIImage? {
@@ -529,14 +619,22 @@ private struct ComposerImageThumbnail: View {
 /// A draft file, as before: icon, name and a remove button in a rounded chip.
 private struct ComposerFileChip: View {
     let file: ComposerFile
+    let upload: FfiUploadStatus?
     let locked: Bool
+    let retry: () -> Void
     let remove: () -> Void
     @Environment(\.connTheme) private var theme
 
+    private var failed: Bool { if case .failed = upload { true } else { false } }
+
     var body: some View {
         HStack(spacing: 6) {
-            ThreadGlyph(name: "file-text", size: 16)
-            Text(file.name).lineLimit(1).truncationMode(.middle)
+            switch upload {
+            case let .uploading(progress): UploadRing(progress: progress, side: 16)
+            case .failed: ThreadGlyph(name: "refresh", size: 16)
+            default: ThreadGlyph(name: "file-text", size: 16)
+            }
+            Text(failed ? "Tap to retry" : file.name).lineLimit(1).truncationMode(.middle)
             Button(action: remove) {
                 ThreadGlyph(name: "close", size: 14)
                     .frame(minWidth: 44, minHeight: 44)
@@ -547,17 +645,55 @@ private struct ComposerFileChip: View {
             .accessibilityLabel("Remove \(file.name)")
         }
         .font(.system(size: 13))
+        .foregroundStyle(failed ? theme.destructive : Color.primary)
         .padding(.leading, 10)
         .background(theme.card.opacity(0.78), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay {
+            if failed {
+                RoundedRectangle(cornerRadius: 12, style: .continuous).strokeBorder(theme.destructive, lineWidth: 1.5)
+            }
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onTapGesture { if failed { retry() } }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(uploadAccessibilityLabel(file.name, upload))
+        .accessibilityAction(named: "Retry upload") { if failed { retry() } }
+    }
+}
+
+/// Lab `UploadRing`: a faint track and the share sent. It never spins.
+private struct UploadRing: View {
+    let progress: Float
+    let side: CGFloat
+
+    var body: some View {
+        ZStack {
+            Circle().stroke(lineWidth: 2.5).opacity(0.3)
+            Circle()
+                .trim(from: 0, to: CGFloat(max(0.04, progress)))
+                .stroke(style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+        }
+        .padding(side * 3 / 24)
+        .frame(width: side, height: side)
+    }
+}
+
+private func uploadAccessibilityLabel(_ name: String, _ upload: FfiUploadStatus?) -> String {
+    switch upload {
+    case let .uploading(progress): "\(name), uploading, \(Int((progress * 100).rounded())) percent"
+    case .failed: "\(name) failed to upload. Tap to retry."
+    default: name
     }
 }
 
 /// SwiftUI animation for a keyboard notification's duration and curve.
 enum KeyboardMotion {
-    /// The keyboard animates on UIKit's private curve 7, which SwiftUI cannot name. A stiff,
-    /// over-damped spring is the usual stand-in.
+    /// The keyboard animates on UIKit's private curve 7, which SwiftUI cannot name. Measured on
+    /// iOS 26, it tracks a critically damped spring of 22 rad/s (62% at 100 ms, 93% at 200 ms).
+    /// The common stand-in (mass 3, stiffness 1000, damping 500) is at 33% when the keyboard stops.
     static var privateCurve: Animation {
-        .interpolatingSpring(mass: 3, stiffness: 1000, damping: 500, initialVelocity: 0)
+        .interpolatingSpring(mass: 1, stiffness: 484, damping: 44, initialVelocity: 0)
     }
 
     static func animation(_ note: Notification) -> Animation {
@@ -573,6 +709,12 @@ enum KeyboardMotion {
         @unknown default: return privateCurve
         }
     }
+}
+
+extension EnvironmentValues {
+    /// Called when the composer changes height with `animation`. A UIKit host lays its new size
+    /// out on the same animation; SwiftUI hosts animate it themselves.
+    @Entry var composerResize: @MainActor (Animation) -> Void = { _ in }
 }
 
 enum ComposerSlot: Sendable { case none, leading, field, trailing }

@@ -384,11 +384,28 @@ dt {
   pointer-events: auto;
 }
 .messages {
+  /* The GPUI timeline's spacing system (`chat/timeline_spacing.rs`). Gaps are visible gaps: ink
+     to ink, edge to edge. Each block pulls its layout edges onto its ink with negative margins
+     (--lead above, --tail below), so the flex gap is the visible gap. */
+  --timeline-block-gap: 40px;
+  --timeline-divider-gap: 13.5px;
+  --timeline-user-gap: 48px;
+  --timeline-grouped-user-gap: 4px;
+  --timeline-end-gap: 28px;
+  --timeline-start-gap: 16px;
+  /* Where a 14px / 22.75px text line paints in its line box (Inter sits its baseline 1px higher
+     than the native font), and a 24px work row in its row. */
+  --text-ink-top: 6px;
+  --text-ink-bottom: 6.5px;
+  --work-row-ink: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--timeline-block-gap);
   width: calc(100% - 96px);
   max-width: 736px;
   margin: auto;
-  padding: 16px 0;
-  padding-block-end: calc(16px + var(--chat-dock-height, 0px));
+  padding: var(--timeline-start-gap) 0;
+  padding-block-end: calc(var(--timeline-end-gap) + var(--chat-dock-height, 0px));
   font-size: 14px;
   line-height: 22.75px;
 }
@@ -396,6 +413,26 @@ dt {
   margin: 4px 0 12px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+/* Every block: a card or bubble paints to its edges. */
+.messages > *,
+.messages > p {
+  --lead: 0px;
+  --tail: 0px;
+  margin: calc(-1 * var(--lead)) 0 calc(-1 * var(--tail));
+}
+/* Text blocks start on a cap top and end on a baseline. */
+.messages > p,
+.messages > .assistant-reply {
+  --lead: var(--text-ink-top);
+  --tail: var(--text-ink-bottom);
+}
+/* A user message keeps its own gap on both sides, and a run of them stays together. */
+.messages > :is(.bubble, .user-message) {
+  margin-block: calc(var(--timeline-user-gap) - var(--timeline-block-gap));
+}
+.messages > :is(.bubble, .user-message) + :is(.bubble, .user-message) {
+  margin-block-start: calc(var(--timeline-grouped-user-gap) - var(--timeline-user-gap));
 }
 .speaker {
   font-weight: 650;
@@ -408,7 +445,7 @@ dt {
 .messages .bubble {
   width: fit-content;
   max-width: 80%;
-  margin: 0 0 12px auto;
+  margin-inline: auto 0;
   padding: 10px 16px 12px;
   border-radius: 14px;
   border-top: 1px solid var(--line);
@@ -500,7 +537,6 @@ dt {
 .task-receipts {
   display: grid;
   gap: 6px;
-  margin: 12px 0;
   max-width: 425px;
 }
 .task-receipts button {
@@ -544,6 +580,11 @@ dt {
   border-radius: var(--composer-radius);
   border: 1px solid var(--line);
   background: var(--raised);
+  /* GPUI composer_card_shadow: blur sigma 32 (CSS blur 64px), 4px up, 0.22 dark, 0.08 light. */
+  box-shadow: 0 -4px 64px rgb(0 0 0 / 0.22);
+}
+.desktop[data-theme="light"] .composer {
+  box-shadow: 0 -4px 64px rgb(0 0 0 / 0.08);
 }
 .composer textarea {
   display: block;
@@ -1090,8 +1131,7 @@ dt {
   position: relative;
 }
 .messages .assistant-reply {
-  margin: 0;
-  padding: 2px 4px;
+  padding: 0 4px;
 }
 .agent-line,
 .worked {
@@ -1123,11 +1163,27 @@ dt {
 .agent-line strong {
   font-weight: 500;
 }
-.worked {
-  height: 38px;
+.messages > .agent-line {
+  --lead: var(--work-row-ink);
+  --tail: var(--work-row-ink);
+}
+/* A "Worked for" header: the divider gap from its baseline to the line, and from the line to
+   what follows. */
+.messages > .worked {
+  --lead: var(--text-ink-top);
+  height: auto;
+  padding: 0 4px calc(var(--timeline-divider-gap) - var(--text-ink-bottom));
   border-bottom: 1px solid var(--line);
-  margin: 7px 0 13px;
+  margin-block-end: calc(var(--timeline-divider-gap) - var(--timeline-block-gap));
   font-size: 14px;
+  line-height: 22.75px;
+}
+/* The last block ends the end gap from its layout bottom. */
+.messages > :has(+ .timeline-end) {
+  margin-block-end: 0;
+}
+.messages > .timeline-end {
+  margin-block-start: calc(-1 * var(--timeline-block-gap));
 }
 .composer .tool[aria-label="Send message"] {
   width: 32px;

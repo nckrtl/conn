@@ -61,6 +61,8 @@ pub(crate) struct FakeServer {
     opened: AtomicUsize,
     /// `(thread, server tab)` of each registration, in order.
     registered: Mutex<Vec<(String, String)>>,
+    /// The environment each registration's binding named, in order.
+    environments: Mutex<Vec<String>>,
     closed: Mutex<Vec<String>>,
     reports: Mutex<Vec<PreviewReportStatusInput>>,
     responses: Mutex<Vec<PreviewAutomationResponse>>,
@@ -132,6 +134,10 @@ impl PreviewApi for FakeServer {
         })
     }
     fn register(&self, binding: DesktopTabBinding) -> ApiFuture<DesktopTabConnection> {
+        self.environments
+            .lock()
+            .unwrap()
+            .push(binding.environment_id.clone());
         let mut registered = self.registered.lock().unwrap();
         registered.push((binding.thread_id, binding.tab_id));
         done(DesktopTabConnection {
@@ -235,6 +241,61 @@ async fn a_new_tab_gets_a_record_and_registers() {
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(fx.server.opened.load(Ordering::SeqCst), 1);
     assert_eq!(fx.server.registrations().len(), 1);
+}
+
+/// A linked environment's thread hosts its tabs through that environment's own connection, under
+/// that environment's id, beside the primary's: an agent on a linked server reaches the tab.
+#[tokio::test(flavor = "multi_thread")]
+async fn each_environment_registers_its_threads_tabs_on_its_own_connection() {
+    let fx = Fixture::new();
+    let mut host = fx.host;
+    let primary = fx.server;
+    let linked = Arc::new(FakeServer::default());
+    let envs = vec![
+        EnvConnection {
+            environment: "env".to_owned(),
+            api: primary.clone(),
+            connection: None,
+            connected: true,
+        },
+        EnvConnection {
+            environment: "linked-env".to_owned(),
+            api: linked.clone(),
+            connection: None,
+            connected: true,
+        },
+    ];
+    let linked_tab = DesiredTab {
+        owner: PanelOwner::new("linked-env", "linked-thread"),
+        id: 2,
+        url: String::new(),
+        title: String::new(),
+    };
+    host.sync(
+        envs.clone(),
+        vec![Fixture::tab("thread-a", 1, ""), linked_tab.clone()],
+    );
+    eventually("both registrations", || {
+        primary.registrations().len() == 1 && linked.registrations().len() == 1
+    })
+    .await;
+    assert_eq!(primary.registrations()[0].0, "thread-a");
+    assert_eq!(*primary.environments.lock().unwrap(), ["env"]);
+    assert_eq!(linked.registrations()[0].0, "linked-thread");
+    assert_eq!(*linked.environments.lock().unwrap(), ["linked-env"]);
+    assert_eq!(linked.live_streams(), 1);
+    // A record names its tab only on its own environment: both servers number from 1.
+    assert_eq!(host.browser_tab_of("linked-env", "server-tab-1"), Some(2));
+    assert_eq!(host.browser_tab_of("env", "server-tab-1"), Some(1));
+    assert_eq!(host.browser_tab_of("linked-env", "server-tab-2"), None);
+
+    // The linked environment drops: its tab stops, the primary's stays registered.
+    host.sync(
+        envs[..1].to_vec(),
+        vec![Fixture::tab("thread-a", 1, ""), linked_tab],
+    );
+    eventually("the linked stream to end", || linked.live_streams() == 0).await;
+    assert_eq!(primary.live_streams(), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

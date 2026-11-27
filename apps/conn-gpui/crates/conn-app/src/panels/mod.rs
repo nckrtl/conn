@@ -26,10 +26,11 @@ pub(crate) mod linked_items;
 mod mcp;
 mod pull_request;
 mod tasks;
-mod terminal;
+pub(crate) mod terminal;
 pub(crate) mod terminal_demo;
 pub(crate) mod terminal_drawer;
 mod terminal_palette;
+pub(crate) mod terminal_target;
 mod tree;
 #[cfg(feature = "zed-files")]
 pub(crate) mod zed_preview;
@@ -48,7 +49,7 @@ use gpui_kit::{
 };
 
 use self::api::ApiPanel;
-use self::browser::{BrowserPanel, BrowserTabEvent};
+use self::browser::{BrowserPanel, BrowserTabEvent, Navigation};
 use self::color::to_hsla;
 use self::database::DatabasePanel;
 #[cfg(test)]
@@ -132,8 +133,9 @@ pub struct RightPanel {
     browsers: Vec<(BrowserTabId, Entity<BrowserPanel>)>,
     /// The browser tab that shows while `tab` is Browser.
     active_browser: Option<BrowserTabId>,
-    /// Addresses asked for before a tab's browser exists; it loads them when made.
-    pending_browser_urls: Vec<(BrowserTabId, String)>,
+    /// Addresses asked for before a tab's browser exists; it loads them when made, as the
+    /// navigation says (a restored address is not a visit).
+    pending_browser_urls: Vec<(BrowserTabId, String, Navigation)>,
     /// Live browsers by when they last showed, oldest first.
     browsers_by_use: Vec<BrowserTabId>,
     /// Titles of tabs whose browser was closed to stay under [`MAX_PARKED_BROWSERS`].
@@ -143,6 +145,10 @@ pub struct RightPanel {
     /// What a new browser tab starts with.
     connection: Option<Connection>,
     environment_id: Option<String>,
+    /// The browser history's project key, and the host its environment runs on. Every browser tab
+    /// reads and feeds the history under them.
+    history_project: Option<String>,
+    history_hostname: Option<String>,
     annotations: Option<(Vec<AnnotationRecord>, bool, bool)>,
     api: Entity<ApiPanel>,
     database: Entity<DatabasePanel>,
@@ -313,6 +319,8 @@ impl RightPanel {
             preview_handles: None,
             connection,
             environment_id: None,
+            history_project: None,
+            history_hostname: None,
             annotations: None,
             api,
             database,
@@ -336,11 +344,30 @@ impl RightPanel {
     /// Loads `url` in browser tab `id` (starting the CEF runtime on first use). A tab whose
     /// browser is not made yet loads it when it is.
     pub fn navigate_browser(&mut self, id: BrowserTabId, url: String, cx: &mut Context<'_, Self>) {
+        self.load_browser(id, url, Navigation::User, cx);
+    }
+
+    /// Loads the saved address of browser tab `id` at startup. Nothing is recorded in the history:
+    /// the address is where the page ended up, not something the user opened.
+    pub fn restore_browser(&mut self, id: BrowserTabId, url: String, cx: &mut Context<'_, Self>) {
+        self.load_browser(id, url, Navigation::Restore, cx);
+    }
+
+    fn load_browser(
+        &mut self,
+        id: BrowserTabId,
+        url: String,
+        source: Navigation,
+        cx: &mut Context<'_, Self>,
+    ) {
         match self.browser(id) {
-            Some(browser) => browser.update(cx, |b, cx| b.navigate(url, cx)),
+            Some(browser) => browser.update(cx, |b, cx| match source {
+                Navigation::User => b.navigate(url, cx),
+                Navigation::Restore => b.restore(url, cx),
+            }),
             None => {
-                self.pending_browser_urls.retain(|(tab, _)| *tab != id);
-                self.pending_browser_urls.push((id, url));
+                self.pending_browser_urls.retain(|(tab, ..)| *tab != id);
+                self.pending_browser_urls.push((id, url, source));
             }
         }
     }
@@ -380,10 +407,10 @@ impl RightPanel {
             None => self
                 .pending_browser_urls
                 .iter()
-                .find(|(tab, _)| *tab == id)
+                .find(|(tab, ..)| *tab == id)
                 .map_or_else(
                     || conn_state::browser_tab_title("", ""),
-                    |(_, url)| conn_state::browser_tab_title("", url),
+                    |(_, url, _)| conn_state::browser_tab_title("", url),
                 ),
         }
     }
@@ -434,6 +461,7 @@ impl RightPanel {
         .detach();
         let (project, root) = (self.project_id.clone(), self.workspace_root.clone());
         let environment = self.environment_id.clone();
+        let history = (self.history_project.clone(), self.history_hostname.clone());
         let annotations = self.annotations.clone();
         let host_handle = self
             .preview_handles
@@ -442,8 +470,8 @@ impl RightPanel {
         let pending = self
             .pending_browser_urls
             .iter()
-            .position(|(tab, _)| *tab == id)
-            .map(|index| self.pending_browser_urls.remove(index).1);
+            .position(|(tab, ..)| *tab == id)
+            .map(|index| self.pending_browser_urls.remove(index));
         browser.update(cx, |b, cx| {
             if let Some(handle) = host_handle {
                 b.set_host_handle(handle);
@@ -453,11 +481,15 @@ impl RightPanel {
             if let Some(environment) = environment {
                 b.set_environment(environment, cx);
             }
+            // Before the pending address: opening it records the visit under the project.
+            b.set_history_context(history.0, history.1, cx);
             if let Some((records, watching, ready)) = annotations {
                 b.sync_annotations(records, watching, ready, cx);
             }
-            if let Some(url) = pending {
-                b.navigate(url, cx);
+            match pending {
+                Some((_, url, Navigation::User)) => b.navigate(url, cx),
+                Some((_, url, Navigation::Restore)) => b.restore(url, cx),
+                None => {}
             }
         });
         self.parked_titles.retain(|(tab, _)| *tab != id);
@@ -497,8 +529,10 @@ impl RightPanel {
             let (url, title) = (page.page_url(), page.tab_title());
             // Dropping the last handle releases its frame and closes its Chromium view.
             drop(browser);
-            self.pending_browser_urls.retain(|(tab, _)| *tab != id);
-            self.pending_browser_urls.push((id, url));
+            self.pending_browser_urls.retain(|(tab, ..)| *tab != id);
+            // `url` is where the page ended up, so it comes back as a restore, never a visit.
+            self.pending_browser_urls
+                .push((id, url, Navigation::Restore));
             self.parked_titles.push((id, title));
         }
     }
@@ -518,7 +552,7 @@ impl RightPanel {
             return;
         };
         self.browsers.retain(|(id, _)| *id != closed);
-        self.pending_browser_urls.retain(|(id, _)| *id != closed);
+        self.pending_browser_urls.retain(|(id, ..)| *id != closed);
         self.browsers_by_use.retain(|id| *id != closed);
         self.parked_titles.retain(|(id, _)| *id != closed);
         if self.active_browser == Some(closed) {
@@ -590,8 +624,8 @@ impl RightPanel {
             None => self
                 .pending_browser_urls
                 .iter()
-                .find(|(tab, _)| *tab == id)
-                .map(|(_, url)| url.clone())
+                .find(|(tab, ..)| *tab == id)
+                .map(|(_, url, _)| url.clone())
                 .unwrap_or_default(),
         };
         (url, self.browser_tab_title(id, cx))
@@ -690,6 +724,23 @@ impl RightPanel {
             .update(cx, |panel, cx| panel.queue_sql(owner, sql, cx))
     }
 
+    /// Points the Terminal at the shown thread: its machine, folder and the connection of its
+    /// environment. The thread's own terminal session shows; other threads' sessions stay put.
+    pub fn set_terminal_target(
+        &mut self,
+        target: terminal_target::TerminalTarget,
+        connection: Option<Connection>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.terminal
+            .update(cx, |p, cx| p.set_target(target, connection, cx));
+    }
+
+    /// The machine the shown thread's terminal runs on, for the tab title (`Terminal · agent`).
+    pub fn terminal_machine(&self, cx: &App) -> Option<String> {
+        self.terminal.read(cx).machine_label().map(str::to_owned)
+    }
+
     /// The shown thread's panel owner, for what waits per thread (the Database query). Set it
     /// before [`Self::set_context`], so a waiting query never lands in another project.
     pub fn set_owner(&mut self, owner: Option<conn_state::PanelOwner>, cx: &mut Context<'_, Self>) {
@@ -720,10 +771,15 @@ impl RightPanel {
             None => self
                 .pending_browser_urls
                 .iter()
-                .find(|(tab, _)| *tab == id)
-                .map(|(_, url)| url.clone())?,
+                .find(|(tab, ..)| *tab == id)
+                .map(|(_, url, _)| url.clone())?,
         };
         (!url.is_empty()).then_some(url)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn files_for_test(&self) -> Entity<FilesPanel> {
+        self.files.clone()
     }
 
     #[cfg(test)]
@@ -865,6 +921,31 @@ impl RightPanel {
         self.environment_id = Some(environment_id);
     }
 
+    /// Names the project the browser history is kept under (the sidebar's project grouping: git
+    /// clones share one key) and the host the environment runs on. Every browser tab, now and
+    /// later, reads and feeds the history under them.
+    pub fn set_browser_history_context(
+        &mut self,
+        project: Option<String>,
+        hostname: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.history_project == project && self.history_hostname == hostname {
+            return;
+        }
+        self.history_project = project;
+        self.history_hostname = hostname;
+        for (_, browser) in &self.browsers {
+            browser.update(cx, |b, cx| {
+                b.set_history_context(
+                    self.history_project.clone(),
+                    self.history_hostname.clone(),
+                    cx,
+                );
+            });
+        }
+    }
+
     /// Updates the active project, workspace root, and thread context.
     pub fn set_context(
         &mut self,
@@ -886,8 +967,6 @@ impl RightPanel {
                 .update(cx, |p, cx| p.set_workspace_root(workspace_root.clone(), cx));
             self.diff
                 .update(cx, |p, cx| p.set_workspace_root(workspace_root.clone(), cx));
-            self.terminal
-                .update(cx, |p, cx| p.set_workspace_root(workspace_root, cx));
         }
         if self.thread_id != thread_id {
             self.files
@@ -1093,6 +1172,31 @@ impl RightPanel {
             .update(cx, |files, cx| files.reveal_lines(path, lines, excerpt, cx))
     }
 
+    /// Shows the Files tree with the workspace folder `folder` expanded and selected (a link to
+    /// a folder was clicked).
+    pub fn reveal_folder(&mut self, folder: String, cx: &mut Context<'_, Self>) {
+        self.files
+            .update(cx, |files, cx| files.reveal_folder(folder, cx));
+    }
+
+    /// Gives the Files panel the connection of the environment the shown thread lives on, so a
+    /// linked thread reads its files from its own machine. The same connection changes nothing.
+    pub fn set_files_connection(
+        &mut self,
+        connection: Option<Connection>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let same = match (self.files.read(cx).connection(), &connection) {
+            (Some(current), Some(next)) => current.same_connection(next),
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.files
+                .update(cx, |files, cx| files.set_connection(connection, cx));
+        }
+    }
+
     /// Shows the file at `path` (project-relative) as its own surface, as Conn's `file` tab.
     pub fn set_file(&mut self, path: String, cx: &mut Context<'_, Self>) {
         self.tabs.activate(PanelSurface::File(path.clone()));
@@ -1251,6 +1355,7 @@ impl RightPanel {
 
         let active = self.displayed_surface(self.surface(), self.tabs.tabs(), cx);
         let browser_titles = self.browser_titles(self.tabs.browser_ids(), cx);
+        let terminal_machine = self.terminal_machine(cx);
         render_panel_header(
             PanelHeaderProps {
                 open_tabs: self.tabs.tabs(),
@@ -1262,6 +1367,7 @@ impl RightPanel {
                 add_menu_open: self.add_menu_open,
                 available_tabs: &RightPanelTab::MENU_ORDER,
                 has_project: true,
+                terminal_machine: terminal_machine.as_deref(),
                 tokens: &self.tokens,
             },
             callbacks,
@@ -1272,6 +1378,8 @@ impl RightPanel {
 
 impl Render for RightPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        #[cfg(test)]
+        crate::render_stats::rendered(|c| &mut c.right_panel);
         if self.tab == RightPanelTab::Terminal {
             self.terminal.update(cx, |p, cx| p.ensure_started(cx));
         }

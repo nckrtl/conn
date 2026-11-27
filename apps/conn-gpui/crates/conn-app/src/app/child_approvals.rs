@@ -23,6 +23,18 @@ pub(super) struct ChildApprovals {
     errors: HashMap<String, String>,
 }
 
+impl ChildApprovals {
+    /// Whether a child approval has `thread_id` open.
+    pub(super) fn holds(&self, thread_id: &str) -> bool {
+        self.open.contains_key(thread_id)
+    }
+
+    /// The children open for their approvals.
+    pub(super) fn open_children(&self) -> impl Iterator<Item = &str> {
+        self.open.keys().map(String::as_str)
+    }
+}
+
 /// On a new subscription, the cached detail can still describe a previous approval.
 /// Once the detail has the request named by the shell, keep showing the live queue
 /// while the two streams deliver later requests at different times.
@@ -79,8 +91,7 @@ impl ConnApp {
         for id in add {
             self.child_approvals.open.insert(id, false);
         }
-        let open: Vec<String> = self.child_approvals.open.keys().cloned().collect();
-        self.sync_open_threads(&open, cx);
+        self.sync_open_threads(cx);
 
         let shown: HashSet<String> = children
             .iter()

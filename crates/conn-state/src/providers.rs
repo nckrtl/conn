@@ -1925,6 +1925,7 @@ pub struct ServerConfigState {
     settings: Option<conn_contract::ServerSettings>,
     catalog: ModelCatalog,
     scratch_workspace_root: Option<String>,
+    environment_id: Option<String>,
     model_catalog_refresh: bool,
     loaded: bool,
 }
@@ -2010,6 +2011,13 @@ impl ServerConfigState {
         self.scratch_workspace_root.as_deref()
     }
 
+    /// `ServerConfig.environment.environmentId`: the id the server itself uses, in the thread
+    /// links it writes. An Orbit target id can differ from it.
+    #[must_use]
+    pub fn environment_id(&self) -> Option<&str> {
+        self.environment_id.as_deref().filter(|id| !id.is_empty())
+    }
+
     /// `environment.capabilities.modelCatalogRefresh`: the server honours `modelCatalogOnly`.
     /// An older one drops the field and would probe every provider.
     #[must_use]
@@ -2047,6 +2055,7 @@ impl ServerConfigState {
             || scratch != self.scratch_workspace_root
             || refresh != self.model_catalog_refresh;
         self.scratch_workspace_root = scratch;
+        self.environment_id = Some(config.environment.environment_id.clone());
         self.model_catalog_refresh = refresh;
         let settings_changed = self.settings.as_ref() != Some(&config.settings);
         self.settings = Some(config.settings.clone());
@@ -2206,6 +2215,11 @@ mod live_tests {
             "but the lookup still knows it"
         );
         assert!(state.scratch_workspace_root().is_some());
+        assert_eq!(
+            state.environment_id(),
+            Some("1a28c0a2-29b1-414d-9e2d-be55ecd752fd"),
+            "the descriptor's own id, which the server's thread links carry"
+        );
     }
 
     #[test]

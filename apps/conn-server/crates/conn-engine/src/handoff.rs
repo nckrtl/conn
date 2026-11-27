@@ -54,7 +54,11 @@ fn attachment_allowance(attachments: &Value) -> u64 {
     })
 }
 
-/// `handoffBudget`: the tokens the history may take. `usage` is the provider thread's
+fn history_byte_cap(tokens: u64) -> u64 {
+    tokens.saturating_mul(4).min(BYTE_CAP)
+}
+
+/// `handoffBudget`: the bytes the history may take. `usage` is the provider thread's
 /// `contextUsage`; `native_estimate` stands in when it has no `usedTokens`.
 pub(crate) fn budget(
     token_cap: u64,
@@ -75,7 +79,7 @@ pub(crate) fn budget(
     let current = json_bytes(&json!(user_text)) as u64 + attachment_allowance(attachments);
     let reserve = ceil_div(window, 4).max(16_000).min(ceil_div(window, 2));
     let room = window as i128 - native as i128 - current as i128 - reserve as i128;
-    room.clamp(0, token_cap.min(BYTE_CAP) as i128) as u64
+    room.clamp(0, history_byte_cap(token_cap) as i128) as u64
 }
 
 /// `historicalMessage`: the turn item as a history message, or `None` for kinds history skips.
@@ -457,7 +461,13 @@ pub(crate) struct ForkDelta<'a> {
 pub(crate) fn prepare_fork_delta(input: &ForkDelta<'_>) -> Value {
     let coverage = coverage(input.source_thread_id, &input.covered, input.items);
     let messages: Vec<Value> = input.items.iter().filter_map(historical_message).collect();
-    let selected = select_history(&messages, &coverage, 0, &[], input.token_cap);
+    let selected = select_history(
+        &messages,
+        &coverage,
+        0,
+        &[],
+        history_byte_cap(input.token_cap),
+    );
     json!({
         "id": input.id,
         "transferId": input.transfer_id,
@@ -529,7 +539,13 @@ pub(crate) fn prepare_provider_handoff(input: &ProviderHandoff<'_>) -> Value {
             Some(message)
         })
         .collect();
-    let selected = select_history(&messages, &coverage, 0, &[], input.token_cap);
+    let selected = select_history(
+        &messages,
+        &coverage,
+        0,
+        &[],
+        history_byte_cap(input.token_cap),
+    );
     json!({
         "id": input.id,
         "transferId": input.transfer_id,

@@ -137,6 +137,8 @@ struct RunningCommand {
 /// One registered turn (`ActiveCodexTurnContext`): a root turn the engine started, or a
 /// subagent's turn on its child thread (`subagent` set; no run and no attempt).
 struct Turn {
+    prompt_pending: bool,
+    prompt_dropped: bool,
     thread_id: String,
     run_id: Option<String>,
     run_ordinal: u32,
@@ -210,6 +212,7 @@ struct UsageState {
 /// The parts of a turn input the mapper keeps until the native turn id is known.
 #[derive(Clone)]
 struct PendingTurn {
+    has_prompt: bool,
     thread_id: String,
     run_id: String,
     run_ordinal: u32,
@@ -506,6 +509,7 @@ impl<E: Env> Mapper<E> {
         self.pending_turns.insert(
             native_thread_id.to_owned(),
             PendingTurn {
+                has_prompt: false,
                 thread_id: input.thread_id.as_str().to_owned(),
                 run_id: input.run_id.as_str().to_owned(),
                 run_ordinal: input.run_ordinal,
@@ -522,6 +526,12 @@ impl<E: Env> Mapper<E> {
                     .to_owned(),
             },
         );
+    }
+
+    pub(crate) fn mark_prompt_sent(&mut self, native: &str) {
+        if let Some(pending) = self.pending_turns.get_mut(native) {
+            pending.has_prompt = true;
+        }
     }
 
     /// `turn/start` failed: forget the pending input.
@@ -704,6 +714,8 @@ impl<E: Env> Mapper<E> {
     ) -> Turn {
         let provider_turn_id = ids::provider_turn_id(DRIVER, native_turn_id);
         Turn {
+            prompt_pending: p.has_prompt,
+            prompt_dropped: false,
             thread_id: p.thread_id,
             run_id: Some(p.run_id),
             run_ordinal: p.run_ordinal,
@@ -1442,6 +1454,7 @@ impl<E: Env> Mapper<E> {
                 return;
             }
             "userMessage" => {
+                turn.prompt_pending = false;
                 self.child_message(turn_id, item, Some(started), out);
                 return;
             }
@@ -1512,6 +1525,11 @@ impl<E: Env> Mapper<E> {
         let item = &p["item"];
         let id = item["id"].as_str().unwrap_or_default().to_owned();
         let kind = item["type"].as_str().unwrap_or_default();
+        if kind == "userMessage"
+            && let Some(turn) = self.turns.get_mut(turn_id)
+        {
+            turn.prompt_pending = false;
+        }
         if kind == "subAgentActivity" || kind == "collabAgentToolCall" {
             self.subagent_item_completed(turn_id, item, out);
             return;
@@ -2066,6 +2084,14 @@ impl<E: Env> Mapper<E> {
             Some("completed") => "completed",
             _ => "running",
         };
+        if status == "interrupted"
+            && let Some(turn) = self.turns.get_mut(&native)
+        {
+            turn.prompt_dropped = turn.prompt_pending
+                && !p["turn"]["items"]
+                    .as_array()
+                    .is_some_and(|items| items.iter().any(|item| item["type"] == "userMessage"));
+        }
         if status == "completed" && self.interrupting.contains(&native) {
             status = "interrupted";
         }
@@ -2134,6 +2160,9 @@ impl<E: Env> Mapper<E> {
             model.as_deref(),
         );
         let mut provider_turn = provider_turn_json(&turn, status, Some(&completed_at));
+        if turn.prompt_dropped {
+            provider_turn["promptDropped"] = json!(true);
+        }
         provider_turn["turnTokenUsage"] = usage;
         if let Some(model) = &model {
             provider_turn["model"] = json!(model);

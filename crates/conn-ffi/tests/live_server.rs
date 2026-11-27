@@ -13,11 +13,68 @@ use std::time::{Duration, Instant};
 use conn_client::{Connection, Credential, ServerConfig};
 use conn_ffi::{
     ConnCore, CoreListener, FfiComposerFile, FfiComposerTarget, FfiConnectionStatus, FfiCredential,
-    FfiSavedSession, FfiSendMode, FfiShellSnapshot, FfiThreadSnapshot, FfiTimelineEntry,
+    FfiEncodedImage, FfiImageCodec, FfiImageInfo, FfiSavedSession, FfiSendMode, FfiShellSnapshot,
+    FfiThreadSnapshot, FfiTimelineEntry, FfiUploadListener, FfiUploadStatus,
 };
 use serde_json::json;
 
 struct ChildGuard(Child);
+
+#[derive(Default)]
+struct UploadLog {
+    latest: Mutex<Option<Option<FfiUploadStatus>>>,
+    notify: Condvar,
+}
+
+impl UploadLog {
+    fn wait_for(&self, pred: impl Fn(Option<&FfiUploadStatus>) -> bool) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        let mut latest = self.latest.lock().map_err(|_| "upload log poisoned")?;
+        loop {
+            if let Some(status) = latest.as_ref()
+                && pred(status.as_ref())
+            {
+                *latest = None;
+                return Ok(());
+            }
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| format!("timed out; last upload status {latest:?}"))?;
+            latest = self
+                .notify
+                .wait_timeout(latest, remaining)
+                .map_err(|_| "upload log poisoned")?
+                .0;
+        }
+    }
+}
+
+impl FfiUploadListener for UploadLog {
+    fn on_upload(&self, _id: String, status: Option<FfiUploadStatus>) {
+        if let Ok(mut latest) = self.latest.lock() {
+            *latest = Some(status);
+            self.notify.notify_all();
+        }
+    }
+}
+
+struct NoCodec;
+
+impl FfiImageCodec for NoCodec {
+    fn inspect(&self, _: Vec<u8>) -> Option<FfiImageInfo> {
+        None
+    }
+    fn encode(
+        &self,
+        _: Vec<u8>,
+        _: u32,
+        _: u32,
+        _: Option<f32>,
+        _: bool,
+    ) -> Option<FfiEncodedImage> {
+        None
+    }
+}
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -364,6 +421,7 @@ fn connects_with_pairing_code_receives_shell_and_opens_thread()
     let stage = tempfile::tempdir()?;
     let path = stage.path().join("draft-file");
     let file = |name: &str, mime: &str| FfiComposerFile {
+        id: name.into(),
         name: name.into(),
         mime_type: mime.into(),
         path: path.to_string_lossy().into_owned(),
@@ -404,7 +462,8 @@ fn connects_with_pairing_code_receives_shell_and_opens_thread()
                     _ => None,
                 })
                 .flatten()
-                .filter(|a| a.name == name)
+                // The local pending row shows first; the check reads the server's copy.
+                .filter(|a| a.name == name && !a.id.starts_with("pending:"))
                 .cloned()
                 .collect::<Vec<_>>()
         };
@@ -446,6 +505,43 @@ fn connects_with_pairing_code_receives_shell_and_opens_thread()
         )?;
     }
     check("screen.gif", "image/gif", true, image)?;
+
+    // A draft file uploads when it is attached; a failed one retries; sending only claims it.
+    let uploads = Arc::new(UploadLog::default());
+    core.set_upload_handlers(uploads.clone(), Arc::new(NoCodec));
+    let early = stage.path().join("early.gif");
+    let attached = FfiComposerFile {
+        id: "early".into(),
+        path: early.to_string_lossy().into_owned(),
+        name: "early.gif".into(),
+        mime_type: "image/gif".into(),
+    };
+    core.attach_upload(attached.clone());
+    uploads.wait_for(|s| matches!(s, Some(FfiUploadStatus::Failed { .. })))?;
+    std::fs::write(&early, image)?;
+    core.retry_upload("early".into());
+    uploads.wait_for(|s| s == Some(&FfiUploadStatus::Ready))?;
+    assert_eq!(
+        core.upload_status("early".into()),
+        Some(FfiUploadStatus::Ready)
+    );
+    let sent_key = conn_client::commands::new_thread_id();
+    futures::executor::block_on(core.submit_composer(
+        reply(),
+        sent_key,
+        "Early".into(),
+        vec![attached.clone()],
+    ))?;
+    check("early.gif", "image/gif", true, image)?;
+    assert_eq!(
+        core.upload_status("early".into()),
+        None,
+        "a sent upload is forgotten"
+    );
+    core.attach_upload(attached);
+    uploads.wait_for(|s| s == Some(&FfiUploadStatus::Ready))?;
+    core.drop_upload("early".into());
+    uploads.wait_for(|s| s.is_none())?;
     futures::executor::block_on(core.stop_thread(launched_id.clone()))?;
     core.close_thread(launched_id);
 

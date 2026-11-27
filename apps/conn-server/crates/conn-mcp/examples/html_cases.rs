@@ -77,7 +77,12 @@ fn start_desktop(
         .to_owned();
     let binding = json!({"environmentId":"html-parity","threadId":thread,"tabId":tab,"deviceName":"Parity Mac","snapshot":snapshot});
     let connection = preview
-        .desktop_register("desktop-session", "html-parity", &binding)
+        .desktop_register(
+            "desktop-session",
+            "html-parity",
+            &binding,
+            conn_preview::relay::SecretAccess::Allowed,
+        )
         .map_err(|reason| format!("register: {reason}"))?;
     let mut feed = preview
         .desktop_requests("desktop-session", &connection)

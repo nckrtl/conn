@@ -13,6 +13,7 @@
 use std::time::Instant;
 
 use conn_contract::PullRequestState;
+use conn_state::providers::ModelCatalog;
 use conn_state::{ProjectShell, ThreadShell};
 use conn_theme::Tokens;
 use gpui_kit::{
@@ -24,11 +25,11 @@ use gpui_kit::{
 use crate::a11y::ConnA11yExt as _;
 use crate::app::ConnApp;
 use crate::icons;
+use crate::sidebar::ThreadProject;
 use crate::sidebar::hover_card_state::{
     COLLISION_PADDING_PX, Entered, HoverError, HoverPullRequest, OPEN_DELAY, RowRect, RowRectCell,
     card_height, card_origin, fitting_pr_lines, hover_card_model,
 };
-use crate::sidebar::render_project_favicon;
 use crate::sidebar::thread_list::middle_truncate;
 use crate::theme::{MONO_FONT, hsla, hsla_alpha};
 
@@ -66,14 +67,21 @@ impl ConnApp {
             return;
         }
         match self.thread_hover.enter(thread_id, now) {
-            Entered::Shown => cx.notify(),
+            Entered::Shown => {
+                cx.notify();
+                let generation = self.thread_hover.generation();
+                self.prefetch_after_dwell(thread_id, generation, cx);
+            }
             Entered::Unchanged => {}
             Entered::Wait(generation) => {
+                let thread_id = thread_id.to_owned();
                 cx.spawn(async move |this, cx| {
                     cx.background_executor().timer(OPEN_DELAY).await;
                     let _ = this.update(cx, |app, cx| {
                         if app.thread_hover.elapse(generation) {
                             cx.notify();
+                            // The pointer rested for the open delay: warm the thread.
+                            app.prefetch_hovered_thread(&thread_id, cx);
                         }
                     });
                 })
@@ -177,12 +185,17 @@ fn pull_request_line(
 }
 
 /// Renders the measuring canvas and, once the row has been measured, the card level with it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "renders the card from the thread row's borrowed project, environment, and catalog"
+)]
 #[must_use]
 pub(crate) fn render_thread_hover_card(
     thread: &ThreadShell,
     project: Option<&ProjectShell>,
     environment_label: Option<&str>,
     environment_icon: &'static str,
+    catalog: &ModelCatalog,
     rect: &RowRectCell,
     app: WeakEntity<ConnApp>,
     tokens: &Tokens,
@@ -218,7 +231,7 @@ pub(crate) fn render_thread_hover_card(
     let Some(row) = rect.get() else {
         return wrapper.into_any_element();
     };
-    let mut model = hover_card_model(thread, project, environment_label);
+    let mut model = hover_card_model(thread, project, environment_label, catalog);
     model.pull_requests.truncate(fitting_pr_lines(&model, &row));
     let (card_x, card_y) = card_origin(&row, card_height(&model, model.pull_requests.len()));
     let muted = hsla(tokens.muted_foreground);
@@ -234,9 +247,11 @@ pub(crate) fn render_thread_hover_card(
         .line_height(px(UI_LINE_PX))
         .text_color(muted);
 
-    if let Some(name) = &model.project {
-        let mut row = div()
+    let name = &model.project;
+    rows = rows.child(
+        div()
             .id("hover-card-project")
+            .test_support()
             .a11y_group(
                 "sidebar.thread-hover-card.project",
                 format!("Project {name}"),
@@ -245,20 +260,16 @@ pub(crate) fn render_thread_hover_card(
             .flex_row()
             .items_center()
             .gap(px(8.0))
-            .min_w_0();
-        if let Some(project) = project {
-            row = row.child(render_project_favicon(project, ICON_PX, tokens));
-        }
-        rows = rows.child(
-            row.child(
+            .min_w_0()
+            .child(ThreadProject::of(thread, project).favicon(ICON_PX, tokens))
+            .child(
                 div()
                     .min_w_0()
                     .truncate()
                     .text_color(text)
                     .child(name.clone()),
             ),
-        );
-    }
+    );
     if let Some(label) = &model.environment {
         rows = rows.child(detail_row(
             "environment",

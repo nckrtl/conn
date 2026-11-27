@@ -6,6 +6,11 @@
 //! Decoding is forgiving the way Conn's is: a list row off the contract hides that task, not the
 //! page; an unknown subtask or agent literal degrades that item to `Unknown`; an insights number
 //! Orbit leaves out or changes becomes `None` (a dash), never zero.
+//!
+//! A task detail read is forgiving the same way. An optional object, list or number that is null,
+//! missing or of an unknown literal falls back to a neutral value (see [`lenient_enum`] and
+//! [`null_default`]); only a field the page cannot do without fails the read, and the error names
+//! it by path (`execution.implementer_mode`).
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -82,10 +87,14 @@ pub struct TaskAttention {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
 pub struct TaskMetrics {
     /// Wall clock across every attempt and wait, up to now while it runs.
+    #[serde(default, deserialize_with = "lenient_number")]
     pub duration_ms: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_number")]
     pub tokens: Option<f64>,
     /// Task: the branch's diff against the default branch at the last report. Subtask: always `None`.
+    #[serde(default, deserialize_with = "lenient_number")]
     pub lines_added: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_number")]
     pub lines_deleted: Option<f64>,
 }
 
@@ -94,6 +103,7 @@ pub struct TaskProject {
     pub id: i64,
     pub slug: String,
     pub name: String,
+    #[serde(default)]
     pub code: Option<String>,
 }
 
@@ -116,10 +126,13 @@ pub struct TaskWorkspace {
     pub name: String,
     /// The Instance status; `removing` and `removed` mean the copy is disposed.
     pub status: String,
+    #[serde(default)]
     pub power_state: Option<PowerState>,
     pub node: Option<TaskNode>,
+    #[serde(default)]
     pub branch: Option<String>,
     /// `None` when the copy has no registered server, or the caller has no access to its Node.
+    #[serde(default)]
     pub conn_environment_id: Option<String>,
 }
 
@@ -135,10 +148,12 @@ pub enum PullRequestState {
 pub struct TaskPullRequest {
     pub number: i64,
     pub url: String,
+    #[serde(default)]
     pub state: Option<PullRequestState>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SubtaskCounts {
     pub total: i64,
     pub todo: i64,
@@ -154,14 +169,21 @@ pub struct TaskSummary {
     pub id: i64,
     pub title: String,
     pub status: TaskStatus,
+    #[serde(default)]
     pub attention: Option<TaskAttention>,
     pub project: TaskProject,
     /// `None` before the task starts, or after its copy was removed.
+    #[serde(default)]
     pub workspace: Option<TaskWorkspace>,
+    #[serde(default)]
     pub pull_request: Option<TaskPullRequest>,
+    #[serde(default, deserialize_with = "null_default")]
     pub subtask_counts: SubtaskCounts,
+    #[serde(default, deserialize_with = "null_default")]
     pub created_at: String,
+    #[serde(default, deserialize_with = "null_default")]
     pub updated_at: String,
+    #[serde(default)]
     pub last_activity_at: Option<String>,
 }
 
@@ -194,12 +216,16 @@ struct RawSubtask {
     id: i64,
     position: i64,
     title: String,
+    #[serde(default, deserialize_with = "null_default")]
     brief: String,
+    #[serde(default, deserialize_with = "null_default")]
     deliverables: Vec<Deliverable>,
     status: SubtaskStatus,
     #[serde(default)]
     attention: Value,
+    #[serde(default)]
     current_implementer_agent_id: Option<i64>,
+    #[serde(default, deserialize_with = "null_default")]
     metrics: TaskMetrics,
 }
 
@@ -263,21 +289,40 @@ pub struct TaskAgent {
     /// Orbit's agent-thread record id. Never a Conn thread id.
     pub id: i64,
     pub role: AgentRole,
+    #[serde(default, deserialize_with = "null_default")]
     pub subtask_ids: Vec<i64>,
     /// False for earlier attempts.
+    #[serde(default, deserialize_with = "null_default")]
     pub current: bool,
     /// Counts per role and subtask, from 1.
+    #[serde(default = "first_attempt", deserialize_with = "attempt")]
     pub attempt: i64,
+    #[serde(default)]
     pub provider: Option<String>,
+    #[serde(default)]
     pub model: Option<String>,
+    #[serde(default)]
     pub effort: Option<String>,
     /// `None` before Orbit's first observation.
+    #[serde(default)]
     pub state: Option<AgentState>,
+    #[serde(default, deserialize_with = "null_default")]
     pub needs_input: bool,
+    #[serde(default, deserialize_with = "null_default")]
     pub created_at: String,
+    #[serde(default)]
     pub observed_at: Option<String>,
     /// The only link to a Conn thread. `None` when the workspace is gone or not reachable.
+    #[serde(default)]
     pub conn: Option<ConversationRef>,
+}
+
+fn first_attempt() -> i64 {
+    1
+}
+
+fn attempt<'de, D: Deserializer<'de>>(deserializer: D) -> Result<i64, D::Error> {
+    Ok(Option::<i64>::deserialize(deserializer)?.unwrap_or(1))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -290,11 +335,34 @@ pub enum ImplementerMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskExecution {
+    /// A missing, null or unknown mode reads as `Task`: one agent for the whole task.
+    #[serde(default = "default_mode", deserialize_with = "implementer_mode")]
     pub implementer_mode: ImplementerMode,
 }
 
+impl Default for TaskExecution {
+    fn default() -> Self {
+        Self {
+            implementer_mode: default_mode(),
+        }
+    }
+}
+
+fn default_mode() -> ImplementerMode {
+    ImplementerMode::Task
+}
+
+fn implementer_mode<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<ImplementerMode, D::Error> {
+    Ok(lenient_enum(deserializer)?.unwrap_or_else(default_mode))
+}
+
 /// `GET /conn/tasks/{task}`: the row plus brief, subtasks (in position order) and agents.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Serialized flat; read through [`DetailBody`] and [`TaskSummary`] one after the other, so a
+/// failure keeps its field path (`#[serde(flatten)]` would lose it).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct TaskDetail {
     #[serde(flatten)]
     pub summary: TaskSummary,
@@ -304,6 +372,84 @@ pub struct TaskDetail {
     pub subtasks: Vec<Subtask>,
     /// Implementers and reviewers, oldest first, current and earlier attempts.
     pub agents: Vec<TaskAgent>,
+}
+
+/// The fields of a task detail beyond its list row.
+#[derive(Deserialize)]
+struct DetailBody {
+    #[serde(default, deserialize_with = "null_default")]
+    brief: String,
+    #[serde(default, deserialize_with = "null_default")]
+    execution: TaskExecution,
+    #[serde(default, deserialize_with = "null_default")]
+    metrics: TaskMetrics,
+    #[serde(default, deserialize_with = "null_default")]
+    subtasks: Vec<Subtask>,
+    /// An agent row off the contract is left out, not the page.
+    #[serde(default, deserialize_with = "lenient_rows")]
+    agents: Vec<TaskAgent>,
+}
+
+impl<'de> Deserialize<'de> for TaskDetail {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = Value::deserialize(deserializer)?;
+        decode_detail(&value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// The task row of a detail read, with the literals this version does not name set aside: an
+/// unknown attention, pull request state or power state reads as absent. A list row with one of
+/// them is left out instead; the page it opens still shows the task.
+fn normalise_detail(value: &Value) -> Value {
+    let mut value = value.clone();
+    let unknown = |value: &Value, key: &str, check: fn(Value) -> bool| {
+        value
+            .get(key)
+            .is_some_and(|field| !field.is_null() && !check(field.clone()))
+    };
+    if unknown(&value, "attention", |v| {
+        serde_json::from_value::<TaskAttention>(v).is_ok()
+    }) {
+        value["attention"] = Value::Null;
+    }
+    if let Some(pull_request) = value.get_mut("pull_request")
+        && unknown(pull_request, "state", |v| {
+            serde_json::from_value::<PullRequestState>(v).is_ok()
+        })
+    {
+        pull_request["state"] = Value::Null;
+    }
+    if let Some(workspace) = value.get_mut("workspace")
+        && unknown(workspace, "power_state", |v| {
+            serde_json::from_value::<PowerState>(v).is_ok()
+        })
+    {
+        workspace["power_state"] = Value::Null;
+    }
+    value
+}
+
+/// Decodes a task object, and names the failing field by its path from the object.
+fn decode_detail(value: &Value) -> Result<TaskDetail, String> {
+    let value = &normalise_detail(value);
+    let failure = |error: serde_path_to_error::Error<serde_json::Error>| {
+        let path = error.path().to_string();
+        if path == "." {
+            error.inner().to_string()
+        } else {
+            format!("{path}: {}", error.inner())
+        }
+    };
+    let summary: TaskSummary = serde_path_to_error::deserialize(value).map_err(failure)?;
+    let body: DetailBody = serde_path_to_error::deserialize(value).map_err(failure)?;
+    Ok(TaskDetail {
+        summary,
+        brief: body.brief,
+        execution: body.execution,
+        metrics: body.metrics,
+        subtasks: body.subtasks,
+        agents: body.agents,
+    })
 }
 
 impl TaskDetail {
@@ -365,6 +511,35 @@ fn lenient_number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<f
         .as_ref()
         .and_then(Value::as_f64)
         .filter(|n| n.is_finite()))
+}
+
+/// A field that may be null or missing reads as its default.
+fn null_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// An enum literal this contract version does not name reads as `None`, as does null.
+fn lenient_enum<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| serde_json::from_value(value).ok()))
+}
+
+/// A list of rows decoded one by one: a row off the contract is left out, not the whole list.
+fn lenient_rows<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let rows = Option::<Vec<Value>>::deserialize(deserializer)?.unwrap_or_default();
+    Ok(each_row(&rows))
 }
 
 /// One period of Orbit's task insights. Every number is `None` when Orbit does not report it;
@@ -527,9 +702,18 @@ pub fn decode_tasks_page(json: &Value) -> Option<TasksPage> {
 
 /// `{ data: <task> }` for one task, with subtasks in position order.
 pub fn decode_task_detail(json: &Value) -> Option<TaskDetail> {
-    let mut detail: TaskDetail = serde_json::from_value(json.get("data")?.clone()).ok()?;
+    try_decode_task_detail(json).ok()
+}
+
+/// Like [`decode_task_detail`], and the error names the failing field by path, such as
+/// `data.execution.implementer_mode: unknown variant ...`.
+pub fn try_decode_task_detail(json: &Value) -> Result<TaskDetail, String> {
+    let data = json
+        .get("data")
+        .ok_or_else(|| "data: missing field".to_owned())?;
+    let mut detail = decode_detail(data).map_err(|error| format!("data.{error}"))?;
     detail.subtasks.sort_by_key(|subtask| subtask.position);
-    Some(detail)
+    Ok(detail)
 }
 
 /// A task-create result, `{ data: <task> }`: its list-row fields, whatever else it carries.
@@ -755,5 +939,180 @@ impl TaskSummary {
                 environment_id: id.clone(),
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::*;
+
+    /// `GET /conn/tasks/6296` as the Gateway sent it: a running task with one task-wide agent, a
+    /// `work` block and a `work_status` the decoder does not read. Text and ids are scrubbed.
+    const LIVE_TASK: &str = include_str!("../testdata/task_detail_live_6296.json");
+
+    fn live() -> Value {
+        serde_json::from_str(LIVE_TASK).expect("fixture is JSON")
+    }
+
+    fn data_mut(json: &mut Value) -> &mut Value {
+        &mut json["data"]
+    }
+
+    #[test]
+    fn decodes_the_live_task_detail() {
+        let task = try_decode_task_detail(&live()).expect("detail");
+        assert_eq!(task.summary.id, 6296);
+        assert_eq!(task.summary.status, TaskStatus::Running);
+        assert_eq!(task.implementer_mode(), ImplementerMode::Task);
+        assert!(task.subtasks.is_empty());
+        assert_eq!(task.agents.len(), 1);
+        assert_eq!(task.agents[0].role, AgentRole::Implementer);
+        assert_eq!(task.agents[0].state, None);
+        assert!(task.agents[0].conn.is_some());
+        assert_eq!(task.metrics.tokens, None);
+        let workspace = task.summary.workspace.as_ref().expect("workspace");
+        assert_eq!(workspace.power_state, Some(PowerState::Running));
+        assert_eq!(task.summary.pull_request, None);
+    }
+
+    #[test]
+    fn unknown_literals_degrade_instead_of_failing_the_read() {
+        let mut json = live();
+        let data = data_mut(&mut json);
+        data["execution"]["implementer_mode"] = json!("swarm");
+        data["workspace"]["power_state"] = json!("hibernating");
+        data["pull_request"] =
+            json!({ "number": 9, "url": "https://example.test/pull/9", "state": "draft" });
+        data["attention"] = json!({ "kind": "escalation", "question": null, "reason": "odd" });
+        data["agents"][0]["role"] = json!("auditor");
+        data["agents"][0]["state"] = json!("dreaming");
+        data["work_status"] = json!("some_future_status");
+        data["review"] = json!("auto_v2");
+        let task = try_decode_task_detail(&json).expect("detail");
+        assert_eq!(task.implementer_mode(), ImplementerMode::Task);
+        let workspace = task.summary.workspace.as_ref().expect("workspace");
+        assert_eq!(workspace.power_state, None);
+        let pull_request = task.summary.pull_request.as_ref().expect("pull request");
+        assert_eq!(pull_request.number, 9);
+        assert_eq!(pull_request.state, None);
+        // An attention kind this version does not name reads as no attention.
+        assert_eq!(task.summary.attention, None);
+        assert_eq!(task.agents[0].role, AgentRole::Unknown);
+        assert_eq!(task.agents[0].state, Some(AgentState::Unknown));
+    }
+
+    #[test]
+    fn null_and_missing_fields_read_as_neutral_values() {
+        let mut json = live();
+        let data = data_mut(&mut json);
+        for key in [
+            "execution",
+            "metrics",
+            "subtasks",
+            "agents",
+            "subtask_counts",
+            "brief",
+            "workspace",
+            "pull_request",
+            "attention",
+            "last_activity_at",
+            "created_at",
+        ] {
+            data[key] = Value::Null;
+        }
+        let task = try_decode_task_detail(&json).expect("detail with nulls");
+        assert_eq!(task.implementer_mode(), ImplementerMode::Task);
+        assert_eq!(task.metrics, TaskMetrics::default());
+        assert!(task.subtasks.is_empty());
+        assert!(task.agents.is_empty());
+        assert_eq!(task.summary.subtask_counts, SubtaskCounts::default());
+        assert_eq!(task.brief, "");
+        assert_eq!(task.summary.workspace, None);
+        let data = data_mut(&mut json).as_object_mut().expect("object");
+        for key in [
+            "execution",
+            "metrics",
+            "subtasks",
+            "agents",
+            "subtask_counts",
+            "brief",
+        ] {
+            data.remove(key);
+        }
+        let task = try_decode_task_detail(&json).expect("detail with missing fields");
+        assert!(task.agents.is_empty());
+        assert_eq!(task.implementer_mode(), ImplementerMode::Task);
+    }
+
+    #[test]
+    fn wrong_typed_numbers_and_nulls_inside_agents_and_metrics_are_tolerated() {
+        let mut json = live();
+        let data = data_mut(&mut json);
+        data["metrics"] = json!({ "duration_ms": "soon", "tokens": null, "lines_added": 3 });
+        data["agents"][0]["subtask_ids"] = Value::Null;
+        data["agents"][0]["attempt"] = Value::Null;
+        data["agents"][0]["needs_input"] = Value::Null;
+        data["agents"][0]["conn"] = Value::Null;
+        // An agent row without a role is off the contract: left out, not the page.
+        data["agents"]
+            .as_array_mut()
+            .expect("agents")
+            .push(json!({ "id": 99 }));
+        let task = try_decode_task_detail(&json).expect("detail");
+        assert_eq!(task.metrics.duration_ms, None);
+        assert_eq!(task.metrics.lines_added, Some(3.0));
+        assert_eq!(task.agents.len(), 1);
+        assert_eq!(task.agents[0].attempt, 1);
+        assert!(task.agents[0].subtask_ids.is_empty());
+        assert_eq!(task.agents[0].conn, None);
+    }
+
+    #[test]
+    fn a_broken_response_names_the_failing_field() {
+        let mut json = live();
+        data_mut(&mut json)["project"] = json!({ "slug": "x", "name": "x" });
+        let error = try_decode_task_detail(&json).expect_err("project id is required");
+        assert!(error.starts_with("data.project:"), "{error}");
+        assert!(error.contains("missing field `id`"), "{error}");
+
+        let mut json = live();
+        data_mut(&mut json)["status"] = json!("teleporting");
+        let error = try_decode_task_detail(&json).expect_err("status is required");
+        assert!(error.contains("unknown variant `teleporting`"), "{error}");
+
+        let mut json = live();
+        data_mut(&mut json)["subtasks"] = json!([{ "id": 1, "position": 1, "title": 7 }]);
+        let error = try_decode_task_detail(&json).expect_err("subtask title is a string");
+        assert!(error.contains("subtasks[0].title"), "{error}");
+
+        let error = try_decode_task_detail(&json!({ "nope": 1 })).expect_err("no data");
+        assert!(error.contains("data"), "{error}");
+        assert_eq!(decode_task_detail(&json!({ "nope": 1 })), None);
+    }
+
+    #[test]
+    fn a_list_row_keeps_the_strict_contract_while_the_detail_degrades() {
+        let mut json = live();
+        let row = data_mut(&mut json).clone();
+        let mut odd_state = row.clone();
+        odd_state["pull_request"] = json!({ "number": 1, "url": "u", "state": "draft" });
+        let mut odd_status = row.clone();
+        odd_status["status"] = json!("teleporting");
+        let mut nulls = row.clone();
+        nulls["subtask_counts"] = Value::Null;
+        nulls["created_at"] = Value::Null;
+        let page = decode_tasks_page(
+            &json!({ "data": [row, odd_state.clone(), odd_status, nulls], "meta": {} }),
+        )
+        .expect("page");
+        assert_eq!(
+            page.tasks.iter().map(|t| t.id).collect::<Vec<_>>(),
+            vec![6296, 6296]
+        );
+        assert_eq!(page.skipped, 2);
+        let detail = try_decode_task_detail(&json!({ "data": odd_state })).expect("detail");
+        assert_eq!(detail.summary.pull_request.map(|p| p.number), Some(1));
     }
 }

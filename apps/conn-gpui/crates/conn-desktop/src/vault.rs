@@ -16,15 +16,20 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
 
+use crate::child_reaper::OwnedChild;
 use crate::database::DatabaseDriver;
 
 /// Default Vault Mac app binary path.
 pub const VAULT_BINARY: &str = "/Applications/Vault.app/Contents/MacOS/Vault";
 
-/// Touch ID or master-password unlock can take a while before Vault replies.
+/// End-to-end deadline for a request that may prompt (Touch ID, master password or a passkey
+/// panel): a person has to act before Vault replies. Vault gives up on its own at 115 seconds.
 const TIMEOUT: Duration = Duration::from_secs(120);
 /// Upper bound for a login status check, which never prompts the user.
 const STATUS_DEADLINE: Duration = Duration::from_secs(15);
+/// End-to-end deadline for a request that never prompts (`allowUnlock: false`): Vault answers
+/// from memory in well under a second, or replies `locked`.
+const PASSIVE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Maximum accepted reply frame length (64 KiB, matching Conn's `MAX_FRAME`).
 const MAX_FRAME: usize = 64 * 1024;
 
@@ -517,7 +522,8 @@ impl VaultClient {
         }
     }
 
-    /// Sets a custom per-request timeout.
+    /// Sets a custom per-request deadline. A request that never prompts uses the shorter of this
+    /// and 15 seconds.
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout;
@@ -803,7 +809,7 @@ impl VaultClient {
         })
         .map_err(|_| PasskeyError::NotSupported)?;
         let payload = self
-            .exchange(&request_id, &body)
+            .exchange(&request_id, &body, self.timeout)
             .await
             .map_err(|_| PasskeyError::NotAllowed)?;
         parse_passkey_reply(&payload)
@@ -837,49 +843,67 @@ impl VaultClient {
         };
         let body = serde_json::to_vec(&payload)
             .map_err(|err| VaultError::new(VaultErrorKind::Error, err.to_string()))?;
-        let payload = self.exchange(&request_id, &body).await?;
+        // One deadline per request: human-length when Vault may prompt, short when it never does.
+        let deadline = if allow_unlock {
+            self.timeout
+        } else {
+            self.timeout.min(PASSIVE_TIMEOUT)
+        };
+        let payload = self.exchange(&request_id, &body, deadline).await?;
         serde_json::from_slice(&payload)
             .map_err(|_| VaultError::new(VaultErrorKind::Error, "Vault sent an invalid reply."))
     }
 
     /// Sends one framed request to a fresh `--conn-bridge` process and returns the raw payload of
     /// the reply whose `id` is `request_id`. Closing the pipe without a reply (an older Vault, or a
-    /// refused caller) is an error. The child dies with the call, which Vault reads as the caller
-    /// going away, so dropping the future cancels a pending ceremony.
-    async fn exchange(&self, request_id: &str, body: &[u8]) -> Result<Vec<u8>, VaultError> {
+    /// refused caller) is an error. `deadline` covers the whole exchange.
+    ///
+    /// The call returns as soon as it has the reply, like Conn's Electron bridge. It never waits
+    /// for the relay to exit: that wait needs SIGCHLD, which the embedded Chromium can disable.
+    /// However the call ends (reply, error, timeout, or the future dropped), [`OwnedChild`]
+    /// closes the pipes, kills the relay and leaves its exit to the background reaper. Vault reads
+    /// the closed pipe as the caller going away, so dropping the future cancels a ceremony.
+    async fn exchange(
+        &self,
+        request_id: &str,
+        body: &[u8],
+        deadline: Duration,
+    ) -> Result<Vec<u8>, VaultError> {
         let body_len = u32::try_from(body.len())
             .map_err(|_| VaultError::new(VaultErrorKind::Error, "Vault request is too large."))?;
-        let mut child = Command::new(&self.binary)
-            .arg("--conn-bridge")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|err| VaultError::unavailable(err.to_string()))?;
-
-        let mut stdin = child
+        let mut relay = OwnedChild::new(
+            Command::new(&self.binary)
+                .arg("--conn-bridge")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .spawn()
+                .map_err(|err| VaultError::unavailable(err.to_string()))?,
+        );
+        // Declared after `relay`, so they drop (and close) before it kills the relay.
+        let mut stdin = relay
+            .child()
             .stdin
             .take()
             .ok_or_else(|| VaultError::unavailable("Vault bridge stdin unavailable."))?;
-        let mut stdout = child
+        let mut stdout = relay
+            .child()
             .stdout
             .take()
             .ok_or_else(|| VaultError::unavailable("Vault bridge stdout unavailable."))?;
 
-        // Keep stdin open until the reply arrives: the relay treats EOF as caller disconnect.
-        let mut frame = Vec::with_capacity(4 + body.len());
-        frame.extend_from_slice(&body_len.to_le_bytes());
-        frame.extend_from_slice(body);
-        if stdin.write_all(&frame).await.is_err() || stdin.flush().await.is_err() {
-            let _ = child.kill().await;
-            return Err(VaultError::new(
-                VaultErrorKind::Error,
-                "Vault refused the request. Update Vault, and use the signed Conn app.",
-            ));
-        }
-
-        let read_reply = async {
+        let talk = async {
+            // Keep stdin open until the reply arrives: the relay treats EOF as caller disconnect.
+            let mut frame = Vec::with_capacity(4 + body.len());
+            frame.extend_from_slice(&body_len.to_le_bytes());
+            frame.extend_from_slice(body);
+            if stdin.write_all(&frame).await.is_err() || stdin.flush().await.is_err() {
+                return Err(VaultError::new(
+                    VaultErrorKind::Error,
+                    "Vault refused the request. Update Vault, and use the signed Conn app.",
+                ));
+            }
             loop {
                 let mut len_buf = [0u8; 4];
                 if let Err(err) = stdout.read_exact(&mut len_buf).await {
@@ -915,17 +939,13 @@ impl VaultClient {
             }
         };
 
-        let result = match tokio::time::timeout(self.timeout, read_reply).await {
-            Ok(inner) => inner,
+        match tokio::time::timeout(deadline, talk).await {
+            Ok(result) => result,
             Err(_) => Err(VaultError::new(
                 VaultErrorKind::Error,
                 "Vault did not answer in time.",
             )),
-        };
-
-        drop(stdin);
-        let _ = child.kill().await;
-        result
+        }
     }
 }
 

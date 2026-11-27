@@ -137,6 +137,7 @@ fn header(tokens: &Tokens) -> gpui_kit::AnyElement {
             add_menu_open: false,
             available_tabs: &[],
             has_project: true,
+            terminal_machine: None,
             tokens,
         },
         callbacks,

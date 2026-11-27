@@ -34,8 +34,15 @@ const TAG_SUBSCRIBE_THREAD: &str = "orchestration.subscribeThread";
 const TAG_PANELS_REQUESTS: &str = "panels.requests";
 const TAG_ANNOTATIONS_SUBSCRIBE: &str = "annotations.subscribe";
 const TAG_SUBSCRIBE_SERVER_CONFIG: &str = "subscribeServerConfig";
+const TAG_DISPATCH_COMMAND: &str = "orchestration.dispatchCommand";
 const PING_INTERVAL: Duration = Duration::from_secs(5);
 const MAX_MISSED_PONGS: u8 = 2;
+/// How long the TCP connect plus WebSocket upgrade may take before the attempt counts as failed.
+/// Without it, a server that accepts the socket but never answers the upgrade (a restarting
+/// server behind a TCP forward) holds the driver forever, and every queued call with it.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
+/// How many sessions a retry-safe call may be sent on before it fails with the session's error.
+const MAX_CALL_ATTEMPTS: u8 = 3;
 
 pub(crate) enum Command {
     SubscribeShell {
@@ -56,6 +63,8 @@ pub(crate) enum Command {
     },
     RefreshThread(String),
     UnsubscribeThread(String),
+    /// Ends the thread subscription and also drops its kept sequence.
+    ForgetThread(String),
     SubscribePanelRequests(DesktopPanelSubscription),
     UnsubscribePanelRequests,
     SubscribeAnnotations(String),
@@ -78,14 +87,31 @@ pub(crate) enum Command {
 
 struct ThreadSubState {
     after_sequence: Option<i64>,
-    /// A local store owns `after_sequence` (it moves only after the store commits) and the
-    /// stream opens with `changesAfterSequence`.
-    store_owned: bool,
-    /// Lower goes first when a reconnect subscribes again.
-    priority: u32,
     request_id: Option<RequestId>,
     /// When the current `subscribeThread` request went out (for `CONN_GPUI_PERF_LOG`).
     subscribed_at: Option<std::time::Instant>,
+    /// Order of the last subscribe or refresh asked for this thread. A new session resubscribes
+    /// the most recent first, so the thread the user just opened does not wait behind hundreds of
+    /// background cache streams.
+    touched: u64,
+    /// A local store owns `after_sequence` (it moves only after the store commits) and the
+    /// stream opens with `changesAfterSequence`.
+    store_owned: bool,
+    /// Lower goes first when a new session subscribes again; ties go most recent first.
+    priority: u32,
+}
+
+impl ThreadSubState {
+    const fn new(after_sequence: Option<i64>, touched: u64) -> Self {
+        Self {
+            after_sequence,
+            request_id: None,
+            subscribed_at: None,
+            touched,
+            store_owned: false,
+            priority: u32::MAX,
+        }
+    }
 }
 
 enum ActiveStream {
@@ -104,6 +130,22 @@ struct PendingCall {
     tag: String,
     payload: Value,
     reply: oneshot::Sender<Result<Value, ClientError>>,
+    /// Sessions this call was already sent on without an answer.
+    attempts: u8,
+}
+
+impl PendingCall {
+    /// Whether sending this call again after a lost session cannot do its work twice.
+    /// `dispatchCommand` is deduplicated by `commandId` on the server: a repeat returns the
+    /// first receipt.
+    fn retry_safe(&self) -> bool {
+        self.tag == TAG_DISPATCH_COMMAND
+            && self
+                .payload
+                .get("commandId")
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.is_empty())
+    }
 }
 
 struct PendingStream {
@@ -134,7 +176,9 @@ struct DriverState {
     annotation_subs: HashMap<String, Option<RequestId>>,
     pending_calls: Vec<PendingCall>,
     pending_streams: Vec<PendingStream>,
-    in_flight_unary: HashMap<RequestId, oneshot::Sender<Result<Value, ClientError>>>,
+    in_flight_unary: HashMap<RequestId, PendingCall>,
+    /// Source of [`ThreadSubState::touched`].
+    touch_counter: u64,
     in_flight_streams: HashMap<RequestId, ActiveStream>,
     generic_stream_ids: HashMap<StreamId, RequestId>,
     closed: bool,
@@ -166,10 +210,70 @@ impl DriverState {
             pending_calls: Vec::new(),
             pending_streams: Vec::new(),
             in_flight_unary: HashMap::new(),
+            touch_counter: 0,
             in_flight_streams: HashMap::new(),
             generic_stream_ids: HashMap::new(),
             closed: false,
         }
+    }
+
+    fn next_touch(&mut self) -> u64 {
+        self.touch_counter = self.touch_counter.wrapping_add(1);
+        self.touch_counter
+    }
+
+    /// Marks `thread_id` as just asked for, adding it (with its kept cursor) when it is new.
+    /// Returns whether the thread was new.
+    fn touch_thread(&mut self, thread_id: &str) -> bool {
+        let touched = self.next_touch();
+        if let Some(sub) = self.thread_subs.get_mut(thread_id) {
+            sub.touched = touched;
+            return false;
+        }
+        let last_seq = self.thread_last_sequences.get(thread_id).copied();
+        self.thread_subs
+            .insert(thread_id.to_owned(), ThreadSubState::new(last_seq, touched));
+        true
+    }
+
+    /// Thread subscriptions in the order a new session sends them: the most recently asked for
+    /// first.
+    fn thread_ids_by_recency(&self) -> Vec<String> {
+        let mut ids: Vec<(&String, (u32, u64))> = self
+            .thread_subs
+            .iter()
+            .map(|(id, sub)| (id, (sub.priority, sub.touched)))
+            .collect();
+        // A store's rank first (the open thread is 0), then the most recently asked for.
+        ids.sort_by(|a, b| {
+            (a.1.0, std::cmp::Reverse(a.1.1), a.0).cmp(&(b.1.0, std::cmp::Reverse(b.1.1), b.0))
+        });
+        ids.into_iter().map(|(id, _)| id.clone()).collect()
+    }
+
+    /// After a session ends: calls that are safe to send again wait for the next session (in
+    /// the order they were first sent); every other call fails with `reason`, because the server
+    /// may have done its work already.
+    fn requeue_or_fail_in_flight_calls(&mut self, reason: &str) {
+        let mut in_flight: Vec<(RequestId, PendingCall)> = self.in_flight_unary.drain().collect();
+        in_flight.sort_by_key(|(id, _)| match id {
+            RequestId::Number(n) => *n,
+            RequestId::String(_) => i64::MAX,
+        });
+        let mut retry = Vec::new();
+        for (_, mut call) in in_flight {
+            call.attempts = call.attempts.saturating_add(1);
+            if call.retry_safe() && call.attempts < MAX_CALL_ATTEMPTS && !call.reply.is_closed() {
+                retry.push(call);
+            } else {
+                let _ = call
+                    .reply
+                    .send(Err(ClientError::Connection(reason.to_owned())));
+            }
+        }
+        // Retried calls go before calls queued while the session was down.
+        retry.append(&mut self.pending_calls);
+        self.pending_calls = retry;
     }
 
     fn alloc_request_id(&mut self) -> RequestId {
@@ -178,15 +282,9 @@ impl DriverState {
         RequestId::Number(id)
     }
 
-    fn fail_in_flight_calls(&mut self, reason: &str) {
-        for (_, reply) in self.in_flight_unary.drain() {
-            let _ = reply.send(Err(ClientError::Connection(reason.to_owned())));
-        }
-    }
-
     fn fail_all_calls(&mut self, make_err: impl Fn() -> ClientError) {
-        for (_, reply) in self.in_flight_unary.drain() {
-            let _ = reply.send(Err(make_err()));
+        for (_, call) in self.in_flight_unary.drain() {
+            let _ = call.reply.send(Err(make_err()));
         }
         for pending in self.pending_calls.drain(..) {
             let _ = pending.reply.send(Err(make_err()));
@@ -209,38 +307,36 @@ impl DriverState {
 
     fn reset_thread(&mut self, thread_id: &str) -> Option<RequestId> {
         self.thread_last_sequences.remove(thread_id);
+        let touched = self.next_touch();
         self.thread_subs
-            .insert(
-                thread_id.to_owned(),
-                ThreadSubState {
-                    after_sequence: None,
-                    store_owned: false,
-                    priority: u32::MAX,
-                    request_id: None,
-                    subscribed_at: None,
-                },
-            )
+            .insert(thread_id.to_owned(), ThreadSubState::new(None, touched))
+            .and_then(|sub| sub.request_id)
+    }
+
+    /// Ends `thread_id`'s subscription and drops its cursor. Returns the stream to interrupt.
+    fn forget_thread(&mut self, thread_id: &str) -> Option<RequestId> {
+        self.thread_last_sequences.remove(thread_id);
+        self.thread_subs
+            .remove(thread_id)
             .and_then(|sub| sub.request_id)
     }
 
     /// Adds or re-ranks a store-owned subscription. True when it needs a request on the wire.
     fn subscribe_from(&mut self, thread_id: String, after: Option<i64>, priority: u32) -> bool {
+        let touched = self.next_touch();
         match self.thread_subs.get_mut(&thread_id) {
             Some(sub) if sub.store_owned => {
                 sub.priority = priority;
+                sub.touched = touched;
                 sub.request_id.is_none()
             }
             _ => {
-                self.thread_subs.insert(
-                    thread_id,
-                    ThreadSubState {
-                        after_sequence: after,
-                        store_owned: true,
-                        priority,
-                        request_id: None,
-                        subscribed_at: None,
-                    },
-                );
+                // The store's cursor is the only one: never a sequence remembered from before.
+                self.thread_last_sequences.remove(&thread_id);
+                let mut sub = ThreadSubState::new(after, touched);
+                sub.store_owned = true;
+                sub.priority = priority;
+                self.thread_subs.insert(thread_id, sub);
                 true
             }
         }
@@ -271,14 +367,7 @@ impl DriverState {
                 self.reset_thread(&thread_id);
             }
             Command::SubscribeThread(thread_id) => {
-                let last_seq = self.thread_last_sequences.get(&thread_id).copied();
-                self.thread_subs.entry(thread_id).or_insert(ThreadSubState {
-                    after_sequence: last_seq,
-                    store_owned: false,
-                    priority: u32::MAX,
-                    request_id: None,
-                    subscribed_at: None,
-                });
+                self.touch_thread(&thread_id);
             }
             Command::SubscribeThreadFrom {
                 thread_id,
@@ -292,10 +381,14 @@ impl DriverState {
             }
             Command::UnsubscribeThread(thread_id) => {
                 if let Some(sub) = self.thread_subs.remove(&thread_id)
+                    && !sub.store_owned
                     && let Some(seq) = sub.after_sequence
                 {
                     self.thread_last_sequences.insert(thread_id, seq);
                 }
+            }
+            Command::ForgetThread(thread_id) => {
+                self.forget_thread(&thread_id);
             }
             Command::SubscribePanelRequests(subscription) => {
                 self.panel_subscription = Some(subscription);
@@ -318,6 +411,7 @@ impl DriverState {
                     tag,
                     payload,
                     reply,
+                    attempts: 0,
                 });
             }
             Command::StartStream {
@@ -489,8 +583,21 @@ pub(crate) async fn run(
         // `disable_nagle = true` (TCP_NODELAY): every client frame is a small Ack or Request. With
         // Nagle on, a `subscribeThread` sent right after an Ack waits for the server's delayed
         // TCP ACK (up to ~200 ms on macOS) before it leaves the socket.
-        match tokio_tungstenite::connect_async_with_config(ws_request, Some(ws_config), true).await
-        {
+        let handshake = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            tokio_tungstenite::connect_async_with_config(ws_request, Some(ws_config), true),
+        );
+        let connected = match handshake.await {
+            Ok(result) => result,
+            Err(_) => {
+                debug!("conn-client websocket handshake timed out after {HANDSHAKE_TIMEOUT:?}");
+                if state.closed || !wait_backoff(&mut state, &mut cmd_rx, &events_tx).await {
+                    break;
+                }
+                continue;
+            }
+        };
+        match connected {
             Ok((ws_stream, _response)) => {
                 state.backoff.reset();
                 if events_tx
@@ -503,7 +610,7 @@ pub(crate) async fn run(
 
                 let session_result = run_session(&mut state, ws_stream, &mut cmd_rx, &events_tx);
                 let outcome = Box::pin(session_result).await;
-                state.fail_in_flight_calls("connection closed");
+                state.requeue_or_fail_in_flight_calls("connection closed");
                 state.clear_active_streams();
 
                 match outcome {
@@ -784,6 +891,13 @@ async fn restore_subscriptions_and_pending<S>(
 where
     S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
+    // Calls first: the server reads its store one request at a time, so a send queued while the
+    // server was away must not wait behind every resubscribed stream's replay.
+    let pending_calls = std::mem::take(&mut state.pending_calls);
+    for call in pending_calls {
+        send_unary_call(state, call, ws_write).await?;
+    }
+
     if state.shell_subscribed && state.shell_request_id.is_none() {
         send_shell_subscribe(state, ws_write).await?;
     }
@@ -792,14 +906,8 @@ where
         send_server_config_subscribe(state, ws_write).await?;
     }
 
-    // Highest priority first (the open thread), so it catches up before the rest.
-    let mut thread_ids: Vec<(u32, String)> = state
-        .thread_subs
-        .iter()
-        .map(|(id, sub)| (sub.priority, id.clone()))
-        .collect();
-    thread_ids.sort();
-    for (_, thread_id) in thread_ids {
+    // Each kept cursor asks only for what changed while the session was down.
+    for thread_id in state.thread_ids_by_recency() {
         send_thread_subscribe(state, &thread_id, ws_write).await?;
     }
 
@@ -810,11 +918,6 @@ where
     let project_ids: Vec<String> = state.annotation_subs.keys().cloned().collect();
     for project_id in project_ids {
         send_annotations_subscribe(state, &project_id, ws_write).await?;
-    }
-
-    let pending_calls = std::mem::take(&mut state.pending_calls);
-    for call in pending_calls {
-        send_unary_call(state, call.tag, call.payload, call.reply, ws_write).await?;
     }
 
     let pending_streams = std::mem::take(&mut state.pending_streams);
@@ -865,23 +968,12 @@ where
             send_thread_subscribe(state, &thread_id, ws_write).await?;
         }
         Command::SubscribeThread(thread_id) => {
-            let needs_send = match state.thread_subs.get(&thread_id) {
-                Some(existing) => existing.request_id.is_none(),
-                None => {
-                    let last_seq = state.thread_last_sequences.get(&thread_id).copied();
-                    state.thread_subs.insert(
-                        thread_id.clone(),
-                        ThreadSubState {
-                            after_sequence: last_seq,
-                            store_owned: false,
-                            priority: u32::MAX,
-                            request_id: None,
-                            subscribed_at: None,
-                        },
-                    );
-                    true
-                }
-            };
+            let added = state.touch_thread(&thread_id);
+            let needs_send = added
+                || state
+                    .thread_subs
+                    .get(&thread_id)
+                    .is_some_and(|existing| existing.request_id.is_none());
             if needs_send {
                 send_thread_subscribe(state, &thread_id, ws_write).await?;
             }
@@ -900,13 +992,21 @@ where
         }
         Command::UnsubscribeThread(thread_id) => {
             if let Some(sub) = state.thread_subs.remove(&thread_id) {
-                if let Some(seq) = sub.after_sequence {
+                if !sub.store_owned
+                    && let Some(seq) = sub.after_sequence
+                {
                     state.thread_last_sequences.insert(thread_id, seq);
                 }
                 if let Some(request_id) = sub.request_id {
                     state.in_flight_streams.remove(&request_id);
                     send_client_frame(ws_write, &FromClient::Interrupt { request_id }).await?;
                 }
+            }
+        }
+        Command::ForgetThread(thread_id) => {
+            if let Some(request_id) = state.forget_thread(&thread_id) {
+                state.in_flight_streams.remove(&request_id);
+                send_client_frame(ws_write, &FromClient::Interrupt { request_id }).await?;
             }
         }
         Command::SubscribePanelRequests(subscription) => {
@@ -952,7 +1052,13 @@ where
             payload,
             reply,
         } => {
-            send_unary_call(state, tag, payload, reply, ws_write).await?;
+            let call = PendingCall {
+                tag,
+                payload,
+                reply,
+                attempts: 0,
+            };
+            send_unary_call(state, call, ws_write).await?;
         }
         Command::StartStream {
             stream_id,
@@ -1043,7 +1149,11 @@ where
         .thread_subs
         .get(thread_id)
         .and_then(|s| s.after_sequence)
-        .or_else(|| state.thread_last_sequences.get(thread_id).copied());
+        .or_else(|| {
+            (!store_owned)
+                .then(|| state.thread_last_sequences.get(thread_id).copied())
+                .flatten()
+        });
     let (after_sequence, changes_after_sequence) = if store_owned {
         (None, after_sequence)
     } else {
@@ -1129,16 +1239,25 @@ where
 
 async fn send_unary_call<S>(
     state: &mut DriverState,
-    tag: String,
-    payload: Value,
-    reply: oneshot::Sender<Result<Value, ClientError>>,
+    mut call: PendingCall,
     ws_write: &mut S,
 ) -> Result<(), String>
 where
     S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
 {
+    // The caller stopped waiting: nothing would read the answer.
+    if call.reply.is_closed() {
+        return Ok(());
+    }
     let request_id = state.alloc_request_id();
-    state.in_flight_unary.insert(request_id.clone(), reply);
+    let tag = call.tag.clone();
+    // A retry-safe call keeps its payload, so a lost session can send it again.
+    let payload = if call.retry_safe() {
+        call.payload.clone()
+    } else {
+        std::mem::take(&mut call.payload)
+    };
+    state.in_flight_unary.insert(request_id.clone(), call);
     send_request(ws_write, request_id, &tag, payload).await
 }
 
@@ -1238,22 +1357,22 @@ where
             handle_exit(state, request_id, exit, events_tx).await?;
         }
         IncomingServerFrame::Other(FromServer::Defect { defect }) => {
-            for (_, reply) in state.in_flight_unary.drain() {
-                let _ = reply.send(Err(ClientError::Rpc(defect.clone())));
+            for (_, call) in state.in_flight_unary.drain() {
+                let _ = call.reply.send(Err(ClientError::Rpc(defect.clone())));
             }
         }
         IncomingServerFrame::Other(FromServer::ClientProtocolError { error, request_ids }) => {
             match request_ids {
                 Some(ids) => {
                     for id in ids {
-                        if let Some(reply) = state.in_flight_unary.remove(&id) {
-                            let _ = reply.send(Err(ClientError::Rpc(error.clone())));
+                        if let Some(call) = state.in_flight_unary.remove(&id) {
+                            let _ = call.reply.send(Err(ClientError::Rpc(error.clone())));
                         }
                     }
                 }
                 None => {
-                    for (_, reply) in state.in_flight_unary.drain() {
-                        let _ = reply.send(Err(ClientError::Rpc(error.clone())));
+                    for (_, call) in state.in_flight_unary.drain() {
+                        let _ = call.reply.send(Err(ClientError::Rpc(error.clone())));
                     }
                 }
             }
@@ -1477,7 +1596,7 @@ async fn handle_exit(
     exit: Exit,
     events_tx: &mpsc::Sender<ClientEvent>,
 ) -> Result<(), SessionOutcome> {
-    if let Some(reply) = state.in_flight_unary.remove(&request_id) {
+    if let Some(PendingCall { reply, .. }) = state.in_flight_unary.remove(&request_id) {
         let result = match exit {
             Exit::Success { value } => Ok(value),
             Exit::Failure { cause } => {

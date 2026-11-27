@@ -41,6 +41,27 @@ fn text_or_hex(bytes: &[u8]) -> Value {
     }
 }
 
+/// A MySQL value whose column sqlx names `BINARY`, `VARBINARY` or `*BLOB`: text when it reads as
+/// text, else hex.
+///
+/// sqlx names these types from the column's `BINARY` flag, and MySQL sets that flag for every
+/// `_bin` collation too (`utf8mb3_bin` on MySQL 8's `information_schema` names, `utf8mb4_bin`
+/// on `varchar` columns), not only for the binary charset that `mysql2` returns as a `Buffer`.
+/// sqlx does not expose the charset, so this tells them apart by content: valid UTF-8 without
+/// control characters is text. Padding (`binary(n)`), UUID bytes, hashes and images fail that
+/// test and stay hex.
+fn mysql_binary_text(bytes: &[u8]) -> Value {
+    match std::str::from_utf8(bytes) {
+        Ok(text) if !text.chars().any(is_binary_control) => Value::String(text.to_owned()),
+        _ => Value::String(hex(bytes)),
+    }
+}
+
+/// A control character other than tab, line feed and carriage return.
+fn is_binary_control(character: char) -> bool {
+    character.is_control() && !matches!(character, '\t' | '\n' | '\r')
+}
+
 fn number(value: f64) -> Value {
     serde_json::Number::from_f64(value).map_or(Value::Null, Value::Number)
 }
@@ -166,7 +187,7 @@ pub(crate) fn mysql_cell(row: &MySqlRow, index: usize) -> Value {
         name if name.contains("BINARY") || name.contains("BLOB") => row
             .try_get_unchecked::<Vec<u8>, _>(index)
             .ok()
-            .map(|bytes| Value::String(hex(&bytes))),
+            .map(|bytes| mysql_binary_text(&bytes)),
         _ => None,
     };
     decoded.unwrap_or_else(|| {
@@ -334,6 +355,41 @@ mod tests {
         let shown = hex(&long);
         assert!(shown.ends_with("… (70 bytes)"), "{shown}");
         assert_eq!(shown.len(), 2 + 128 + "… (70 bytes)".len());
+    }
+
+    #[test]
+    fn mysql_binary_names_that_are_utf8_text_show_as_text() {
+        assert_eq!(mysql_binary_text(b"cache"), Value::String("cache".into()));
+        assert_eq!(
+            mysql_binary_text("café — 日本".as_bytes()),
+            Value::String("café — 日本".into())
+        );
+        assert_eq!(
+            mysql_binary_text(b"line one\n\tline two\r\n"),
+            Value::String("line one\n\tline two\r\n".into())
+        );
+        assert_eq!(mysql_binary_text(b""), Value::String(String::new()));
+    }
+
+    #[test]
+    fn mysql_binary_data_stays_hex() {
+        // Invalid UTF-8.
+        assert_eq!(
+            mysql_binary_text(&[0xff, 0xfe, 0x00]),
+            Value::String("0xfffe00".into())
+        );
+        // Valid UTF-8 that is padding or control bytes, as in `binary(8)` or a packed value.
+        assert_eq!(
+            mysql_binary_text(b"ab\0\0\0\0\0\0"),
+            Value::String("0x6162000000000000".into())
+        );
+        assert_eq!(
+            mysql_binary_text(&[0x01, 0x02, 0x03]),
+            Value::String("0x010203".into())
+        );
+        // Long values keep the 64-byte cut and the length.
+        let long = vec![0u8; 70];
+        assert_eq!(mysql_binary_text(&long), Value::String(hex(&long)));
     }
 
     #[test]

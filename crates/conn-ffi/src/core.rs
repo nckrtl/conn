@@ -200,6 +200,7 @@ pub struct ConnCore {
     shell_watch: watch::Receiver<Option<FfiShellSnapshot>>,
     status_watch: watch::Receiver<FfiConnectionStatus>,
     limits: watch::Receiver<FfiComposerLimits>,
+    pub(crate) uploads: conn_client::uploads::Uploads,
     image_reader: RwLock<std::sync::Weak<crate::OfflineReader>>,
     disconnected: AtomicBool,
     started_with_bearer: bool,
@@ -413,6 +414,7 @@ impl ConnCore {
             runtime: Some(runtime),
             runtime_handle,
             server_url: normalized_url,
+            uploads: conn_client::uploads::Uploads::new(connection.clone()),
             connection,
             ctrl_tx,
             thread_runs,
@@ -452,26 +454,6 @@ impl ConnCore {
             .ok()
             .and_then(|map| map.get(thread_id).cloned())
             .unwrap_or_default()
-    }
-
-    /// Deletes a send's staged uploads once its command settled; the server keeps its own copies.
-    fn delete_pending_uploads(&self, attachments: Vec<conn_contract::ChatAttachment>) {
-        if attachments.is_empty() {
-            return;
-        }
-        let connection = self.connection.clone();
-        self.runtime_handle.spawn(async move {
-            // The server expires pending uploads. A lost cleanup reply must never hold a draft.
-            let _ = tokio::time::timeout(Duration::from_secs(5), async {
-                for attachment in &attachments {
-                    let id = crate::FfiAttachment::from(attachment).id;
-                    let _ = connection
-                        .call_json("attachments.delete", json!({"attachmentId": id}))
-                        .await;
-                }
-            })
-            .await;
-        });
     }
 
     fn ensure_connected(&self) -> Result<(), FfiError> {
@@ -847,7 +829,6 @@ impl ConnCore {
         files: Vec<FfiComposerFile>,
     ) -> Result<String, FfiError> {
         self.ensure_connected()?;
-        let mut attachments = Vec::new();
         let reader = self
             .image_reader
             .read()
@@ -877,16 +858,30 @@ impl ConnCore {
             FfiComposerTarget::New { .. } => None,
         };
         let result = async {
-            self.composer_limits()
-                .upload(
-                    &self.connection,
-                    files,
-                    &mut attachments,
-                    reader.as_ref().map(|reader| {
-                        (reader, thread.as_str(), item.as_str(), &self.runtime_handle)
-                    }),
-                )
-                .await?;
+            let ready = self.ready_uploads(&files).await?;
+            if let Some(reader) = &reader {
+                // The picked images show from the cache instead of downloading again.
+                let (reader, thread, item) = (reader.clone(), thread.clone(), item.clone());
+                let picks: Vec<_> = ready
+                    .iter()
+                    .map(|upload| {
+                        (
+                            crate::FfiAttachment::from(&upload.attachment),
+                            upload.bytes.clone(),
+                        )
+                    })
+                    .collect();
+                let _ = self
+                    .runtime_handle
+                    .spawn(async move {
+                        for (index, (file, bytes)) in picks.into_iter().enumerate() {
+                            let _ = reader.seed_pick(&thread, &item, index, file, &bytes).await;
+                        }
+                    })
+                    .await;
+            }
+            let attachments: Vec<conn_contract::ChatAttachment> =
+                ready.into_iter().map(|upload| upload.attachment).collect();
             match target {
                 FfiComposerTarget::New { project_id } => {
                     let project = match project_id {
@@ -911,7 +906,10 @@ impl ConnCore {
                 accepted: result.is_ok(),
             });
         }
-        self.delete_pending_uploads(attachments);
+        // A refused send gives its files back to the draft, uploads and all.
+        if result.is_ok() {
+            self.uploads_sent(&files);
+        }
         result
     }
 
@@ -1223,13 +1221,15 @@ impl ConnCore {
         } else {
             None
         };
-        let mut uploaded = Vec::new();
         let result = async {
-            self.composer_limits()
-                .upload(&self.connection, files, &mut uploaded, None)
-                .await?;
+            let uploaded = self
+                .ready_uploads(&files)
+                .await?
+                .into_iter()
+                .map(|upload| upload.attachment)
+                .collect();
             let attachments =
-                crate::queued::edit_attachments(existing, kept_attachment_ids, uploaded.clone())?;
+                crate::queued::edit_attachments(existing, kept_attachment_ids, uploaded)?;
             let command = conn_client::commands::edit_queued_run(
                 &thread_id,
                 &run_id,
@@ -1240,7 +1240,9 @@ impl ConnCore {
             self.dispatch_command(command).await
         }
         .await;
-        self.delete_pending_uploads(uploaded);
+        if result.is_ok() {
+            self.uploads_sent(&files);
+        }
         result
     }
 
@@ -3065,6 +3067,7 @@ mod tests {
             "disconnect-after-dispatch".into(),
             String::new(),
             vec![FfiComposerFile {
+                id: "test-file".into(),
                 path: file.path().to_string_lossy().into_owned(),
                 name: "test.txt".into(),
                 mime_type: "text/plain".into(),

@@ -36,12 +36,25 @@ use crate::theme::{apply_kit_theme, hsla};
 use gpui_kit::prelude::FluentBuilder as _;
 
 mod child_approvals;
+pub(crate) mod details_schedules;
 pub(crate) mod details_tasks;
+mod hover_prefetch;
 mod linked;
 mod preview;
 mod rail_workspaces;
+#[cfg(test)]
+mod reconnect_tests;
+mod regions;
+mod send_pending;
+#[cfg(test)]
+mod send_pending_tests;
+#[cfg(test)]
+mod shell_event_tests;
 mod sidebar_keys;
 mod sidebar_more;
+mod thread_links;
+#[cfg(test)]
+mod thread_links_tests;
 mod thread_panels;
 mod threads;
 
@@ -54,7 +67,9 @@ actions!(
         ToggleRightPanel,
         NewThread,
         ToggleTerminal,
-        NewRightPanelSurface
+        NewRightPanelSurface,
+        PickerNextField,
+        PickerPreviousField
     ]
 );
 
@@ -63,6 +78,12 @@ pub(crate) fn register_keybindings(cx: &mut App) {
     crate::palette::register_keybindings(cx);
     crate::settings::register_keybindings(cx);
     cx.bind_keys([
+        KeyBinding::new("tab", PickerNextField, Some("ComposerModelPicker")),
+        KeyBinding::new(
+            "shift-tab",
+            PickerPreviousField,
+            Some("ComposerModelPicker"),
+        ),
         KeyBinding::new("cmd-b", ToggleSidebar, None),
         KeyBinding::new("cmd-alt-b", ToggleRightPanel, None),
         KeyBinding::new("cmd-n", NewThread, None),
@@ -251,6 +272,9 @@ pub(crate) struct ConnApp {
     tokens: Tokens,
     geometry: ShellGeometry,
     shell: ShellState,
+    /// What the primary shell items applied since the app last caught up with them changed
+    /// ([`ConnApp::settle_shell`]): a burst of items is settled once.
+    pending_shell: Option<conn_state::ShellChange>,
     layout: LayoutState,
     active_workspace: Option<String>,
     /// What the thread sidebar remembers and does besides its lists: the Settled shelf, the message
@@ -260,6 +284,9 @@ pub(crate) struct ConnApp {
     theme_id: String,
     connection: Option<Connection>,
     status: Option<ConnectionStatus>,
+    /// Messages sent but not yet taken by the server, and the ids of messages that came back
+    /// to the composer, for a resend that must not post them twice.
+    sends: send_pending::PendingSends,
     /// True when the active connection came from `CONN_GPUI_*` env vars (skip overwriting
     /// persisted user `server.json`).
     env_pinned_server: bool,
@@ -367,6 +394,9 @@ pub(crate) struct ConnApp {
     rail_menu: Option<crate::sidebar::rail::RailMenuAnchor>,
     /// The workspace editor (`WorkspaceDialog`), open from the rail's `+` or a tile's `Edit…`.
     workspace_editor: Option<Entity<crate::workspace_editor::WorkspaceEditor>>,
+    /// The full-image viewer, open from a sent message's thumbnail.
+    image_viewer: Option<Entity<crate::chat::image_viewer::ImageViewer>>,
+    image_viewer_subscription: Option<gpui_kit::Subscription>,
     /// The workspace the editor edits; none while it creates one.
     workspace_editor_target: Option<String>,
     /// Each workspace's badge image, decoded once from its data URL.
@@ -383,10 +413,18 @@ pub(crate) struct ConnApp {
     pub(crate) thread_hover: ThreadHoverState,
     /// Ticks relative times and live elapsed labels (`useNowSecond` / `useNowMinute`).
     _sidebar_clock: Option<gpui_kit::Task<()>>,
+    /// The sidebar and the header as cached views (`app/regions.rs`).
+    regions: regions::ShellRegions,
+    /// Whether the jump numbers showed when the sidebar last drew.
+    sidebar_jump_hints_shown: bool,
     /// Whether the sidebar project-scope filter popover is open.
     sidebar_filter_menu_open: bool,
     /// When true, replaces translucent shell fills with opaque `sidebar`/`shell_card`.
     reduce_transparency: bool,
+    /// The theme choice saved for the next launch's first frame (`theme_boot.rs`).
+    boot_theme: crate::theme_boot::BootTheme,
+    /// Theme changes applied since launch (tests check that an identical sync changes nothing).
+    theme_changes: u64,
     persist_composer_context_strip: bool,
     server_url: Option<String>,
     server_label: Option<String>,
@@ -400,6 +438,8 @@ pub(crate) struct ConnApp {
     linked: linked::LinkedEnvironments,
     /// Child threads subscribed for their approvals (`app/child_approvals.rs`).
     child_approvals: child_approvals::ChildApprovals,
+    /// Thread stream started by sidebar hover (`app/hover_prefetch.rs`).
+    speculative: hover_prefetch::SpeculativeThreads,
     /// Live control socket server handle (dropped on app exit).
     _control_server: Option<conn_desktop::control::ControlServerHandle>,
     /// Background task draining `conn://` URLs and Unix control socket requests.
@@ -433,12 +473,30 @@ impl std::fmt::Debug for ConnApp {
 }
 
 impl ConnApp {
-    /// Creates the root shell. With a server config it connects and streams the live shell;
-    /// without one it shows the built-in demo fixture (or awaits Orbit auto-connect).
+    /// [`Self::new_with_boot_theme`] with the saved theme record (none under `cfg(test)`).
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn new(
         theme_id: String,
         tokens: Tokens,
+        server: Option<crate::live::StartupServer>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
+        let boot_theme = crate::theme_boot::BootTheme::load();
+        Self::new_with_boot_theme(theme_id, tokens, boot_theme, server, window, cx)
+    }
+
+    /// Creates the root shell. With a server config it connects and streams the live shell;
+    /// without one it shows the built-in demo fixture (or awaits Orbit auto-connect).
+    ///
+    /// `boot_theme` is the saved theme record `main` read before it opened the window; `tokens`
+    /// already carry its reduce-transparency choice.
+    #[must_use]
+    pub(crate) fn new_with_boot_theme(
+        theme_id: String,
+        tokens: Tokens,
+        boot_theme: crate::theme_boot::BootTheme,
         server: Option<crate::live::StartupServer>,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
@@ -580,6 +638,12 @@ impl ConnApp {
                 crate::chat::ChatEvent::ForkFromRun { run_id } => {
                     app.fork_selected_from_run(run_id, cx);
                 }
+                crate::chat::ChatEvent::OpenThreadLink(link) => {
+                    app.open_thread_link(link, cx);
+                }
+                crate::chat::ChatEvent::OpenImageViewer { images, index } => {
+                    app.open_image_viewer(images.clone(), *index, window, cx);
+                }
                 crate::chat::ChatEvent::OpenFile(location) => {
                     app.show_source_location(location, cx)
                 }
@@ -631,6 +695,12 @@ impl ConnApp {
                     attachments,
                 } => {
                     app.edit_queued_message(run_id, text, attachments.as_deref(), cx);
+                }
+                crate::chat::ChatEvent::ReorderQueuedMessage {
+                    run_id,
+                    before_run_id,
+                } => {
+                    app.reorder_queued_message(run_id, before_run_id.as_deref(), cx);
                 }
             },
         )
@@ -727,10 +797,12 @@ impl ConnApp {
         });
         let threads = threads::Threads::new(connection.is_some());
         let (preview_ui_tx, preview_ui_rx) = tokio::sync::mpsc::unbounded_channel();
+        let regions = regions::ShellRegions::new(cx);
         let mut app = Self {
             tokens,
             geometry: ShellGeometry::default(),
             shell,
+            pending_shell: None,
             layout,
             active_workspace: rail_workspaces::saved_active_workspace(&orbit.workspaces),
             sidebar: sidebar_state,
@@ -738,6 +810,7 @@ impl ConnApp {
             theme_id,
             connection,
             status: None,
+            sends: send_pending::PendingSends::default(),
             env_pinned_server,
             threads,
             chat,
@@ -799,6 +872,8 @@ impl ConnApp {
             thread_menu: None,
             rail_menu: None,
             workspace_editor: None,
+            image_viewer: None,
+            image_viewer_subscription: None,
             workspace_editor_target: None,
             workspace_images: HashMap::new(),
             rail_gesture: crate::sidebar::rail::RailGesture::default(),
@@ -806,8 +881,12 @@ impl ConnApp {
             header_menu_generation: 0,
             thread_details: ThreadDetailsState::default(),
             _sidebar_clock: None,
+            regions,
+            sidebar_jump_hints_shown: false,
             sidebar_filter_menu_open: false,
-            reduce_transparency: false,
+            reduce_transparency: boot_theme.reduce_transparency,
+            boot_theme,
+            theme_changes: 0,
             persist_composer_context_strip: false,
             server_url,
             server_label,
@@ -816,6 +895,7 @@ impl ConnApp {
             pending_open_thread: None,
             linked: linked::LinkedEnvironments::load(),
             child_approvals: child_approvals::ChildApprovals::default(),
+            speculative: hover_prefetch::SpeculativeThreads::default(),
             _control_server: None,
             _activation_task: None,
             thread_hover: ThreadHoverState::default(),
@@ -838,10 +918,9 @@ impl ConnApp {
             panel.set_preview_handles(preview_handles, cx)
         });
         Self::pump_preview_requests(preview_ui_rx, cx);
-        // The write in flight finishes, and the latest layout follows if it differs.
         cx.on_app_quit(|app, cx| {
             app.preview_host.close_all();
-            app.thread_panels_on_quit(cx)
+            app.quit_saves(cx)
         })
         .detach();
         app.sync_chat(cx);
@@ -1200,6 +1279,92 @@ impl ConnApp {
             && self.command_palette.is_none()
             && self.settings_modal.is_none()
             && self.workspace_editor.is_none()
+            && self.image_viewer.is_none()
+    }
+
+    /// Opens the full-image viewer on `items[index]`. It takes the keyboard and gives it back to
+    /// what had it when it closes.
+    fn open_image_viewer(
+        &mut self,
+        items: Vec<crate::chat::image_viewer::ViewerItem>,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        use crate::chat::image_viewer::{ImageViewer, ImageViewerEvent, ViewerOpen};
+        if items.is_empty() {
+            return;
+        }
+        // One viewer at a time: a second open (a double click) replaces the first.
+        self.close_image_viewer(false, window, cx);
+        let return_focus = window
+            .focused(cx)
+            .or_else(|| Some(self.focus_handle.clone()));
+        let thread_id = self.layout.selected_thread_id.clone();
+        // The thread's own connection: a linked environment's attachments live on that
+        // environment, not on the primary connection. Stepping through the gallery reuses it.
+        let connection = self.context_connection();
+        let tokens = self.tokens.clone();
+        let open = ViewerOpen {
+            items,
+            index,
+            connection,
+            thread_id,
+            return_focus,
+        };
+        let viewer = cx.new(|cx| ImageViewer::new(open, tokens, window, cx));
+        let sub = cx.subscribe_in(
+            &viewer,
+            window,
+            |app, _viewer, event: &ImageViewerEvent, window, cx| match event {
+                ImageViewerEvent::Close => app.close_image_viewer(true, window, cx),
+            },
+        );
+        self.image_viewer_subscription = Some(sub);
+        self.image_viewer = Some(viewer);
+        self.sync_browser_visibility(cx);
+        cx.notify();
+    }
+
+    /// Closes the image viewer. `restore` gives the keyboard back to what had it before; a thread
+    /// switch skips that, as the old composer is gone.
+    fn close_image_viewer(
+        &mut self,
+        restore: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(viewer) = self.image_viewer.take() else {
+            return;
+        };
+        self.image_viewer_subscription = None;
+        let focus = viewer.update(cx, |viewer, cx| {
+            viewer.release_images(cx);
+            viewer.take_return_focus()
+        });
+        let focus = focus
+            .filter(|_| restore)
+            .unwrap_or_else(|| self.focus_handle.clone());
+        window.focus(&focus, cx);
+        self.sync_browser_visibility(cx);
+        cx.notify();
+    }
+
+    /// Routes a key to the open image viewer: Escape, arrows and zoom keys. Returns whether it
+    /// was used. The palette and Settings, opened on top of it, keep their own keys.
+    fn handle_image_viewer_key(
+        &mut self,
+        event: &gpui_kit::KeyDownEvent,
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        if self.command_palette.is_some() || self.settings_modal.is_some() {
+            return false;
+        }
+        let Some(viewer) = self.image_viewer.clone() else {
+            return false;
+        };
+        viewer.update(cx, |viewer, cx| viewer.handle_key(event, window, cx))
     }
 
     fn sync_browser_visibility(&self, cx: &mut Context<'_, Self>) {
@@ -1244,6 +1409,62 @@ impl ConnApp {
         self.files_subscription = next;
     }
 
+    /// What the Browser panel keeps its history under for `project_id`: the sidebar's project
+    /// grouping key (git clones share one, a plain folder is scoped to its server, so it waits for
+    /// the server's config) and the host the server runs on, so a page on that host is the page on
+    /// `localhost`.
+    fn browser_history_context(
+        &self,
+        project_id: Option<&str>,
+    ) -> (Option<String>, Option<String>) {
+        let environment = self.context_environment();
+        let key = project_id.and_then(|id| {
+            let project = self.shell.project(id)?;
+            let config = self.active_server_config();
+            conn_state::project_groups::project_group_key(
+                project,
+                config.environment_id(),
+                self.shell.projects.iter().filter(|candidate| {
+                    self.linked_environment_of_project(&candidate.id) == environment.as_deref()
+                }),
+            )
+        });
+        let hostname = self
+            .context_server_url(environment.as_deref())
+            .and_then(|raw| url::Url::parse(raw).ok())
+            .and_then(|url| url.host_str().map(str::to_owned));
+        (key, hostname)
+    }
+
+    /// The project of the open thread, else of the open draft.
+    fn context_project_id(&self) -> Option<String> {
+        let selected = self.layout.selected_thread_id.as_deref();
+        selected
+            .and_then(|id| self.shell.find_thread(id))
+            .map(|thread| thread.project_id.clone())
+            .or_else(|| self.draft.as_ref().map(|draft| draft.project_id.clone()))
+    }
+
+    /// The child thread's own model of each subagent card of `thread` (open as `selected`), from
+    /// the shell. A local child lives on the parent's environment; a remote child on its own.
+    fn subagent_child_models(
+        &self,
+        thread: &conn_state::ThreadState,
+        selected: Option<&str>,
+    ) -> std::collections::HashMap<String, conn_state::SubagentModel> {
+        let parent_environment = selected.and_then(|id| self.linked_environment_of_thread(id));
+        let primary = self.primary_environment_id();
+        crate::chat::subagent_child_models(thread, |child, remote_environment| {
+            let wanted = match remote_environment {
+                Some(environment) => (environment != primary).then_some(environment),
+                None => parent_environment,
+            };
+            (self.linked_environment_of_thread(child) == wanted)
+                .then(|| self.shell.find_thread(child))
+                .flatten()
+        })
+    }
+
     /// Pushes the selected thread's timeline (or active draft state) into the chat view and right panel.
     fn sync_chat(&mut self, cx: &mut Context<'_, Self>) {
         if self.sync_panel_owner() {
@@ -1260,6 +1481,7 @@ impl ConnApp {
         }
         self.refresh_selected_outline(cx);
         self.sync_chat_environment(cx);
+        self.sync_thread_directory(cx);
         let child_approvals = self.sync_child_approvals(cx);
         self.sync_files_subscription();
         let selected = self.layout.selected_thread_id.as_deref();
@@ -1301,6 +1523,9 @@ impl ConnApp {
         let timeline = selected.and_then(|id| self.thread(id));
         let fallback = selected.map(conn_state::ThreadState::new);
         let thread = timeline.or(fallback.as_ref());
+        let subagent_child_models = thread
+            .map(|thread| self.subagent_child_models(thread, selected))
+            .unwrap_or_default();
         let project_id = shell_thread
             .map(|t| t.project_id.clone())
             .or_else(|| self.draft.as_ref().map(|d| d.project_id.clone()));
@@ -1311,8 +1536,25 @@ impl ConnApp {
         let environment_id = self.environment_id();
         let panel_owner = self.thread_panels.owner().cloned();
         let linked_environment = self.context_environment();
+        let terminal_thread = thread_id
+            .clone()
+            .or_else(|| self.draft.as_ref().map(|draft| draft.draft_id.clone()));
+        let terminal_target = self.terminal_target(terminal_thread.as_deref(), root.clone());
+        let terminal_connection = self.context_connection();
+        // Files reads a linked thread's files on its own machine, like its terminal, and never
+        // falls back to this Mac's server. Other threads read over the primary connection.
+        let files_connection = match self.context_environment() {
+            Some(_) => Some(terminal_connection.clone()),
+            None => self.connection.clone().map(Some),
+        };
+        let (history_key, history_hostname) = self.browser_history_context(project_id.as_deref());
         self.right_panel.update(cx, |panel, cx| {
+            if let Some(connection) = files_connection {
+                panel.set_files_connection(connection, cx);
+            }
+            panel.set_terminal_target(terminal_target, terminal_connection, cx);
             panel.set_environment(environment_id, cx);
+            panel.set_browser_history_context(history_key, history_hostname, cx);
             panel.set_owner(panel_owner, cx);
             panel.set_linked_environment(linked_environment, cx);
             panel.set_context(project_id.clone(), panel_root, thread_id, shell_thread, cx);
@@ -1420,12 +1662,14 @@ impl ConnApp {
                 chat.clear_offline_prompt_notice(cx);
             }
             chat.set_child_approvals(child_approvals, cx);
+            chat.set_subagent_child_models(subagent_child_models, cx);
             chat.set_branch_context(branch_context, cx);
             chat.set_thread_context(branch, worktree_active, runtime_mode, interaction_mode, cx);
             if let Some(model) = model {
                 chat.set_model_selection(model_instance, model, model_options, cx);
             }
         });
+        self.sync_pending_sends(cx);
         self.sync_annotations_state(project_id.as_deref(), cx);
     }
 
@@ -1447,26 +1691,12 @@ impl ConnApp {
                         if app.connection_gen != generation {
                             return false;
                         }
-                        let mut status_changed = false;
-                        let mut shell_changed = false;
-                        for event in batch {
-                            if matches!(
-                                event,
-                                ClientEvent::Status(_) | ClientEvent::BearerIssued(_)
-                            ) {
-                                status_changed = true;
-                            }
-                            shell_changed |= matches!(event, ClientEvent::Shell(_));
-                            app.apply_event(event, orbit_server_id.as_deref(), cx);
+                        let shows = batch.iter().any(|event| app.event_shows(event));
+                        app.apply_batch(batch, orbit_server_id.as_deref(), cx);
+                        if shows {
+                            app.sync_chat(cx);
+                            cx.notify();
                         }
-                        if shell_changed {
-                            app.schedule_kept(cx);
-                        }
-                        if status_changed {
-                            app.refresh_settings_orbit_info(cx);
-                        }
-                        app.sync_chat(cx);
-                        cx.notify();
                         true
                     })
                     .unwrap_or(false);
@@ -1476,6 +1706,120 @@ impl ConnApp {
             }
         })
         .detach();
+    }
+
+    /// Applies one batch of the primary connection's events. A run of shell items is applied
+    /// item by item but settled once ([`Self::settle_shell`]), before the next event of another
+    /// kind and at the end, so a burst re-merges the linked shells and brings the kept threads in
+    /// line once, not once per item.
+    fn apply_batch(
+        &mut self,
+        batch: Vec<ClientEvent>,
+        orbit_server_id: Option<&str>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let mut status_changed = false;
+        let mut shell_changed = false;
+        for event in batch {
+            match event {
+                ClientEvent::Shell(item) => {
+                    shell_changed = true;
+                    self.apply_shell_item(item);
+                }
+                event => {
+                    status_changed |=
+                        matches!(event, ClientEvent::Status(_) | ClientEvent::BearerIssued(_));
+                    self.settle_shell(cx);
+                    self.apply_event(event, orbit_server_id, cx);
+                }
+            }
+        }
+        self.settle_shell(cx);
+        if shell_changed {
+            self.schedule_kept(cx);
+        }
+        if status_changed {
+            self.refresh_settings_orbit_info(cx);
+        }
+    }
+
+    /// Applies one primary shell item to the merged shell. [`Self::settle_shell`] catches up.
+    fn apply_shell_item(&mut self, item: conn_state::ShellStreamItem) {
+        let change = self.shell.apply(item);
+        match &mut self.pending_shell {
+            Some(pending) => {
+                pending.projects_changed |= change.projects_changed;
+                pending.snapshot_required |= change.snapshot_required;
+                pending.threads_changed.extend(change.threads_changed);
+            }
+            None => self.pending_shell = Some(change),
+        }
+    }
+
+    /// Catches up with the primary shell items applied since the last call: merges the linked
+    /// shells again only when the items need it, then does once what every item used to do.
+    fn settle_shell(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(change) = self.pending_shell.take() else {
+            return;
+        };
+        self.merge_after_primary_change(&change);
+        if self.shell.synchronized && std::mem::take(&mut self.perf_shell_pending) {
+            conn_client::perf::shell_current();
+        }
+        if self.shell.synchronized
+            && self
+                .layout
+                .selected_thread_id
+                .as_deref()
+                .is_some_and(|id| self.shell.find_thread(id).is_none())
+        {
+            self.layout.selected_thread_id = None;
+        }
+        self.release_settled_drop();
+        if change.snapshot_required || !change.threads_changed.is_empty() {
+            self.drive_older_pages(cx);
+        }
+        if !change.threads_changed.is_empty() {
+            self.resubscribe_ended_threads();
+        }
+        if change.snapshot_required
+            && let Some(connection) = &self.connection
+        {
+            connection.subscribe_shell_with_idle_subagents();
+        }
+        if let Some(pending_id) = self.pending_open_thread.clone()
+            && self.shell.find_thread(&pending_id).is_some()
+        {
+            self.pending_open_thread = None;
+            self.select_thread(pending_id, cx);
+        } else if self.layout.selected_thread_id.is_none() && self.draft.is_none() {
+            let initial = self
+                .shell
+                .top_level_active_threads()
+                .next()
+                .or_else(|| self.shell.threads.iter().find(|t| self.shell.is_listed(t)))
+                .map(|first| (first.project_id.clone(), first.id.clone()));
+            if let Some((project_id, thread_id)) = initial {
+                self.layout.selected_project_id = Some(project_id);
+                self.open_thread(thread_id);
+            }
+        }
+    }
+
+    /// Whether `event` can change what the window shows. Items of the engine's kept thread
+    /// streams cannot, and there are hundreds of those streams.
+    fn event_shows(&self, event: &ClientEvent) -> bool {
+        match event {
+            ClientEvent::Thread { thread_id, .. } => self.thread_on_screen(thread_id),
+            _ => true,
+        }
+    }
+
+    /// Whether `thread_id`'s timeline feeds the window: it is selected, or a child whose approval
+    /// its parent shows.
+    fn thread_on_screen(&self, thread_id: &str) -> bool {
+        self.layout.selected_thread_id.as_deref() == Some(thread_id)
+            || self.child_approvals.holds(thread_id)
     }
 
     fn apply_event(
@@ -1524,49 +1868,8 @@ impl ConnApp {
                 }
             }
             ClientEvent::Shell(item) => {
-                let change = self.shell.apply(item);
-                self.remerge_linked_shells();
-                if self.shell.synchronized && std::mem::take(&mut self.perf_shell_pending) {
-                    conn_client::perf::shell_current();
-                }
-                if self.shell.synchronized
-                    && self
-                        .layout
-                        .selected_thread_id
-                        .as_deref()
-                        .is_some_and(|id| self.shell.find_thread(id).is_none())
-                {
-                    self.layout.selected_thread_id = None;
-                }
-                self.release_settled_drop();
-                if change.snapshot_required || !change.threads_changed.is_empty() {
-                    self.drive_older_pages(cx);
-                }
-                if !change.threads_changed.is_empty() {
-                    self.resubscribe_ended_threads();
-                }
-                if change.snapshot_required
-                    && let Some(connection) = &self.connection
-                {
-                    connection.subscribe_shell_with_idle_subagents();
-                }
-                if let Some(pending_id) = self.pending_open_thread.clone()
-                    && self.shell.find_thread(&pending_id).is_some()
-                {
-                    self.pending_open_thread = None;
-                    self.select_thread(pending_id, cx);
-                } else if self.layout.selected_thread_id.is_none() && self.draft.is_none() {
-                    let initial = self
-                        .shell
-                        .top_level_active_threads()
-                        .next()
-                        .or_else(|| self.shell.threads.iter().find(|t| self.shell.is_listed(t)))
-                        .map(|first| (first.project_id.clone(), first.id.clone()));
-                    if let Some((project_id, thread_id)) = initial {
-                        self.layout.selected_project_id = Some(project_id);
-                        self.open_thread(thread_id);
-                    }
-                }
+                self.apply_shell_item(item);
+                self.settle_shell(cx);
             }
             ClientEvent::Thread { thread_id, item } => {
                 let perf_kind = self
@@ -1670,6 +1973,12 @@ impl ConnApp {
         self.right_panel.update(cx, |panel, cx| {
             panel.set_server_config(std::sync::Arc::clone(&config), cx)
         });
+        // A plain folder's history key needs the server's environment id, which arrives here.
+        let (history_key, history_hostname) =
+            self.browser_history_context(self.context_project_id().as_deref());
+        self.right_panel.update(cx, |panel, cx| {
+            panel.set_browser_history_context(history_key, history_hostname, cx)
+        });
         let primary_config = std::sync::Arc::clone(&self.server_config);
         if let Some(modal) = &self.settings_modal {
             let shells = self
@@ -1726,6 +2035,8 @@ impl ConnApp {
             self.perf_open = Some((thread_id.clone(), std::time::Instant::now()));
             self.perf_open_pending_chat = true;
         }
+        // A hover prefetch of this thread is the open thread now.
+        self.speculative.promote(&thread_id);
         self.layout.selected_thread_id = Some(thread_id);
     }
 
@@ -2856,12 +3167,15 @@ impl ConnApp {
         } else {
             None
         };
-        let command = match crate::commands::send_message(
+        // An unchanged resend of a message that came back without an answer keeps its ids.
+        let ids = self.sends.ids_for(&thread_id, &text, &attachments);
+        let command = match crate::commands::send_message_with_ids(
             &thread_id,
             &text,
             &attachments,
             working,
             steer_target.as_deref(),
+            &ids,
         ) {
             Ok(command) => command,
             Err(e) => {
@@ -2873,36 +3187,18 @@ impl ConnApp {
             }
         };
         self.chat.update(cx, |chat, cx| chat.set_error(None, cx));
-        let generation = self.connection_gen;
-        let fallback_text = text;
-        cx.spawn(async move |this, cx| {
-            let result = connection.dispatch_command(command).await.map_err(|err| {
-                format!(
-                    "Send failed: {}",
-                    crate::commands::format_client_error(&err)
-                )
-            });
-            if let Err(msg) = result {
-                eprintln!("send: dispatchCommand failed: {msg}");
-                let _ = this.update(cx, |app, cx| {
-                    if app.connection_gen != generation {
-                        return;
-                    }
-                    app.chat.update(cx, |chat, cx| {
-                        chat.set_error(Some(msg), cx);
-                    });
-                    if let Some(win) = send_window {
-                        let chat = app.chat.clone();
-                        let restore = fallback_text.clone();
-                        let _ = win.update(cx, |_, window, cx| {
-                            chat.update(cx, |c, cx| c.set_draft_text(restore, window, cx));
-                        });
-                    }
-                    cx.notify();
-                });
-            }
-        })
-        .detach();
+        self.run_send(
+            send_pending::Outgoing {
+                connection,
+                thread_id,
+                text,
+                attachments,
+                ids,
+                command,
+                window: send_window,
+            },
+            cx,
+        );
     }
 
     /// A composer send over pending approvals (`useComposerSend`). With feedback support it
@@ -3357,6 +3653,51 @@ impl ConnApp {
         .detach();
     }
 
+    /// Moves a queued message before `before_run_id`, or to the end of the queue
+    /// (`queued-run.reorder`). The server renumbers the queue and sends the messages in that order.
+    pub(crate) fn reorder_queued_message(
+        &mut self,
+        run_id: &str,
+        before_run_id: Option<&str>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let (Some(connection), Some(thread_id)) = (
+            self.context_connection(),
+            self.layout.selected_thread_id.clone(),
+        ) else {
+            return;
+        };
+        let command = match crate::commands::reorder_queued_run(&thread_id, run_id, before_run_id) {
+            Ok(cmd) => cmd,
+            Err(err) => {
+                eprintln!("queue: could not build queued-run.reorder: {err}");
+                self.chat
+                    .update(cx, |chat, cx| chat.queue_reorder_failed(cx));
+                return;
+            }
+        };
+        let generation = self.connection_gen;
+        cx.spawn(async move |this, cx| {
+            if let Err(err) = connection.dispatch_command(command).await {
+                let msg = crate::commands::format_client_error(&err);
+                eprintln!("queue: queued-run.reorder failed: {msg}");
+                let _ = this.update(cx, |app, cx| {
+                    if app.connection_gen != generation {
+                        return;
+                    }
+                    app.chat.update(cx, |chat, cx| {
+                        chat.queue_reorder_failed(cx);
+                        chat.set_error(
+                            Some(format!("Could not reorder queued message: {msg}")),
+                            cx,
+                        );
+                    });
+                });
+            }
+        })
+        .detach();
+    }
+
     /// Saves edits to a queued message (`queued-run.edit`).
     pub(crate) fn edit_queued_message(
         &mut self,
@@ -3534,6 +3875,7 @@ impl ConnApp {
             "chatMetrics": chat_metrics,
             "palette": self.command_palette.is_some(),
             "settings": self.settings_modal.is_some(),
+            "imageViewer": self.image_viewer.is_some(),
         })
     }
 
@@ -3798,6 +4140,7 @@ impl ConnApp {
         }
         self.reveal_open_row = true;
         self.open_thread(thread_id);
+        self.release_gone_terminals(cx);
         if project_id.is_some() {
             self.layout.selected_project_id = project_id;
         }
@@ -3957,6 +4300,22 @@ impl ConnApp {
         error
     }
 
+    /// Shows the browser tab whose record on `environment` is `record`, for an agent's
+    /// `panel_open` with a `tabId`.
+    fn show_agent_browser_tab(
+        &mut self,
+        environment: &str,
+        record: &str,
+        cx: &mut Context<'_, Self>,
+    ) -> Result<(), String> {
+        let id = self
+            .preview_host
+            .browser_tab_of(environment, record)
+            .ok_or_else(|| format!("Conn has no browser tab {record} for this thread."))?;
+        self.select_right_panel_surface(PanelSurface::Browser(id), cx);
+        Ok(())
+    }
+
     /// Whose panel an agent's request for `thread` from `origin` reaches. The primary's needs
     /// its environment id confirmed by the server since it last connected: a request that
     /// arrives before is refused, never filed under a guessed id.
@@ -4004,6 +4363,48 @@ impl ConnApp {
         self.forget_thread_panel(owner, cx);
     }
 
+    /// A deleted thread's terminal session goes with it: emulator, scrollback and shell.
+    pub(crate) fn forget_thread_terminal(
+        &mut self,
+        environment: Option<&str>,
+        thread: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let terminal = self.right_panel.read(cx).terminal_entity();
+        terminal.update(cx, |panel, cx| {
+            panel.forget_thread(environment, thread, cx);
+        });
+    }
+
+    /// Frees the parked terminals of threads that left the lists (archived, settled or deleted
+    /// elsewhere) when their shell lives on the server or has ended. Runs on thread switches.
+    fn release_gone_terminals(&mut self, cx: &mut Context<'_, Self>) {
+        let terminal = self.right_panel.read(cx).terminal_entity();
+        let parked = terminal.read(cx).parked_keys();
+        if parked.is_empty() {
+            return;
+        }
+        let gone: HashSet<crate::panels::terminal_target::SessionKey> = parked
+            .into_iter()
+            .filter(|key| {
+                key.thread.as_deref().is_some_and(|thread| {
+                    // The thread being opened shows its session next.
+                    self.layout.selected_thread_id.as_deref() != Some(thread)
+                        && self
+                            .shell
+                            .threads
+                            .iter()
+                            .find(|t| t.id == thread)
+                            .is_none_or(|t| t.deleted_at.is_some() || ShellState::is_settled(t))
+                })
+            })
+            .collect();
+        if gone.is_empty() {
+            return;
+        }
+        terminal.update(cx, |panel, _| panel.release_gone(|key| gone.contains(key)));
+    }
+
     /// A deleted thread's right panel goes with it, and so do its browsers, its waiting
     /// Database query and its saved layout.
     fn forget_thread_panel(&mut self, owner: &PanelOwner, cx: &mut Context<'_, Self>) {
@@ -4036,6 +4437,18 @@ impl ConnApp {
     #[cfg(test)]
     pub(crate) fn right_panel_for_test(&self) -> &Entity<crate::panels::RightPanel> {
         &self.right_panel
+    }
+
+    /// One batch of server events, applied as the connection's batch loop applies it.
+    #[cfg(test)]
+    pub(crate) fn apply_batch_for_test(
+        &mut self,
+        batch: Vec<ClientEvent>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.apply_batch(batch, None, cx);
+        self.sync_chat(cx);
+        cx.notify();
     }
 
     /// One server event, applied as the connection's batch loop applies it.
@@ -4200,6 +4613,16 @@ impl ConnApp {
         location: &conn_contract::source::SourceLocation,
         cx: &mut Context<'_, Self>,
     ) {
+        // A link to a workspace folder opens it in the Files tree.
+        if let Some(folder) = location.path.strip_suffix('/')
+            && conn_contract::source::workspace_relative(folder)
+        {
+            let folder = folder.to_owned();
+            self.select_right_panel_tab(RightPanelTab::Files, cx);
+            self.right_panel
+                .update(cx, |panel, cx| panel.reveal_folder(folder, cx));
+            return;
+        }
         self.select_right_panel_surface(PanelSurface::File(location.path.clone()), cx);
         if let Some(lines) = location.lines {
             self.right_panel.update(cx, |panel, cx| {
@@ -4302,6 +4725,7 @@ impl ConnApp {
         self.settings_modal.is_some()
             || self.command_palette.is_some()
             || self.workspace_editor.is_some()
+            || self.image_viewer.is_some()
             || self.thread_menu.is_some()
             || self.rail_menu.is_some()
             || self.sidebar_filter_menu_open
@@ -4416,6 +4840,26 @@ impl ConnApp {
 
     #[cfg(test)]
     #[must_use]
+    pub(crate) fn image_viewer_for_test(
+        &self,
+    ) -> Option<Entity<crate::chat::image_viewer::ImageViewer>> {
+        self.image_viewer.clone()
+    }
+
+    /// Test helper: opens the viewer on `items[index]` without a thumbnail click.
+    #[cfg(test)]
+    pub(crate) fn open_image_viewer_for_test(
+        &mut self,
+        items: Vec<crate::chat::image_viewer::ViewerItem>,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.open_image_viewer(items, index, window, cx);
+    }
+
+    #[cfg(test)]
+    #[must_use]
     pub(crate) fn chat_for_test(&self) -> Entity<crate::chat::ChatView> {
         self.chat.clone()
     }
@@ -4480,6 +4924,16 @@ impl ConnApp {
     #[must_use]
     pub(crate) fn theme_id_for_test(&self) -> &str {
         &self.theme_id
+    }
+
+    #[cfg(test)]
+    pub(crate) fn tokens_for_test(&self) -> &Tokens {
+        &self.tokens
+    }
+
+    #[cfg(test)]
+    pub(crate) fn theme_changes_for_test(&self) -> u64 {
+        self.theme_changes
     }
 
     /// Scopes the thread sidebar to one workspace (`Some(project_id)`) or all
@@ -4580,6 +5034,17 @@ impl ConnApp {
     #[must_use]
     pub(crate) fn thread_hover_suppressed(&self) -> bool {
         self.thread_menu.is_some() || self.renaming_thread_id.is_some() || self.pointer_captured()
+    }
+
+    /// Test helper: the provider catalog this machine reports.
+    #[cfg(test)]
+    pub(crate) fn set_server_config_for_test(
+        &mut self,
+        config: std::sync::Arc<conn_state::providers::ServerConfigState>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.server_config = config;
+        self.push_server_config(cx);
     }
 
     #[cfg(test)]
@@ -5156,6 +5621,10 @@ impl ConnApp {
             }
             ThreadMenuAction::CopyThread => self.copy_to_clipboard(thread.title, cx),
             ThreadMenuAction::CopyThreadId => self.copy_to_clipboard(thread.id, cx),
+            ThreadMenuAction::CopyThreadLink => {
+                let link = self.thread_link_for(&thread.id);
+                self.copy_to_clipboard(link, cx);
+            }
             ThreadMenuAction::ProjectSettings => {
                 if self.settings_modal.is_none() {
                     self.open_settings(window, cx);
@@ -5248,6 +5717,9 @@ impl ConnApp {
         let deleted = thread_id.to_owned();
         // Before the thread leaves the shell, which tells its environment.
         let owner = self.panel_owner_of_thread(thread_id);
+        let terminal_env = self
+            .linked_environment_of_thread(thread_id)
+            .map(str::to_owned);
         self.dispatch_thread_command_then(
             "delete thread",
             crate::commands::delete_thread(thread_id),
@@ -5255,6 +5727,7 @@ impl ConnApp {
             move |app, cx| {
                 app.forget_thread_draft(&deleted, cx);
                 app.release_thread_panel(&owner, cx);
+                app.forget_thread_terminal(terminal_env.as_deref(), &deleted, cx);
             },
         );
     }
@@ -5286,13 +5759,18 @@ impl ConnApp {
                         app.settle_drafts(cx);
                     }
                     let minute = now / 60;
-                    if minute != last_minute {
+                    let new_minute = minute != last_minute;
+                    if new_minute {
                         // Threads leave the keep window as time passes.
                         app.schedule_kept(cx);
                     }
-                    if live || app.thread_details.open || minute != last_minute {
+                    if app.thread_details.open || new_minute {
                         last_minute = minute;
                         cx.notify();
+                    } else if live {
+                        // Only the sidebar's elapsed labels moved: the header, the chat and the
+                        // panels keep their frame.
+                        app.regions.sidebar.update(cx, |_, cx| cx.notify());
                     }
                 });
                 if alive.is_err() {
@@ -5400,13 +5878,12 @@ impl ConnApp {
         };
         if let Some(cwd) = cwd {
             self.thread_details.vcs_loading = true;
-            let conn = connection.clone();
             cx.spawn(async move |this, cx| {
                 let payload = conn_contract::VcsRefreshStatusPayload {
                     cwd,
                     local_only: Some(true),
                 };
-                let result = conn
+                let result = connection
                     .call::<_, conn_contract::VcsStatusResult>("vcs.refreshStatus", &payload)
                     .await;
                 let _ = this.update(cx, |app, cx| {
@@ -5423,28 +5900,8 @@ impl ConnApp {
             })
             .detach();
         }
-        // First `scheduledTasks.subscribe` snapshot, then stop the stream.
-        let (stream_id, mut rx) =
-            connection.stream_json("scheduledTasks.subscribe", serde_json::json!({}));
-        cx.spawn(async move |this, cx| {
-            let first = rx.recv().await;
-            connection.cancel_stream(stream_id);
-            let _ = this.update(cx, |app, cx| {
-                match first.map(serde_json::from_value::<conn_state::ScheduledTaskListResult>) {
-                    Some(Ok(list)) => {
-                        app.thread_details.tasks = list.tasks.into_iter().flatten().collect();
-                        app.thread_details.tasks_error = None;
-                    }
-                    Some(Err(e)) => {
-                        app.thread_details.tasks_error =
-                            Some(format!("Failed to load scheduled tasks: {e}"));
-                    }
-                    None => {}
-                }
-                cx.notify();
-            });
-        })
-        .detach();
+        // The scheduled tasks arrive on the live `scheduledTasks.subscribe` stream that
+        // `sync_details_schedules` keeps open on the thread's own connection.
     }
 
     pub(crate) fn open_details_copy_menu(
@@ -5589,9 +6046,13 @@ impl ConnApp {
         payload: serde_json::Value,
         cx: &mut Context<'_, Self>,
     ) {
-        let Some(connection) = self.connection.clone() else {
+        // The tasks live on the thread's environment: act there, never on the primary server.
+        let Some(connection) = self.details_schedule_connection() else {
             return;
         };
+        if self.thread_details.busy_task_id.is_some() {
+            return;
+        }
         self.thread_details.busy_task_id = Some(task_id);
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -5740,8 +6201,9 @@ impl ConnApp {
         &self.tokens
     }
 
-    fn render_chat_column(&self, viewport_h: f32, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let header = render_chat_header(
+    /// The thread header: the [`regions::ShellRegion`] that draws it renders through here.
+    pub(crate) fn render_header_region(&self, cx: &mut Context<'_, Self>) -> gpui_kit::AnyElement {
+        render_chat_header(
             &ChatHeaderProps {
                 shell: &self.shell,
                 layout: &self.layout,
@@ -5754,7 +6216,12 @@ impl ConnApp {
                 geometry: &self.geometry,
             },
             cx,
-        );
+        )
+        .into_any_element()
+    }
+
+    fn render_chat_column(&self, viewport_h: f32, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let header = regions::header_region(&self.regions.header, self.geometry.header_height_px);
 
         let join = CardJoin {
             left: self.layout.sidebar_open,
@@ -5826,6 +6293,8 @@ impl ConnApp {
                     thread,
                     state: &self.thread_details,
                     task_links: self.selected_timeline().map(|t| &t.task_links),
+                    timeline: self.selected_timeline(),
+                    catalog: self.server_config.catalog(),
                     environment_label: &environment_label,
                     max_height: (viewport_h
                         - self.geometry.header_height_px
@@ -5977,6 +6446,7 @@ impl ConnApp {
             .right_panel
             .read(cx)
             .browser_titles(self.right_panel_tabs.browser_ids(), cx);
+        let terminal_machine = self.right_panel.read(cx).terminal_machine(cx);
         let header = render_panel_header(
             PanelHeaderProps {
                 open_tabs: &open_tabs,
@@ -5988,6 +6458,7 @@ impl ConnApp {
                 add_menu_open: self.right_panel_add_menu_open,
                 available_tabs: &available_tabs,
                 has_project: self.shown_thread_has_project(),
+                terminal_machine: terminal_machine.as_deref(),
                 tokens: &self.tokens,
             },
             PanelHeaderCallbacks {
@@ -6158,38 +6629,89 @@ impl ConnApp {
             .orbit
             .custom_themes
             .iter()
-            .find(|t| t.id == theme_id)?
-            .clone();
+            .find(|t| t.id == theme_id)
+            .cloned()
+            // A custom theme saved for this launch before the Orbit profile has arrived.
+            .or_else(|| {
+                self.boot_theme
+                    .resolve(None)
+                    .filter(|saved| saved.id == theme_id)
+            })?;
         let tokens = Tokens::derive(&custom);
         Some((custom, tokens))
     }
 
     /// Switches to a built-in or Orbit-synced custom theme by id and syncs the choice to Orbit.
     pub(crate) fn set_theme(&mut self, theme_id: &str, cx: &mut Context<'_, Self>) -> bool {
-        self.apply_theme_choice(theme_id, true, cx)
+        self.apply_theme_choice(theme_id, ThemeSource::User, cx)
     }
 
     /// Switches to a theme locally without pushing to Orbit (used by automation captures).
     #[cfg(feature = "automation")]
     pub(crate) fn set_theme_local(&mut self, theme_id: &str, cx: &mut Context<'_, Self>) -> bool {
-        self.apply_theme_choice(theme_id, false, cx)
+        self.apply_theme_choice(theme_id, ThemeSource::Automation, cx)
+    }
+
+    /// Applies a theme synced from the Orbit profile (a fetch or a backup restore).
+    /// Returns whether the theme is known; the same theme as now changes nothing.
+    pub(crate) fn adopt_synced_theme(
+        &mut self,
+        theme_id: &str,
+        follow_system: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        self.apply_theme_choice(theme_id, ThemeSource::Synced { follow_system }, cx)
     }
 
     fn apply_theme_choice(
         &mut self,
         theme_id: &str,
-        push_to_orbit: bool,
+        source: ThemeSource,
         cx: &mut Context<'_, Self>,
     ) -> bool {
         let Some((theme, tokens)) = self.resolve_theme(theme_id) else {
             return false;
         };
-        self.theme_id = theme.id.clone();
-        self.set_tokens(tokens, cx);
-        if push_to_orbit {
-            self.push_orbit_appearance(&theme, cx);
+        let mut shown = tokens.clone();
+        if self.reduce_transparency {
+            crate::theme::reduce_transparency(&mut shown);
+        }
+        if theme.id != self.theme_id || shown != self.tokens {
+            self.theme_id = theme.id.clone();
+            self.theme_changes += 1;
+            self.set_tokens(tokens, cx);
+        }
+        match source {
+            ThemeSource::User => {
+                self.save_boot_theme(&theme, false);
+                self.push_orbit_appearance(&theme, cx);
+            }
+            ThemeSource::Synced { follow_system } => self.save_boot_theme(&theme, follow_system),
+            // Automation captures switch themes for a moment; the saved choice stays.
+            ThemeSource::Automation => {}
         }
         true
+    }
+
+    /// Saves `theme` as the next launch's first-frame theme, with both Orbit slot themes when
+    /// the choice follows the macOS appearance. Writes only when the record changed.
+    fn save_boot_theme(&mut self, theme: &conn_theme::ThemeDefinition, follow_system: bool) {
+        let slots = if follow_system {
+            let light_id = self.orbit.light_theme_id.clone();
+            let dark_id = self.orbit.dark_theme_id.clone();
+            self.resolve_theme(&light_id)
+                .zip(self.resolve_theme(&dark_id))
+                .map(|((light, _), (dark, _))| (light, dark))
+        } else {
+            None
+        };
+        let mut next = self.boot_theme.clone();
+        next.record(theme, slots.as_ref().map(|(l, d)| (l, d)));
+        next.reduce_transparency = self.reduce_transparency;
+        if next != self.boot_theme {
+            next.save();
+            self.boot_theme = next;
+        }
     }
 
     /// Display name advertised to `conn-server` on the `panels.requests` stream.
@@ -6644,7 +7166,19 @@ impl ConnApp {
                     }
                 }
             }
-            AgentPanelKind::Browser | AgentPanelKind::Diff | AgentPanelKind::Files => {}
+            // A named tab is one of this thread's desktop tabs (the server checked it is hosted):
+            // show that one instead of the tab the Browser panel showed last.
+            AgentPanelKind::Browser => {
+                if let Some(record) = request.tab_id
+                    && let Ok(Err(error)) = this.update(cx, |app, cx| {
+                        app.show_agent_browser_tab(&owner.environment, &record, cx)
+                    })
+                {
+                    resp.ok = false;
+                    resp.error = Some(error);
+                }
+            }
+            AgentPanelKind::Diff | AgentPanelKind::Files | AgentPanelKind::Terminal => {}
         }
 
         resp
@@ -6766,10 +7300,8 @@ impl ConnApp {
                 if let Some(reduce) = effects.reduce_transparency {
                     self.apply_reduce_transparency_choice(reduce, false, cx);
                 }
-                if let Some(theme_id) = effects.theme_id
-                    && theme_id != self.theme_id
-                {
-                    let _ = self.apply_theme_choice(&theme_id, false, cx);
+                if let Some(theme_id) = effects.theme_id {
+                    let _ = self.adopt_synced_theme(&theme_id, effects.follow_system, cx);
                 }
                 // Auto-connect to the local (or previously active) Orbit Node when launched
                 // without an explicit server or demo mode flag.
@@ -6918,6 +7450,7 @@ impl ConnApp {
         self.server_config = std::sync::Arc::default();
         self.ended_threads.clear();
         self.reset_child_approvals();
+        self.reset_speculative();
         self.subscribed_annotation_project = None;
         self.files_subscription = None;
         self.annotations.clear();
@@ -7270,7 +7803,7 @@ impl ConnApp {
             self.apply_reduce_transparency_choice(reduce, false, cx);
         }
         if let Some(theme_id) = effects.theme_id {
-            let _ = self.apply_theme_choice(&theme_id, false, cx);
+            let _ = self.adopt_synced_theme(&theme_id, effects.follow_system, cx);
         }
         self.orbit.notice = Some("Previous settings restored.".to_owned());
         self.refresh_settings_orbit_info(cx);
@@ -7466,6 +7999,10 @@ impl ConnApp {
             return;
         }
         self.reduce_transparency = enabled;
+        if self.boot_theme.reduce_transparency != enabled {
+            self.boot_theme.reduce_transparency = enabled;
+            self.boot_theme.save();
+        }
         let theme_id = self.theme_id.clone();
         if let Some((_, tokens)) = self.resolve_theme(&theme_id) {
             self.set_tokens(tokens, cx);
@@ -7480,8 +8017,7 @@ impl ConnApp {
     /// Replaces the active theme tokens and updates `gpui-kit`'s global theme.
     pub(crate) fn set_tokens(&mut self, mut tokens: Tokens, cx: &mut Context<'_, Self>) {
         if self.reduce_transparency {
-            tokens.shell_fill = tokens.sidebar;
-            tokens.shell_inner_fill = tokens.shell_card;
+            crate::theme::reduce_transparency(&mut tokens);
         }
         apply_kit_theme(&tokens, cx);
         crate::vibrancy::sync_appearance(tokens.appearance);
@@ -7496,12 +8032,30 @@ impl ConnApp {
         if let Some(palette) = &self.command_palette {
             palette.update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
         }
+        if let Some(viewer) = &self.image_viewer {
+            viewer.update(cx, |v, cx| v.set_tokens(tokens.clone(), cx));
+        }
         if let Some(editor) = &self.workspace_editor {
             editor.update(cx, |e, cx| e.set_tokens(tokens.clone(), cx));
         }
         self.tokens = tokens;
         cx.notify();
     }
+}
+
+/// Where a theme switch came from: it decides whether it is saved and pushed to Orbit.
+#[derive(Clone, Copy, Debug)]
+enum ThemeSource {
+    /// Picked in Settings or the command palette: saved locally and pushed to Orbit.
+    User,
+    /// Adopted from the Orbit profile: saved locally, not pushed back.
+    Synced { follow_system: bool },
+    /// An automation capture: neither saved nor pushed.
+    #[cfg_attr(
+        not(feature = "automation"),
+        expect(dead_code, reason = "only automation captures switch themes this way")
+    )]
+    Automation,
 }
 
 impl Focusable for ConnApp {
@@ -7543,14 +8097,180 @@ fn agent_panel_tab(panel: conn_contract::AgentPanelKind) -> RightPanelTab {
         AgentPanelKind::Mcp => RightPanelTab::Mcp,
         AgentPanelKind::Diff => RightPanelTab::Diff,
         AgentPanelKind::Files => RightPanelTab::Files,
+        AgentPanelKind::Terminal => RightPanelTab::Terminal,
+    }
+}
+
+impl ConnApp {
+    /// The workspace rail and the thread sidebar: the [`regions::ShellRegion`] that draws them
+    /// renders through here. What the sidebar shows that changes the app (a held drop the server
+    /// has shown through, the ranked message matches) is settled here, as it is drawn.
+    pub(crate) fn render_sidebar_region(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> gpui_kit::AnyElement {
+        if !self.layout.sidebar_open {
+            return div().into_any_element();
+        }
+        // What the sidebar draws that changes the app: a drop the server has shown through ends,
+        // the search ranks what it found, and the shelf starts its scope.
+        self.release_settled_drop();
+        let search_text = self.sidebar_search_query(cx);
+        if !search_text.trim().is_empty() {
+            self.refresh_message_matches(&search_text);
+        }
+        let shelf_scope = self.settled_scope_key();
+        let shelf_visible = self.sidebar.visible_count(&shelf_scope);
+        let shelf_more = self.older_more_state();
+        // A held row shows the lists as they would be with it dropped where it is.
+        let drag_view = self.sidebar.drag.as_ref().map(|drag| {
+            let projection = match &drag.target {
+                Some(target) => conn_state::sidebar_drag::project(
+                    &drag.id,
+                    target,
+                    &drag.pinned,
+                    &drag.active,
+                    &drag.settled,
+                    // The held row shows in the shelf where it would settle, closed or not.
+                    true,
+                ),
+                None => conn_state::sidebar_drag::Projection {
+                    pinned: drag.pinned.clone(),
+                    active: drag.active.clone(),
+                    settled: drag.settled.clone(),
+                },
+            };
+            (
+                drag.id.clone(),
+                drag.from,
+                drag.target.as_ref().map(|t| t.section),
+                projection,
+            )
+        });
+        let draft_rows = self.sidebar_draft_rows(cx);
+        let draft_sidebar = DraftSidebar {
+            rows: draft_rows
+                .iter()
+                .map(|row| DraftRowView {
+                    row,
+                    project: self.shell.project(&row.project_id),
+                })
+                .collect(),
+            undo: self
+                .discard_failure
+                .map(UndoNotice::Failed)
+                .or_else(|| self.discards.notice().map(UndoNotice::Undoable)),
+            undo_focus: &self.undo_focus,
+            unsent_threads: self.sidebar_unsent_threads(cx),
+        };
+        self.sidebar_jump_hints_shown = self.jump_hints_visible(window, cx);
+        let jump_order = self.jump_hint_order(window, cx);
+        let hover_open_for = self
+            .thread_hover
+            .open_for()
+            .filter(|_| !self.thread_hover_suppressed());
+        let hover_environment_label = self.hover_environment_label(hover_open_for);
+        let hover_server_config = self.active_server_config();
+        let machine_icons = self.linked.machine_icons();
+        let scratch_projects = self.scratch_project_ids();
+        div()
+            .flex()
+            .flex_row()
+            .size_full()
+            .child(render_workspace_rail(
+                &self.orbit.workspaces,
+                &self.workspace_images,
+                self.active_workspace.as_deref(),
+                &self.tokens,
+                &self.geometry,
+                &self.rail_gesture,
+                cx,
+            ))
+            .child(render_thread_sidebar(
+                &self.shell,
+                &self.layout,
+                &self.orbit.workspaces,
+                self.active_workspace.as_deref(),
+                &draft_sidebar,
+                &SidebarMarks {
+                    jump_order: &jump_order,
+                    selection: &self.thread_selection,
+                    shelf: crate::sidebar::thread_list::ShelfMarks {
+                        expanded: self.sidebar.settled_expanded,
+                        visible_count: shelf_visible,
+                        more: shelf_more,
+                    },
+                    search: crate::sidebar::thread_list::SearchMarks {
+                        order: &self.sidebar.search.order,
+                        excerpts: &self.sidebar.search.excerpts,
+                        matched_query: &self.sidebar.search.matched_query,
+                        pending: self.sidebar.search.pending(),
+                        failed: self.sidebar.search.failed(),
+                    },
+                    pending_drop: self
+                        .sidebar
+                        .pending_drop
+                        .as_ref()
+                        .map(|p| (&p.drop, &p.thread)),
+                    drag: drag_view.as_ref().map(|(held, from, target, projection)| {
+                        crate::sidebar::thread_list::DragMarks {
+                            held,
+                            from: *from,
+                            target: *target,
+                            pinned: &projection.pinned,
+                            active: &projection.active,
+                            settled: &projection.settled,
+                        }
+                    }),
+                    sweep: self.sidebar.sweep.as_ref().map(|sweep| {
+                        crate::sidebar::thread_list::SweepMarks {
+                            keys: &sweep.keys,
+                            action: sweep.action,
+                        }
+                    }),
+                },
+                &self.sidebar_search_input,
+                self.sidebar_search_highlight.as_deref(),
+                self.renaming_thread_id
+                    .as_deref()
+                    .filter(|_| !self.rename_in_header),
+                &self.rename_input,
+                self.sidebar_filter_menu_open,
+                &ThreadHoverView {
+                    open_for: hover_open_for,
+                    environment_label: hover_environment_label.as_deref(),
+                    catalog: hover_server_config.catalog(),
+                    origins: Some(self.linked.origins()),
+                    machine_icons: &machine_icons,
+                    scratch_projects: &scratch_projects,
+                    primary_machine_icon: self.primary_machine_icon(),
+                    rect: self.thread_hover.row_rect(),
+                },
+                &mut self.sidebar_tree,
+                &self.tokens,
+                &self.geometry,
+                window,
+                cx,
+            ))
+            .into_any_element()
     }
 }
 
 impl Render for ConnApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.sync_details_task_history(cx);
+        self.sync_details_schedules(cx);
         self.refresh_workspace_images();
         RENDERS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        #[cfg(test)]
+        crate::render_stats::rendered(|c| &mut c.root);
+        // Another thread on screen drops the viewer, as web drops its preview.
+        if self.image_viewer.as_ref().is_some_and(|viewer| {
+            viewer.read(cx).thread_id() != self.layout.selected_thread_id.as_deref()
+        }) {
+            self.close_image_viewer(false, window, cx);
+        }
         self.sync_thread_menu_focus(window, cx);
         self.sync_undo_notice_focus(window, cx);
         #[cfg(feature = "zed-files")]
@@ -7570,6 +8290,10 @@ impl Render for ConnApp {
             .capture_key_down(
                 cx.listener(|app, event: &gpui_kit::KeyDownEvent, window, cx| {
                     if std::mem::take(&mut app.keystroke_consumed) {
+                        return;
+                    }
+                    if app.handle_image_viewer_key(event, window, cx) {
+                        cx.stop_propagation();
                         return;
                     }
                     if std::env::var_os("CONN_GPUI_FRAME_LOG").is_some() {
@@ -7682,57 +8406,6 @@ impl Render for ConnApp {
             .line_height(px(self.geometry.ui_line_height_px))
             .text_color(hsla(self.tokens.foreground));
 
-        // What the sidebar draws that changes the app: a drop the server has shown through ends,
-        // the search ranks what it found, and the shelf starts its scope.
-        self.release_settled_drop();
-        let search_text = self.sidebar_search_query(cx);
-        if !search_text.trim().is_empty() {
-            self.refresh_message_matches(&search_text);
-        }
-        let shelf_scope = self.settled_scope_key();
-        let shelf_visible = self.sidebar.visible_count(&shelf_scope);
-        let shelf_more = self.older_more_state();
-        // A held row shows the lists as they would be with it dropped where it is.
-        let drag_view = self.sidebar.drag.as_ref().map(|drag| {
-            let projection = match &drag.target {
-                Some(target) => conn_state::sidebar_drag::project(
-                    &drag.id,
-                    target,
-                    &drag.pinned,
-                    &drag.active,
-                    &drag.settled,
-                    // The held row shows in the shelf where it would settle, closed or not.
-                    true,
-                ),
-                None => conn_state::sidebar_drag::Projection {
-                    pinned: drag.pinned.clone(),
-                    active: drag.active.clone(),
-                    settled: drag.settled.clone(),
-                },
-            };
-            (
-                drag.id.clone(),
-                drag.from,
-                drag.target.as_ref().map(|t| t.section),
-                projection,
-            )
-        });
-        let draft_rows = self.sidebar_draft_rows(cx);
-        let draft_sidebar = DraftSidebar {
-            rows: draft_rows
-                .iter()
-                .map(|row| DraftRowView {
-                    row,
-                    project: self.shell.project(&row.project_id),
-                })
-                .collect(),
-            undo: self
-                .discard_failure
-                .map(UndoNotice::Failed)
-                .or_else(|| self.discards.notice().map(UndoNotice::Undoable)),
-            undo_focus: &self.undo_focus,
-            unsent_threads: self.sidebar_unsent_threads(cx),
-        };
         if std::mem::take(&mut self.reveal_open_row)
             && let Some(open) = self.layout.selected_thread_id.clone()
         {
@@ -7745,90 +8418,11 @@ impl Render for ConnApp {
                 });
             });
         }
-        let jump_order = self.jump_hint_order(window, cx);
-        let hover_open_for = self
-            .thread_hover
-            .open_for()
-            .filter(|_| !self.thread_hover_suppressed());
-        let hover_environment_label = self.hover_environment_label(hover_open_for);
-        let machine_icons = self.linked.machine_icons();
-        let scratch_projects = self.scratch_project_ids();
+        self.sync_sidebar_inputs(window, cx);
         if self.layout.sidebar_open {
+            let width = crate::shell::WORKSPACE_RAIL_WIDTH_PX + self.layout.sidebar_width;
             root = root
-                .child(render_workspace_rail(
-                    &self.orbit.workspaces,
-                    &self.workspace_images,
-                    self.active_workspace.as_deref(),
-                    &self.tokens,
-                    &self.geometry,
-                    &self.rail_gesture,
-                    cx,
-                ))
-                .child(render_thread_sidebar(
-                    &self.shell,
-                    &self.layout,
-                    &self.orbit.workspaces,
-                    self.active_workspace.as_deref(),
-                    &draft_sidebar,
-                    &SidebarMarks {
-                        jump_order: &jump_order,
-                        selection: &self.thread_selection,
-                        shelf: crate::sidebar::thread_list::ShelfMarks {
-                            expanded: self.sidebar.settled_expanded,
-                            visible_count: shelf_visible,
-                            more: shelf_more,
-                        },
-                        search: crate::sidebar::thread_list::SearchMarks {
-                            order: &self.sidebar.search.order,
-                            excerpts: &self.sidebar.search.excerpts,
-                            matched_query: &self.sidebar.search.matched_query,
-                            pending: self.sidebar.search.pending(),
-                            failed: self.sidebar.search.failed(),
-                        },
-                        pending_drop: self
-                            .sidebar
-                            .pending_drop
-                            .as_ref()
-                            .map(|p| (&p.drop, &p.thread)),
-                        drag: drag_view.as_ref().map(|(held, from, target, projection)| {
-                            crate::sidebar::thread_list::DragMarks {
-                                held,
-                                from: *from,
-                                target: *target,
-                                pinned: &projection.pinned,
-                                active: &projection.active,
-                                settled: &projection.settled,
-                            }
-                        }),
-                        sweep: self.sidebar.sweep.as_ref().map(|sweep| {
-                            crate::sidebar::thread_list::SweepMarks {
-                                keys: &sweep.keys,
-                                action: sweep.action,
-                            }
-                        }),
-                    },
-                    &self.sidebar_search_input,
-                    self.sidebar_search_highlight.as_deref(),
-                    self.renaming_thread_id
-                        .as_deref()
-                        .filter(|_| !self.rename_in_header),
-                    &self.rename_input,
-                    self.sidebar_filter_menu_open,
-                    &ThreadHoverView {
-                        open_for: hover_open_for,
-                        environment_label: hover_environment_label.as_deref(),
-                        origins: Some(self.linked.origins()),
-                        machine_icons: &machine_icons,
-                        scratch_projects: &scratch_projects,
-                        primary_machine_icon: self.primary_machine_icon(),
-                        rect: self.thread_hover.row_rect(),
-                    },
-                    &mut self.sidebar_tree,
-                    &self.tokens,
-                    &self.geometry,
-                    window,
-                    cx,
-                ))
+                .child(regions::sidebar_region(&self.regions.sidebar, width))
                 .child(self.render_seam(false, viewport_w, cx));
         }
 
@@ -7963,6 +8557,9 @@ impl Render for ConnApp {
             ));
         }
 
+        if let Some(viewer) = &self.image_viewer {
+            root = root.child(crate::chat::image_viewer::render_overlay(viewer));
+        }
         if let Some(modal) = &self.settings_modal {
             root = root.child(crate::settings::render_overlay(modal));
         }

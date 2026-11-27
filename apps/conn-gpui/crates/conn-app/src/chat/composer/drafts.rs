@@ -19,9 +19,28 @@ fn saved_content(text: &str, attachments: &[PendingAttachment]) -> DraftContent 
                     size_bytes: attachment.size_bytes,
                     attachment: descriptor.clone(),
                 }),
-                AttachmentUploadStatus::Uploading | AttachmentUploadStatus::Error(_) => None,
+                AttachmentUploadStatus::Uploading(_) | AttachmentUploadStatus::Error(_) => None,
             })
             .collect(),
+    }
+}
+
+/// The name and size an uploaded attachment shows with in the composer.
+fn attachment_name_and_size(attachment: &conn_contract::ChatAttachment) -> (String, usize) {
+    let (name, size) = match attachment {
+        conn_contract::ChatAttachment::Image(image) => (&image.name, image.size_bytes),
+        conn_contract::ChatAttachment::File(file) => (&file.name, file.size_bytes),
+        conn_contract::ChatAttachment::Unknown(other) => (&other.name, other.size_bytes),
+    };
+    (name.clone(), usize::try_from(size).unwrap_or(0))
+}
+
+/// `returned` with the `draft` typed since after it, a blank line between.
+fn before_draft(returned: String, draft: &str) -> String {
+    if draft.trim().is_empty() {
+        returned
+    } else {
+        format!("{returned}\n\n{draft}")
     }
 }
 
@@ -71,6 +90,8 @@ impl Composer {
                     name: saved.name,
                     size_bytes: saved.size_bytes,
                     status: AttachmentUploadStatus::Ready(saved.attachment),
+                    source: None,
+                    server: None,
                 }
             })
             .collect();
@@ -81,6 +102,57 @@ impl Composer {
                 attachments,
             },
         );
+    }
+
+    /// Puts a message whose send failed back under `key`: in the composer when `key` shows,
+    /// else parked for that thread. What the user typed or attached since stays, after the
+    /// message, so a send that comes back never overwrites a draft.
+    pub(crate) fn return_unsent(
+        &mut self,
+        key: &str,
+        text: String,
+        attachments: Vec<conn_contract::ChatAttachment>,
+        window: Option<&mut gpui_kit::Window>,
+        cx: &mut gpui_kit::Context<'_, Self>,
+    ) {
+        let server = self.server.clone();
+        let mut returned: Vec<PendingAttachment> = attachments
+            .into_iter()
+            .map(|attachment| {
+                let local_id = self.next_attachment_id;
+                self.next_attachment_id = self.next_attachment_id.wrapping_add(1);
+                let (name, size_bytes) = attachment_name_and_size(&attachment);
+                PendingAttachment {
+                    local_id,
+                    name,
+                    size_bytes,
+                    status: AttachmentUploadStatus::Ready(attachment),
+                    source: None,
+                    server: server.clone(),
+                }
+            })
+            .collect();
+        if self.drafts.active_key() == Some(key) {
+            let Some(window) = window else {
+                return;
+            };
+            returned.append(&mut self.attachments);
+            self.attachments = returned;
+            let typed = self.textarea.read(cx).value().to_string();
+            self.set_draft_text(before_draft(text, &typed), window, cx);
+            return;
+        }
+        let parked = self.drafts.discard(key).unwrap_or_default();
+        let text = before_draft(text, &parked.text);
+        returned.extend(parked.attachments);
+        self.drafts.park(
+            key,
+            ComposerDraft {
+                text,
+                attachments: returned,
+            },
+        );
+        cx.notify();
     }
 
     /// Drops `key`'s draft once it is sent or discarded (`clearDraftThread`) and returns what
@@ -108,6 +180,8 @@ mod tests {
             name: format!("file-{local_id}.txt"),
             size_bytes: 3,
             status,
+            source: None,
+            server: None,
         }
     }
 
@@ -125,7 +199,7 @@ mod tests {
             "text",
             &[
                 pending(1, AttachmentUploadStatus::Ready(ready)),
-                pending(2, AttachmentUploadStatus::Uploading),
+                pending(2, AttachmentUploadStatus::Uploading(0.0)),
                 pending(3, AttachmentUploadStatus::Error("offline".to_owned())),
             ],
         );

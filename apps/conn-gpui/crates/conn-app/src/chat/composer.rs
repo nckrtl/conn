@@ -17,6 +17,9 @@ mod drafts;
 mod footer;
 mod menus;
 mod model_picker;
+#[cfg(test)]
+mod model_picker_layout_tests;
+mod picker_settings;
 mod popovers;
 mod stash;
 
@@ -33,6 +36,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gpui_kit::TestSupportExt as _;
 
 use conn_client::Connection;
+use conn_client::uploads::{FileSource, LocalFile, UploadStatus, Uploads};
 use conn_contract::rpc::projects::search_entries;
 use conn_contract::{ChatAttachment, ProjectSearchEntriesInput};
 use conn_desktop::operator::{DictationStart, DictationWait, OperatorClient};
@@ -77,6 +81,15 @@ pub(super) const COMPOSER_MAX_LINES: usize = 8;
 
 /// Composer card corner radius matching Conn's `rounded-2xl` (`16px`).
 const COMPOSER_RADIUS_PX: f32 = 16.0;
+/// Side of a staged image's chip in the attachment strip, in logical px.
+const STAGED_CHIP_PX: f32 = 64.0;
+/// Composer card shadow: a large blur, a low alpha and a small upward offset. GPUI's blur radius
+/// is the gaussian's sigma, so it matches CSS `box-shadow: 0 -4px 64px` (CSS blur is 2 sigma).
+/// The vendored shadow shader dithers its output, so the falloff has no 8-bit bands.
+const COMPOSER_SHADOW_BLUR_PX: f32 = 32.0;
+const COMPOSER_SHADOW_OFFSET_Y_PX: f32 = -4.0;
+const COMPOSER_SHADOW_ALPHA_DARK: f32 = 0.22;
+const COMPOSER_SHADOW_ALPHA_LIGHT: f32 = 0.08;
 /// Bottom gap below the composer card when the context strip is hidden: the card's bottom
 /// lines up with the bottom of the sidebar's last line (Conn's `sm:h-[1.25rem]` was 4px lower).
 const COMPOSER_BOTTOM_SPACER_PX: f32 =
@@ -98,6 +111,15 @@ const PLAN_IMPLEMENTATION_PROMPT_PREFIX: &str = "PLEASE IMPLEMENT THIS PLAN:\n";
 /// `modelPicker.toggle` shortcut label.
 const MODEL_PICKER_SHORTCUT_LABEL: &str = "⌘⇧M";
 
+fn chip_upload(status: &AttachmentUploadStatus) -> super::attachment_thumb::ChipUpload {
+    use super::attachment_thumb::ChipUpload;
+    match status {
+        AttachmentUploadStatus::Uploading(p) => ChipUpload::Uploading(*p),
+        AttachmentUploadStatus::Ready(_) => ChipUpload::Ready,
+        AttachmentUploadStatus::Error(_) => ChipUpload::Failed,
+    }
+}
+
 /// State of one staged file/image attachment in the composer strip.
 #[derive(Clone, Debug)]
 struct PendingAttachment {
@@ -105,11 +127,25 @@ struct PendingAttachment {
     name: String,
     size_bytes: usize,
     status: AttachmentUploadStatus,
+    /// What to upload again on retry or after a reconnect; restored drafts have none.
+    source: Option<LocalFile>,
+    /// The server (environment key) this file uploads to: the one its draft's thread lives
+    /// on. Its upload id is valid only there, so it never uploads anywhere else.
+    server: Option<String>,
+}
+
+/// One server's upload queue and the task that applies its progress to the composer.
+struct UploadQueue {
+    server: Option<String>,
+    connection: Connection,
+    uploads: Uploads,
+    _events: gpui_kit::Task<()>,
 }
 
 #[derive(Clone, Debug)]
 enum AttachmentUploadStatus {
-    Uploading,
+    /// The share sent, 0 to 1 (`UploadStatus::Uploading`).
+    Uploading(f32),
     Ready(ChatAttachment),
     Error(String),
 }
@@ -248,7 +284,7 @@ pub(crate) struct Composer {
     meter: context_meter::MeterHover,
     meter_timer: Option<gpui_kit::Task<()>>,
     footer_permissions_open: bool,
-    picker_permissions_open: bool,
+    strip_permissions_open: bool,
     permission_preview: Option<&'static str>,
     implement_menu_open: bool,
     /// Popovers open at the last render, to tell which opened since (`popovers.rs`).
@@ -270,8 +306,14 @@ pub(crate) struct Composer {
     selected_model: String,
     selected_options: Option<serde_json::Map<String, serde_json::Value>>,
     model_picker_open: bool,
+    /// Menu, cursor and focus of the picker's settings column.
+    picker_settings: picker_settings::SettingsState,
+    /// The pointer is on the trigger, so an outside press must not close the picker first.
+    model_trigger_hovered: bool,
     picker_provider_filter: Option<String>,
     picker_highlighted_index: usize,
+    /// Composer width and distance from the top of the window to its picker anchor.
+    picker_room_px: std::rc::Rc<std::cell::Cell<Option<(f32, f32)>>>,
     active_trigger: Option<ComposerTrigger>,
     dismissed_trigger_text: Option<String>,
     menu_highlighted_index: usize,
@@ -288,8 +330,14 @@ pub(crate) struct Composer {
     /// Placeholder last pushed into the textarea.
     applied_placeholder: &'static str,
     next_attachment_id: u64,
-    /// Thumbnails of staged images, by `PendingAttachment::local_id`.
-    attachment_previews: HashMap<u64, Arc<gpui_kit::Image>>,
+    /// Thumbnails of staged images, by `PendingAttachment::local_id`, decoded at chip size off
+    /// the UI thread. Each is freed (pixels and window texture) once no draft holds its chip.
+    attachment_previews: HashMap<u64, super::attachment_thumb::SentImage>,
+    /// Uploads start on attach (`attachmentUploads.ts`); one queue per server. A queue stays
+    /// while the chat shows another server, so a parked draft's uploads finish on their own.
+    upload_queues: Vec<UploadQueue>,
+    /// The server `connection` belongs to (its environment key); new attachments upload there.
+    server: Option<String>,
     editing_queued: Option<EditingQueuedRun>,
     dictation: DictationState,
     dictation_error: Option<String>,
@@ -410,7 +458,7 @@ impl Composer {
             meter: context_meter::MeterHover::default(),
             meter_timer: None,
             footer_permissions_open: false,
-            picker_permissions_open: false,
+            strip_permissions_open: false,
             permission_preview: None,
             implement_menu_open: false,
             seen_popovers: Vec::new(),
@@ -427,8 +475,11 @@ impl Composer {
             selected_model: "Default model".to_owned(),
             selected_options: None,
             model_picker_open: false,
+            picker_settings: picker_settings::SettingsState::new(cx),
+            model_trigger_hovered: false,
             picker_provider_filter: None,
             picker_highlighted_index: 0,
+            picker_room_px: std::rc::Rc::default(),
             active_trigger: None,
             dismissed_trigger_text: None,
             menu_highlighted_index: 0,
@@ -442,6 +493,8 @@ impl Composer {
             applied_placeholder: COMPOSER_PLACEHOLDER,
             next_attachment_id: 1,
             attachment_previews: HashMap::new(),
+            upload_queues: Vec::new(),
+            server: None,
             editing_queued: None,
             dictation: DictationState::Idle,
             dictation_error: None,
@@ -460,15 +513,218 @@ impl Composer {
         cx.notify();
     }
 
-    /// Updates the server connection. The catalog follows the app's config stream.
+    /// Updates the server connection and the server (environment key) it belongs to. The
+    /// catalog follows the app's config stream.
     pub(crate) fn set_connection(
         &mut self,
         connection: Option<Connection>,
+        server: Option<String>,
         cx: &mut Context<'_, Self>,
     ) {
+        let same = self
+            .connection
+            .as_ref()
+            .zip(connection.as_ref())
+            .is_some_and(|(a, b)| a.same_connection(b));
         self.connection = connection;
         self.catalog_refresh_in_flight = false;
+        let old_server = std::mem::replace(&mut self.server, server);
+        if same {
+            // The same connection under a new name: what it staged keeps uploading there.
+            if old_server != self.server {
+                let server = self.server.clone();
+                for attachment in self
+                    .attachments
+                    .iter_mut()
+                    .chain(self.drafts.parked_attachments_mut())
+                    .filter(|a| a.server == old_server)
+                {
+                    attachment.server.clone_from(&server);
+                }
+                for queue in self
+                    .upload_queues
+                    .iter_mut()
+                    .filter(|q| q.server == old_server)
+                {
+                    queue.server.clone_from(&server);
+                }
+            }
+        } else {
+            self.restart_uploads(cx);
+        }
         cx.notify();
+    }
+
+    /// The connection moved: this server's unfinished or failed uploads start (again) on it.
+    /// Attachments of drafts on other servers keep their own queues and wait for their server.
+    fn restart_uploads(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(uploads) = self.upload_queue(cx) else {
+            return;
+        };
+        let server = self.server.clone();
+        for attachment in self
+            .attachments
+            .iter_mut()
+            .chain(self.drafts.parked_attachments_mut())
+            .filter(|a| a.server == server)
+        {
+            let Some(source) = &attachment.source else {
+                continue;
+            };
+            let id = attachment.local_id.to_string();
+            let queued = uploads.status(&id);
+            let restart = match attachment.status {
+                AttachmentUploadStatus::Uploading(_) => queued.is_none(),
+                AttachmentUploadStatus::Error(_) => true,
+                AttachmentUploadStatus::Ready(_) => false,
+            };
+            if !restart {
+                continue;
+            }
+            if matches!(queued, Some(UploadStatus::Failed { .. })) {
+                uploads.retry(&id);
+            } else {
+                uploads.add(&id, source.clone());
+            }
+            attachment.status = AttachmentUploadStatus::Uploading(0.0);
+        }
+    }
+
+    /// The upload queue of the current server on the current connection. A queue for this
+    /// server on an older connection (a reconnect) is dropped.
+    fn upload_queue(&mut self, cx: &mut Context<'_, Self>) -> Option<Uploads> {
+        let connection = self.connection.clone()?;
+        if let Some(queue) = self
+            .upload_queues
+            .iter()
+            .find(|q| q.server == self.server && q.connection.same_connection(&connection))
+        {
+            return Some(queue.uploads.clone());
+        }
+        let server = self.server.clone();
+        self.upload_queues.retain(|q| q.server != server);
+        let uploads = Uploads::new(connection.clone());
+        uploads.set_codec(Arc::new(super::upload_codec::DesktopImageCodec));
+        let (tx, mut rx) = futures::channel::mpsc::unbounded::<(String, Option<UploadStatus>)>();
+        uploads.set_listener(Arc::new(move |id, status| {
+            let _ = tx.unbounded_send((id.to_owned(), status.cloned()));
+        }));
+        let queue = uploads.clone();
+        let events = cx.spawn(async move |this, cx| {
+            use futures::StreamExt as _;
+            while let Some((id, status)) = rx.next().await {
+                let ready = matches!(status, Some(UploadStatus::Ready))
+                    .then(|| queue.uploaded(&id))
+                    .flatten();
+                let updated = this.update(cx, |composer, cx| {
+                    composer.apply_upload(&queue, &id, status, ready.map(|r| r.attachment), cx);
+                });
+                if updated.is_err() {
+                    break;
+                }
+            }
+        });
+        self.upload_queues.push(UploadQueue {
+            server,
+            connection,
+            uploads: uploads.clone(),
+            _events: events,
+        });
+        Some(uploads)
+    }
+
+    /// The queue `server`'s attachments upload on, if it has one.
+    fn queue_of(&self, server: &Option<String>) -> Option<&Uploads> {
+        self.upload_queues
+            .iter()
+            .find(|q| q.server == *server)
+            .map(|q| &q.uploads)
+    }
+
+    fn apply_upload(
+        &mut self,
+        queue: &Uploads,
+        id: &str,
+        status: Option<UploadStatus>,
+        ready: Option<ChatAttachment>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Ok(local_id) = id.parse::<u64>() else {
+            return;
+        };
+        // Only the queue of the attachment's own server may change it; a replaced queue is gone.
+        let Some(server) = self
+            .upload_queues
+            .iter()
+            .find(|q| q.uploads.same_queue(queue))
+            .map(|q| q.server.clone())
+        else {
+            return;
+        };
+        let next = match status {
+            Some(UploadStatus::Uploading { progress }) => {
+                AttachmentUploadStatus::Uploading(progress)
+            }
+            Some(UploadStatus::Failed { reason }) => AttachmentUploadStatus::Error(reason),
+            Some(UploadStatus::Ready) => match ready {
+                Some(attachment) => AttachmentUploadStatus::Ready(attachment),
+                None => return,
+            },
+            None => return,
+        };
+        // The upload may finish after the user switched threads; its draft is parked then.
+        if let Some(slot) = self
+            .attachments
+            .iter_mut()
+            .chain(self.drafts.parked_attachments_mut())
+            .find(|a| {
+                a.local_id == local_id
+                    && a.server == server
+                    && !matches!(a.status, AttachmentUploadStatus::Ready(_))
+            })
+        {
+            slot.status = next;
+            cx.notify();
+        }
+    }
+
+    /// Starts a failed upload again, on its own server only.
+    fn retry_attachment(&mut self, local_id: u64, cx: &mut Context<'_, Self>) {
+        let server = self.server.clone();
+        if !self.attachments.iter().any(|a| {
+            a.local_id == local_id
+                && a.server == server
+                && a.source.is_some()
+                && matches!(a.status, AttachmentUploadStatus::Error(_))
+        }) {
+            return;
+        }
+        let Some(uploads) = self.upload_queue(cx) else {
+            return;
+        };
+        let Some(attachment) = self.attachments.iter_mut().find(|a| a.local_id == local_id) else {
+            return;
+        };
+        let Some(source) = &attachment.source else {
+            return;
+        };
+        let id = local_id.to_string();
+        if uploads.status(&id).is_some() {
+            uploads.retry(&id);
+        } else {
+            uploads.add(&id, source.clone());
+        }
+        attachment.status = AttachmentUploadStatus::Uploading(0.0);
+        cx.notify();
+    }
+
+    /// The sent attachments leave the queue; their ids stay valid for a restored draft.
+    fn forget_uploads(&self) {
+        for attachment in &self.attachments {
+            if let Some(uploads) = self.queue_of(&attachment.server) {
+                let _ = uploads.forget(&[attachment.local_id.to_string()]);
+            }
+        }
     }
 
     /// Sets the workspace root used for `@` file mention searches (`projects.searchEntries`).
@@ -1032,7 +1288,7 @@ impl Composer {
     /// Toggles the floating model picker popup.
     pub(crate) fn toggle_model_picker(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         self.model_picker_open = !self.model_picker_open;
-        self.picker_permissions_open = false;
+        self.picker_settings.reset();
         self.permission_preview = None;
         if self.model_picker_open {
             self.active_trigger = None;
@@ -1060,7 +1316,7 @@ impl Composer {
         }
         for open in [
             &mut self.footer_permissions_open,
-            &mut self.picker_permissions_open,
+            &mut self.strip_permissions_open,
             &mut self.implement_menu_open,
             &mut self.context_meter_open,
             &mut self.stash.menu_open,
@@ -1073,6 +1329,7 @@ impl Composer {
             }
         }
         self.permission_preview = None;
+        self.picker_settings.reset();
         if self.active_trigger.take().is_some() {
             let text = self.textarea.read(cx).value().to_string();
             self.dismissed_trigger_text = Some(text);
@@ -1092,7 +1349,7 @@ impl Composer {
     fn any_overlay_open(&self) -> bool {
         self.model_picker_open
             || self.footer_permissions_open
-            || self.picker_permissions_open
+            || self.strip_permissions_open
             || self.implement_menu_open
             || self.context_meter_open
             || self.stash.menu_open
@@ -1156,6 +1413,8 @@ impl Composer {
                         name,
                         size_bytes: 0,
                         status: AttachmentUploadStatus::Error(err.to_string()),
+                        source: None,
+                        server: self.server.clone(),
                     });
                     cx.notify();
                 }
@@ -1163,8 +1422,8 @@ impl Composer {
         }
     }
 
-    /// Stages in-memory bytes (such as a pasted clipboard image) and uploads via
-    /// `attachments.createUploadUrl`.
+    /// Stages in-memory bytes (such as a pasted clipboard image) and starts their upload at once;
+    /// the shared queue scales images, runs three at a time and reports progress.
     pub(super) fn stage_and_upload_bytes(
         &mut self,
         name: String,
@@ -1173,42 +1432,28 @@ impl Composer {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        let Some(conn) = self.connection.clone() else {
+        let Some(uploads) = self.upload_queue(cx) else {
             return;
         };
         let local_id = self.next_attachment_id;
         self.next_attachment_id = self.next_attachment_id.wrapping_add(1);
         let size_bytes = bytes.len();
-        if let Some(image) = super::attachment_thumb::preview_image(&mime_type, bytes.clone()) {
-            self.attachment_previews.insert(local_id, image);
-        }
+        self.decode_attachment_preview(local_id, &mime_type, &bytes, window, cx);
+        let source = LocalFile {
+            source: FileSource::Bytes(Arc::new(bytes)),
+            name: name.clone(),
+            mime_type,
+        };
+        uploads.add(&local_id.to_string(), source.clone());
         self.attachments.push(PendingAttachment {
             local_id,
-            name: name.clone(),
+            name,
             size_bytes,
-            status: AttachmentUploadStatus::Uploading,
+            status: AttachmentUploadStatus::Uploading(0.0),
+            source: Some(source),
+            server: self.server.clone(),
         });
         cx.notify();
-
-        cx.spawn_in(window, async move |this, cx| {
-            let upload_res = conn.upload_chat_attachment(name, mime_type, bytes).await;
-            let _ = this.update(cx, |composer, cx| {
-                // The upload may finish after the user switched threads; its draft is parked then.
-                if let Some(slot) = composer
-                    .attachments
-                    .iter_mut()
-                    .chain(composer.drafts.parked_attachments_mut())
-                    .find(|a| a.local_id == local_id)
-                {
-                    slot.status = match upload_res {
-                        Ok(att) => AttachmentUploadStatus::Ready(att),
-                        Err(err) => AttachmentUploadStatus::Error(err.to_string()),
-                    };
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
     }
 
     #[cfg(test)]
@@ -1224,11 +1469,24 @@ impl Composer {
 
     #[cfg(test)]
     pub(crate) fn attachment_states_for_test(&self) -> Vec<(String, String)> {
-        self.attachments
+        Self::states_for_test(&self.attachments)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn parked_attachment_states_for_test(&self, key: &str) -> Vec<(String, String)> {
+        self.drafts
+            .parked_draft(key)
+            .map(|d| Self::states_for_test(&d.attachments))
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    fn states_for_test(attachments: &[PendingAttachment]) -> Vec<(String, String)> {
+        attachments
             .iter()
             .map(|a| {
                 let state = match &a.status {
-                    AttachmentUploadStatus::Uploading => "uploading".to_owned(),
+                    AttachmentUploadStatus::Uploading(_) => "uploading".to_owned(),
                     AttachmentUploadStatus::Ready(att) => {
                         let id = match att {
                             ChatAttachment::Image(img) => img.id.as_str(),
@@ -1514,12 +1772,155 @@ impl Composer {
     }
 
     fn remove_attachment(&mut self, local_id: u64, cx: &mut Context<'_, Self>) {
+        if let Some(uploads) = self
+            .attachments
+            .iter()
+            .find(|a| a.local_id == local_id)
+            .and_then(|a| self.queue_of(&a.server))
+        {
+            uploads.remove(&local_id.to_string());
+        }
         let before = self.attachments.len();
         self.attachments.retain(|a| a.local_id != local_id);
-        self.attachment_previews.remove(&local_id);
+        if let Some(preview) = self.attachment_previews.remove(&local_id) {
+            preview.release(cx);
+        }
         if self.attachments.len() != before {
             cx.notify();
         }
+    }
+
+    /// Decodes a staged image's chip thumbnail off the UI thread. GPUI would otherwise decode
+    /// the whole picture for a 64 px chip and keep it for the rest of the session.
+    fn decode_attachment_preview(
+        &mut self,
+        local_id: u64,
+        mime_type: &str,
+        bytes: &[u8],
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        use super::attachment_thumb::{SentImage, image_format_for_mime, load_sent_image};
+        if image_format_for_mime(mime_type).is_none() {
+            return;
+        }
+        self.attachment_previews
+            .insert(local_id, SentImage::Loading(local_id));
+        let target = super::thumb_cache::TargetPx::from_logical(
+            STAGED_CHIP_PX,
+            STAGED_CHIP_PX,
+            window.scale_factor(),
+        );
+        let svg_renderer = cx.svg_renderer();
+        let mime_type = mime_type.to_owned();
+        let bytes = bytes.to_vec();
+        let decode = cx.background_executor().spawn(async move {
+            let cancel = std::sync::atomic::AtomicBool::new(false);
+            load_sent_image(&mime_type, bytes, target, svg_renderer, &cancel).0
+        });
+        cx.spawn(async move |this, cx| {
+            let image = decode.await;
+            let _ = this.update(cx, |composer, cx| {
+                let waiting = matches!(
+                    composer.attachment_previews.get(&local_id),
+                    Some(SentImage::Loading(id)) if *id == local_id
+                );
+                match image {
+                    SentImage::Ready(_) if waiting => {
+                        composer.attachment_previews.insert(local_id, image);
+                    }
+                    // A picture that does not decode shows as a file chip.
+                    _ if waiting => {
+                        composer.attachment_previews.remove(&local_id);
+                    }
+                    // The chip went while decoding.
+                    image => image.release(cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Frees the thumbnails no draft shows any more: sent, cleared, or discarded with their
+    /// draft. A parked draft keeps its chips. Returns how many went.
+    fn prune_attachment_previews(&mut self, cx: &mut Context<'_, Self>) -> usize {
+        let live: std::collections::HashSet<u64> = self
+            .attachments
+            .iter()
+            .map(|a| a.local_id)
+            .chain(
+                self.drafts
+                    .parked_drafts()
+                    .flat_map(|(_, d)| d.attachments.iter().map(|a| a.local_id)),
+            )
+            .collect();
+        let gone: Vec<u64> = self
+            .attachment_previews
+            .keys()
+            .filter(|id| !live.contains(id))
+            .copied()
+            .collect();
+        for id in &gone {
+            if let Some(preview) = self.attachment_previews.remove(id) {
+                preview.release(cx);
+            }
+        }
+        gone.len()
+    }
+
+    /// Test helper: stages an image as a paste does, without uploading it. Returns its id.
+    #[cfg(test)]
+    pub(crate) fn stage_image_for_test(
+        &mut self,
+        name: &str,
+        mime_type: &str,
+        bytes: Vec<u8>,
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) -> u64 {
+        let local_id = self.next_attachment_id;
+        self.next_attachment_id = self.next_attachment_id.wrapping_add(1);
+        self.decode_attachment_preview(local_id, mime_type, &bytes, window, cx);
+        self.attachments.push(PendingAttachment {
+            local_id,
+            name: name.to_owned(),
+            size_bytes: bytes.len(),
+            status: AttachmentUploadStatus::Uploading(0.0),
+            source: None,
+            server: self.server.clone(),
+        });
+        cx.notify();
+        local_id
+    }
+
+    /// Test helper: the chip's remove button.
+    #[cfg(test)]
+    pub(crate) fn remove_attachment_for_test(&mut self, local_id: u64, cx: &mut Context<'_, Self>) {
+        self.remove_attachment(local_id, cx);
+    }
+
+    /// Test helper: the decoded thumbnail of staged image `local_id`, once it is ready.
+    #[cfg(test)]
+    pub(crate) fn attachment_preview_image_for_test(
+        &self,
+        local_id: u64,
+    ) -> Option<Arc<gpui_kit::RenderImage>> {
+        match self.attachment_previews.get(&local_id)? {
+            super::attachment_thumb::SentImage::Ready(image) => Some(image.clone()),
+            _ => None,
+        }
+    }
+
+    /// Test helper: how many staged-image thumbnails the composer holds, and how many decoded.
+    #[cfg(test)]
+    pub(crate) fn attachment_previews_for_test(&self) -> (usize, usize) {
+        let ready = self
+            .attachment_previews
+            .values()
+            .filter(|p| matches!(p, super::attachment_thumb::SentImage::Ready(_)))
+            .count();
+        (self.attachment_previews.len(), ready)
     }
 
     /// Submits the current draft with the default dispatch (Enter or the send button).
@@ -1575,7 +1976,7 @@ impl Composer {
         let still_uploading = self
             .attachments
             .iter()
-            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading));
+            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading(_)));
         if still_uploading {
             return;
         }
@@ -1603,6 +2004,7 @@ impl Composer {
                 input.set_value(editing.saved_draft, window, cx);
                 input.focus(window, cx);
             });
+            self.forget_uploads();
             self.attachments.clear();
             self.active_trigger = None;
             self.dismissed_trigger_text = None;
@@ -1648,6 +2050,7 @@ impl Composer {
             self.textarea.update(cx, |input, cx| {
                 input.set_value("", window, cx);
             });
+            self.forget_uploads();
             self.attachments.clear();
             None
         };
@@ -1666,7 +2069,7 @@ impl Composer {
         let uploading = self
             .attachments
             .iter()
-            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading));
+            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading(_)));
         QuestionComposerStatus {
             typed: self.textarea.read(cx).value().to_string(),
             voice_active: matches!(self.dictation, DictationState::Recording { .. }),
@@ -1785,12 +2188,6 @@ impl Composer {
         cx.notify();
     }
 
-    pub(super) fn toggle_picker_permissions_menu(&mut self, cx: &mut Context<'_, Self>) {
-        self.picker_permissions_open = !self.picker_permissions_open;
-        self.permission_preview = None;
-        cx.notify();
-    }
-
     /// Hover preview inside `ComposerPermissionsSection`.
     pub(super) fn preview_permission(
         &mut self,
@@ -1814,7 +2211,7 @@ impl Composer {
     /// Picks a permission mode; the radio item closes its menu (`closeOnClick`).
     pub(super) fn pick_runtime_mode(&mut self, mode: &'static str, cx: &mut Context<'_, Self>) {
         self.footer_permissions_open = false;
-        self.picker_permissions_open = false;
+        self.strip_permissions_open = false;
         self.permission_preview = None;
         if self.runtime_mode != mode {
             self.runtime_mode = mode.to_owned();
@@ -1978,6 +2375,8 @@ impl Composer {
                     name: chat_attachment_name(&att).to_owned(),
                     size_bytes: chat_attachment_size(&att),
                     status: AttachmentUploadStatus::Ready(att),
+                    source: None,
+                    server: self.server.clone(),
                 }
             })
             .collect();
@@ -2376,6 +2775,8 @@ impl Render for Composer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         // One popover at a time: opening one closes the others (Nick, #323).
         self.keep_one_popover(cx);
+        // Thumbnails of chips no draft shows any more are freed.
+        self.prune_attachment_previews(cx);
         // `noProviderAvailable` (`ChatComposer.tsx:934-945`): no instance is usable for this
         // composer. Until the first config arrives the catalog is merely unknown.
         let provider_selection = self
@@ -2400,7 +2801,7 @@ impl Render for Composer {
         let is_uploading = self
             .attachments
             .iter()
-            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading));
+            .any(|a| matches!(a.status, AttachmentUploadStatus::Uploading(_)));
         let has_non_empty_text = !self.textarea.read(cx).value().trim().is_empty();
         let send_action = composer_send_action(&self.pending_request, !has_non_empty_text);
         let choice_only = self
@@ -2417,7 +2818,7 @@ impl Render for Composer {
         let uploading_count = self
             .attachments
             .iter()
-            .filter(|a| matches!(a.status, AttachmentUploadStatus::Uploading))
+            .filter(|a| matches!(a.status, AttachmentUploadStatus::Uploading(_)))
             .count();
         let attachment_block_reason = match uploading_count {
             0 => None,
@@ -2504,6 +2905,9 @@ impl Render for Composer {
             })
             .when(picker_open, |s| s.bg(highlight_bg))
             .hover(move |s| s.bg(highlight_bg).text_color(fg))
+            .on_hover(cx.listener(|composer, hovered: &bool, _, _| {
+                composer.model_trigger_hovered = *hovered;
+            }))
             .on_click(cx.listener(|composer, _, window, cx| {
                 composer.toggle_model_picker(window, cx);
             }))
@@ -2673,6 +3077,7 @@ impl Render for Composer {
             } else {
                 card_border
             })
+            .shadow(vec![composer_card_shadow(&tokens)])
             .overflow_hidden();
 
         if is_editing_queued {
@@ -2806,31 +3211,59 @@ impl Render for Composer {
             }
             for att in &self.attachments {
                 let local_id = att.local_id;
-                if let Some(image) = self.attachment_previews.get(&local_id).cloned() {
+                if let Some(preview) = self.attachment_previews.get(&local_id) {
                     strip = strip.child(super::attachment_thumb::staged_image_chip(
                         local_id,
                         &att.name,
-                        image,
-                        matches!(att.status, AttachmentUploadStatus::Uploading),
-                        matches!(att.status, AttachmentUploadStatus::Error(_)),
+                        preview.source(),
+                        chip_upload(&att.status),
                         &tokens,
                         cx.listener(move |composer, _, _, cx| {
                             composer.remove_attachment(local_id, cx);
+                        }),
+                        cx.listener(move |composer, _, _, cx| {
+                            composer.retry_attachment(local_id, cx);
                         }),
                     ));
                     continue;
                 }
                 let file_icon = crate::file_icons::file_icon(&att.name, tokens.appearance);
                 let status_label = match &att.status {
-                    AttachmentUploadStatus::Uploading => "Uploading…".to_owned(),
+                    AttachmentUploadStatus::Uploading(p) => format!("{}%", (p * 100.0).round()),
                     AttachmentUploadStatus::Ready(_) => format_byte_size(att.size_bytes),
-                    AttachmentUploadStatus::Error(err) => err.clone(),
+                    AttachmentUploadStatus::Error(_) => "Failed · Retry".to_owned(),
                 };
                 let is_err = matches!(att.status, AttachmentUploadStatus::Error(_));
+                let leading = match &att.status {
+                    AttachmentUploadStatus::Uploading(p) => {
+                        super::attachment_thumb::progress_ring(14.0, *p, fg)
+                    }
+                    AttachmentUploadStatus::Error(_) => {
+                        icons::icon(icons::REFRESH, 14.0, hsla(tokens.destructive))
+                            .into_any_element()
+                    }
+                    AttachmentUploadStatus::Ready(_) => {
+                        crate::file_icons::icon_img(file_icon.asset, 14.0).into_any_element()
+                    }
+                };
+                let tooltip = match &att.status {
+                    AttachmentUploadStatus::Error(err) => {
+                        format!("{}: {err}. Click to retry.", att.name)
+                    }
+                    _ => att.name.clone(),
+                };
                 strip = strip.child(
                     div()
                         .id(SharedString::from(format!("composer-att-{local_id}")))
                         .a11y_group(format!("composer.attachment.{local_id}"), "Attachment")
+                        .conn_tooltip(tooltip, &tokens)
+                        .when(is_err, |chip| {
+                            chip.cursor_pointer().on_click(cx.listener(
+                                move |composer, _, _, cx| {
+                                    composer.retry_attachment(local_id, cx);
+                                },
+                            ))
+                        })
                         .flex()
                         .flex_row()
                         .items_center()
@@ -2846,7 +3279,7 @@ impl Render for Composer {
                         } else {
                             hsla(tokens.shell_inner_border)
                         })
-                        .child(crate::file_icons::icon_img(file_icon.asset, 14.0))
+                        .child(leading)
                         .child(
                             div()
                                 .flex_1()
@@ -3046,6 +3479,12 @@ impl Render for Composer {
             ))
             .capture_key_down(cx.listener(
                 |composer, event: &gpui_kit::KeyDownEvent, window, cx| {
+                    // The picker's settings column takes its keys first (`Tab` in, arrows, `Escape`).
+                    if composer.model_picker_open && composer.handle_settings_key(event, window, cx)
+                    {
+                        cx.stop_propagation();
+                        return;
+                    }
                     let keystroke = &event.keystroke;
                     let m = keystroke.modifiers;
                     // `⌘S` (`composer.stash`).
@@ -3132,6 +3571,35 @@ impl Render for Composer {
             );
         } else if self.model_picker_open {
             let query = self.model_search_input.read(cx).value().to_string();
+            let viewport = window.viewport_size();
+            let measured = std::rc::Rc::clone(&self.picker_room_px);
+            root = root.child(
+                gpui_kit::canvas(
+                    move |bounds, window, _| {
+                        let width = f32::from(bounds.size.width);
+                        let top = f32::from(bounds.origin.y);
+                        if measured.get() != Some((width, top)) {
+                            measured.set(Some((width, top)));
+                            window.refresh();
+                        }
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .inset_0(),
+            );
+            let room = self.picker_room_px.get();
+            let mut geometry = model_picker::PickerGeometry::measure(
+                f32::from(viewport.width),
+                f32::from(viewport.height),
+                room.map_or(0.0, |(width, _)| width),
+            );
+            if let Some((_, top)) = room {
+                // The new-thread composer is centered. Reserve the popup gap and top margin.
+                geometry.shell_height = geometry.shell_height.min((top - 8.0).max(0.0));
+            }
+            self.picker_settings
+                .set_layout(f32::from(viewport.height), geometry.compact);
             let popup = render_model_picker(
                 &ModelPickerView {
                     catalog: &self.catalog,
@@ -3147,9 +3615,9 @@ impl Render for Composer {
                     selected_options: self.selected_options.as_ref(),
                     runtime_mode: &self.runtime_mode,
                     runtime_options: &runtime_options,
-                    permissions_open: self.picker_permissions_open,
-                    permission_preview: self.permission_preview,
                     follow_up: self.effective_follow_up(),
+                    settings: &self.picker_settings,
+                    geometry,
                 },
                 cx,
             );
@@ -3159,7 +3627,12 @@ impl Render for Composer {
                         .absolute()
                         .bottom_full()
                         .right_0()
-                        .mb(px(6.0))
+                        .mb(px(4.0))
+                        // A press outside the popup closes it; the settings menus hang below
+                        // their fields, so a press on an open menu counts as inside.
+                        .on_mouse_down_out(cx.listener(|composer, _, window, cx| {
+                            composer.dismiss_picker_outside(window, cx);
+                        }))
                         .child(popup),
                 )
                 .with_priority(2),
@@ -3175,13 +3648,41 @@ impl Render for Composer {
 /// Mirrors Conn's `--shell-composer` (`var(--card)` in light, lifted surface in dark)
 /// and `--chat-composer-outline` (`8%` black/white hairline via `shell_inner_border`).
 pub(crate) fn composer_surface_colors(tokens: &Tokens) -> (gpui_kit::Hsla, gpui_kit::Hsla) {
-    let bg = match tokens.appearance {
-        Appearance::Light => hsla(tokens.card),
-        Appearance::Dark => hsla(tokens.shell_field),
-    };
+    let bg = hsla(composer_fill(tokens));
     // Web Conn's glass is 80% over a 12px backdrop blur. GPUI has no per-element backdrop blur
     // (gpui-kit#3598), so the card stays opaque until it lands (Nick, 2026-11-23).
     (bg, hsla(tokens.shell_inner_border))
+}
+
+/// The composer card's fill token: `card` in light, `shell_field` in dark. The queue tray
+/// derives its own fill from this, so the two stay related when the theme changes.
+#[must_use]
+pub(crate) fn composer_fill(tokens: &Tokens) -> conn_theme::Rgba {
+    match tokens.appearance {
+        Appearance::Light => tokens.card,
+        Appearance::Dark => tokens.shell_field,
+    }
+}
+
+/// The composer card's soft ambient shadow.
+///
+/// It lifts the card off the queue tray that tucks behind it, and off the timeline. The offset
+/// is a little upward so the shadow also falls onto the tray. gpui-kit and the theme have no
+/// shadow token (`apply_kit_theme` turns the kit's shadows off), so this builds a `BoxShadow`
+/// the way the popovers' `dropdown_glass_shadow` does. Dark needs a higher alpha to show.
+#[must_use]
+pub(crate) fn composer_card_shadow(tokens: &Tokens) -> gpui_kit::BoxShadow {
+    let alpha = match tokens.appearance {
+        Appearance::Dark => COMPOSER_SHADOW_ALPHA_DARK,
+        Appearance::Light => COMPOSER_SHADOW_ALPHA_LIGHT,
+    };
+    gpui_kit::BoxShadow {
+        color: gpui_kit::hsla(0.0, 0.0, 0.0, alpha),
+        offset: gpui_kit::point(px(0.0), px(COMPOSER_SHADOW_OFFSET_Y_PX)),
+        blur_radius: px(COMPOSER_SHADOW_BLUR_PX),
+        spread_radius: px(0.0),
+        inset: false,
+    }
 }
 
 /// Microphone button styled like Conn's `ComposerSpeechButton` wired to local Operator dictation.
@@ -3378,6 +3879,63 @@ fn append_transcript(existing: &str, transcript: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_composer_card_has_a_soft_outer_shadow_in_dark_and_light() {
+        for id in ["dark-ocean", "t3-code-light"] {
+            let theme = conn_theme::theme_by_id(id).expect("a built-in theme");
+            let shadow = composer_card_shadow(&Tokens::derive(&theme));
+            assert!(!shadow.inset, "{id}: an outer shadow");
+            assert!(f32::from(shadow.blur_radius) >= 24.0, "{id}: a large blur");
+            assert!(
+                shadow.color.a > 0.05 && shadow.color.a <= 0.35,
+                "{id}: low but visible alpha, got {}",
+                shadow.color.a
+            );
+            assert!(
+                f32::from(shadow.offset.y) <= 0.0 && f32::from(shadow.offset.y) >= -12.0,
+                "{id}: a small upward offset, so it falls onto the tray"
+            );
+        }
+        let alpha = |id: &str| {
+            let theme = conn_theme::theme_by_id(id).expect("a built-in theme");
+            composer_card_shadow(&Tokens::derive(&theme)).color.a
+        };
+        assert!(alpha("dark-ocean") > alpha("t3-code-light"));
+    }
+
+    #[test]
+    fn the_composer_shadow_is_subtle_and_matches_the_lab() {
+        // Locked to lab-gpui's `.composer` box-shadow: `0 -4px 64px` at 0.22 dark, 0.08 light.
+        let shadow = |id: &str| {
+            let theme = conn_theme::theme_by_id(id).expect("a built-in theme");
+            composer_card_shadow(&Tokens::derive(&theme))
+        };
+        for (id, alpha) in [("dark-ocean", 0.22), ("t3-code-light", 0.08)] {
+            let s = shadow(id);
+            assert!(
+                (s.color.a - alpha).abs() < 1e-6,
+                "{id}: alpha {}",
+                s.color.a
+            );
+            assert!(
+                (f32::from(s.blur_radius) - 32.0).abs() < f32::EPSILON,
+                "{id}: blur"
+            );
+            assert!(
+                (f32::from(s.offset.y) + 4.0).abs() < f32::EPSILON,
+                "{id}: offset"
+            );
+            assert!(
+                f32::from(s.offset.x).abs() < f32::EPSILON,
+                "{id}: no x offset"
+            );
+            assert!(
+                f32::from(s.spread_radius).abs() < f32::EPSILON,
+                "{id}: no spread"
+            );
+        }
+    }
 
     #[test]
     fn infer_mime_and_byte_size_formatting() {

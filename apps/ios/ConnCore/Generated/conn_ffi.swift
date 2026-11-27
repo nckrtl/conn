@@ -661,6 +661,25 @@ fileprivate struct FfiConverterData: FfiConverterRustBuffer {
 public protocol ConnCoreProtocol: AnyObject, Sendable {
     
     /**
+     * Starts uploading a file the draft holds, unless it already is.
+     */
+    func attachUpload(file: FfiComposerFile) 
+    
+    /**
+     * The draft let go of the file: stops its upload or deletes it from the server.
+     */
+    func dropUpload(id: String) 
+    
+    func retryUpload(id: String) 
+    
+    /**
+     * The listener for status changes and the codec that scales images before they upload.
+     */
+    func setUploadHandlers(listener: FfiUploadListener, codec: FfiImageCodec) 
+    
+    func uploadStatus(id: String)  -> FfiUploadStatus?
+    
+    /**
      * Saves or declines a pending secret request (`secrets.answerRequest`).
      *
      * Pass `Some(secret)` to save (trimmed; blank strings are rejected) or `None` to decline.
@@ -1009,6 +1028,62 @@ public static func connect(serverUrl: String, credential: FfiCredential, listene
 }
     
 
+    
+    /**
+     * Starts uploading a file the draft holds, unless it already is.
+     */
+open func attachUpload(file: FfiComposerFile)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_conncore_attach_upload(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeFfiComposerFile_lower(file),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * The draft let go of the file: stops its upload or deletes it from the server.
+     */
+open func dropUpload(id: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_conncore_drop_upload(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(id),uniffiCallStatus
+    )
+}
+}
+    
+open func retryUpload(id: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_conncore_retry_upload(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(id),uniffiCallStatus
+    )
+}
+}
+    
+    /**
+     * The listener for status changes and the codec that scales images before they upload.
+     */
+open func setUploadHandlers(listener: FfiUploadListener, codec: FfiImageCodec)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_conncore_set_upload_handlers(
+            self.uniffiCloneHandle(),
+        FfiConverterTypeFfiUploadListener_lower(listener),
+        FfiConverterTypeFfiImageCodec_lower(codec),uniffiCallStatus
+    )
+}
+}
+    
+open func uploadStatus(id: String) -> FfiUploadStatus?  {
+    return try!  FfiConverterOptionTypeFfiUploadStatus.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_conncore_upload_status(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(id),uniffiCallStatus
+    )
+})
+}
     
     /**
      * Saves or declines a pending secret request (`secrets.answerRequest`).
@@ -2623,6 +2698,275 @@ public func FfiConverterTypeCoreListener_lower(_ value: CoreListener) -> UInt64 
 
 
 /**
+ * The app's image codec (ImageIO on iPhone); the core decides sizes and formats
+ * (`conn_client::uploads::prepare`).
+ */
+public protocol FfiImageCodec: AnyObject, Sendable {
+    
+    /**
+     * The size once the orientation is applied, and whether the image has transparency.
+     */
+    func inspect(bytes: Data)  -> FfiImageInfo?
+    
+    /**
+     * Scales to exactly `width`×`height` after orienting, then encodes a JPEG when
+     * `jpeg_quality` is set and a PNG when `png` is.
+     */
+    func encode(bytes: Data, width: UInt32, height: UInt32, jpegQuality: Float?, png: Bool)  -> FfiEncodedImage?
+    
+}
+/**
+ * The app's image codec (ImageIO on iPhone); the core decides sizes and formats
+ * (`conn_client::uploads::prepare`).
+ */
+open class FfiImageCodecImpl: FfiImageCodec, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_conn_ffi_fn_clone_ffiimagecodec(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_conn_ffi_fn_free_ffiimagecodec(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * The size once the orientation is applied, and whether the image has transparency.
+     */
+open func inspect(bytes: Data) -> FfiImageInfo?  {
+    return try!  FfiConverterOptionTypeFfiImageInfo.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_ffiimagecodec_inspect(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(bytes),uniffiCallStatus
+    )
+})
+}
+    
+    /**
+     * Scales to exactly `width`×`height` after orienting, then encodes a JPEG when
+     * `jpeg_quality` is set and a PNG when `png` is.
+     */
+open func encode(bytes: Data, width: UInt32, height: UInt32, jpegQuality: Float?, png: Bool) -> FfiEncodedImage?  {
+    return try!  FfiConverterOptionTypeFfiEncodedImage.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_ffiimagecodec_encode(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(bytes),
+        FfiConverterUInt32.lower(width),
+        FfiConverterUInt32.lower(height),
+        FfiConverterOptionFloat.lower(jpegQuality),
+        FfiConverterBool.lower(png),uniffiCallStatus
+    )
+})
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceFfiImageCodec {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceFfiImageCodec = UniffiVTableCallbackInterfaceFfiImageCodec(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeFfiImageCodec.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface FfiImageCodec: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeFfiImageCodec.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface FfiImageCodec: handle missing in uniffiClone")
+            }
+        },
+        inspect: { (
+            uniffiHandle: UInt64,
+            bytes: RustBuffer,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> FfiImageInfo? in
+                guard let uniffiObj = try? FfiConverterTypeFfiImageCodec.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.inspect(
+                     bytes: try FfiConverterData.lift(bytes)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionTypeFfiImageInfo.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        },
+        encode: { (
+            uniffiHandle: UInt64,
+            bytes: RustBuffer,
+            width: UInt32,
+            height: UInt32,
+            jpegQuality: RustBuffer,
+            png: Int8,
+            uniffiOutReturn: UnsafeMutablePointer<RustBuffer>,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> FfiEncodedImage? in
+                guard let uniffiObj = try? FfiConverterTypeFfiImageCodec.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.encode(
+                     bytes: try FfiConverterData.lift(bytes),
+                     width: try FfiConverterUInt32.lift(width),
+                     height: try FfiConverterUInt32.lift(height),
+                     jpegQuality: try FfiConverterOptionFloat.lift(jpegQuality),
+                     png: try FfiConverterBool.lift(png)
+                )
+            }
+
+            
+            let writeReturn = { uniffiOutReturn.pointee = FfiConverterOptionTypeFfiEncodedImage.lower($0) }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceFfiImageCodec> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceFfiImageCodec>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitFfiImageCodec() {
+    uniffi_conn_ffi_fn_init_callback_vtable_ffiimagecodec(UniffiCallbackInterfaceFfiImageCodec.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiImageCodec: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<FfiImageCodec>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = FfiImageCodec
+
+    public static func lift(_ handle: UInt64) throws -> FfiImageCodec {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return FfiImageCodecImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: FfiImageCodec) -> UInt64 {
+         if let rustImpl = value as? FfiImageCodecImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiImageCodec {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: FfiImageCodec, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiImageCodec_lift(_ handle: UInt64) throws -> FfiImageCodec {
+    return try FfiConverterTypeFfiImageCodec.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiImageCodec_lower(_ value: FfiImageCodec) -> UInt64 {
+    return FfiConverterTypeFfiImageCodec.lower(value)
+}
+
+
+
+
+
+
+/**
  * Measures whether the agent's context fits the panel's three lines; Swift measures with the
  * panel's font and width.
  */
@@ -2833,6 +3177,213 @@ public func FfiConverterTypeFfiTextFits_lift(_ handle: UInt64) throws -> FfiText
 #endif
 public func FfiConverterTypeFfiTextFits_lower(_ value: FfiTextFits) -> UInt64 {
     return FfiConverterTypeFfiTextFits.lower(value)
+}
+
+
+
+
+
+
+/**
+ * Upload status changes; `None` once the upload is gone (removed or sent).
+ */
+public protocol FfiUploadListener: AnyObject, Sendable {
+    
+    func onUpload(id: String, status: FfiUploadStatus?) 
+    
+}
+/**
+ * Upload status changes; `None` once the upload is gone (removed or sent).
+ */
+open class FfiUploadListenerImpl: FfiUploadListener, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_conn_ffi_fn_clone_ffiuploadlistener(self.handle, $0) }
+    }
+    // No primary constructor declared for this class.
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_conn_ffi_fn_free_ffiuploadlistener(handle, $0) }
+    }
+
+    
+
+    
+open func onUpload(id: String, status: FfiUploadStatus?)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_method_ffiuploadlistener_on_upload(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(id),
+        FfiConverterOptionTypeFfiUploadStatus.lower(status),uniffiCallStatus
+    )
+}
+}
+    
+
+    
+}
+
+
+
+// Put the implementation in a struct so we don't pollute the top-level namespace
+fileprivate struct UniffiCallbackInterfaceFfiUploadListener {
+
+    // Create the VTable using a series of closures.
+    // Swift automatically converts these into C callback functions.
+    //
+    // Store the vtable directly.
+    static let vtable: UniffiVTableCallbackInterfaceFfiUploadListener = UniffiVTableCallbackInterfaceFfiUploadListener(
+        uniffiFree: { (uniffiHandle: UInt64) -> () in
+            do {
+                try FfiConverterTypeFfiUploadListener.handleMap.remove(handle: uniffiHandle)
+            } catch {
+                print("Uniffi callback interface FfiUploadListener: handle missing in uniffiFree")
+            }
+        },
+        uniffiClone: { (uniffiHandle: UInt64) -> UInt64 in
+            do {
+                return try FfiConverterTypeFfiUploadListener.handleMap.clone(handle: uniffiHandle)
+            } catch {
+                fatalError("Uniffi callback interface FfiUploadListener: handle missing in uniffiClone")
+            }
+        },
+        onUpload: { (
+            uniffiHandle: UInt64,
+            id: RustBuffer,
+            status: RustBuffer,
+            uniffiOutReturn: UnsafeMutableRawPointer,
+            uniffiCallStatus: UnsafeMutablePointer<RustCallStatus>
+        ) in
+            let makeCall = {
+                () throws -> () in
+                guard let uniffiObj = try? FfiConverterTypeFfiUploadListener.handleMap.get(handle: uniffiHandle) else {
+                    throw UniffiInternalError.unexpectedStaleHandle
+                }
+                return uniffiObj.onUpload(
+                     id: try FfiConverterString.lift(id),
+                     status: try FfiConverterOptionTypeFfiUploadStatus.lift(status)
+                )
+            }
+
+            
+            let writeReturn = { () }
+            uniffiTraitInterfaceCall(
+                callStatus: uniffiCallStatus,
+                makeCall: makeCall,
+                writeReturn: writeReturn
+            )
+        }
+    )
+
+    // Rust stores this pointer for future callback invocations, so it must live
+    // for the process lifetime (not just for the init function call).
+    //
+    // `nonisolated(unsafe)` is needed under Swift 6 strict concurrency.
+    // This is safe because the pointee is initialized once during static init
+    // and never mutated by either side of the FFI.  Its fields are C function pointers.
+    nonisolated(unsafe) static let vtablePtr: UnsafePointer<UniffiVTableCallbackInterfaceFfiUploadListener> = {
+        let ptr = UnsafeMutablePointer<UniffiVTableCallbackInterfaceFfiUploadListener>.allocate(capacity: 1)
+        ptr.initialize(to: vtable)
+        return UnsafePointer(ptr)
+    }()
+}
+
+private func uniffiCallbackInitFfiUploadListener() {
+    uniffi_conn_ffi_fn_init_callback_vtable_ffiuploadlistener(UniffiCallbackInterfaceFfiUploadListener.vtablePtr)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiUploadListener: FfiConverter {
+    fileprivate static let handleMap = UniffiHandleMap<FfiUploadListener>()
+
+    typealias FfiType = UInt64
+    typealias SwiftType = FfiUploadListener
+
+    public static func lift(_ handle: UInt64) throws -> FfiUploadListener {
+        if ((handle & 1) == 0) {
+            // Rust-generated handle, construct a new class that uses the handle to implement the
+            // interface
+            return FfiUploadListenerImpl(unsafeFromHandle: handle)
+        } else {
+            // Swift-generated handle, get the object from the handle map
+            return try handleMap.remove(handle: handle)
+        }
+    }
+
+    public static func lower(_ value: FfiUploadListener) -> UInt64 {
+         if let rustImpl = value as? FfiUploadListenerImpl {
+             // Rust-implemented object.  Clone the handle and return it
+            return rustImpl.uniffiCloneHandle()
+         } else {
+            // Swift object, generate a new vtable handle and return that.
+            return handleMap.insert(obj: value)
+         }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiUploadListener {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: FfiUploadListener, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiUploadListener_lift(_ handle: UInt64) throws -> FfiUploadListener {
+    return try FfiConverterTypeFfiUploadListener.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiUploadListener_lower(_ value: FfiUploadListener) -> UInt64 {
+    return FfiConverterTypeFfiUploadListener.lower(value)
 }
 
 
@@ -5332,13 +5883,21 @@ public func FfiConverterTypeFfiColor_lower(_ value: FfiColor) -> RustBuffer {
 
 
 public struct FfiComposerFile: Equatable, Hashable {
+    /**
+     * The draft's id for this file; its upload is keyed by it.
+     */
+    public var id: String
     public var path: String
     public var name: String
     public var mimeType: String
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(path: String, name: String, mimeType: String) {
+    public init(
+        /**
+         * The draft's id for this file; its upload is keyed by it.
+         */id: String, path: String, name: String, mimeType: String) {
+        self.id = id
         self.path = path
         self.name = name
         self.mimeType = mimeType
@@ -5360,6 +5919,7 @@ public struct FfiConverterTypeFfiComposerFile: FfiConverterRustBuffer {
     public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiComposerFile {
         return
             try FfiComposerFile(
+                id: FfiConverterString.read(from: &buf), 
                 path: FfiConverterString.read(from: &buf), 
                 name: FfiConverterString.read(from: &buf), 
                 mimeType: FfiConverterString.read(from: &buf)
@@ -5367,6 +5927,7 @@ public struct FfiConverterTypeFfiComposerFile: FfiConverterRustBuffer {
     }
 
     public static func write(_ value: FfiComposerFile, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.id, into: &buf)
         FfiConverterString.write(value.path, into: &buf)
         FfiConverterString.write(value.name, into: &buf)
         FfiConverterString.write(value.mimeType, into: &buf)
@@ -5615,6 +6176,60 @@ public func FfiConverterTypeFfiDeliverable_lower(_ value: FfiDeliverable) -> Rus
 }
 
 
+public struct FfiEncodedImage: Equatable, Hashable {
+    public var jpeg: Data?
+    public var png: Data?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(jpeg: Data?, png: Data?) {
+        self.jpeg = jpeg
+        self.png = png
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiEncodedImage: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiEncodedImage: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiEncodedImage {
+        return
+            try FfiEncodedImage(
+                jpeg: FfiConverterOptionData.read(from: &buf), 
+                png: FfiConverterOptionData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiEncodedImage, into buf: inout [UInt8]) {
+        FfiConverterOptionData.write(value.jpeg, into: &buf)
+        FfiConverterOptionData.write(value.png, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiEncodedImage_lift(_ buf: RustBuffer) throws -> FfiEncodedImage {
+    return try FfiConverterTypeFfiEncodedImage.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiEncodedImage_lower(_ value: FfiEncodedImage) -> RustBuffer {
+    return FfiConverterTypeFfiEncodedImage.lower(value)
+}
+
+
 public struct FfiFilePatch: Equatable, Hashable {
     public var newPath: String?
     public var oldPath: String?
@@ -5678,6 +6293,64 @@ public func FfiConverterTypeFfiFilePatch_lift(_ buf: RustBuffer) throws -> FfiFi
 #endif
 public func FfiConverterTypeFfiFilePatch_lower(_ value: FfiFilePatch) -> RustBuffer {
     return FfiConverterTypeFfiFilePatch.lower(value)
+}
+
+
+public struct FfiImageInfo: Equatable, Hashable {
+    public var width: UInt32
+    public var height: UInt32
+    public var alpha: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(width: UInt32, height: UInt32, alpha: Bool) {
+        self.width = width
+        self.height = height
+        self.alpha = alpha
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiImageInfo: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiImageInfo: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiImageInfo {
+        return
+            try FfiImageInfo(
+                width: FfiConverterUInt32.read(from: &buf), 
+                height: FfiConverterUInt32.read(from: &buf), 
+                alpha: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiImageInfo, into buf: inout [UInt8]) {
+        FfiConverterUInt32.write(value.width, into: &buf)
+        FfiConverterUInt32.write(value.height, into: &buf)
+        FfiConverterBool.write(value.alpha, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiImageInfo_lift(_ buf: RustBuffer) throws -> FfiImageInfo {
+    return try FfiConverterTypeFfiImageInfo.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiImageInfo_lower(_ value: FfiImageInfo) -> RustBuffer {
+    return FfiConverterTypeFfiImageInfo.lower(value)
 }
 
 
@@ -16348,6 +17021,91 @@ public func FfiConverterTypeFfiTurnItemStatus_lower(_ value: FfiTurnItemStatus) 
 
 
 /**
+ * A draft file's upload (`AttachmentUploadStatus`).
+ */
+
+public enum FfiUploadStatus: Equatable, Hashable {
+    
+    /**
+     * `progress` is the share sent, 0 to 1 in 5% steps.
+     */
+    case uploading(progress: Float
+    )
+    case ready
+    case failed(reason: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension FfiUploadStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiUploadStatus: FfiConverterRustBuffer {
+    typealias SwiftType = FfiUploadStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiUploadStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .uploading(progress: try FfiConverterFloat.read(from: &buf)
+        )
+        
+        case 2: return .ready
+        
+        case 3: return .failed(reason: try FfiConverterString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: FfiUploadStatus, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .uploading(progress):
+            writeInt(&buf, Int32(1))
+            FfiConverterFloat.write(progress, into: &buf)
+            
+        
+        case .ready:
+            writeInt(&buf, Int32(2))
+        
+        
+        case let .failed(reason):
+            writeInt(&buf, Int32(3))
+            FfiConverterString.write(reason, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiUploadStatus_lift(_ buf: RustBuffer) throws -> FfiUploadStatus {
+    return try FfiConverterTypeFfiUploadStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiUploadStatus_lower(_ value: FfiUploadStatus) -> RustBuffer {
+    return FfiConverterTypeFfiUploadStatus.lower(value)
+}
+
+
+
+/**
  * Value submitted for one user-input question in [`crate::ConnCore::respond_user_input`].
  */
 
@@ -16496,6 +17254,30 @@ fileprivate struct FfiConverterOptionInt64: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionFloat: FfiConverterRustBuffer {
+    typealias SwiftType = Float?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterFloat.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterFloat.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionDouble: FfiConverterRustBuffer {
     typealias SwiftType = Double?
 
@@ -16560,6 +17342,30 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterString.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
+    typealias SwiftType = Data?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterData.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterData.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -16656,6 +17462,54 @@ fileprivate struct FfiConverterOptionTypeFfiConversationRef: FfiConverterRustBuf
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeFfiConversationRef.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiEncodedImage: FfiConverterRustBuffer {
+    typealias SwiftType = FfiEncodedImage?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiEncodedImage.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiEncodedImage.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiImageInfo: FfiConverterRustBuffer {
+    typealias SwiftType = FfiImageInfo?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiImageInfo.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiImageInfo.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -17280,6 +18134,30 @@ fileprivate struct FfiConverterOptionTypeFfiTaskLabelTone: FfiConverterRustBuffe
         switch try readInt(&buf) as Int8 {
         case 0: return nil
         case 1: return try FfiConverterTypeFfiTaskLabelTone.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeFfiUploadStatus: FfiConverterRustBuffer {
+    typealias SwiftType = FfiUploadStatus?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiUploadStatus.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiUploadStatus.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
     }
@@ -18962,6 +19840,30 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_func_theme_tokens() != 49538) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_conn_ffi_checksum_method_ffiimagecodec_inspect() != 26577) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_ffiimagecodec_encode() != 51920) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_ffiuploadlistener_on_upload() != 55828) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_attach_upload() != 31090) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_drop_upload() != 8624) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_retry_upload() != 44057) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_set_upload_handlers() != 27271) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_conncore_upload_status() != 48305) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_conn_ffi_checksum_method_conncore_answer_secret_request() != 53478) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -19294,7 +20196,9 @@ private let initializationResult: InitializationResult = {
     }
 
     uniffiCallbackInitCoreListener()
+    uniffiCallbackInitFfiImageCodec()
     uniffiCallbackInitFfiTextFits()
+    uniffiCallbackInitFfiUploadListener()
     uniffiCallbackInitOrbitListener()
     uniffiCallbackInitSessionListener()
     return InitializationResult.ok

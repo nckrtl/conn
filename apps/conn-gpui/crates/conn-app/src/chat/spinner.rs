@@ -1,9 +1,11 @@
 //! Lightweight turning-arc spinner for active tool calls and the Working row.
 //!
 //! Only schedules a repaint timer when actually rendered in the element tree, so idle
-//! views incur zero timer wakeups and zero GPU repaints.
+//! views incur zero timer wakeups and zero GPU repaints. The shimmer and the arcs of one view
+//! share that timer, so a view with both still redraws at most [`FRAMES_PER_SECOND`] times a
+//! second, whatever the display's refresh rate.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashSet;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -16,8 +18,15 @@ use gpui_kit::{
 
 /// Full rotation period in seconds.
 const TURN_SECONDS: f32 = 0.9;
-/// ~30 fps refresh interval so spinners stay smooth without pegging high-refresh displays.
-const FRAME_INTERVAL: Duration = Duration::from_millis(33);
+/// Animation frames per second for spinners and the shimmer: smooth for a slow sweep and a small
+/// arc, and a quarter of what a 120 Hz display would draw.
+pub(super) const FRAMES_PER_SECOND: u32 = 30;
+/// Time between animation frames. Frames fall on a fixed grid of this step (see
+/// [`next_frame_delay`]), so the cadence stays even when a frame paints late.
+const FRAME_INTERVAL: Duration = Duration::from_nanos(1_000_000_000 / FRAMES_PER_SECOND as u64);
+/// The shortest wait for the next frame: a paint that lands just before a grid point waits for
+/// the one after it rather than asking for two frames in a row.
+const MIN_FRAME_GAP: Duration = Duration::from_millis(4);
 /// Fraction of the ring drawn (three-quarters arc).
 const ARC_SWEEP: f32 = 0.75;
 
@@ -33,7 +42,8 @@ const SHIMMER_WEB_PERIOD_S: f32 = 2.2;
 const SHIMMER_TYPICAL_WIDTH_PX: f32 = 200.0;
 const SHIMMER_SPEED_PX_PER_S: f32 =
     (SHIMMER_TYPICAL_WIDTH_PX + SHIMMER_BAND_PX) / SHIMMER_WEB_PERIOD_S;
-/// Tick of the "Working for 44s" label. The shimmer itself asks for display frames while painted.
+/// Tick of the "Working for 44s" label. The shimmer itself asks for [`FRAMES_PER_SECOND`] frames
+/// a second while painted.
 pub(super) const SHIMMER_STEP_INTERVAL: Duration = Duration::from_millis(1_000);
 
 /// Number of alpha steps the highlight overlay is quantised to, so the one-glyph overlay lines
@@ -153,7 +163,9 @@ impl ShimmerText {
             Some(phase) => band_center_at_phase(phase, width),
             None => {
                 if !cx.reduce_motion() {
-                    window.request_animation_frame();
+                    // Not `request_animation_frame`: that redraws the window on every vsync,
+                    // 120 times a second on a ProMotion display.
+                    schedule_next_frame(window, cx);
                 }
                 band_center(clock_secs(), width)
             }
@@ -267,8 +279,10 @@ impl IntoElement for ShimmerText {
 }
 
 thread_local! {
-    /// Views that already have a pending spinner tick timer.
+    /// Views that already have a pending animation frame timer.
     static TICKING: RefCell<HashSet<EntityId>> = RefCell::new(HashSet::new());
+    /// Origin of the frame grid, on the executor's clock.
+    static FRAME_EPOCH: Cell<Option<Instant>> = const { Cell::new(None) };
 }
 
 /// Three-quarter turning arc spinner painted directly on a GPUI canvas.
@@ -340,15 +354,40 @@ fn paint_arc(bounds: Bounds<Pixels>, color: Hsla, window: &mut Window) {
     }
 }
 
+/// How long after `since_epoch` the next animation frame is due: the next point of a grid of
+/// [`FRAME_INTERVAL`] steps that is at least [`MIN_FRAME_GAP`] away.
+///
+/// A fixed grid rather than a fixed wait from the paint keeps one frame every
+/// `FRAME_INTERVAL` when painting is slow: the paint's own time does not add to the period.
+fn next_frame_delay(since_epoch: Duration) -> Duration {
+    let interval = FRAME_INTERVAL.as_nanos();
+    let into_step = since_epoch.as_nanos() % interval;
+    let mut delay = interval - into_step;
+    if delay < MIN_FRAME_GAP.as_nanos() {
+        delay += interval;
+    }
+    Duration::from_nanos(u64::try_from(delay).unwrap_or(u64::MAX))
+}
+
+/// Notifies the view being painted at the next point of the animation frame grid, once however
+/// many spinners and shimmers it paints.
 fn schedule_next_frame(window: &mut Window, cx: &mut App) {
     let view_id = window.current_view();
     let already_ticking = TICKING.with(|set| !set.borrow_mut().insert(view_id));
     if already_ticking {
         return;
     }
+    let now = cx.background_executor().now();
+    let epoch = FRAME_EPOCH.with(|epoch| {
+        epoch.get().unwrap_or_else(|| {
+            epoch.set(Some(now));
+            now
+        })
+    });
+    let delay = next_frame_delay(now.saturating_duration_since(epoch));
     let window_handle = window.window_handle();
     cx.spawn(async move |cx| {
-        cx.background_executor().timer(FRAME_INTERVAL).await;
+        cx.background_executor().timer(delay).await;
         TICKING.with(|set| {
             set.borrow_mut().remove(&view_id);
         });
@@ -464,6 +503,36 @@ mod bench {
                     if wrap { "wrap    " } else { "ellipsis" },
                 );
             }
+        }
+    }
+
+    /// Frames fall on a 1/30 s grid: a late paint shortens the wait instead of stretching the
+    /// period, and a paint just before a grid point skips to the next one.
+    #[test]
+    fn animation_frames_fall_on_a_thirty_fps_grid() {
+        use std::time::Duration;
+
+        use super::{FRAME_INTERVAL, FRAMES_PER_SECOND, MIN_FRAME_GAP, next_frame_delay};
+
+        assert_eq!(FRAMES_PER_SECOND, 30, "spinners animate at 30 fps");
+        assert_eq!(next_frame_delay(Duration::ZERO), FRAME_INTERVAL);
+        // A paint 10 ms into a step waits only for the rest of it.
+        assert_eq!(
+            next_frame_delay(FRAME_INTERVAL * 7 + Duration::from_millis(10)),
+            FRAME_INTERVAL - Duration::from_millis(10)
+        );
+        // Too close to the next point: the frame after it.
+        let late = FRAME_INTERVAL * 3 - Duration::from_millis(1);
+        assert_eq!(
+            next_frame_delay(late),
+            FRAME_INTERVAL + Duration::from_millis(1)
+        );
+        for ms in 0..200 {
+            let delay = next_frame_delay(Duration::from_millis(ms));
+            assert!(
+                delay >= MIN_FRAME_GAP && delay <= FRAME_INTERVAL + MIN_FRAME_GAP,
+                "{ms} ms: {delay:?}"
+            );
         }
     }
 

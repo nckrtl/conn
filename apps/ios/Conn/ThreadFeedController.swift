@@ -264,7 +264,11 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
 
     func setBars(composer: AnyView, floating: AnyView, capsuleInset: CGFloat) {
         let theme = theme
-        composerHost.rootView = AnyView(composer.environment(\.connTheme, theme))
+        composerHost.rootView = AnyView(
+            composer
+                .environment(\.connTheme, theme)
+                .environment(\.composerResize) { [weak self] animation in self?.resizeComposer(animation) }
+        )
         floatingHost.rootView = AnyView(
             floating
                 .environment(\.connTheme, theme)
@@ -569,6 +573,16 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
 
     func gestureRecognizer(_ g: UIGestureRecognizer, shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer) -> Bool {
         true
+    }
+
+    /// The composer changed height on `animation`: lay its host and the feed inset out now, on the
+    /// same animation. Left to the next pass, the host jumped to its new height while SwiftUI
+    /// animated the content inside it.
+    private func resizeComposer(_ animation: Animation) {
+        UIView.animate(animation) {
+            composerHost.view.invalidateIntrinsicContentSize()
+            view.layoutIfNeeded()
+        }
     }
 
     override func viewDidLayoutSubviews() {

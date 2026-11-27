@@ -241,3 +241,80 @@ async fn a_desktop_cannot_restore_an_id_from_this_servers_allocator() {
     assert!(browser.restore_desktop(&opened));
     let _ = std::fs::remove_dir_all(root);
 }
+
+fn session_with(id: &str, scopes: &[&str]) -> CallContext {
+    CallContext {
+        principal: Some(std::sync::Arc::new(crate::auth::Principal {
+            session_id: id.into(),
+            subject: "desktop".into(),
+            scopes: scopes.iter().map(|s| (*s).to_owned()).collect(),
+            expires_at_ms: u64::MAX,
+        })),
+        ..CallContext::default()
+    }
+}
+
+/// `preview.desktopRegister` records whether the registering session may read test logins:
+/// `preview:operate` alone hosts a tab, but its host never receives a fill. The scope is the
+/// one `testLogins.reveal` needs.
+#[tokio::test]
+async fn a_desktop_hosts_test_login_fills_only_with_the_scope_that_reads_them() {
+    let root =
+        std::env::temp_dir().join(format!("conn-preview-secrets-{}", conn_support::uuid_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let environment = std::sync::Arc::new(
+        crate::environment::Environment::load(&root, None, root.clone(), Default::default())
+            .unwrap(),
+    );
+    let environment_id = environment.environment_id().to_owned();
+    let browser = conn_preview::tabs::Preview::new(root.join("browser"));
+    let mut table = MethodTable::new();
+    register(
+        &mut table,
+        &Deps {
+            preview: Some(browser.clone()),
+            environment: Some(environment.clone()),
+            ..Deps::default()
+        },
+    );
+    let Some(Handler::Unary(register_tab)) = table.get("preview.desktopRegister") else {
+        panic!("missing preview.desktopRegister")
+    };
+    let operate_only = ["orchestration:read", "preview:operate"];
+    let with_settings = ["orchestration:read", "preview:operate", SECRETS_SCOPE];
+    for (session, scopes, expected) in [
+        ("guest", &operate_only[..], SecretAccess::Withheld),
+        ("owner", &with_settings[..], SecretAccess::Allowed),
+    ] {
+        let snapshot = browser.open_desktop("thread", &json!({})).unwrap();
+        let tab = snapshot["tabId"].as_str().unwrap().to_owned();
+        let binding = json!({"environmentId":environment_id,"threadId":"thread","tabId":tab,
+            "deviceName":session,"snapshot":snapshot});
+        register_tab(session_with(session, scopes), binding)
+            .await
+            .unwrap();
+        let hosted = browser
+            .desktop_tab(&environment_id, "thread", &tab)
+            .unwrap();
+        assert_eq!(hosted.secrets, expected, "{session}");
+    }
+    // The scope that unlocks fills is the one that reads test logins.
+    assert!(
+        crate::scopes::check(
+            "testLogins.reveal",
+            &session_with("owner", &[SECRETS_SCOPE]),
+            &json!({})
+        )
+        .is_ok()
+    );
+    assert!(
+        crate::scopes::check(
+            "testLogins.reveal",
+            &session_with("guest", &operate_only),
+            &json!({})
+        )
+        .is_err()
+    );
+    browser.shutdown().await;
+    let _ = std::fs::remove_dir_all(root);
+}

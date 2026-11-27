@@ -23,7 +23,7 @@ import * as PreviewAutomationBroker from "../../PreviewAutomationBroker.ts";
 
 const PanelOpenTool = Tool.make("panel_open", {
   description: [
-    "Show a panel to the user in the Conn desktop app on their Mac, for this thread, from any server: browser, database, mcp, diff or files. Use it to show the user your work running.",
+    "Show a panel to the user in the Conn desktop app on their Mac, for this thread, from any server: browser, database, mcp, diff, files or terminal. Use it to show the user your work running.",
     "browser with url opens a desktop tab there; then every preview_* tool without a tabId drives that tab, including request_credentials and fill_credential to sign in.",
     "Fails when no Conn desktop is connected to this server. Never falls back to a hidden browser.",
   ].join(" "),

@@ -37,7 +37,8 @@ pub fn perf_set_process_start(epoch_ms: f64) {
 
 pub use crate::approvals::{FfiApprovalOption, FfiButtonTone, FfiPendingApproval};
 pub use crate::composer::{
-    FfiComposerFile, FfiComposerLimits, FfiComposerTarget, composer_restore_draft,
+    FfiComposerFile, FfiComposerLimits, FfiComposerTarget, FfiEncodedImage, FfiImageCodec,
+    FfiImageInfo, FfiUploadListener, FfiUploadStatus, composer_restore_draft,
 };
 pub use crate::core::{ConnCore, CoreListener, FfiPullRequestOperation};
 pub use crate::model_picker::{

@@ -263,6 +263,10 @@ export function peerFixture(rustBinary, prefix, { host = "127.0.0.1" } = {}) {
     );
     for (const [from, to] of names) text = text.split(from).join(to);
     return text
+      // The one accepted difference in a thread link: the TS server writes `t3-thread://v2/<env>/<thread>`,
+      // the Rust server `conn://thread/<env>/<thread>`. Clients read both. Only the scheme is
+      // equated; the environment and thread ids, the label and the link's punctuation still compare.
+      .replaceAll("t3-thread://v2/", "conn://thread/")
       .replace(/\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?Z/g, "<time>")
       .replace(/"traceId":"[^"]*"/g, '"traceId":"<trace>"');
   }

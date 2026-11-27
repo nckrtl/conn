@@ -206,6 +206,30 @@ impl ConnApp {
         }
     }
 
+    /// Whether the thread is current without opening it: open, or in memory or stored on the
+    /// device by its engine, which keeps its stream.
+    pub(super) fn thread_current(&self, id: &str) -> bool {
+        self.threads.open.keys().any(|(_, open)| open == id)
+            || self
+                .thread_env(id)
+                .and_then(|env| self.threads.engines.get(env))
+                .is_some_and(|slot| slot.engine.thread(id).is_some() || slot.engine.stored(id))
+    }
+
+    /// Keeps threads in an engine on `db` for the primary connection, as the live app does.
+    #[cfg(test)]
+    pub(super) fn use_engine_for_test(&mut self, db: &std::path::Path, cx: &mut Context<'_, Self>) {
+        self.threads.db = Some(db.to_owned());
+        if let (Some(env), Some(connection)) = (self.server_url.clone(), self.connection.clone()) {
+            self.start_engine(&env, connection, cx);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn thread_open_for_test(&self, id: &str) -> bool {
+        self.threads.open.keys().any(|(_, open)| open == id)
+    }
+
     /// Whether the app keeps the stream the server ended, so it asks again once the shell
     /// lists the thread.
     pub(super) fn keeps_stream(&self, id: &str) -> bool {
@@ -228,8 +252,8 @@ impl ConnApp {
     }
 
     /// Opens what the screen shows (the selected thread, the children asking for approval) and
-    /// closes what it no longer shows.
-    pub(super) fn sync_open_threads(&mut self, children: &[String], cx: &mut Context<'_, Self>) {
+    /// the hovered thread being prefetched, and closes the rest.
+    pub(super) fn sync_open_threads(&mut self, cx: &mut Context<'_, Self>) {
         let mut want: HashSet<(String, String)> = HashSet::new();
         let selected = self
             .layout
@@ -238,7 +262,8 @@ impl ConnApp {
             .filter(|_| self.draft.is_none());
         for id in selected
             .into_iter()
-            .chain(children.iter().map(String::as_str))
+            .chain(self.child_approvals.open_children())
+            .chain(self.speculative.thread())
         {
             if let Some(env) = self.thread_env(id) {
                 want.insert((env.to_owned(), id.to_owned()));

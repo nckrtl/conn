@@ -490,7 +490,7 @@ function DesktopLab() {
                 )}
 
                 {extra?.map((msg) => (
-                  <div key={msg.id}>
+                  <div key={msg.id} className="user-message">
                     {msg.selections.map((selection) => (
                       <div key={locationLabel(selection)} className="sent-code-reference">
                         {sourceLink(selection)}
@@ -507,7 +507,7 @@ function DesktopLab() {
                     )}
                   </div>
                 ))}
-                <div ref={end} />
+                <div className="timeline-end" ref={end} />
               </div>
             </div>
             <div className="chat-dock" ref={chatDock}>

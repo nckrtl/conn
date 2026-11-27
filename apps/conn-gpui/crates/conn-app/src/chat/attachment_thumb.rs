@@ -11,10 +11,10 @@ use std::sync::atomic::AtomicBool;
 
 use conn_theme::Tokens;
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Image, ImageFormat, ImageSource, InteractiveElement as _,
-    IntoElement as _, ObjectFit, ParentElement as _, RenderImage, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, SvgRenderer, Window, div, img,
-    px,
+    AnyElement, App, Bounds, ClickEvent, Hsla, Image, ImageFormat, ImageSource,
+    InteractiveElement as _, IntoElement as _, ObjectFit, ParentElement as _, PathBuilder, Pixels,
+    RenderImage, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _,
+    SvgRenderer, Window, canvas, div, img, point, px,
 };
 
 use super::icons;
@@ -34,12 +34,6 @@ pub(super) fn image_format_for_mime(mime_type: &str) -> Option<ImageFormat> {
         "image/svg+xml" => Some(ImageFormat::Svg),
         _ => None,
     }
-}
-
-/// An image GPUI can paint from `bytes`, or `None` for a non-image or unsupported type.
-pub(super) fn preview_image(mime_type: &str, bytes: Vec<u8>) -> Option<Arc<Image>> {
-    let format = image_format_for_mime(mime_type)?;
-    Some(Arc::new(Image::from_bytes(format, bytes)))
 }
 
 /// A sent image in the chat's thumbnail cache.
@@ -87,16 +81,7 @@ pub(super) fn load_sent_image(
     cancel: &AtomicBool,
 ) -> (SentImage, usize) {
     let thumb = thumbnail_for(mime_type, bytes, target, cancel, |bytes| {
-        let format = image_format_for_mime(mime_type)?;
-        let decoded = Image::from_bytes(format, bytes)
-            .to_image_data(svg_renderer)
-            .ok()?;
-        let size = decoded.size(0);
-        image::RgbaImage::from_raw(
-            u32::try_from(size.width.0).ok()?,
-            u32::try_from(size.height.0).ok()?,
-            decoded.as_bytes(0)?.to_vec(),
-        )
+        gpui_first_frame(mime_type, bytes, svg_renderer)
     });
     match thumb {
         Some(thumb) => {
@@ -106,6 +91,44 @@ pub(super) fn load_sent_image(
         }
         None => (SentImage::Failed, 0),
     }
+}
+
+/// The first frame of `bytes` through GPUI's own decoder, in GPUI's pixel order (BGRA). Only SVG,
+/// BMP and TIFF need it: the `image` build here reads the other formats itself.
+pub(super) fn gpui_first_frame(
+    mime_type: &str,
+    bytes: Vec<u8>,
+    svg_renderer: SvgRenderer,
+) -> Option<image::RgbaImage> {
+    let format = image_format_for_mime(mime_type)?;
+    let decoded = Image::from_bytes(format, bytes)
+        .to_image_data(svg_renderer)
+        .ok()?;
+    let size = decoded.size(0);
+    image::RgbaImage::from_raw(
+        u32::try_from(size.width.0).ok()?,
+        u32::try_from(size.height.0).ok()?,
+        decoded.as_bytes(0)?.to_vec(),
+    )
+}
+
+/// Decodes the whole picture of a downloaded attachment for the full-image viewer, within
+/// `max_bytes` of pixels. The result is `Ready` with its pixel size, or `Failed`.
+pub(super) fn load_viewer_image(
+    mime_type: &str,
+    bytes: Vec<u8>,
+    max_bytes: usize,
+    svg_renderer: SvgRenderer,
+    cancel: &AtomicBool,
+) -> Option<(Arc<RenderImage>, (u32, u32), usize)> {
+    let picture =
+        super::thumb_cache::viewer_picture_for(mime_type, bytes, max_bytes, cancel, |bytes| {
+            gpui_first_frame(mime_type, bytes, svg_renderer)
+        })?;
+    let size = (picture.pixels.width(), picture.pixels.height());
+    let cost = picture.byte_len();
+    let image = RenderImage::new(vec![image::Frame::new(picture.pixels)]);
+    Some((Arc::new(image), size, cost))
 }
 
 /// The widest a sent bubble gets: 80% of the capped chat column. Thumbnails decode for this
@@ -440,25 +463,88 @@ pub(super) fn gallery_cell(
         .aspect_ratio(GALLERY_TILE_ASPECT)
 }
 
+/// A staged attachment's upload, as its chip shows it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum ChipUpload {
+    /// The share sent, 0 to 1.
+    Uploading(f32),
+    Ready,
+    Failed,
+}
+
+/// A still ring: a faint track and the share sent (lab `UploadOverlay`). It never animates.
+pub(super) fn progress_ring(side: f32, progress: f32, color: Hsla) -> AnyElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, _| paint_ring(bounds, progress, color, window),
+    )
+    .flex_none()
+    .size(px(side))
+    .into_any_element()
+}
+
+fn paint_ring(bounds: Bounds<Pixels>, progress: f32, color: Hsla, window: &mut Window) {
+    let stroke = 2.0_f32;
+    let side = f32::from(bounds.size.width).min(f32::from(bounds.size.height));
+    let radius = ((side - stroke) / 2.0).max(1.0);
+    let center = bounds.center();
+    let at = |turn: f32| {
+        let angle = (turn - 0.25) * std::f32::consts::TAU;
+        point(
+            center.x + px(radius * angle.cos()),
+            center.y + px(radius * angle.sin()),
+        )
+    };
+    let arc = |from: f32, to: f32, color: Hsla, window: &mut Window| {
+        let mut path = PathBuilder::stroke(px(stroke));
+        path.move_to(at(from));
+        path.arc_to(
+            point(px(radius), px(radius)),
+            px(0.0),
+            to - from > 0.5,
+            true,
+            at(to),
+        );
+        if let Ok(built) = path.build() {
+            window.paint_path(built, color);
+        }
+    };
+    let track = Hsla {
+        a: color.a * 0.25,
+        ..color
+    };
+    arc(0.0, 0.5, track, window);
+    arc(0.5, 1.0, track, window);
+    let share = progress.clamp(0.04, 0.999);
+    arc(0.0, share, color, window);
+}
+
 /// A staged image in the composer strip (`ComposerAttachmentStrip.tsx`): a `64px` square,
-/// `rounded-lg`, `border-border/80`, `object-cover`, with the remove button on its corner.
+/// `rounded-lg`, `border-border/80`, `object-cover`, with the remove button on its corner. While
+/// it uploads a scrim and a progress ring cover it; a failed one shows the retry glyph and a red
+/// border, and a click retries. `image` is the chip-sized thumbnail, or `None` while it decodes.
 pub(super) fn staged_image_chip(
     local_id: u64,
     name: &str,
-    image: Arc<Image>,
-    uploading: bool,
-    failed: bool,
+    image: Option<ImageSource>,
+    upload: ChipUpload,
     tokens: &Tokens,
     on_remove: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    on_retry: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
     let muted = hsla(tokens.muted_foreground);
     let scrim = hsla_alpha(tokens.background, 0.85);
+    let failed = upload == ChipUpload::Failed;
+    let label = match upload {
+        ChipUpload::Uploading(p) => {
+            format!("Attachment {name}, uploading {}%", (p * 100.0).round())
+        }
+        ChipUpload::Failed => format!("Attachment {name}, upload failed. Click to retry."),
+        ChipUpload::Ready => format!("Attachment {name}"),
+    };
     let mut chip = div()
         .id(SharedString::from(format!("composer-att-{local_id}")))
-        .a11y_group(
-            format!("composer.attachment.{local_id}"),
-            format!("Attachment {name}"),
-        )
+        .a11y_group(format!("composer.attachment.{local_id}"), label)
         .relative()
         .flex_none()
         .size(px(64.0))
@@ -471,38 +557,54 @@ pub(super) fn staged_image_chip(
             hsla_alpha(tokens.border, 0.80)
         })
         // 8px outer radius, so the picture inside the 1px border takes 7px.
-        .child(
-            img(ImageSource::Image(image))
-                .size_full()
-                .rounded(px(7.0))
-                .object_fit(ObjectFit::Cover)
-                .with_fallback(move || {
-                    div()
-                        .size_full()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(icons::icon(icons::IMAGE, 16.0, muted))
-                        .into_any_element()
-                }),
-        );
-    if uploading || failed {
-        chip = chip.child(
-            div()
-                .absolute()
-                .inset_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .bg(hsla_alpha(tokens.background, 0.55))
-                .text_size(px(11.0))
-                .text_color(if failed {
-                    hsla(tokens.destructive)
-                } else {
-                    muted
-                })
-                .child(if failed { "Failed" } else { "Uploading…" }),
-        );
+        .child({
+            let placeholder = move || {
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icons::icon(icons::IMAGE, 16.0, muted))
+                    .into_any_element()
+            };
+            match image {
+                Some(image) => img(image)
+                    .size_full()
+                    .rounded(px(7.0))
+                    .object_fit(ObjectFit::Cover)
+                    .with_fallback(placeholder)
+                    .into_any_element(),
+                None => placeholder(),
+            }
+        });
+    let overlay = || {
+        div()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(hsla_alpha(tokens.background, 0.55))
+    };
+    match upload {
+        ChipUpload::Uploading(progress) => {
+            chip =
+                chip.child(overlay().child(progress_ring(22.0, progress, hsla(tokens.foreground))));
+        }
+        ChipUpload::Failed => {
+            chip = chip.child(
+                overlay()
+                    .id(SharedString::from(format!("composer-att-retry-{local_id}")))
+                    .a11y_button(
+                        SharedString::from(format!("composer.att.retry.{local_id}")),
+                        "Retry upload",
+                    )
+                    .cursor_pointer()
+                    .on_click(on_retry)
+                    .child(icons::icon(icons::REFRESH, 16.0, hsla(tokens.destructive))),
+            );
+        }
+        ChipUpload::Ready => {}
     }
     chip.child(
         div()
@@ -537,8 +639,6 @@ mod tests {
         assert_eq!(image_format_for_mime("IMAGE/JPG"), Some(ImageFormat::Jpeg));
         assert_eq!(image_format_for_mime("image/webp"), Some(ImageFormat::Webp));
         assert_eq!(image_format_for_mime("application/pdf"), None);
-        assert!(preview_image("text/plain", vec![1, 2, 3]).is_none());
-        assert!(preview_image("image/png", vec![1, 2, 3]).is_some());
     }
 
     #[test]

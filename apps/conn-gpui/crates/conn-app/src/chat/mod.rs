@@ -46,6 +46,8 @@ mod link_menu;
 mod link_preview;
 #[cfg(test)]
 mod picker_settings_shots;
+#[cfg(all(test, target_os = "macos"))]
+mod steer_thinking_tests;
 pub(crate) use self::link_menu::LinkedPullRequest;
 pub(crate) mod markdown;
 mod provider_banner;
@@ -3020,7 +3022,7 @@ impl ChatView {
             };
             let mut list = div().flex().flex_col().w_full().min_w_0().pt(px(list_pad));
             for row in rows {
-                list = list.child(self.render_work_entry(row, cx));
+                list = list.child(self.render_work_entry(row, has_active, cx));
             }
             container = container.child(list);
         }
@@ -3215,35 +3217,36 @@ impl ChatView {
                         } else {
                             "Thought".into_any_element()
                         };
-                        col = col.child(
-                            div()
-                                .id(SharedString::from(format!("live-status-{id}")))
-                                .a11y_group(
-                                    format!("timeline.work.{id}.live"),
-                                    if shimmer { "Thinking" } else { "Thought" },
-                                )
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(WORK_ICON_GAP_PX))
-                                .w_full()
-                                .min_w_0()
-                                .min_h(px(WORK_ROW_MIN_HEIGHT_PX))
-                                .px(px(TIMELINE_INSET_PX))
-                                .child(work_icon_box(
-                                    SharedString::from(format!("live-status-icon-{id}")),
-                                    icons::icon(icons::BRAIN, 16.0, icon_muted),
-                                ))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_size(px(BODY_FONT_PX))
-                                        .line_height(px(BODY_LINE_HEIGHT_PX))
-                                        .text_color(muted)
-                                        .child(label_el),
-                                ),
-                        );
+                        let status_row = div()
+                            .id(SharedString::from(format!("live-status-{id}")))
+                            .a11y_group(
+                                format!("timeline.work.{id}.live"),
+                                if shimmer { "Thinking" } else { "Thought" },
+                            )
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(WORK_ICON_GAP_PX))
+                            .w_full()
+                            .min_w_0()
+                            .min_h(px(WORK_ROW_MIN_HEIGHT_PX))
+                            .px(px(TIMELINE_INSET_PX))
+                            .child(work_icon_box(
+                                SharedString::from(format!("live-status-icon-{id}")),
+                                icons::icon(icons::BRAIN, 16.0, icon_muted),
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(BODY_FONT_PX))
+                                    .line_height(px(BODY_LINE_HEIGHT_PX))
+                                    .text_color(muted)
+                                    .child(label_el),
+                            );
+                        #[cfg(test)]
+                        let status_row = gpui_kit::TestSupportExt::test_support(status_row);
+                        col = col.child(status_row);
                     }
                 }
                 _ => {}
@@ -3253,13 +3256,20 @@ impl ChatView {
         col.into_any_element()
     }
 
-    fn render_work_entry(&self, row: &CachedRow, cx: &mut Context<'_, Self>) -> AnyElement {
+    /// A work row. `live` is false in a settled group: its reasoning shows as settled even when
+    /// the server has not closed it yet (a steer or a new message came after it).
+    fn render_work_entry(
+        &self,
+        row: &CachedRow,
+        live: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         match &row.entry {
             TimelineEntry::Thinking {
                 id,
                 text,
                 streaming,
-            } => self.render_thinking_row(id, text, *streaming, cx),
+            } => self.render_thinking_row(id, text, *streaming && live, cx),
             TimelineEntry::Tool {
                 id,
                 kind,

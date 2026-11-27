@@ -19,7 +19,7 @@ fn saved_content(text: &str, attachments: &[PendingAttachment]) -> DraftContent 
                     size_bytes: attachment.size_bytes,
                     attachment: descriptor.clone(),
                 }),
-                AttachmentUploadStatus::Uploading | AttachmentUploadStatus::Error(_) => None,
+                AttachmentUploadStatus::Uploading(_) | AttachmentUploadStatus::Error(_) => None,
             })
             .collect(),
     }
@@ -71,6 +71,8 @@ impl Composer {
                     name: saved.name,
                     size_bytes: saved.size_bytes,
                     status: AttachmentUploadStatus::Ready(saved.attachment),
+                    source: None,
+                    server: None,
                 }
             })
             .collect();
@@ -108,6 +110,8 @@ mod tests {
             name: format!("file-{local_id}.txt"),
             size_bytes: 3,
             status,
+            source: None,
+            server: None,
         }
     }
 
@@ -125,7 +129,7 @@ mod tests {
             "text",
             &[
                 pending(1, AttachmentUploadStatus::Ready(ready)),
-                pending(2, AttachmentUploadStatus::Uploading),
+                pending(2, AttachmentUploadStatus::Uploading(0.0)),
                 pending(3, AttachmentUploadStatus::Error("offline".to_owned())),
             ],
         );

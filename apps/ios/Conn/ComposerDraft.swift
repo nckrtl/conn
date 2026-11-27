@@ -11,7 +11,14 @@ enum ComposerDraftKey: Hashable {
 @MainActor @Observable
 final class ComposerDraft {
     var text: String { didSet { if text != oldValue { renewKey() } } }
-    var files: [ComposerFile] = [] { didSet { renewKey() } }
+    var files: [ComposerFile] = [] {
+        didSet {
+            renewKey()
+            for file in files where !oldValue.contains(where: { $0 === file }) { uploads?.attach(file) }
+        }
+    }
+    /// Starts each file's upload as it joins the draft (the store's `ComposerUploads`).
+    @ObservationIgnored var uploads: ComposerUploads?
     var projectOverride: (id: String?, title: String)? { didSet { renewKey() } }
     private(set) var key = UUID().uuidString
     private var discarded = false
@@ -48,12 +55,10 @@ final class ComposerDraft {
         error = nil
     }
 
+    /// Photos are scaled before they upload, so their size and total are checked by the core.
     func append(_ file: ComposerFile) throws {
         guard !discarded else { throw CancellationError() }
         guard files.count < 100 else { throw ComposerFileError("Attach up to 100 files per message.") }
-        if file.isImage && files.filter(\.isImage).reduce(file.size, { $0 + $1.size }) > 80 * 1024 * 1024 {
-            throw ComposerFileError("Images can total up to 80 MiB per message.")
-        }
         files.append(file)
     }
 }
@@ -69,7 +74,15 @@ final class ComposerFile: Identifiable, Sendable {
     let name: String
     let mime: String
     let size: Int
+    /// Shown as a picture; HEIC uploads as JPEG.
     let isImage: Bool
+    private let release = ReleaseHook()
+
+    var uploadId: String { id.uuidString }
+    var ffi: FfiComposerFile { FfiComposerFile(id: uploadId, path: url.path, name: name, mimeType: mime) }
+
+    /// Runs once nothing holds the file any more.
+    func onRelease(_ action: @escaping @Sendable () -> Void) { release.set(action) }
 
     init(copying source: URL, name: String, type: UTType, limits: FfiComposerLimits) throws {
         let info = try source.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
@@ -82,8 +95,10 @@ final class ComposerFile: Identifiable, Sendable {
         }
         self.name = name
         mime = type.preferredMIMEType ?? "application/octet-stream"
-        isImage = ["image/png", "image/jpeg", "image/gif", "image/webp"].contains(mime)
-        let maxSize: UInt64? = isImage && limits.images ? 10 * 1024 * 1024 : limits.maxFileBytes
+        isImage = ["image/png", "image/jpeg", "image/gif", "image/webp", "image/heic", "image/heif"].contains(mime)
+        // The core scales these first, then checks the 10 MiB image limit.
+        let scaled = ["image/png", "image/jpeg", "image/heic", "image/heif"].contains(mime)
+        let maxSize: UInt64? = isImage && limits.images ? (scaled ? 200 * 1024 * 1024 : 10 * 1024 * 1024) : limits.maxFileBytes
         guard let maxSize else { throw ComposerFileError("This server cannot upload \(name).") }
         guard UInt64(size) <= maxSize else {
             throw ComposerFileError("\(name) exceeds the \(ByteCountFormatter.string(fromByteCount: Int64(maxSize), countStyle: .binary)) limit.")
@@ -92,7 +107,10 @@ final class ComposerFile: Identifiable, Sendable {
         try FileManager.default.copyItem(at: source, to: url)
     }
 
-    deinit { try? FileManager.default.removeItem(at: url) }
+    deinit {
+        release.fire()
+        try? FileManager.default.removeItem(at: url)
+    }
 
     static func document(_ url: URL, limits: FfiComposerLimits) async throws -> ComposerFile {
         try await Task.detached(priority: .userInitiated) {
@@ -124,7 +142,8 @@ struct ComposerPhotosPicker: UIViewControllerRepresentable {
         var config = PHPickerConfiguration()
         config.filter = limits.maxFileBytes == nil ? .images : .any(of: [.images, .videos])
         config.selectionLimit = max(1, 100 - draft.files.count)
-        config.preferredAssetRepresentationMode = .compatible
+        // The original (HEIC): Photos skips its full-size JPEG copy and the core scales it once.
+        config.preferredAssetRepresentationMode = .current
         let picker = PHPickerViewController(configuration: config)
         picker.delegate = context.coordinator
         return picker

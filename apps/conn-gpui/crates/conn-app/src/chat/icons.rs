@@ -38,6 +38,7 @@ pub(super) const CHECK: &str = "superhero/check.svg";
 pub(super) const EDIT: &str = "superhero/edit.svg";
 pub(super) const CLOSE: &str = "superhero/close.svg";
 pub(super) const IMAGE: &str = "superhero/image.svg";
+pub(super) const REFRESH: &str = "superhero/refresh.svg";
 
 // Card and hover-action glyphs (Lucide name -> superheroicons concept via manifest.json).
 /// `Redo2` (Conn's `Steer` marker).

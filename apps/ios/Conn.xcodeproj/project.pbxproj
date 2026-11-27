@@ -13,6 +13,7 @@
 		08B78CB940C77DD796F99FE7 /* Dictation.swift in Sources */ = {isa = PBXBuildFile; fileRef = B5EB1DEDCC9F3900D76DCF92 /* Dictation.swift */; };
 		0E762194DEB1EEC9949DAFB1 /* ThreadMessages.swift in Sources */ = {isa = PBXBuildFile; fileRef = 362BABC1D0CE218BFEC81CE0 /* ThreadMessages.swift */; };
 		11F90A4595F8C522E1A4F744 /* PullRequestsTabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A380BEABDE2E2C5A0D33192E /* PullRequestsTabView.swift */; };
+		126C19B374C5E0A4AEF38770 /* ComposerUploads.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A1EC2E9D961B52A03AA5595 /* ComposerUploads.swift */; };
 		12A10ADA099500D133C5F214 /* ConnSpikeUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B282DA827183E073EF9A48C6 /* ConnSpikeUITests.swift */; };
 		155A6C09FC940518D0D86F26 /* ConnTheme.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1785EB0CC38B9B367514E3D9 /* ConnTheme.swift */; };
 		17CA94C6E222134A31BF4D14 /* OrbitConnectView.swift in Sources */ = {isa = PBXBuildFile; fileRef = E26EA68AF617A11A6E036C60 /* OrbitConnectView.swift */; };
@@ -96,6 +97,7 @@
 		142016B2795B526B53A2A754 /* ThreadComposer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThreadComposer.swift; sourceTree = "<group>"; };
 		1785EB0CC38B9B367514E3D9 /* ConnTheme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ConnTheme.swift; sourceTree = "<group>"; };
 		195AC4C2F3764E276F2218A3 /* ModelPickerSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelPickerSheet.swift; sourceTree = "<group>"; };
+		1A1EC2E9D961B52A03AA5595 /* ComposerUploads.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ComposerUploads.swift; sourceTree = "<group>"; };
 		1B9E5245F4E95FC79202BCF9 /* ConnUITests.xctest */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.cfbundle; path = ConnUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		1CE3181F6E68461F996404BA /* conn_ffi.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = conn_ffi.swift; sourceTree = "<group>"; };
 		27FB848CF1FE14FE7EEDC47A /* PrettyJSONTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PrettyJSONTests.swift; sourceTree = "<group>"; };
@@ -249,6 +251,7 @@
 				2A101A8DA8F4F68706844776 /* Assets.xcassets */,
 				4ACDAF1FE7D50A1A99F759F1 /* BodyCount.swift */,
 				0BE9E75FB8EF9857CA143CC1 /* ComposerDraft.swift */,
+				1A1EC2E9D961B52A03AA5595 /* ComposerUploads.swift */,
 				FB37DF09D3781436727F439A /* Conn.entitlements */,
 				0AF68E89FDEB6E0FCFB1897A /* ConnApp.swift */,
 				F0ABEB932FF5357EF1B48C2F /* ConnAppDelegate.swift */,
@@ -447,6 +450,7 @@
 			files = (
 				AD936B4569A796FCEB7F800B /* BodyCount.swift in Sources */,
 				B795481020E8CC028303C92C /* ComposerDraft.swift in Sources */,
+				126C19B374C5E0A4AEF38770 /* ComposerUploads.swift in Sources */,
 				F20503BB181FBB6D34D73724 /* ConnApp.swift in Sources */,
 				215CE6E0AD4A4E4588E30A90 /* ConnAppDelegate.swift in Sources */,
 				8C2418FCEB0B7E3BDBDBF3A3 /* ConnComposerPill.swift in Sources */,

@@ -464,7 +464,9 @@ fn the_cache_watches_unsettled_threads_and_live_children_only(cx: &mut TestAppCo
     assert!(!watched(&watching, "nick-top-5"), "a settled thread");
     assert!(watched(&watching, "mini-child-0"), "a linked running child");
 
-    // A child finishes: its watch ends. A finished child runs again: it is watched again.
+    // A child finishes: it stays watched while its last items may arrive, and its watch ends
+    // once they are saved (`a_subagent_that_just_finished_keeps_its_last_message_offline`). A
+    // finished child runs again: it is watched again.
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             let done = thread_json(
@@ -493,9 +495,115 @@ fn the_cache_watches_unsettled_threads_and_live_children_only(cx: &mut TestAppCo
         });
     });
     let watching = desired(cx, &app);
-    assert!(!watched(&watching, "nick-child-1"));
+    assert!(
+        watched(&watching, "nick-child-1"),
+        "kept for its last items"
+    );
+    assert!(watched(&watching, "nick-child-2"));
+    assert_eq!(watching.len(), 3 * 6 + 1);
+    settle_after(cx, &app, std::time::Duration::from_secs(31));
+    let watching = desired(cx, &app);
+    assert!(!watched(&watching, "nick-child-1"), "a finished child");
     assert!(watched(&watching, "nick-child-2"));
     assert_eq!(watching.len(), 3 * 6);
+}
+
+/// Looks at the children that finished as the clock stands `after` from now.
+fn settle_after(cx: &mut TestAppContext, app: &Entity<ConnApp>, after: std::time::Duration) {
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.settle_finishing_at(std::time::Instant::now() + after, cx);
+        })
+    });
+}
+
+fn finish(cx: &mut TestAppContext, app: &Entity<ConnApp>, id: &str, parent: &str) {
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            let done = thread_json(id, "p-nick", Some(parent), Run::Completed, None, now_ms());
+            app.apply_batch_for_test(vec![ClientEvent::Shell(updated(50, done))], cx);
+        });
+    });
+}
+
+/// The shell reports a subagent completed before its final message reaches the cache. The
+/// cache keeps following it, saves the message, and then drops the watch.
+#[gpui_kit::test]
+fn a_subagent_that_just_finished_keeps_its_last_message_offline(cx: &mut TestAppContext) {
+    use super::reconnect_tests::thread_snapshot;
+
+    let (app, _cache) = mount_fleet(cx, small_fleet());
+    let id = "nick-child-1";
+    // The thread snapshot at `sequence` with `turns` turns; its run has ended when `ended`.
+    let stream = |sequence, turns, ended: bool| {
+        let mut snapshot = thread_snapshot(id, sequence, turns);
+        if ended {
+            let run = &mut snapshot["projection"]["runs"][0];
+            run["status"] = json!("completed");
+            run["completedAt"] = json!("2026-11-13T13:37:20.000Z");
+        }
+        from_json(snapshot).expect("snapshot")
+    };
+    cx.update(|cx| {
+        app.update(cx, |app, _| {
+            app.apply_cache_stream(PRIMARY, id, stream(20, 1, false));
+            app.save_offline_now_for_test();
+        })
+    });
+    let before = cx.read(|cx| app.read(cx).cached_rows_for_test(id));
+    assert!(before > 0, "the first turn is cached");
+
+    finish(cx, &app, id, "nick-top-1");
+    assert!(watched(&desired(cx, &app), id), "still watched");
+
+    // The final message arrives after the status flip, while the stream's run still runs.
+    cx.update(|cx| {
+        app.update(cx, |app, _| {
+            app.apply_cache_stream(PRIMARY, id, stream(21, 2, false));
+            app.save_offline_now_for_test();
+        })
+    });
+    settle_after(cx, &app, std::time::Duration::from_secs(3));
+    assert!(
+        watched(&desired(cx, &app), id),
+        "the stream has not shown the run end"
+    );
+
+    // The run ends. Unsaved, it holds the watch.
+    cx.update(|cx| {
+        app.update(cx, |app, _| {
+            app.apply_cache_stream(PRIMARY, id, stream(22, 2, true))
+        })
+    });
+    settle_after(cx, &app, std::time::Duration::from_secs(3));
+    assert!(watched(&desired(cx, &app), id), "the end is unsaved");
+
+    // Saved: the watch ends, and the cache holds the message.
+    cx.update(|cx| app.update(cx, |app, _| app.save_offline_now_for_test()));
+    settle_after(cx, &app, std::time::Duration::from_secs(3));
+    assert!(!watched(&desired(cx, &app), id), "no longer watched");
+    let after = cx.read(|cx| app.read(cx).cached_rows_for_test(id));
+    assert!(
+        after > before,
+        "the final message is cached: {before} → {after}"
+    );
+}
+
+/// A finished subagent whose stream says nothing is not watched for good.
+#[gpui_kit::test]
+fn a_finished_subagent_with_a_silent_stream_is_dropped_after_a_while(cx: &mut TestAppContext) {
+    let (app, _cache) = mount_fleet(cx, small_fleet());
+    finish(cx, &app, "nick-child-1", "nick-top-1");
+    settle_after(cx, &app, std::time::Duration::from_secs(3));
+    assert!(
+        watched(&desired(cx, &app), "nick-child-1"),
+        "within the grace"
+    );
+    settle_after(cx, &app, std::time::Duration::from_secs(31));
+    assert!(
+        !watched(&desired(cx, &app), "nick-child-1"),
+        "past the grace"
+    );
 }
 
 /// After `step`, the incremental expiry and watches hold what a full sweep decides.

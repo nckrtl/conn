@@ -372,14 +372,17 @@ pub(crate) fn require_scope(
 
 /// `EnvironmentScopeRequiredError`, 403.
 pub(crate) fn scope_required(scope: &str) -> Response {
-    Json(json!({
+    Json(scope_required_body(scope)).with_status(StatusCode::FORBIDDEN)
+}
+
+fn scope_required_body(scope: &str) -> Value {
+    json!({
         "_tag": "EnvironmentScopeRequiredError",
         "code": "insufficient_scope",
         "requiredScope": auth::legacy_parent(scope),
         "requiredPermission": scope,
         "traceId": trace_id(),
-    }))
-    .with_status(StatusCode::FORBIDDEN)
+    })
 }
 
 fn internal(reason: &str, error: std::io::Error) -> Response {
@@ -949,8 +952,8 @@ const MAX_PROVIDER_INSTANCE_MUTATIONS: usize = 32;
 /// `GET /api/settings/provider-instances`: `providerInstances` of the settings as
 /// `server.getSettings` sends them, secrets left out. Orbit reads what it provisioned here.
 async fn provider_instances(State(state): State<AppState>, headers: HeaderMap) -> Response {
-    if let Err(response) = require_scope(&state, &headers, PROVIDERS_MANAGE) {
-        return *response;
+    if let Err(response) = require_providers_manage(&state, &headers) {
+        return response;
     }
     let Some(environment) = &state.deps.environment else {
         return engine_unavailable();
@@ -969,8 +972,8 @@ async fn mutate_provider_instances(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    if let Err(response) = require_scope(&state, &headers, PROVIDERS_MANAGE) {
-        return *response;
+    if let Err(response) = require_providers_manage(&state, &headers) {
+        return response;
     }
     let mutations = match provider_instance_mutations(&body) {
         Ok(mutations) => mutations,
@@ -998,6 +1001,18 @@ async fn mutate_provider_instances(
         },
         Err(_) => internal_reason("provider_instances_update_failed"),
     }
+}
+
+/// [`require_scope`] for `providers:manage`; the 403 also carries the `scope_required` reason
+/// that ADR 0274 names.
+fn require_providers_manage(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
+    let principal = authenticated(state, headers).map_err(|response| *response)?;
+    if principal.has_scope(PROVIDERS_MANAGE) {
+        return Ok(());
+    }
+    let mut body = scope_required_body(PROVIDERS_MANAGE);
+    body["reason"] = json!("scope_required");
+    Err(Json(body).with_status(StatusCode::FORBIDDEN))
 }
 
 /// The request's mutations, or the index and reason of the first one the contract refuses.
@@ -1920,6 +1935,7 @@ mod tests {
             let (status, body) = request(format!("authorization: Bearer {other}")).await;
             assert_eq!(status, 403, "{method}");
             assert_eq!(body["_tag"], "EnvironmentScopeRequiredError");
+            assert_eq!(body["reason"], "scope_required");
             assert_eq!(body["requiredPermission"], "providers:manage");
         }
         assert!(!dir.join("settings.json").exists(), "a refused POST saved");

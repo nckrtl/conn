@@ -530,6 +530,14 @@ pub(super) fn apply(dir: &Path, changes: &[Change]) -> Result<Undo, (&'static st
     Ok(undo)
 }
 
+/// Whether applying `changes` would leave the store as it is: each write holds the stored
+/// value and each removed secret is absent. A store that cannot be read counts as changed.
+pub(super) fn unchanged(dir: &Path, changes: &[Change]) -> bool {
+    changes.iter().all(|change| {
+        secret_store::read(dir, &change.name).is_ok_and(|stored| stored == change.write)
+    })
+}
+
 /// What [`apply`] changed, to undo when the settings file cannot be written after it.
 pub(super) struct Undo(Vec<Change>);
 

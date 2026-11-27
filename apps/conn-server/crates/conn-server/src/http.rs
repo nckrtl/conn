@@ -79,6 +79,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/orchestration/shell", get(shell_snapshot))
         .route("/api/projects/mutate", post(projects_mutate))
         .route(
+            "/api/settings/provider-instances",
+            get(provider_instances).post(mutate_provider_instances),
+        )
+        .route(
             "/api/orchestration/threads/{thread_id}",
             get(thread_snapshot),
         )
@@ -938,6 +942,127 @@ async fn projects_mutate(
     }
 }
 
+const PROVIDERS_MANAGE: &str = "providers:manage";
+/// The most mutations one `POST /api/settings/provider-instances` takes.
+const MAX_PROVIDER_INSTANCE_MUTATIONS: usize = 32;
+
+/// `GET /api/settings/provider-instances`: `providerInstances` of the settings as
+/// `server.getSettings` sends them, secrets left out. Orbit reads what it provisioned here.
+async fn provider_instances(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(response) = require_scope(&state, &headers, PROVIDERS_MANAGE) {
+        return *response;
+    }
+    let Some(environment) = &state.deps.environment else {
+        return engine_unavailable();
+    };
+    crate::settings::refresh(environment).await;
+    provider_instances_view(&environment.settings.for_client())
+}
+
+/// `POST /api/settings/provider-instances`: up to 32 `providerInstanceMutation`s of
+/// `server.updateSettings`, applied in order to one copy of the settings and saved once, as one
+/// `server.updateSettings` call saves (secrets to the store, one revision, the live
+/// reconcile). A failed mutation saves nothing. Orbit provisions routed providers here.
+/// The body holds secrets: nothing here logs it.
+async fn mutate_provider_instances(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    if let Err(response) = require_scope(&state, &headers, PROVIDERS_MANAGE) {
+        return *response;
+    }
+    let mutations = match provider_instance_mutations(&body) {
+        Ok(mutations) => mutations,
+        Err((index, message)) => return invalid_mutation(index, &message),
+    };
+    let (Some(_), Some(environment)) = (&state.engine, &state.deps.environment) else {
+        return engine_unavailable();
+    };
+    let environment = environment.clone();
+    let saved = tokio::task::spawn_blocking(move || {
+        environment.settings.update_provider_instances(mutations)
+    })
+    .await;
+    match saved {
+        Ok(Ok(view)) => provider_instances_view(&view),
+        Ok(Err(error)) => match error.mutation_index {
+            Some(index) => invalid_mutation(index, &error.detail),
+            None => {
+                eprintln!(
+                    "conn-server: provider_instances_update_failed: {}",
+                    error.operation
+                );
+                internal_reason("provider_instances_update_failed")
+            }
+        },
+        Err(_) => internal_reason("provider_instances_update_failed"),
+    }
+}
+
+/// The request's mutations, or the index and reason of the first one the contract refuses.
+/// The schema checks of `ProviderInstanceMutation` follow in the settings store.
+fn provider_instance_mutations(body: &[u8]) -> Result<Vec<Value>, (usize, String)> {
+    let body: Value =
+        serde_json::from_slice(body).map_err(|_| (0, "the body is not JSON".to_owned()))?;
+    let Some(Value::Array(mutations)) = body.get("mutations") else {
+        return Err((0, "the body holds no mutations list".into()));
+    };
+    if mutations.len() > MAX_PROVIDER_INSTANCE_MUTATIONS {
+        return Err((
+            MAX_PROVIDER_INSTANCE_MUTATIONS,
+            format!("at most {MAX_PROVIDER_INSTANCE_MUTATIONS} mutations"),
+        ));
+    }
+    for (index, mutation) in mutations.iter().enumerate() {
+        let operation = mutation.get("operation").and_then(Value::as_str);
+        if !matches!(operation, Some("upsert" | "create" | "remove")) {
+            return Err((index, "unknown operation".into()));
+        }
+        if !mutation
+            .get("instanceId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty())
+        {
+            return Err((index, "missing instanceId".into()));
+        }
+        if operation != Some("remove") && mutation.get("instance").is_none() {
+            return Err((index, "missing instance".into()));
+        }
+    }
+    Ok(mutations.clone())
+}
+
+/// `{"providerInstances": …}` from a client view of the settings.
+fn provider_instances_view(settings: &Value) -> Response {
+    let instances = settings
+        .get("providerInstances")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    Json(json!({ "providerInstances": instances })).into_response()
+}
+
+fn invalid_mutation(index: usize, message: &str) -> Response {
+    Json(json!({
+        "_tag": "EnvironmentRequestInvalidError",
+        "code": "invalid_request",
+        "reason": "invalid_mutation",
+        "index": index,
+        "message": message,
+        "traceId": trace_id(),
+    }))
+    .with_status(StatusCode::BAD_REQUEST)
+}
+
+fn engine_unavailable() -> Response {
+    error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "EnvironmentInternalError",
+        "internal_error",
+        "engine_unavailable",
+    )
+}
+
 /// `failProjectMutation`: a project the request names wrongly is the caller's error.
 fn is_invalid_project_command(error: &Value) -> bool {
     matches!(
@@ -1689,6 +1814,413 @@ mod tests {
             .filter_map(|p| p["title"].as_str())
             .collect();
         assert!(titles.contains(&"Added"), "{titles:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A server with on-disk settings and the engine, for the provider instance routes.
+    async fn serve_settings(
+        dir: &std::path::Path,
+        instances: Option<Arc<crate::instances::Instances>>,
+    ) -> (std::net::SocketAddr, Arc<AuthStore>, crate::methods::Deps) {
+        let environment = Arc::new(
+            crate::environment::Environment::load(dir, None, dir.to_owned(), Default::default())
+                .unwrap(),
+        );
+        let engine: Arc<dyn Engine> = Arc::new(
+            conn_engine::SqliteEngine::open(conn_engine::EngineConfig::new(
+                dir.join("engine.sqlite"),
+            ))
+            .unwrap(),
+        );
+        let deps = crate::methods::Deps {
+            environment: Some(environment),
+            engine: Some(engine.clone()),
+            instances,
+            ..Default::default()
+        };
+        let (addr, auth) = serve_with_deps(Some(engine), deps.clone()).await;
+        (addr, auth, deps)
+    }
+
+    fn token(auth: &AuthStore, scopes: &[&str]) -> String {
+        auth.issue_session(auth::SessionRequest {
+            scopes: scopes.iter().map(|s| s.to_string()).collect(),
+            label: None,
+            subject: None,
+            ttl_ms: auth::SESSION_TTL_MS,
+        })
+        .unwrap()
+        .token
+    }
+
+    const INSTANCES: &str = "/api/settings/provider-instances";
+
+    async fn instances_get(addr: std::net::SocketAddr, token: &str) -> (u16, Value) {
+        let (status, body) = call(
+            addr,
+            &format!("GET {INSTANCES} HTTP/1.1\r\nauthorization: Bearer {token}"),
+            "",
+        )
+        .await;
+        (status, serde_json::from_str(&body).unwrap())
+    }
+
+    async fn instances_post(
+        addr: std::net::SocketAddr,
+        token: &str,
+        mutations: Value,
+    ) -> (u16, Value) {
+        let (status, body) = call(
+            addr,
+            &format!(
+                "POST {INSTANCES} HTTP/1.1\r\ncontent-type: application/json\r\nauthorization: Bearer {token}"
+            ),
+            &json!({ "mutations": mutations }).to_string(),
+        )
+        .await;
+        (status, serde_json::from_str(&body).unwrap())
+    }
+
+    fn temp(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "conn-server-instances-{name}-{}",
+            auth::random_hex(6)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Both routes take a Bearer session with `providers:manage`, with the bodies the other
+    /// routes answer.
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_instance_routes_need_a_session_with_providers_manage() {
+        let dir = temp("auth");
+        let (addr, auth, _) = serve_settings(&dir, None).await;
+        let other = token(&auth, &["orchestration:read", "settings:write"]);
+        for method in ["GET", "POST"] {
+            let request = |header: String| {
+                let head = format!(
+                    "{method} {INSTANCES} HTTP/1.1\r\ncontent-type: application/json\r\n{header}"
+                );
+                async move {
+                    let (status, body) = call(addr, &head, r#"{"mutations":[]}"#).await;
+                    (status, serde_json::from_str::<Value>(&body).unwrap())
+                }
+            };
+            let (status, body) = request("x-none: 1".into()).await;
+            assert_eq!(
+                (status, &body["reason"]),
+                (401, &json!("missing_credential"))
+            );
+            let (status, body) = request("authorization: Bearer forged".into()).await;
+            assert_eq!(
+                (status, &body["reason"]),
+                (401, &json!("invalid_credential"))
+            );
+            let (status, body) = request(format!("authorization: Bearer {other}")).await;
+            assert_eq!(status, 403, "{method}");
+            assert_eq!(body["_tag"], "EnvironmentScopeRequiredError");
+            assert_eq!(body["requiredPermission"], "providers:manage");
+        }
+        assert!(!dir.join("settings.json").exists(), "a refused POST saved");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GET serves the client view: a saved secret field and a sensitive variable show only
+    /// the markers, never the value.
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_instances_are_read_without_their_secrets() {
+        let dir = temp("get");
+        std::fs::write(
+            dir.join("settings.json"),
+            json!({"providerInstances": {"agyRouted": {"driver": "antigravity", "enabled": true,
+                "config": {"authMethod": "gemini-api-key", "apiKey": "inline-key-1f2e"},
+                "environment": [
+                    {"name": "GOOGLE_GEMINI_BASE_URL", "value": "http://router:8317"},
+                    {"name": "ROUTER_TOKEN", "value": "inline-token-9a8b", "sensitive": true}]}}})
+            .to_string(),
+        )
+        .unwrap();
+        let (addr, auth, _) = serve_settings(&dir, None).await;
+        let admin = token(&auth, &["providers:manage"]);
+        let (status, body) = instances_get(addr, &admin).await;
+        assert_eq!(status, 200, "{body}");
+        let text = body.to_string();
+        assert!(!text.contains("inline-key-1f2e") && !text.contains("inline-token-9a8b"));
+        let instance = &body["providerInstances"]["agyRouted"];
+        assert_eq!(instance["config"]["apiKey"], "••••••");
+        assert_eq!(instance["environment"][0]["value"], "http://router:8317");
+        assert_eq!(instance["environment"][1]["value"], "");
+        assert_eq!(instance["environment"][1]["valueRedacted"], true);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The mutations apply in order and save once; a failure at any index saves nothing and
+    /// names the index. Malformed requests answer `invalid_mutation`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_instance_mutations_apply_together_or_not_at_all() {
+        let dir = temp("atomic");
+        let (addr, auth, deps) = serve_settings(&dir, None).await;
+        let admin = token(&auth, &["providers:manage"]);
+        let codex = |name: &str| json!({"driver": "codex", "displayName": name});
+        let (status, body) = instances_post(
+            addr,
+            &admin,
+            json!([
+                {"operation": "create", "instanceId": "a", "instance": codex("A")},
+                {"operation": "upsert", "instanceId": "b", "instance": codex("B")},
+                {"operation": "upsert", "instanceId": "a", "instance": codex("A2")},
+                {"operation": "remove", "instanceId": "b"},
+            ]),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["providerInstances"], json!({"a": codex("A2")}));
+        assert_eq!(instances_get(addr, &admin).await.1, body);
+        let saved = std::fs::read(dir.join("settings.json")).unwrap();
+        let revision = *deps
+            .environment
+            .as_ref()
+            .unwrap()
+            .settings
+            .subscribe()
+            .borrow();
+
+        let refused = [
+            (
+                json!([{"operation": "upsert", "instanceId": "c", "instance": codex("C")},
+                    {"operation": "rename", "instanceId": "a"}]),
+                1,
+            ),
+            (json!([{"operation": "upsert", "instance": codex("C")}]), 0),
+            (
+                json!([{"operation": "upsert", "instanceId": "c", "instance": codex("C")},
+                    {"operation": "remove", "instanceId": "a"},
+                    {"operation": "create", "instanceId": "d"}]),
+                2,
+            ),
+            // The schema refuses what the shape check lets through.
+            (
+                json!([{"operation": "remove", "instanceId": "a"},
+                    {"operation": "upsert", "instanceId": "c", "instance": {"driver": 7}}]),
+                1,
+            ),
+            // `create` refuses an id the settings hold.
+            (
+                json!([{"operation": "upsert", "instanceId": "c", "instance": codex("C")},
+                    {"operation": "create", "instanceId": "a", "instance": codex("A3")}]),
+                1,
+            ),
+            (
+                Value::Array(
+                    (0..33)
+                        .map(|i| {
+                            json!({"operation": "upsert", "instanceId": format!("x{i}"),
+                                    "instance": codex("X")})
+                        })
+                        .collect(),
+                ),
+                32,
+            ),
+        ];
+        for (mutations, index) in refused {
+            let (status, body) = instances_post(addr, &admin, mutations).await;
+            assert_eq!(status, 400, "{body}");
+            assert_eq!(body["reason"], "invalid_mutation");
+            assert_eq!(body["index"], index, "{body}");
+            assert!(body["message"].is_string());
+        }
+        assert_eq!(std::fs::read(dir.join("settings.json")).unwrap(), saved);
+        assert_eq!(
+            *deps
+                .environment
+                .as_ref()
+                .unwrap()
+                .settings
+                .subscribe()
+                .borrow(),
+            revision
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An upsert of what is saved, secrets inline or echoed as markers, saves nothing,
+    /// publishes no revision and answers the same body. Secrets move to the store and the
+    /// response shows them redacted.
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_instance_upserts_move_secrets_and_are_idempotent() {
+        let dir = temp("secrets");
+        let (addr, auth, deps) = serve_settings(&dir, None).await;
+        let admin = token(&auth, &["providers:manage"]);
+        let instance = json!({"driver": "antigravity", "enabled": true,
+            "config": {"authMethod": "gemini-api-key", "apiKey": "router-key-5c6d"},
+            "environment": [
+                {"name": "GOOGLE_GEMINI_BASE_URL", "value": "http://router:8317", "sensitive": false},
+                {"name": "ROUTER_TOKEN", "value": "router-token-7e8f", "sensitive": true}]});
+        let upsert =
+            json!([{"operation": "upsert", "instanceId": "agyRouted", "instance": instance}]);
+        let (status, first) = instances_post(addr, &admin, upsert.clone()).await;
+        assert_eq!(status, 200, "{first}");
+        let text = first.to_string();
+        assert!(!text.contains("router-key-5c6d") && !text.contains("router-token-7e8f"));
+        assert_eq!(
+            first["providerInstances"]["agyRouted"]["config"]["apiKey"],
+            "••••••"
+        );
+        let file = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(!file.contains("router-key-5c6d") && !file.contains("router-token-7e8f"));
+        let stored: Vec<String> = std::fs::read_dir(dir.join("secrets"))
+            .unwrap()
+            .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+            .collect();
+        assert!(
+            stored.iter().any(|v| v == "router-key-5c6d"),
+            "{}",
+            stored.len()
+        );
+        assert!(stored.iter().any(|v| v == "router-token-7e8f"));
+        let raw = deps.environment.as_ref().unwrap().settings.raw();
+        assert_eq!(
+            raw["providerInstances"]["agyRouted"]["config"]["apiKey"],
+            "router-key-5c6d"
+        );
+
+        let settings = &deps.environment.as_ref().unwrap().settings;
+        let revision = *settings.subscribe().borrow();
+        let modified = std::fs::metadata(dir.join("settings.json"))
+            .unwrap()
+            .modified()
+            .unwrap();
+        let echoed = json!([{"operation": "upsert", "instanceId": "agyRouted",
+            "instance": first["providerInstances"]["agyRouted"]}]);
+        for again in [upsert, echoed] {
+            let (status, body) = instances_post(addr, &admin, again).await;
+            assert_eq!((status, &body), (200, &first));
+            assert_eq!(*settings.subscribe().borrow(), revision);
+            assert_eq!(
+                std::fs::metadata(dir.join("settings.json"))
+                    .unwrap()
+                    .modified()
+                    .unwrap(),
+                modified
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Without the engine the POST answers 503 and saves nothing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn provider_instance_mutations_need_the_engine() {
+        let dir = temp("engine");
+        let environment = Arc::new(
+            crate::environment::Environment::load(&dir, None, dir.clone(), Default::default())
+                .unwrap(),
+        );
+        let deps = crate::methods::Deps {
+            environment: Some(environment),
+            ..Default::default()
+        };
+        let (addr, auth) = serve_with_deps(None, deps).await;
+        let admin = token(&auth, &["providers:manage"]);
+        let (status, body) = instances_post(
+            addr,
+            &admin,
+            json!([{"operation": "upsert", "instanceId": "a", "instance": {"driver": "codex"}}]),
+        )
+        .await;
+        assert_eq!(
+            (status, &body["reason"]),
+            (503, &json!("engine_unavailable"))
+        );
+        assert!(!dir.join("settings.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The live reconcile: an Antigravity instance that Orbit enables over POST, keyed and
+    /// pointed at the router, is built and probed with no restart. The stub `agy` records the
+    /// router URL it was started with.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_posted_antigravity_instance_becomes_available_without_a_restart() {
+        let dir = temp("reconcile");
+        let agy = dir.join("bin").join("agy");
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        let seen = dir.join("base-url");
+        conn_support::test_util::executable(
+            &agy,
+            &format!(
+                "#!/bin/sh\nprintf '%s' \"$GOOGLE_GEMINI_BASE_URL\" > '{}'\n[ \"$1\" = --version ] && echo 1.5.13\nexit 0\n",
+                seen.display()
+            ),
+        )
+        .unwrap();
+        let config = conn_provider_acp::AntigravityConfig {
+            state_dir: dir.clone(),
+            attachments_dir: None,
+            self_command: None,
+            model_manifest: Default::default(),
+            status_notifier: Default::default(),
+        };
+        let registry = Arc::new(crate::instances::Instances::new(
+            &[conn_provider_acp::ANTIGRAVITY.driver],
+            Arc::new(move |id: &str, _: &str, entry: Option<&Value>| {
+                Some(
+                    Arc::new(conn_provider_acp::AntigravityProvider::for_instance(
+                        id.into(),
+                        config.clone(),
+                        entry,
+                    )) as Arc<dyn conn_provider::Provider>,
+                )
+            }),
+        ));
+        let (addr, auth, deps) = serve_settings(&dir, Some(registry.clone())).await;
+        registry
+            .reconcile(
+                &deps.providers,
+                &deps.environment.as_ref().unwrap().settings.raw(),
+            )
+            .await;
+        crate::methods::provider::start_status_refresh(&deps);
+        assert!(deps.providers.get("agyRouted").is_none());
+        let mut statuses = deps.provider_status.subscribe();
+
+        let admin = token(&auth, &["providers:manage"]);
+        let (status, body) = instances_post(
+            addr,
+            &admin,
+            json!([{"operation": "upsert", "instanceId": "agyRouted", "instance": {
+                "driver": "antigravity", "enabled": true,
+                "config": {"authMethod": "gemini-api-key", "apiKey": "router-key-3b4c",
+                           "binaryPath": agy.display().to_string()},
+                "environment": [{"name": "GOOGLE_GEMINI_BASE_URL",
+                                 "value": "http://router:8317", "sensitive": false}]}}]),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let entry = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                statuses.changed().await.unwrap();
+                if let Some(entry) = deps
+                    .providers
+                    .get("agyRouted")
+                    .and_then(|p| p.server_provider_entry(""))
+                    .filter(|entry| entry["installed"] == true)
+                {
+                    return entry;
+                }
+            }
+        })
+        .await
+        .expect("the instance was not built and probed");
+        assert_eq!(entry["enabled"], true);
+        assert_eq!(entry["driver"], "antigravity");
+        assert_ne!(entry["status"], "disabled");
+        assert_ne!(entry["status"], "error", "{entry}");
+        assert_eq!(entry["auth"]["type"], "gemini-api-key");
+        assert_eq!(
+            std::fs::read_to_string(&seen).unwrap(),
+            "http://router:8317"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

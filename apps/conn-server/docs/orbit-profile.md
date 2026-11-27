@@ -1287,7 +1287,7 @@ C is the container verdict, H the host verdict. "Size if built": S under 300 lin
 
 ## Appendix C. Every HTTP route
 
-The first table covers all 57 `EnvironmentHttpApi` routes. The eight additional served
+The first table covers all 57 `EnvironmentHttpApi` routes. The ten additional served
 endpoints below it are outside that contract and the dated C/H classification. GET routes
 also accept HEAD (explicitly for webhooks); the router handles OPTIONS for CORS. Neither is
 counted as a separate profile row.
@@ -1364,3 +1364,5 @@ counted as a separate profile row.
 | `* /api/device-hub/*` | yes | Device panel streams, input and screenshots, proxied to the host's hub |
 | `POST /mcp` | yes | MCP requests |
 | `DELETE /mcp` | yes | MCP session close |
+| `GET /api/settings/provider-instances` | yes | Orbit reads the provider instances it provisioned, secrets redacted (`providers:manage`) |
+| `POST /api/settings/provider-instances` | yes | Orbit applies routed provider instances live, as one `server.updateSettings` save (`providers:manage`) |

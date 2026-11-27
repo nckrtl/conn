@@ -101,6 +101,8 @@ pub struct SettingsError {
     pub operation: &'static str,
     pub detail: String,
     pub provider_instance_id: Option<String>,
+    /// The mutation that failed, by its index in the request.
+    pub mutation_index: Option<usize>,
 }
 
 impl SettingsError {
@@ -250,20 +252,29 @@ impl SettingsStore {
     /// `persistSettingsSecrets` sends them: a new value is written, a value a client echoes as
     /// `••••••` stays, a cleared one is removed; on a failure the store changes are undone.
     pub fn update(&self, patch: Value, mutation: Option<Value>) -> Result<Value, SettingsError> {
-        self.update_with(patch, mutation, false)
+        self.update_with(patch, mutation.into_iter().collect(), false, false)
+    }
+
+    /// `POST /api/settings/provider-instances`: the mutations in order on one copy of the
+    /// settings, then one save, as [`Self::update`] saves one. A failed mutation saves
+    /// nothing and names its index. Mutations that leave the settings as they are save
+    /// nothing and publish no revision.
+    pub fn update_provider_instances(&self, mutations: Vec<Value>) -> Result<Value, SettingsError> {
+        self.update_with(Value::Object(Map::new()), mutations, false, true)
     }
 
     /// `ServerSettingsService.updateSettings` from the server itself (the `/mcp` tools): as
     /// [`Self::update`], and the theme defaults that only the theme service sets are kept.
     pub fn update_server(&self, patch: Value) -> Result<Value, SettingsError> {
-        self.update_with(patch, None, true)
+        self.update_with(patch, Vec::new(), true, false)
     }
 
     fn update_with(
         &self,
         patch: Value,
-        mutation: Option<Value>,
+        mutations: Vec<Value>,
         theme_defaults: bool,
+        skip_unchanged: bool,
     ) -> Result<Value, SettingsError> {
         let mut theme = Map::new();
         // `30.0` is a whole number to T3: read it as one before the patch decodes.
@@ -286,14 +297,17 @@ impl SettingsStore {
         if let Err(error) = conn_contract::from_json::<ClientServerSettingsPatch>(patch.clone()) {
             return Err(self.error("normalize", format!("invalid settings patch: {error}")));
         }
-        if let Some(mutation) = &mutation
-            && let Err(error) =
+        for (index, mutation) in mutations.iter().enumerate() {
+            if let Err(error) =
                 conn_contract::from_json::<ProviderInstanceMutation>(mutation.clone())
-        {
-            return Err(self.error(
-                "normalize",
-                format!("invalid provider instance mutation: {error}"),
-            ));
+            {
+                let mut error = self.error(
+                    "normalize",
+                    format!("invalid provider instance mutation: {error}"),
+                );
+                error.mutation_index = Some(index);
+                return Err(error);
+            }
         }
         let Value::Object(mut patch) = patch else {
             return Err(self.error("normalize", "the patch is not an object"));
@@ -314,30 +328,54 @@ impl SettingsStore {
             return Err(self.error("read-file", detail));
         }
         let mut next = current.clone();
-        if let Some(mutation) = &mutation
-            && mutation["operation"] == "create"
-            && let Some(id) = mutation["instanceId"].as_str()
-            && next
-                .get("providerInstances")
-                .and_then(|instances| instances.get(id))
-                .is_some()
-        {
-            let mut error = self.error("create-provider-instance", "the provider instance exists");
-            error.provider_instance_id = Some(id.to_owned());
-            return Err(error);
+        // A create fails on an id the saved settings or an earlier mutation hold.
+        let mut ids: Vec<String> = current
+            .get("providerInstances")
+            .and_then(Value::as_object)
+            .map(|instances| instances.keys().cloned().collect())
+            .unwrap_or_default();
+        for (index, mutation) in mutations.iter().enumerate() {
+            let Some(id) = mutation["instanceId"].as_str() else {
+                continue;
+            };
+            let exists = ids.iter().any(|known| known == id);
+            match mutation["operation"].as_str() {
+                Some("create") if exists => {
+                    let mut error =
+                        self.error("create-provider-instance", "the provider instance exists");
+                    error.provider_instance_id = Some(id.to_owned());
+                    error.mutation_index = Some(index);
+                    return Err(error);
+                }
+                Some("create" | "upsert") if !exists => ids.push(id.to_owned()),
+                Some("remove") => ids.retain(|known| known != id),
+                _ => {}
+            }
         }
         apply_patch(&mut next, patch);
-        if let Some(mutation) = mutation {
-            apply_provider_instance_mutation(&mut next, mutation)
-                .map_err(|detail| self.error("normalize", detail))?;
+        // Each mutation is checked as it applies, so a failure names its index.
+        let patch_only = mutations.is_empty();
+        for (index, mutation) in mutations.into_iter().enumerate() {
+            let failed = |detail: String| {
+                let mut error = self.error("normalize", detail);
+                error.mutation_index = Some(index);
+                error
+            };
+            apply_provider_instance_mutation(&mut next, mutation).map_err(failed)?;
+            if let Err(error) = file::check(&next) {
+                return Err(failed(format!("the settings would not decode: {error}")));
+            }
         }
-        if let Err(error) = file::check(&next) {
+        if patch_only && let Err(error) = file::check(&next) {
             return Err(self.error(
                 "normalize",
                 format!("the settings would not decode: {error}"),
             ));
         }
         let changes = secrets::persist(&current, &mut next);
+        if skip_unchanged && next == current && secrets::unchanged(&self.secrets_dir, &changes) {
+            return Ok(self.for_client());
+        }
         let undo = secrets::apply(&self.secrets_dir, &changes)
             .map_err(|(operation, error)| self.error(operation, error.to_string()))?;
         let served = served(&next);
@@ -366,6 +404,7 @@ impl SettingsStore {
             operation,
             detail: detail.into(),
             provider_instance_id: None,
+            mutation_index: None,
         }
     }
 

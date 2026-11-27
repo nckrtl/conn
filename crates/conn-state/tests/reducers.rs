@@ -2247,6 +2247,280 @@ fn system_notice_level_comes_from_the_contract_not_the_text() {
     }
 }
 
+fn notification_entry(
+    source: Value,
+    outcome: &str,
+    summary: &str,
+    detail: Option<&str>,
+) -> TimelineEntry {
+    let mut item = json!({
+        "id": "wake-1", "type": "notification", "status": "completed",
+        "source": source, "outcome": outcome, "summary": summary,
+    });
+    if let Some(detail) = detail {
+        item["detail"] = json!(detail);
+    }
+    let mut state = ThreadState::new("thread-cards");
+    assert!(state.apply(turn_item_event(1, item)), "notification added");
+    assert_eq!(state.entries.len(), 1, "{:?}", state.entries);
+    state.entries.remove(0)
+}
+
+fn background_command(
+    entry: &TimelineEntry,
+) -> (
+    Option<&str>,
+    conn_state::BackgroundCommandOutcome,
+    Option<i64>,
+    Option<&str>,
+) {
+    match entry {
+        TimelineEntry::BackgroundCommand {
+            label,
+            outcome,
+            exit_code,
+            detail,
+            ..
+        } => (label.as_deref(), *outcome, *exit_code, detail.as_deref()),
+        other => panic!("expected a background command card, got {other:?}"),
+    }
+}
+
+fn card_summary(entry: &TimelineEntry) -> &str {
+    match entry {
+        TimelineEntry::BackgroundCommand { summary, .. } => summary,
+        other => panic!("expected a background command card, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_finished_background_command_becomes_a_command_card() {
+    use conn_state::BackgroundCommandOutcome::Finished;
+    let entry = notification_entry(
+        json!({"kind": "command"}),
+        "completed",
+        "Command \"Wait for dev app rebuild\" finished",
+        None,
+    );
+    assert_eq!(
+        background_command(&entry),
+        (Some("Wait for dev app rebuild"), Finished, None, None)
+    );
+}
+
+#[test]
+fn a_command_that_exited_non_zero_is_a_failed_card_with_its_code() {
+    use conn_state::BackgroundCommandOutcome::Failed;
+    let entry = notification_entry(
+        json!({"kind": "command"}),
+        "failed",
+        "Command \"npm test\" failed (exit 2)",
+        Some("Tests failed:\n  1) adds numbers"),
+    );
+    assert_eq!(
+        background_command(&entry),
+        (
+            Some("npm test"),
+            Failed,
+            Some(2),
+            Some("Tests failed:\n  1) adds numbers")
+        )
+    );
+}
+
+#[test]
+fn the_server_summary_is_kept_whole_on_the_card() {
+    for summary in [
+        "Command \"Wait for dev app rebuild\" finished",
+        "Command \"npm test\" failed (exit 2)",
+        "Command \"sleep 600\" was stopped",
+        "Command finished",
+    ] {
+        let outcome = if summary.contains("failed") {
+            "failed"
+        } else if summary.contains("stopped") {
+            "cancelled"
+        } else {
+            "completed"
+        };
+        let entry = notification_entry(json!({"kind": "command"}), outcome, summary, None);
+        assert_eq!(card_summary(&entry), summary);
+    }
+}
+
+#[test]
+fn free_text_in_the_detail_never_changes_the_status() {
+    use conn_state::BackgroundCommandOutcome::Finished;
+    // The command finished. Its output talks about exit codes and failures.
+    for detail in [
+        "previous exit code 1 ignored",
+        "Background command \"make\" completed (exit code 3)",
+        "exit 1",
+        "retry failed twice, then it worked; exit code 255 from the helper",
+        "FAILED: 0 tests, exit code -1",
+    ] {
+        let entry = notification_entry(
+            json!({"kind": "command"}),
+            "completed",
+            "Command \"make\" finished",
+            Some(detail),
+        );
+        assert_eq!(
+            background_command(&entry),
+            (Some("make"), Finished, None, Some(detail)),
+            "detail {detail:?} must not make the command Failed"
+        );
+    }
+}
+
+#[test]
+fn only_a_strict_trailing_exit_suffix_counts() {
+    use conn_state::BackgroundCommandOutcome::{Failed, Finished};
+    // An exit suffix inside the label is part of the label.
+    let entry = notification_entry(
+        json!({"kind": "command"}),
+        "completed",
+        "Command \"echo (exit 5)\" finished",
+        None,
+    );
+    assert_eq!(
+        background_command(&entry),
+        (Some("echo (exit 5)"), Finished, None, None)
+    );
+    // A malformed suffix is not a code: the summary is not one the server writes, so it stays a
+    // plain notice rather than guessing.
+    for summary in [
+        "Command \"make\" finished (exit 5",
+        "Command \"make\" finished (exit +5)",
+        "Command \"make\" finished (exit five)",
+        "Command \"make\" finished (exit )",
+    ] {
+        let entry = notification_entry(json!({"kind": "command"}), "completed", summary, None);
+        assert!(
+            matches!(&entry, TimelineEntry::Notice { text, .. } if text == summary),
+            "{summary:?} stays a plain notice, got {entry:?}"
+        );
+    }
+    // The server's own suffix is trusted.
+    let entry = notification_entry(
+        json!({"kind": "command"}),
+        "completed",
+        "Command \"make\" finished (exit 3)",
+        None,
+    );
+    assert_eq!(
+        background_command(&entry),
+        (Some("make"), Failed, Some(3), None)
+    );
+}
+
+#[test]
+fn a_zero_exit_stays_finished_and_a_stopped_command_says_so() {
+    use conn_state::BackgroundCommandOutcome::{Finished, Stopped};
+    let entry = notification_entry(
+        json!({"kind": "command"}),
+        "completed",
+        "Command \"make\" finished (exit 0)",
+        None,
+    );
+    assert_eq!(
+        background_command(&entry),
+        (Some("make"), Finished, Some(0), None)
+    );
+    let entry = notification_entry(
+        json!({"kind": "command"}),
+        "cancelled",
+        "Command \"sleep 600\" was stopped",
+        None,
+    );
+    assert_eq!(
+        background_command(&entry),
+        (Some("sleep 600"), Stopped, None, None)
+    );
+}
+
+#[test]
+fn a_command_without_a_label_and_a_legacy_source_still_make_a_card() {
+    use conn_state::BackgroundCommandOutcome::Finished;
+    let entry = notification_entry(
+        json!({"kind": "background_command"}),
+        "completed",
+        "Command finished",
+        None,
+    );
+    assert_eq!(background_command(&entry), (None, Finished, None, None));
+}
+
+#[test]
+fn the_providers_summary_is_the_expandable_detail_unless_it_repeats_the_summary() {
+    let entry = notification_entry(
+        json!({"kind": "command"}),
+        "completed",
+        "Command \"make\" finished",
+        Some("Command \"make\" finished"),
+    );
+    assert_eq!(
+        background_command(&entry).3,
+        None,
+        "a detail that only repeats the summary is not worth expanding"
+    );
+    let entry = notification_entry(
+        json!({"kind": "command"}),
+        "completed",
+        "Command \"make\" finished",
+        Some("   "),
+    );
+    assert_eq!(background_command(&entry).3, None, "blank detail");
+}
+
+#[test]
+fn other_notifications_stay_plain_notices() {
+    let plain = |entry: TimelineEntry, text: &str| {
+        assert!(
+            matches!(&entry, TimelineEntry::Notice { text: t, .. } if t == text),
+            "expected the plain notice {text:?}, got {entry:?}"
+        );
+    };
+    // Several commands in one wake.
+    for summary in [
+        "2 commands finished",
+        "Command \"make\" (exit 0) and command \"npm test\" (exit 2) failed",
+        "Command \"a\" and command \"b\" finished",
+    ] {
+        plain(
+            notification_entry(json!({"kind": "command"}), "completed", summary, None),
+            summary,
+        );
+    }
+    // Other kinds of background work keep the pill.
+    for (source, summary) in [
+        (
+            json!({"kind": "subagent"}),
+            "Subagent \"Find the bug\" finished",
+        ),
+        (json!({"kind": "monitor"}), "Monitor reported new output"),
+        (
+            json!({"kind": "background_task"}),
+            "Background task \"Backup\" finished",
+        ),
+    ] {
+        plain(
+            notification_entry(source, "completed", summary, None),
+            summary,
+        );
+    }
+    // A command notice that is not a finish.
+    plain(
+        notification_entry(
+            json!({"kind": "command"}),
+            "updated",
+            "Command \"tail -f\" updated",
+            None,
+        ),
+        "Command \"tail -f\" updated",
+    );
+}
+
 #[test]
 fn handoff_notice_shows_endpoints_without_the_provider_transcript() {
     let mut item = json!({

@@ -250,6 +250,32 @@ pub enum TimelineEntry {
         text: String,
         level: NoticeLevel,
     },
+    /// A background command that ended: the `notification` a provider's wake carries for one
+    /// command (Claude's `task-notification` for a Bash `run_in_background` task).
+    BackgroundCommand {
+        id: String,
+        /// The server's own summary, whole: `Command "npm test" failed (exit 2)`. The card's
+        /// expand panel and the iOS bridge show it as it came.
+        summary: String,
+        /// The task's description, else its command, as the provider named it.
+        label: Option<String>,
+        outcome: BackgroundCommandOutcome,
+        /// The command's exit code, when the provider reported one.
+        exit_code: Option<i64>,
+        /// The provider's own summary or output, shown on expand.
+        detail: Option<String>,
+    },
+}
+
+/// How a background command ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BackgroundCommandOutcome {
+    /// It ran to the end (exit 0, or no exit code reported).
+    Finished,
+    /// It failed, or exited with a non-zero code.
+    Failed,
+    /// Someone stopped it.
+    Stopped,
 }
 
 impl TimelineEntry {
@@ -269,7 +295,8 @@ impl TimelineEntry {
             | Self::SecretRequest { id, .. }
             | Self::ProposedPlan { id, .. }
             | Self::Subagent { id, .. }
-            | Self::Notice { id, .. } => id,
+            | Self::Notice { id, .. }
+            | Self::BackgroundCommand { id, .. } => id,
         }
     }
 }
@@ -2454,7 +2481,88 @@ fn map_system_notice(item: SystemNoticeItem) -> Option<TimelineEntry> {
     })
 }
 
+/// The card for a notification about one background command; `None` for any other notification,
+/// or a command notice that names several commands, which stays a plain notice.
+fn background_command_entry(item: &NotificationItem) -> Option<TimelineEntry> {
+    use conn_contract::OrchestrationV2NotificationSource as Source;
+    use conn_contract::OrchestrationV2NotificationSourceMonitorPullRequestSectionOutcome as Outcome;
+
+    if !matches!(
+        item.source,
+        Source::Command(_) | Source::BackgroundCommand(_)
+    ) {
+        return None;
+    }
+    let (label, exit_code) = parse_command_summary(&item.summary)?;
+    let detail = item
+        .detail
+        .as_deref()
+        .map(str::trim)
+        .filter(|d| !d.is_empty() && *d != item.summary.trim())
+        .map(str::to_owned);
+    // The status is the server's `outcome`. Only the server's own `(exit N)` suffix, never the
+    // provider's free-text detail, can turn a completed command into a failed one.
+    let outcome = match item.outcome {
+        Outcome::Completed if exit_code.is_some_and(|code| code != 0) => {
+            BackgroundCommandOutcome::Failed
+        }
+        Outcome::Completed => BackgroundCommandOutcome::Finished,
+        Outcome::Failed => BackgroundCommandOutcome::Failed,
+        Outcome::Cancelled => BackgroundCommandOutcome::Stopped,
+        Outcome::Updated | Outcome::Unknown => return None,
+    };
+    Some(TimelineEntry::BackgroundCommand {
+        id: item.id.clone(),
+        summary: item.summary.clone(),
+        label,
+        outcome,
+        exit_code,
+        detail,
+    })
+}
+
+/// Reads the label and exit code out of the one-command summary the server writes
+/// (`Command "<label>" finished`, `… failed (exit 2)`, `… was stopped`, or `Command finished` with
+/// no label). `None` for a summary of several commands. The contract has no structured label yet.
+fn parse_command_summary(summary: &str) -> Option<(Option<String>, Option<i64>)> {
+    const VERBS: [&str; 4] = [" finished", " failed", " was stopped", " updated"];
+    let mut rest = summary.trim();
+    // The server writes the exit suffix after the verb: `Command "x" failed (exit 2)`.
+    let mut exit_code = None;
+    if let Some(open) = rest.rfind(" (exit ")
+        && let Some(code) = rest[open + " (exit ".len()..].strip_suffix(')')
+        && is_exit_code(code)
+        && let Ok(code) = code.parse::<i64>()
+    {
+        exit_code = Some(code);
+        rest = &rest[..open];
+    }
+    let head = VERBS.iter().find_map(|verb| rest.strip_suffix(verb))?;
+    if head == "Command" {
+        return Some((None, exit_code));
+    }
+    let label = head.strip_prefix("Command \"")?.strip_suffix('"')?;
+    // Several commands join as `Command "a" (exit 0) and command "b"`.
+    if label.contains("\" (exit ")
+        || label.contains("\" and command \"")
+        || label.contains("\", command \"")
+    {
+        return None;
+    }
+    let label = label.trim();
+    Some(((!label.is_empty()).then(|| label.to_owned()), exit_code))
+}
+
+/// The server writes the code as plain decimal digits, with a `-` for a signal-style negative.
+fn is_exit_code(code: &str) -> bool {
+    let digits = code.strip_prefix('-').unwrap_or(code);
+    !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
 fn map_notification(item: NotificationItem) -> Option<TimelineEntry> {
+    if let Some(entry) = background_command_entry(&item) {
+        return Some(entry);
+    }
     Some(TimelineEntry::Notice {
         id: item.id,
         text: item.summary,

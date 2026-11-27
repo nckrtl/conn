@@ -513,7 +513,7 @@ async fn preview(
     if let Err(response) = reader_only(&principal) {
         return *response;
     }
-    let Some(preview) = state.app.deps.preview.clone() else {
+    let Some(preview) = state.app.deps.features.preview.clone() else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let gate = SessionGate(handle);

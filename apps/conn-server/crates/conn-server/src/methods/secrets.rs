@@ -5,7 +5,7 @@ use crate::table::{Failure, MethodTable};
 use conn_contract::SecretRequestAnswerInput;
 
 pub(super) fn register(table: &mut MethodTable, deps: &Deps) {
-    let Some(secrets) = deps.secrets.clone() else {
+    let Some(secrets) = deps.features.secrets.clone() else {
         return;
     };
     table.unary(
@@ -56,7 +56,10 @@ mod tests {
         register(
             &mut table,
             &Deps {
-                secrets: Some(secrets),
+                features: conn_mcp::Features {
+                    secrets: Some(secrets),
+                    ..Default::default()
+                },
                 ..Deps::default()
             },
         );

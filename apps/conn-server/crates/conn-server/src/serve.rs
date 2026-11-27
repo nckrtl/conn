@@ -3,7 +3,7 @@
 
 use std::{
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
     time::Duration,
 };
@@ -280,12 +280,10 @@ pub async fn serve_with_instances(
         vcs: vcs.clone(),
         terminals: terminals.clone(),
         environment: environment.clone(),
-        scheduled_tasks: OnceLock::new(),
-        devices: OnceLock::new(),
+        features: OnceLock::new(),
         settlement_wake: Arc::default(),
         idle_compaction: OnceLock::new(),
         worktree_cleanup: OnceLock::new(),
-        previews: OnceLock::new(),
         settle_cleanups: Arc::default(),
     });
 
@@ -394,36 +392,12 @@ pub async fn serve_with_instances(
         "cannot open the engine",
     ));
     let engine: Arc<dyn Engine> = sqlite_engine.clone();
-    let secrets = conn_features::secrets::SecretRequests::new(
-        &state_dir,
-        engine.clone(),
-        Arc::new(conn_features::clock::SystemClock),
-    );
-    let scheduled_tasks =
-        conn_features::scheduled::ScheduledTasks::start(conn_features::scheduled::Config {
-            state_dir: state_dir.clone(),
-            clock: Arc::new(conn_features::clock::SystemClock),
-            zone: jiff::tz::TimeZone::system(),
-            runner: Arc::new(conn_features::scheduled::EngineRunner::new(engine.clone())),
-            secret_requests: Some(secrets.clone()),
-            start_timer: !inert,
-        })
-        .await;
-    let _ = host.scheduled_tasks.set(scheduled_tasks.clone());
-    let preview = conn_preview::tabs::Preview::new(state_dir.clone());
-    let _ = host.previews.set(preview.clone());
+    let features = feature_services(&state_dir, &environment, &engine, inert).await;
+    // The host is older than the engine, so it gets them here: before any effect runs.
+    let _ = host.features.set(features.clone());
     let mut deps = Deps {
-        preview: Some(preview.clone()),
-        panels: Some(conn_features::panels::PanelBroker::default()),
-        secrets: Some(secrets),
-        test_logins: Some(conn_features::test_logins::TestLogins::new(&state_dir)),
+        features,
         engine: Some(engine.clone()),
-        scheduled_tasks: Some(scheduled_tasks),
-        annotations: Some(conn_features::annotations::Annotations::new(
-            &state_dir,
-            Arc::new(conn_features::clock::SystemClock),
-            Arc::new(conn_features::annotations::EngineProjects(engine.clone())),
-        )),
         providers,
         instances,
         environment: Some(environment.clone()),
@@ -437,7 +411,6 @@ pub async fn serve_with_instances(
         ))),
         // An inert copy holds the original's peer links: it must not use them.
         peers: (!inert).then(|| crate::peers::PeerLinks::new(environment.clone(), engine.clone())),
-        devices: Some(crate::methods::devices::start(environment.clone())),
         provider_status: crate::methods::provider::ProviderStatus::with_notifier(status_notifier),
         model_manifest: Some(crate::model_manifest::ModelManifest::new(
             state_dir.clone(),
@@ -446,9 +419,6 @@ pub async fn serve_with_instances(
         )),
         ..Deps::default()
     };
-    if let Some(devices) = &deps.devices {
-        let _ = host.devices.set(devices.clone());
-    }
     start_agent_tools(&mut deps, &host, &sqlite_engine, addr);
     // After the MCP service, which settled threads' cleanup uses: the first sweep may settle.
     // An inert rehearsal copy settles and compacts nothing: its threads belong to the original.
@@ -554,7 +524,9 @@ pub async fn serve_with_instances(
         }
     }
 
-    let devices = state.deps.devices.clone();
+    let conn_mcp::Features {
+        preview, devices, ..
+    } = state.deps.features.clone();
     let mcp = state.deps.mcp.clone();
     let app = router(state).into_make_service_with_connect_info::<SocketAddr>();
     let (stop_tx, mut stop_rx) = tokio::sync::watch::channel(false);
@@ -611,7 +583,9 @@ pub async fn serve_with_instances(
         mcp.stop_remote_tasks().await;
     }
     engine.shutdown().await;
-    preview.shutdown().await;
+    if let Some(preview) = preview {
+        preview.shutdown().await;
+    }
     // Device hubs and agent daemons stop, here and on SSH hosts, as T3's finalizers do;
     // bounded, so an unreachable host cannot hold the stop.
     if let Some(devices) = devices {
@@ -621,6 +595,47 @@ pub async fn serve_with_instances(
     if restart.requested() {
         // A failure exit also restarts units with Restart=on-failure.
         std::process::exit(1);
+    }
+}
+
+/// Builds the feature services, in the order they need each other: the secret requests
+/// before the scheduled tasks, which ask through them. Called once, after the engine opens:
+/// the secret requests, the scheduled tasks and the annotations are built on it. `Deps`, the
+/// engine host and `/mcp` hold the one result. An inert copy's scheduled tasks start no timer.
+async fn feature_services(
+    state_dir: &Path,
+    environment: &Arc<Environment>,
+    engine: &Arc<dyn Engine>,
+    inert: bool,
+) -> conn_mcp::Features {
+    let secrets = conn_features::secrets::SecretRequests::new(
+        state_dir,
+        engine.clone(),
+        Arc::new(conn_features::clock::SystemClock),
+    );
+    let scheduled_tasks =
+        conn_features::scheduled::ScheduledTasks::start(conn_features::scheduled::Config {
+            state_dir: state_dir.to_owned(),
+            clock: Arc::new(conn_features::clock::SystemClock),
+            zone: jiff::tz::TimeZone::system(),
+            runner: Arc::new(conn_features::scheduled::EngineRunner::new(engine.clone())),
+            secret_requests: Some(secrets.clone()),
+            start_timer: !inert,
+        })
+        .await;
+    // Every field by name: a new service fails to compile until it has its line here.
+    conn_mcp::Features {
+        preview: Some(conn_preview::tabs::Preview::new(state_dir.to_owned())),
+        panels: Some(conn_features::panels::PanelBroker::default()),
+        secrets: Some(secrets),
+        test_logins: Some(conn_features::test_logins::TestLogins::new(state_dir)),
+        scheduled_tasks: Some(scheduled_tasks),
+        annotations: Some(conn_features::annotations::Annotations::new(
+            state_dir,
+            Arc::new(conn_features::clock::SystemClock),
+            Arc::new(conn_features::annotations::EngineProjects(engine.clone())),
+        )),
+        devices: Some(crate::methods::devices::start(environment.clone())),
     }
 }
 

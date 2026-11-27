@@ -51,7 +51,10 @@ async fn run(state_dir: &Path, project: &Path, config_out: &Path) {
     let mut deps = Deps {
         engine: Some(engine.clone()),
         providers: vec![provider].into(),
-        panels: Some(conn_features::panels::PanelBroker::default()),
+        features: conn_mcp::Features {
+            panels: Some(conn_features::panels::PanelBroker::default()),
+            ..Default::default()
+        },
         files: Some(Arc::new(
             conn_files::Files::open(state_dir).expect("disposable file store"),
         )),

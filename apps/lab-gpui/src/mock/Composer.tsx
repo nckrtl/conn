@@ -142,15 +142,23 @@ export function Composer({
   onSend,
   attachments,
   agentSmoke,
+  running = false,
+  editing,
 }: {
   abovePrompt?: ReactNode;
-  onSend: (text: string) => void;
+  onSend: (text: string, followUp: string) => void;
   attachments?: ReactNode;
   agentSmoke: boolean;
+  /** A turn runs: the send button queues or steers (`resolve_primary_action`). */
+  running?: boolean;
+  /** A queued message being edited: its text fills the prompt, and sending updates it. */
+  editing?: { id: string; text: string } | undefined;
 }) {
-  const [draft, setDraft] = useState("");
+  // Editing a queued message moves its text into the prompt; the page re-keys the composer for it.
+  const [draft, setDraft] = useState(editing?.text ?? "");
   const [speed, setSpeed] = useState(agentSmoke ? "Standard" : "Fast");
-  const [followup, setFollowup] = useState("Steer");
+  // A follow-up queues behind the running turn unless Steer is chosen.
+  const [followup, setFollowup] = useState("Queue");
   const [access, setAccess] = useState<string>(permissions[3][0]);
   const [picker, setPicker] = useState(false);
   const [model, setModel] = useState(
@@ -205,7 +213,7 @@ export function Composer({
   }
   function send() {
     if (!draft.trim() && !attachments) return;
-    onSend(draft.trim());
+    onSend(draft.trim(), followup);
     setDraft("");
   }
   return (
@@ -259,12 +267,33 @@ export function Composer({
           <span className="composer-mic" aria-label="Dictate with Operator">
             <Icon name="microphone" />
           </span>
-          <Tool
-            label="Send message"
-            icon="arrow-up"
-            onClick={send}
-            disabled={!draft.trim() && !attachments}
-          />
+          {running && !editing && !draft.trim() && !attachments ? (
+            <Tool label="Stop generation" data-stop="" icon="stop" data-tip="Interrupt" />
+          ) : (
+            <Tool
+              label={
+                editing
+                  ? "Update queued message"
+                  : running
+                    ? followup === "Queue"
+                      ? "Queue message"
+                      : "Steer message"
+                    : "Send message"
+              }
+              data-send=""
+              icon={
+                editing
+                  ? "check"
+                  : running
+                    ? followup === "Queue"
+                      ? "list-add"
+                      : "forward"
+                    : "arrow-up"
+              }
+              onClick={send}
+              disabled={!draft.trim() && !attachments}
+            />
+          )}
         </div>
         {picker && (
           <div ref={popup} className="model-picker" role="dialog" aria-label="Model picker">

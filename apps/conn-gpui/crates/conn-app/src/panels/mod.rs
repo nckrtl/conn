@@ -1348,6 +1348,8 @@ impl RightPanel {
 
 impl Render for RightPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        #[cfg(test)]
+        crate::render_stats::rendered(|c| &mut c.right_panel);
         if self.tab == RightPanelTab::Terminal {
             self.terminal.update(cx, |p, cx| p.ensure_started(cx));
         }

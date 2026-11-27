@@ -18,6 +18,8 @@ mod menus;
 mod orbit_sync;
 mod palette;
 mod preview_host;
+#[cfg(test)]
+mod render_stats;
 mod runtime_warmup;
 mod screen_anchor;
 mod settings;

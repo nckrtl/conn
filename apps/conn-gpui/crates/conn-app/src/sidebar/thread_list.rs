@@ -204,6 +204,8 @@ pub(crate) fn render_thread_sidebar(
     cx: &mut Context<'_, ConnApp>,
 ) -> gpui_kit::Stateful<gpui_kit::Div> {
     tree.begin();
+    #[cfg(test)]
+    crate::render_stats::rendered(|c| &mut c.sidebar);
     let fg = hsla(tokens.sidebar_foreground);
     let muted = hsla(tokens.sidebar_muted_foreground);
     let search_icon_color = hsla_alpha(tokens.sidebar_muted_foreground, 0.85);

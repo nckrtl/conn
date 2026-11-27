@@ -3609,6 +3609,8 @@ impl ChatView {
 impl Render for ChatView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.log_first_paint();
+        #[cfg(test)]
+        crate::render_stats::rendered(|c| &mut c.chat);
         self.sweep_thumb_loads(cx);
         if !self.pending_card_ids.is_empty()
             || !self.user_input_cards.is_empty()

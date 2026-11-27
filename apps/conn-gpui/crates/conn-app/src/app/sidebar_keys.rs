@@ -881,15 +881,19 @@ impl ConnApp {
     /// numbers; none while they are hidden. The hints go while the model picker, which takes
     /// `⌘1`..`⌘9` for itself, is open.
     pub(crate) fn jump_hint_order(&self, window: &Window, cx: &gpui_kit::App) -> Vec<String> {
-        if self.jump_hints
-            && window.is_window_active()
-            && shows_jump_hints(key_mods(&window.modifiers()))
-            && !self.chat.read(cx).model_picker_open(cx)
-        {
+        if self.jump_hints_visible(window, cx) {
             self.thread_traversal_ids()
         } else {
             Vec::new()
         }
+    }
+
+    /// Whether the rows wear their jump numbers now (see [`Self::jump_hint_order`]).
+    pub(crate) fn jump_hints_visible(&self, window: &Window, cx: &gpui_kit::App) -> bool {
+        self.jump_hints
+            && window.is_window_active()
+            && shows_jump_hints(key_mods(&window.modifiers()))
+            && !self.chat.read(cx).model_picker_open(cx)
     }
 
     /// A click on a thread row (`handleThreadClick`): `⌘`-click picks the thread for a bulk action

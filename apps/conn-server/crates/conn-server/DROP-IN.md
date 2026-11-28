@@ -67,12 +67,40 @@ conn-server-<version>-linux-x64/
     └── node_modules/    @anthropic-ai/claude-agent-sdk only (npm ci --omit=dev --ignore-scripts)
 ```
 
-**Release.** `.github/workflows/conn-server-release.yml` in the Conn monorepo
-(`nckrtl/conn`, public) builds it on `ubuntu-24.04` when a tag `conn-server-v*` is pushed.
-The tag must be `conn-server-v` plus the `conn-server` crate version. The run makes a GitHub
-Release on `nckrtl/conn` with the tarball and its `.sha256`, not marked Latest.
-`workflow_dispatch` on a branch only keeps the tarball as a workflow artifact. No tag has been
-pushed and no release made yet.
+**Fleet release.** Merge the server version bump to Conn's main branch. Push
+`conn-server-v<X>` at the checked commit, where `<X>` matches the crate version.
+The Conn Server Release workflow builds the Linux x64 tarball on Ubuntu and the
+signed Apple silicon app on mini. A tag publishes both files and their SHA-256
+checksums. A branch build keeps artifacts for testing.
+
+After publication, **Propose Conn Server fleet pin** checks the tagged commit
+again. It downloads both archives and their published checksums, verifies the
+release metadata and binds the recorded version line to the Linux archive hash.
+The writer generates the Orbit recipe, launch contract and convergence
+fixture. The `orbit-nckrtl` GitHub App opens one PR per tag on
+`hardimpactdev/orbit:main`. To retry, dispatch the proposal workflow from main
+with the same published tag. The writer reuses the PR or its already pushed
+branch. Merge the pin through the Orbit merge queue.
+
+Set the Conn Actions variable `ORBIT_PIN_APP_ID` and the secret
+`ORBIT_PIN_APP_PRIVATE_KEY`. The proposal job mints a short-lived installation
+token for Orbit alone, then verifies that token can read the repository. A manual
+run against the already pinned tag can prove access without opening a new PR. The
+Mac runner uses its existing Developer ID. It has no App credentials.
+
+A parallel job retries Orbit lookups through five minutes after publication.
+It checks when the PR was created, even if the lookup returns after the deadline.
+If it cannot confirm timely creation, it fails in Actions and opens one issue on
+`nckrtl/conn` assigned to Nick. Nick checks the proposal job, fixes the cause and
+dispatches the same tag again. An Actions runner queue can delay the alert.
+
+Once the Gateway serves the reviewed pin, it dry-runs and updates the standalone
+canary, then verifies the exact version and an authenticated thread read. Promote
+the proven pin with its canary operation ID after the other standalone Nodes pass
+their read-only checks. See the [Orbit rollout contract](https://github.com/hardimpactdev/orbit/blob/main/docs/reference/development-containers.md#conn-server-rollout)
+for the request and recovery steps. Budget 30–45 minutes for a routine release
+with prompt approval. Signing, hosted checks, merge-queue waits and slow Nodes
+can extend that estimate.
 
 **How the server finds the SDK host.** Orbit links `bin/conn-server` to
 `../conn-server/conn-server-<version>-linux-x64/conn-server`. The server follows that link
@@ -81,27 +109,9 @@ and looks beside the real binary: `conn-sdk-host` (the single executable) first,
 still win. The `node` is Orbit's runtime folder's (`/opt/orbit-runtime/current/bin/node`,
 Node 24.22.1); the agent folder has none.
 
-**Recipe entry Orbit would add** (`apps/gateway/resources/machine-software/recipe.json`,
-`instances.agent`), beside `t3`:
-
-```json
-"conn-server": {
-    "version": "0.1.0",
-    "artifacts": {
-        "amd64": {
-            "url": "https://github.com/nckrtl/conn/releases/download/conn-server-v0.1.0/conn-server-0.1.0-linux-x64.tar.gz",
-            "sha256": "<the .sha256 of the release>"
-        }
-    },
-    "bin": {
-        "conn-server": "conn-server-0.1.0-linux-x64/conn-server"
-    }
-}
-```
-
-A Project that chooses the Conn Server then gets `ExecStart=/opt/orbit-agent/current/agent/bin/conn-server
-serve --host=0.0.0.0 --port=3773 --no-browser` in `t3.service`, and Orbit's `t3 ...` CLI calls
-become `conn-server ...`. The Orbit side of the choice is not built.
+Orbit stores the pin under `instances.agent.conn-server` in its machine-software
+recipe. Container hosts consume the Linux artifact through the shared agent
+folder. The standalone rollout consumes the Mac or Linux artifact for each node.
 
 **Node.** The SDK host asks for Node 24.10 or newer (`engines`); the Claude Agent SDK 0.3.321
 asks for 18.14. The T3 server allows `^22.16 || ^23.11 || >=24.10` (`apps/server/package.json`),

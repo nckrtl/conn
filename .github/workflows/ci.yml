@@ -51,6 +51,8 @@ jobs:
             /.github/scripts/ci-check.test.cjs
             /.github/scripts/conn-server-after-ci.cjs
             /.github/scripts/conn-server-after-ci.test.cjs
+            /.github/scripts/conn-server-fleet-pin.sh
+            /.github/scripts/conn-server-fleet-pin.test.cjs
             /.github/workflows/conn-server-after-ci.yml
             /.github/workflows/conn-server-checks.yml
             /.github/workflows/conn-server-ci.yml
@@ -69,9 +71,9 @@ jobs:
       - name: Test CI scripts
         run: node --test .github/scripts/ci-check.test.cjs .github/scripts/web-test.test.cjs
 
-      - name: Test deferred Conn Server checks
+      - name: Test Conn Server release automation
         if: github.repository == 'nckrtl/conn'
-        run: node --test .github/scripts/conn-server-after-ci.test.cjs
+        run: node --test .github/scripts/conn-server-after-ci.test.cjs .github/scripts/conn-server-fleet-pin.test.cjs
 
   # Lint and the desktop build each get a runner so they run side by side.
   # Typecheck shares the build's install. Lint always runs: it formats every

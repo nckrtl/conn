@@ -192,3 +192,5 @@ which stage.
 Write documents, comments, commit messages and reports in clear, brief English: common words,
 short sentences, active voice, one idea per sentence. Lead with the answer. Say plainly what is
 proven and what is not.
+
+For a fleet release, follow [Release tarball for Orbit](crates/conn-server/DROP-IN.md#release-tarball-for-orbit-2026-11-15). It covers tagging, mini signing, the Orbit pin PR and canary promotion.

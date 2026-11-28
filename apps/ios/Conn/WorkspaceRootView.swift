@@ -23,6 +23,8 @@ private enum WorkspaceSelection: Hashable {
 enum WorkspaceRoute: Hashable, Codable {
     case task(Int64)
     case pullRequest(PullRequestRow)
+    /// A pull request opened from a thread of a linked environment (`scope`).
+    case scopedPullRequest(PullRequestRow, scope: String)
     case thread(String, scope: String)
     case newThreadDraft(projectId: String?, title: String, scope: String = "", prompt: String = "")
 }
@@ -182,40 +184,12 @@ struct WorkspaceRootView: View {
                     TaskRecordView(id: id, model: tasks)
                 case let .pullRequest(row):
                     PullRequestRecord(store: store, row: row)
-                case let .thread(threadId, scope):
+                case let .scopedPullRequest(row, scope):
                     if let owner = scope.isEmpty ? store : store.linked[scope] {
-                        let summary = owner.shell?.threads.first(where: { $0.id == threadId })
-                        let projectTitle = summary.flatMap { s in
-                            owner.shell?.projects.first(where: { $0.id == s.projectId })?.title
-                        }
-                        ThreadView(
-                            store: owner,
-                            threadId: threadId,
-                            initialTitle: summary?.title ?? "Thread",
-                            initialProjectTitle: summary?.orbitProjectSlug ?? projectTitle,
-                            initialBranch: summary?.branch,
-                            initialSettled: summary?.settled ?? false,
-                            onOpenThread: { childId, environment in
-                                if let environment, environment != owner.environmentId {
-                                    // Opened from a thread: push it, so Back returns to that thread.
-                                    pushNextLink = true
-                                    store.open(ThreadLink(environmentId: environment, threadId: childId))
-                                } else {
-                                    navigationPath.append(.thread(childId, scope: scope))
-                                }
-                            },
-                            onTemplate: { prompt in
-                                let opened = owner.openThread
-                                let openedProject = opened?.threadId == threadId ? opened?.projectId : nil
-                                guard let projectId = openedProject ?? summary?.projectId else {
-                                    owner.lastError = "Could not find this thread’s project."
-                                    return
-                                }
-                                let title = owner.shell?.projects.first(where: { $0.id == projectId })?.title
-                                navigationPath.append(.newThreadDraft(projectId: projectId, title: title ?? projectId, scope: scope, prompt: prompt))
-                            }
-                        )
+                        PullRequestRecord(store: owner, row: row)
                     }
+                case let .thread(threadId, scope):
+                    threadDestination(threadId: threadId, scope: scope)
                 case let .newThreadDraft(projectId, title, scope, prompt):
                     if let owner = scope.isEmpty ? store : store.linked[scope] {
                     NewThreadDraftView(
@@ -348,6 +322,65 @@ struct WorkspaceRootView: View {
     }
 
     /// Shows a thread from a `conn://thread/...` URL or a push tap.
+    /// A thread of the main store (`scope` empty) or of a linked one.
+    @ViewBuilder
+    private func threadDestination(threadId: String, scope: String) -> some View {
+        if let owner = scope.isEmpty ? store : store.linked[scope] {
+            let summary = owner.shell?.threads.first(where: { $0.id == threadId })
+            let projectTitle = summary.flatMap { s in
+                owner.shell?.projects.first(where: { $0.id == s.projectId })?.title
+            }
+            ThreadView(
+                store: owner,
+                threadId: threadId,
+                initialTitle: summary?.title ?? "Thread",
+                initialProjectTitle: summary?.orbitProjectSlug ?? projectTitle,
+                initialBranch: summary?.branch,
+                initialSettled: summary?.settled ?? false,
+                onOpenThread: { childId, environment in
+                    if let environment, environment != owner.environmentId {
+                        // Opened from a thread: push it, so Back returns to that thread.
+                        pushNextLink = true
+                        store.open(ThreadLink(environmentId: environment, threadId: childId))
+                    } else {
+                        navigationPath.append(.thread(childId, scope: scope))
+                    }
+                },
+                onTemplate: { prompt in
+                    let opened = owner.openThread
+                    let openedProject = opened?.threadId == threadId ? opened?.projectId : nil
+                    guard let projectId = openedProject ?? summary?.projectId else {
+                        owner.lastError = "Could not find this thread’s project."
+                        return
+                    }
+                    let title = owner.shell?.projects.first(where: { $0.id == projectId })?.title
+                    navigationPath.append(.newThreadDraft(projectId: projectId, title: title ?? projectId, scope: scope, prompt: prompt))
+                },
+                onOpenPullRequest: { pr in
+                    openPullRequest(pr, projectTitle: projectTitle, scope: scope)
+                }
+            )
+        }
+    }
+
+    /// Opens a pull request from a thread's details, as the Pull requests tab does; one the
+    /// server has not linked yet (no host) opens in the browser.
+    private func openPullRequest(_ pr: FfiThreadPullRequest, projectTitle: String?, scope: String) {
+        guard let host = pr.host else {
+            if let url = URL(string: pr.url) { UIApplication.shared.open(url) }
+            return
+        }
+        let author: PullRequestRow.Actor? = pr.author.map { PullRequestRow.Actor(login: $0) }
+        let row = PullRequestRow(
+            projectId: pr.projectId, projectTitle: projectTitle ?? "", host: host,
+            repository: pr.repository, title: pr.title, url: pr.url,
+            headBranch: pr.headBranch, baseBranch: pr.baseBranch, number: Int(pr.number),
+            isDraft: pr.state == .draft, author: author,
+            labels: nil, checksState: nil, updatedAt: pr.updatedAt
+        )
+        navigationPath.append(.scopedPullRequest(row, scope: scope))
+    }
+
     private func showPendingLink() {
         guard let link = store.consumePendingLink() else { return }
         showingSettings = false

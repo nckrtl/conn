@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 fn store<'a>(cx: &'a Cx<'_>) -> Result<&'a TestLogins, ToolError> {
     cx.config()
+        .features
         .test_logins
         .as_ref()
         .ok_or_else(|| super::fail("capability_denied", "Test logins are not supported."))
@@ -99,7 +100,7 @@ pub(super) async fn fill(cx: &Cx<'_>, args: &Args) -> ToolResult {
     let caller = cx.require_thread("This tool")?.clone();
     cx.writing_caller().await?;
     cx.require_preview()?;
-    let Some(preview) = cx.config().preview.clone() else {
+    let Some(preview) = cx.config().features.preview.clone() else {
         return Err(ToolError::Message(
             include_str!("../preview-unavailable.txt").to_owned(),
         ));

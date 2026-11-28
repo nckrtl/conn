@@ -75,6 +75,7 @@ pub(super) async fn preview(cx: &Cx<'_>, args: &Args) -> ToolResult {
         .ok_or_else(|| fail("orchestration_error", "The HTML render could not be saved."))?;
     let preview = cx
         .config()
+        .features
         .preview
         .as_ref()
         .ok_or_else(|| {

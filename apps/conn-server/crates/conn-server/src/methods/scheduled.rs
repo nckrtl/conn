@@ -27,7 +27,7 @@ fn task_failure(error: &TaskError) -> Failure {
 }
 
 pub(super) fn register(table: &mut MethodTable, deps: &Deps) {
-    let Some(service) = deps.scheduled_tasks.clone() else {
+    let Some(service) = deps.features.scheduled_tasks.clone() else {
         return;
     };
 

@@ -1,7 +1,7 @@
 // Pull request link sync differential check. T3's own `PullRequestSyncReactor` and
 // `ThreadPullRequestService` (apps/server/src/orchestration-v2) run on stub services and a
 // test clock; ours (`src/pull_requests/link_sync.rs` and the engine's deciders, through
-// `crates/conn-engine/examples/pr_link_sync_cases.rs`) run the same cases. A case is a set of
+// `examples/pr_link_sync_cases.rs`) run the same cases. A case is a set of
 // threads and minute-by-minute host answers. Both sides sweep once a minute and feed their own
 // commands forward (T3's side applies its commands as its decider does, below), so the reads
 // (which pull requests and branches each sweep asks the host for), the commands, and the

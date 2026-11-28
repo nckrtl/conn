@@ -26,7 +26,7 @@ fn require_ids<'a>(mut ids: impl Iterator<Item = &'a String>) -> Result<(), Fail
 }
 
 pub(super) fn register(table: &mut MethodTable, deps: &Deps) {
-    let Some(store) = deps.annotations.clone() else {
+    let Some(store) = deps.features.annotations.clone() else {
         return;
     };
 

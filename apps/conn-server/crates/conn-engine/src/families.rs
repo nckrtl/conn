@@ -940,6 +940,23 @@ fn deliver(tx: &mut Tx<'_>, thread_id: &str, settled: bool) -> StoreResult<Vec<E
             break;
         }
     }
+    // `delegatedCompletion` names the tasks, so clients link the wake to their children. T3
+    // keeps one cohort per spawning run; this wake may carry several, and names the first.
+    let task_ids: Vec<&str> = due.iter().filter_map(|row| row["id"].as_str()).collect();
+    let mut completion = None;
+    if let Some(parent_run) = due.iter().find_map(|row| row["runId"].as_str()) {
+        let earlier = tx
+            .entities_where(
+                thread_id,
+                "messages",
+                "delegatedCompletion.parentRunId",
+                parent_run,
+            )?
+            .len();
+        completion = Some(json!({
+            "parentRunId": parent_run, "generation": earlier + 1, "taskIds": task_ids,
+        }));
+    }
     let mut effects = vec![];
     for mut row in due {
         row["completionDelivery"] = json!({"state": "delivered", "observedByRunId": null});
@@ -962,15 +979,16 @@ fn deliver(tx: &mut Tx<'_>, thread_id: &str, settled: bool) -> StoreResult<Vec<E
     {
         mode = json!({"type": "steer_active", "targetRunId":run["id"]});
     }
-    match dispatch(
-        tx,
-        json!({
-            "type": "message.dispatch", "commandId": command_id, "threadId": thread_id,
-            "messageId": format!("message:{command_id}"), "text": parts.join("\n\n"),
-            "attachments": [], "dispatchMode": mode,
-            "createdBy": "agent", "creationSource": "server",
-        }),
-    ) {
+    let mut command = json!({
+        "type": "message.dispatch", "commandId": command_id, "threadId": thread_id,
+        "messageId": format!("message:{command_id}"), "text": parts.join("\n\n"),
+        "attachments": [], "dispatchMode": mode,
+        "createdBy": "agent", "creationSource": "server",
+    });
+    if let Some(completion) = completion {
+        command["delegatedCompletion"] = completion;
+    }
+    match dispatch(tx, command) {
         Ok(more) => {
             effects.extend(more);
             let run_id = format!("run:{thread_id}:{ordinal}");

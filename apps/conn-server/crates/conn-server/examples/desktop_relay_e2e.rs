@@ -58,8 +58,11 @@ async fn run(state_dir: &Path, project: &Path) {
         engine: Some(engine.clone()),
         providers: vec![provider].into(),
         environment: Some(environment.clone()),
-        preview: Some(conn_preview::tabs::Preview::new(state_dir.join("browser"))),
-        panels: Some(conn_features::panels::PanelBroker::default()),
+        features: conn_mcp::Features {
+            preview: Some(conn_preview::tabs::Preview::new(state_dir.join("browser"))),
+            panels: Some(conn_features::panels::PanelBroker::default()),
+            ..Default::default()
+        },
         ..Deps::default()
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")

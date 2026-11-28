@@ -19,7 +19,10 @@ async fn clients_and_agents_share_tabs_events_errors_and_render_settings() {
     register(
         &mut table,
         &Deps {
-            preview: Some(browser.clone()),
+            features: conn_mcp::Features {
+                preview: Some(browser.clone()),
+                ..Default::default()
+            },
             ..Deps::default()
         },
     );
@@ -98,7 +101,10 @@ async fn desktop_tabs_are_records_and_their_desktop_hosts_them_for_agents() {
     register(
         &mut table,
         &Deps {
-            preview: Some(browser.clone()),
+            features: conn_mcp::Features {
+                preview: Some(browser.clone()),
+                ..Default::default()
+            },
             environment: Some(environment.clone()),
             ..Deps::default()
         },
@@ -272,7 +278,10 @@ async fn a_desktop_hosts_test_login_fills_only_with_the_scope_that_reads_them() 
     register(
         &mut table,
         &Deps {
-            preview: Some(browser.clone()),
+            features: conn_mcp::Features {
+                preview: Some(browser.clone()),
+                ..Default::default()
+            },
             environment: Some(environment.clone()),
             ..Deps::default()
         },

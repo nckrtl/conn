@@ -9,7 +9,7 @@ use conn_contract::{
 use tokio::sync::mpsc;
 
 pub(super) fn register(table: &mut MethodTable, deps: &Deps) {
-    let Some(panels) = deps.panels.clone() else {
+    let Some(panels) = deps.features.panels.clone() else {
         return;
     };
     let broker = panels.clone();
@@ -51,7 +51,10 @@ mod tests {
         register(
             &mut table,
             &Deps {
-                panels: Some(broker.clone()),
+                features: conn_mcp::Features {
+                    panels: Some(broker.clone()),
+                    ..Default::default()
+                },
                 ..Deps::default()
             },
         );
@@ -127,7 +130,10 @@ mod tests {
         register(
             &mut table,
             &Deps {
-                panels: Some(conn_features::panels::PanelBroker::default()),
+                features: conn_mcp::Features {
+                    panels: Some(conn_features::panels::PanelBroker::default()),
+                    ..Default::default()
+                },
                 ..Deps::default()
             },
         );
@@ -161,7 +167,10 @@ mod tests {
         register(
             &mut table,
             &Deps {
-                panels: Some(broker.clone()),
+                features: conn_mcp::Features {
+                    panels: Some(broker.clone()),
+                    ..Default::default()
+                },
                 ..Deps::default()
             },
         );
@@ -194,7 +203,10 @@ mod tests {
         register(
             &mut table,
             &Deps {
-                panels: Some(broker.clone()),
+                features: conn_mcp::Features {
+                    panels: Some(broker.clone()),
+                    ..Default::default()
+                },
                 ..Deps::default()
             },
         );

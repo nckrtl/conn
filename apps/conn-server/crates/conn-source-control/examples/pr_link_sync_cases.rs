@@ -1,7 +1,7 @@
-//! Answers pull request link sync cases for `crates/conn-server/tools/pr-link-sync-diff.mjs`:
+//! Answers pull request link sync cases for `tools/pr-link-sync-diff.mjs`:
 //! one JSON array of cases on stdin, one JSON array of answers on stdout. Each case runs the
 //! link sweep (`conn_source_control::pull_requests::link_sync`) or the branch lookup minute by
-//! minute on scripted host answers, and applies its own commands with this engine's deciders,
+//! minute on scripted host answers, and applies its own commands with the engine's deciders,
 //! so a drift in what a sync writes shows up in a later step.
 
 use std::io::Read;

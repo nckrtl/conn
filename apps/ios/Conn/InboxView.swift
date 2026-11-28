@@ -510,9 +510,10 @@ private func rgb(_ hex: UInt32) -> Color {
 }
 
 extension View {
-    func projectStatusDot(_ tone: StatusDotTone?) -> some View {
+    /// `ring` is the colour the dot is cut out of; the screen colour by default.
+    func projectStatusDot(_ tone: StatusDotTone?, ring: Color? = nil) -> some View {
         overlay(alignment: .topTrailing) {
-            if let tone { ProjectStatusDot(tone: tone) }
+            if let tone { ProjectStatusDot(tone: tone, ring: ring) }
         }
     }
 
@@ -527,11 +528,12 @@ extension View {
 private struct ProjectStatusDot: View {
     var tone: StatusDotTone?
     var fill: Color?
+    var ring: Color?
     @Environment(\.connTheme) private var theme
     @Environment(\.colorScheme) private var colorScheme
     var body: some View {
         Circle().fill(fill ?? tone?.color(theme, dark: colorScheme == .dark) ?? theme.mutedForeground)
             .frame(width: 6, height: 6)
-            .padding(2).background(theme.background, in: Circle()).offset(x: 4, y: -4)
+            .padding(2).background(ring ?? theme.background, in: Circle()).offset(x: 4, y: -4)
     }
 }

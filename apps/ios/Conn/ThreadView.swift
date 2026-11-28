@@ -11,6 +11,8 @@ struct ThreadView: View {
     let initialSettled: Bool
     let onOpenThread: (String, String?) -> Void
     let onTemplate: (String) -> Void
+    /// Opens a pull request's record, as the Pull requests tab does.
+    let onOpenPullRequest: (FfiThreadPullRequest) -> Void
     @State private var setup: FfiWorktreeSetup?
 
     @Environment(\.connTheme) private var theme
@@ -32,6 +34,9 @@ struct ThreadView: View {
     @State private var retainedSnapshot: FfiThreadSnapshot?
     private static let titleInset: CGFloat = 16 + 44 + 16
     @State private var showsAgents = false
+    @State private var showsDetails = false
+    /// What a details row asked for, done once the sheet has gone.
+    @State private var afterDetails: (() -> Void)?
     /// The feed's scroll state (pinned, jump button), owned by the feed controller.
     @State private var chrome = FeedChrome()
     @State private var historyNotice: String?
@@ -63,7 +68,8 @@ struct ThreadView: View {
         initialBranch: String?,
         initialSettled: Bool,
         onOpenThread: @escaping (String, String?) -> Void,
-        onTemplate: @escaping (String) -> Void
+        onTemplate: @escaping (String) -> Void,
+        onOpenPullRequest: @escaping (FfiThreadPullRequest) -> Void
     ) {
         self.store = store
         self.threadId = threadId
@@ -73,6 +79,7 @@ struct ThreadView: View {
         self.initialSettled = initialSettled
         self.onOpenThread = onOpenThread
         self.onTemplate = onTemplate
+        self.onOpenPullRequest = onOpenPullRequest
         self._settled = State(initialValue: initialSettled)
         // Start at the screen size, so the first frame of a push already lays the title out
         // between the buttons instead of full width (the geometry arrives a frame later).
@@ -281,15 +288,13 @@ struct ThreadView: View {
                 .accessibilityAddTraits(.isHeader)
             }
             ToolbarItem(placement: .topBarTrailing) {
-                Menu {
-                    Button { showsOutline = true } label: { Label("Thread outline", systemImage: "list.bullet") }
-                } label: {
+                Button { showsDetails = true } label: {
                     ThreadGlyph(name: "more-horizontal", size: 22)
                         .foregroundStyle(theme.foreground)
                         .frame(width: 44, height: 44)
                         .glassEffect(.regular.interactive(), in: .circle)
                 }
-                .accessibilityLabel("More actions")
+                .accessibilityLabel("Thread details")
                 .accessibilityIdentifier("thread.moreButton")
             }
             .sharedBackgroundVisibility(.hidden)
@@ -303,6 +308,27 @@ struct ThreadView: View {
                 showsAgents = false
                 onOpenThread(child, agent.environment)
             }
+        }
+        .sheet(isPresented: $showsDetails, onDismiss: {
+            let action = afterDetails
+            afterDetails = nil
+            action?()
+        }) {
+            ThreadDetailsSheet(
+                store: store,
+                threadId: threadId,
+                machine: store.displayName,
+                onOutline: { afterDetails = { showsOutline = true } },
+                onOpenPullRequest: { pr in
+                    afterDetails = { onOpenPullRequest(pr) }
+                    showsDetails = false
+                },
+                onOpenAgent: { agent in
+                    guard let child = agent.threadId else { return }
+                    afterDetails = { onOpenThread(child, agent.environmentId) }
+                    showsDetails = false
+                }
+            )
         }
         .sheet(isPresented: $showsOutline) {
             NavigationStack {

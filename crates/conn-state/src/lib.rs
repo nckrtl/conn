@@ -44,6 +44,7 @@ mod test_threads;
 #[cfg(feature = "testkit")]
 pub mod testkit;
 mod thread;
+pub mod thread_details;
 pub mod thread_feed;
 pub mod thread_models;
 pub mod thread_search;

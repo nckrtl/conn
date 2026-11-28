@@ -44,15 +44,37 @@ pub use peers::{
 pub use transport::Reply;
 pub use worktrees::WorktreeConfig;
 
+/// The feature services: one struct, built in one function (`feature_services` in the
+/// server's `serve.rs`) and held by the server's method dependencies (`Deps`), its engine
+/// host and [`McpConfig`]. `None`: the feature is off here, and its methods and tools are
+/// not served. It lives in this crate because no lower crate knows every one of them.
+#[derive(Clone, Debug, Default)]
+pub struct Features {
+    /// The browser: preview tabs and the HTML preview.
+    pub preview: Option<conn_preview::tabs::Preview>,
+    /// Device hosts; without them the device tools answer that device access is off.
+    pub devices: Option<conn_devices::Devices>,
+    /// Scheduled tasks; without it the scheduled task tools answer that they are not served.
+    pub scheduled_tasks: Option<conn_features::scheduled::ScheduledTasks>,
+    /// Annotations; without it the annotation tools answer that they are not served.
+    pub annotations: Option<conn_features::annotations::Annotations>,
+    /// Shared by `secrets.answerRequest` and the agent secret tools.
+    pub secrets: Option<conn_features::secrets::SecretRequests>,
+    pub test_logins: Option<conn_features::test_logins::TestLogins>,
+    /// Shared by `panels.requests`, `panels.respond` and the agent panel tools.
+    pub panels: Option<conn_features::panels::PanelBroker>,
+}
+
 /// What the service needs from the server around it.
 pub struct McpConfig {
     /// Where the server listens. Every credential carries `/mcp` at this address, so bind
     /// the listener before the service exists.
     pub listen_address: SocketAddr,
-    pub preview: Option<conn_preview::tabs::Preview>,
     pub engine: Arc<dyn Engine>,
     /// The same attachment store used by client RPC and HTTP uploads.
     pub files: Option<Arc<conn_files::Files>>,
+    /// The feature services, the same ones the server's RPC methods use.
+    pub features: Features,
     /// Worktree defaults, git status and setup terminals.
     pub worktrees: Option<WorktreeConfig>,
     pub environment_id: String,
@@ -67,21 +89,10 @@ pub struct McpConfig {
     pub refresh_provider: Option<ProviderRefresh>,
     /// Outside callers get thread links through this app, as Copy thread's do.
     pub hosted_app_url: String,
-    /// Scheduled tasks; without it the scheduled task tools answer that they are not served.
-    pub scheduled_tasks: Option<conn_features::scheduled::ScheduledTasks>,
-    /// Annotations; without it the annotation tools answer that they are not served.
-    pub annotations: Option<conn_features::annotations::Annotations>,
-    /// The store also used by secrets.answerRequest.
-    pub secrets: Option<conn_features::secrets::SecretRequests>,
-    pub test_logins: Option<conn_features::test_logins::TestLogins>,
-    /// The broker also used by panels.requests and panels.respond.
-    pub panels: Option<conn_features::panels::PanelBroker>,
     /// Linked environments; without it every tool stays in this environment.
     pub peers: Option<Arc<dyn Peers>>,
     /// The server settings, for the environment preference tools.
     pub settings: Option<SettingsPort>,
-    /// Device hosts; without them the device tools answer that device access is off.
-    pub devices: Option<conn_devices::Devices>,
     /// The server's GitHub pull request panel; without it the watch and guide tools answer
     /// as T3 does when no host can be read.
     pub pull_requests: Option<PullRequestHost>,
@@ -216,6 +227,8 @@ pub struct ClientCaller {
     /// Narrower modes the client asked for on this request (`T3-Mode-Limit`): runtime,
     /// interaction.
     pub narrowed: Option<(&'static str, &'static str)>,
+    /// A linked client's thread there that this request is made for (`T3-Sender-Thread`).
+    pub sender_thread: Option<peers::PeerSender>,
     /// A native bearer session's scopes (`None` for an MCP OAuth client, whose access level
     /// decides). Tools that change settings or links check them, as the RPC methods do.
     pub scopes: Option<Vec<String>>,

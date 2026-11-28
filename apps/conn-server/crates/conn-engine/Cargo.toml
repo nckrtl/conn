@@ -16,8 +16,9 @@ conn-provider.workspace = true
 conn-provider-support.workspace = true
 # Git checkpoints per turn (`src/checkpoint.rs`); already in the server binary.
 conn-vcs.workspace = true
-# The host definition registry: pull request link keys as T3 writes them (`src/pull_requests.rs`).
-conn-source-control.workspace = true
+# Pull request link keys as T3 writes them, and a watch's combined wake
+# (`src/pull_requests.rs`). The core only: the engine never depends on a feature crate.
+conn-source-control-core.workspace = true
 # In-thread Find searches the text a message's Markdown shows (`src/thread_find.rs`).
 pulldown-cmark.workspace = true
 serde.workspace = true

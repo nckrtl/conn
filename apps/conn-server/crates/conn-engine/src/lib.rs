@@ -974,7 +974,7 @@ mod tests {
 mod workflows;
 
 /// The deciders of the host syncs, for the link sweep's check against T3
-/// (`examples/pr_link_sync_cases.rs`).
+/// (`conn-source-control/examples/pr_link_sync_cases.rs`).
 pub mod pull_request_sync {
     pub use crate::pull_requests::{decide as decide_link, decide_branch_sync, decide_link_sync};
 }

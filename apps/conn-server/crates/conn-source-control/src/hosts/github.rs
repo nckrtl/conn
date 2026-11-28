@@ -638,24 +638,11 @@ fn starred_path(repository: &str) -> Option<String> {
             "user/starred/{}",
             segments
                 .iter()
-                .map(|s| encode_uri_component(s))
+                .map(|s| conn_support::url::encode_uri_component(s))
                 .collect::<Vec<_>>()
                 .join("/")
         )
     })
-}
-
-/// `encodeURIComponent`.
-pub fn encode_uri_component(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for byte in text.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&byte) {
-            out.push(char::from(byte));
-        } else {
-            out.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    out
 }
 
 /// `makeIsRepositoryStarred` / `makeStarRepository`: true only on 204; false on any failure.

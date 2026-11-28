@@ -605,7 +605,11 @@ mod tests {
             panic!("user")
         };
         assert!(sender.is_none());
-        *sender = Some(AgentMessageSender::LinkedTitle("Release reviews".into()));
+        *sender = Some(AgentMessageSender::Linked {
+            environment_id: "env-linked".into(),
+            thread_id: "thread-release".into(),
+            title: "Release reviews".into(),
+        });
         let saved = Message::capture(&row).expect("cached conversation entry");
         let wire = serde_json::to_vec(&saved).expect("encoded cache row");
         let restored = serde_json::from_slice::<Message>(&wire)

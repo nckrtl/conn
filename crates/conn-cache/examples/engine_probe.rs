@@ -73,6 +73,15 @@ async fn main() {
     }
     let caught_up_ms = start.elapsed().as_secs_f64() * 1000.0;
 
+    // PROBE_EXIT_EARLY=1: a kill right after catch-up, before the device write is sure to land.
+    if std::env::var("PROBE_EXIT_EARLY").as_deref() == Ok("1") {
+        println!(
+            "{}",
+            serde_json::json!({"thread": thread, "killed_after_ms": caught_up_ms, "catch_up_items": items})
+        );
+        std::process::exit(0);
+    }
+
     // PROBE_OLDER=subagent: page older rows (device first, then server) until a subagent card
     // shows, and report whether its record came with it.
     let mut card = serde_json::Value::Null;

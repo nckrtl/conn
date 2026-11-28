@@ -121,7 +121,8 @@ struct InboxView: View {
             ThreadListV2RowView(
                 thread: thread,
                 projectTitle: thread.orbitProjectSlug ?? project?.title,
-                settled: settled
+                settled: settled,
+                needsAttention: store.needsAttention(thread, owner: owner)
             )
         }
         .buttonStyle(.plain)
@@ -319,6 +320,8 @@ private struct ThreadListV2RowView: View {
     let thread: FfiThreadSummary
     let projectTitle: String?
     let settled: Bool
+    /// The thread or a child it rolls up, on any environment, waits on the user.
+    let needsAttention: Bool
 
     @Environment(\.connTheme) private var theme
 
@@ -331,6 +334,7 @@ private struct ThreadListV2RowView: View {
             HStack(alignment: .center, spacing: titleGap) {
                 ProjectFaviconView(title: projectTitle, size: iconSize)
                     .opacity(settled ? 0.6 : 1)
+                    // Settled rows draw no dot, pending attention included, as in GPUI and web.
                     .projectStatusDot(settled ? nil : statusTone)
 
                 Text(thread.title.isEmpty ? "Untitled thread" : thread.title)
@@ -365,9 +369,10 @@ private struct ThreadListV2RowView: View {
 
     private var statusTone: StatusDotTone {
         if thread.usageLimited { return .limited }
+        if needsAttention { return .attention }
         switch thread.activity {
         case .working: return .working
-        case .needsAttention: return .waiting
+        case .needsAttention: return .attention
         case .failed: return .failed
         case .idle: return .done
         }
@@ -489,13 +494,15 @@ func wholeMinuteRelativeTime(from date: Date) -> String {
 }
 
 /// Lab `StatusDot.css` states: blue working, grey waiting, green done, red failed, amber limited.
+/// `attention` is GPUI's yellow approval/question dot (`RowStatus::dot_color`, `--color-warning`).
 enum StatusDotTone {
-    case working, waiting, done, failed, limited, merged
+    case working, waiting, attention, done, failed, limited, merged
 
     func color(_ theme: ConnTheme, dark: Bool) -> Color {
         switch self {
         case .working: dark ? rgb(0x00BCFF) : rgb(0x0084D1) // sky-400 / sky-600
         case .waiting: theme.mutedForeground // --color-foreground-tertiary
+        case .attention: theme.warning // --color-warning
         case .done: dark ? rgb(0x00D492) : rgb(0x009966) // emerald-400 / emerald-600
         case .failed: dark ? rgb(0xFF6467) : rgb(0xC10007) // --color-danger-foreground
         case .limited: dark ? rgb(0xFFB900) : rgb(0xBB4D00) // --color-warning-foreground

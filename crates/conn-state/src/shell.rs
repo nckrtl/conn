@@ -1032,6 +1032,15 @@ impl ShellState {
         }
     }
 
+    /// Names the environment this unmerged shell came from, so a task delegated from another
+    /// environment's thread with the same id does not flag the thread here.
+    pub fn name_environment(&mut self, environment_id: &str) {
+        if self.environment_id.as_deref() != Some(environment_id) {
+            self.set_environment_id(environment_id);
+            self.refresh_derived();
+        }
+    }
+
     /// Names the environment this shell's own threads came from.
     pub(crate) fn set_environment_id(&mut self, environment_id: &str) {
         if self.environment_id.as_deref() != Some(environment_id) {

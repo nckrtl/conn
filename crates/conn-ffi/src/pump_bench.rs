@@ -206,6 +206,7 @@ fn run_burst(turns: usize, burst: usize, pace: Option<Duration>, shell_every: us
     let recorder = std::sync::Arc::new(Recorder::default());
     let listener: std::sync::Arc<dyn CoreListener> = recorder.clone();
     let (shell_tx, _shell_rx) = watch::channel(None);
+    let (roll_up_tx, _roll_up_rx) = watch::channel(None);
     let (status_tx, _status_rx) = watch::channel(FfiConnectionStatus::Connecting);
     let (limits_tx, _limits_rx) = watch::channel(FfiComposerLimits::default());
     rt.spawn(run_pump(
@@ -214,7 +215,7 @@ fn run_burst(turns: usize, burst: usize, pace: Option<Duration>, shell_every: us
         (ctrl_rx, ctrl_tx.clone()),
         listener,
         std::sync::Arc::default(),
-        (shell_tx, status_tx, limits_tx),
+        (shell_tx, roll_up_tx, status_tx, limits_tx),
         SessionIdentity {
             server_url: "http://127.0.0.1:9/".into(),
             orbit_server_id: None,
@@ -386,6 +387,7 @@ fn bare_pump(
         recorder.clone(),
         std::sync::Arc::default(),
         (
+            watch::channel(None).0,
             watch::channel(None).0,
             watch::channel(FfiConnectionStatus::Connecting).0,
             watch::channel(FfiComposerLimits::default()).0,
@@ -721,4 +723,81 @@ fn a_reply_shows_at_once_and_its_echo_leaves_exactly_one_row_before_or_after_the
     let _ = state.handle_control(settle("k3", false));
     state.flush_due_at(t0 + Duration::from_secs(6));
     assert_eq!(rows_for(&last(&state), "k3"), 0);
+}
+
+/// A synchronized shell holding `T` and a task, awaiting approval, delegated from `from`'s `T`.
+fn shared_id_pump(
+    rt: &tokio::runtime::Runtime,
+    dir: &std::path::Path,
+    from: &str,
+) -> (PumpState, Ctrl) {
+    let (mut state, _, ctrl) = bare_pump(rt, dir);
+    let mut task = thread_shell("task", 0);
+    task["delegatedFrom"] = json!({"environmentId": from, "threadId": "T", "title": "T"});
+    task["pendingRuntimeRequest"] =
+        json!({"id": "r", "kind": "command", "createdAt": "2026-11-13T09:00:00.000Z"});
+    let mut parent = thread_shell("T", 0);
+    parent["status"] = json!("idle");
+    state.handle_event(shell(json!({"kind": "snapshot", "snapshot": {
+        "schemaVersion": 1, "snapshotSequence": 1, "projects": [],
+        "threads": [parent, task], "archivedThreads": []
+    }})));
+    state.handle_event(shell(json!({"kind": "synchronized"})));
+    state.flush_due_at(Instant::now() + Duration::from_secs(1));
+    (state, ctrl)
+}
+
+fn activity_of(state: &PumpState, id: &str) -> Option<crate::types::FfiThreadActivity> {
+    let snapshot = state.shell_watch.borrow().clone()?;
+    snapshot
+        .threads
+        .iter()
+        .find(|t| t.id == id)
+        .map(|t| t.activity)
+}
+
+/// The inbox's roll-up reads a dropped environment's last shell no longer: an approval answered
+/// there meanwhile must not keep another machine's thread flagged.
+#[test]
+fn a_dropped_connection_clears_the_roll_up_shell_until_the_server_shell_returns() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _rt = rt.enter();
+    let dir = tempfile::tempdir().expect("dir");
+    let (mut state, _ctrl) = shared_id_pump(&rt, dir.path(), "b");
+    assert!(state.roll_up_watch.borrow().is_some(), "published");
+
+    state.handle_event(ClientEvent::Status(
+        conn_client::ConnectionStatus::Reconnecting { attempt: 1 },
+    ));
+    assert!(
+        state.roll_up_watch.borrow().is_none(),
+        "dropped: no roll-up"
+    );
+
+    state.handle_event(shell(json!({"kind": "synchronized"})));
+    state.flush_due_at(Instant::now() + Duration::from_secs(2));
+    assert!(state.roll_up_watch.borrow().is_some(), "current again");
+}
+
+/// A and B both hold `T`. A task on A delegated from B's `T` flags B's `T` through the inbox's
+/// cross-environment roll-up, never A's own `T`.
+#[test]
+fn a_named_core_does_not_flag_its_thread_for_a_task_another_environment_delegated() {
+    use crate::types::FfiThreadActivity::NeedsAttention;
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _rt = rt.enter();
+    let dir = tempfile::tempdir().expect("dir");
+    let (mut state, _ctrl) = shared_id_pump(&rt, dir.path(), "b");
+    // Unnamed, the shell matches the task to `T` by bare id.
+    assert_eq!(activity_of(&state, "T"), Some(NeedsAttention));
+    let _ = state.handle_control(PumpControl::NameEnvironment("a".into()));
+    state.flush_due_at(Instant::now() + Duration::from_secs(2));
+    assert_ne!(activity_of(&state, "T"), Some(NeedsAttention));
+
+    // A's own `T` still rolls up the task it delegated.
+    let dir = tempfile::tempdir().expect("dir");
+    let (mut state, _ctrl) = shared_id_pump(&rt, dir.path(), "a");
+    let _ = state.handle_control(PumpControl::NameEnvironment("a".into()));
+    state.flush_due_at(Instant::now() + Duration::from_secs(2));
+    assert_eq!(activity_of(&state, "T"), Some(NeedsAttention));
 }

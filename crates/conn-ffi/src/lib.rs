@@ -10,11 +10,13 @@ mod composer;
 mod core;
 mod details;
 mod feed;
+mod inbox;
 pub use feed::{
     FfiChangedFileRow, FfiCodeSpan, FfiConnToolIcon, FfiConnToolLabel, FfiFeedDetail, FfiFilePatch,
     FfiPatchLine, FfiReviewExcerpt, FfiSetupStage, FfiWorktreeSetup, WorktreeSetupFeed,
     changed_file_rows, conn_tool_label, highlight_code, parse_file_patches,
 };
+pub use inbox::{FfiThreadKey, inbox_attention};
 mod mcp_app;
 mod model_picker;
 pub use mcp_app::{FfiMcpToolInfo, ThreadMcpApp};

@@ -13,6 +13,8 @@ enum OrbitConnectState: Equatable {
 @MainActor
 final class InboxPublications {
     private var pending: [String: () -> Void] = [:]
+    /// Runs after each committed batch.
+    var onCommit: (() -> Void)?
 
     func submit(scope: String, publish: @escaping () -> Void) {
         let schedule = pending.isEmpty
@@ -23,7 +25,13 @@ final class InboxPublications {
             let batch = pending
             pending.removeAll(keepingCapacity: true)
             for commit in batch.values { commit() }
+            onCommit?()
         }
+    }
+
+    /// Commits a batch with nothing to publish, for what `onCommit` reads from outside the shells.
+    func invalidate() {
+        submit(scope: "\u{0}invalidate") {}
     }
 }
 
@@ -138,12 +146,29 @@ final class CoreStore {
     private var linkedOrder: [String] = []
     var inboxOwners: [CoreStore] { [self] + linkedOrder.compactMap { linked[$0] } }
 
+    /// Threads a child's request needs the user on once every environment is merged, so a task
+    /// on another machine flags the thread that delegated it. Read on the main store.
+    private(set) var rolledUpAttention: Set<FfiThreadKey> = []
+
+    func needsAttention(_ thread: FfiThreadSummary, owner: CoreStore) -> Bool {
+        thread.activity == .needsAttention
+            || rolledUpAttention.contains(FfiThreadKey(environmentId: owner.environmentId ?? "", threadId: thread.id))
+    }
+
+    /// Runs after each inbox commit, and after a machine is linked, forgotten, connects or drops.
+    private func refreshRolledUpAttention() {
+        let listed = inboxOwners.filter { $0.shell != nil }
+        let keys = Set(inboxAttention(sessions: listed.compactMap(\.session)))
+        if keys != rolledUpAttention { rolledUpAttention = keys }
+    }
+
     private func registerLinked(_ child: CoreStore) {
         linked[child.scope] = child
         if !linkedOrder.contains(child.scope) {
             linkedOrder.append(child.scope)
             UserDefaults.standard.set(linkedOrder, forKey: "linkedSessions")
         }
+        publications.invalidate()
     }
 
     /// The connection status the workspace shows inline. Once this scope has connected, a
@@ -211,6 +236,9 @@ final class CoreStore {
     init(scope: String = "", deferOrbit: Bool = false, publications: InboxPublications = InboxPublications()) {
         self.publications = publications
         self.scope = scope
+        if scope.isEmpty {
+            publications.onCommit = { [weak self] in self?.refreshRolledUpAttention() }
+        }
         let arguments = ProcessInfo.processInfo.arguments
         if scope.isEmpty && arguments.contains("--reset-session") {
             for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("workspace.route.") {
@@ -755,6 +783,7 @@ final class CoreStore {
         linked.removeValue(forKey: id)?.disconnect()
         linkedOrder.removeAll { $0 == id }
         UserDefaults.standard.set(linkedOrder, forKey: "linkedSessions")
+        publications.invalidate()
     }
 
     private func clearLinkedSessions() {
@@ -769,6 +798,7 @@ final class CoreStore {
         linked.removeAll()
         linkedOrder.removeAll()
         UserDefaults.standard.removeObject(forKey: "linkedSessions")
+        publications.invalidate()
     }
 
     func reconnect() {
@@ -942,6 +972,7 @@ final class CoreStore {
             break
         }
         updateWorkspaceVisibility()
+        publications.invalidate()
         if case .live = newState.phase, let core {
             uploads.use(core, connection: newState.connectionId)
         } else {

@@ -18,12 +18,16 @@ use super::{
 const FULL_ACCESS_REQUIRED: &str = "Changing projects or environment settings needs a live full-access/default calling thread or a full-access client.";
 
 fn service<'a>(cx: &'a Cx<'_>) -> Result<&'a ScheduledTasks, ToolError> {
-    cx.config().scheduled_tasks.as_ref().ok_or_else(|| {
-        fail(
-            "capability_denied",
-            "Scheduled tasks are not available here.",
-        )
-    })
+    cx.config()
+        .features
+        .scheduled_tasks
+        .as_ref()
+        .ok_or_else(|| {
+            fail(
+                "capability_denied",
+                "Scheduled tasks are not available here.",
+            )
+        })
 }
 
 /// `scheduledTaskSummary`. No task here has a webhook, so no URL or signature field.

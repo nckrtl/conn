@@ -554,8 +554,8 @@ pub(crate) fn github_urls_value(value: &Value) -> HostResult<CloneUrls> {
 fn repo_path(owner: &str, name: &str) -> String {
     format!(
         "repos/{}/{}",
-        github::encode_uri_component(owner),
-        github::encode_uri_component(name)
+        conn_support::url::encode_uri_component(owner),
+        conn_support::url::encode_uri_component(name)
     )
 }
 
@@ -628,7 +628,10 @@ async fn github_create(
     let is_viewer =
         matches!((&viewer, &owner), (Some(v), Some(o)) if o.to_lowercase() == v.to_lowercase());
     let path = match &owner {
-        Some(owner) if !is_viewer => format!("orgs/{}/repos", github::encode_uri_component(owner)),
+        Some(owner) if !is_viewer => format!(
+            "orgs/{}/repos",
+            conn_support::url::encode_uri_component(owner)
+        ),
         _ => "user/repos".into(),
     };
     let body = format!(

@@ -11,10 +11,13 @@ pub mod discovery;
 pub mod hosts;
 pub mod http;
 pub mod pull_requests;
-pub mod registry;
-pub mod remote;
 pub mod repository;
 pub mod secret;
 pub mod settings;
 
 pub use secret::Secret;
+
+// The registry and the remote text live below the engine, which reads link keys through
+// them. This crate's answers carry the registry's types, so it shows them as its own.
+pub use conn_source_control_core::registry;
+pub(crate) use conn_source_control_core::remote;

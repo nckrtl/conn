@@ -40,7 +40,7 @@ async fn upgrade(
     if !principal.has_scope("orchestration:read") {
         return (StatusCode::FORBIDDEN, "Forbidden").into_response();
     }
-    let Some(preview) = state.deps.preview.clone() else {
+    let Some(preview) = state.deps.features.preview.clone() else {
         return StatusCode::NOT_FOUND.into_response();
     };
     let (thread, tab) = (

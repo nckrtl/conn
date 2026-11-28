@@ -10,7 +10,7 @@ fn fail(error: TestLoginError) -> Failure {
 }
 
 pub(super) fn register(table: &mut MethodTable, deps: &Deps) {
-    let Some(store) = deps.test_logins.clone() else {
+    let Some(store) = deps.features.test_logins.clone() else {
         return;
     };
     let list = store.clone();
@@ -75,7 +75,10 @@ mod tests {
         register(
             &mut table,
             &Deps {
-                test_logins: Some(conn_features::test_logins::TestLogins::new(&dir)),
+                features: conn_mcp::Features {
+                    test_logins: Some(conn_features::test_logins::TestLogins::new(&dir)),
+                    ..Default::default()
+                },
                 ..Deps::default()
             },
         );

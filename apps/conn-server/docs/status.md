@@ -16,6 +16,24 @@ from the tool call and its permission request. Handoffs budget serialized histor
 
 PR checks now include GitHub’s start and completion timestamps when available. Clients can show elapsed time for completed runs.
 
+**Server boundaries (2026-11-27):** five steps on the server's own structure. No method, flag or
+answer changed: `/health` and the descriptor's capabilities equal those of the commit before.
+
+- A `capabilities` check (`crates/conn-server/tools/capabilities-check.mjs`) holds each
+  advertised capability to what is registered. Every flag of the contract has one row in
+  `capabilities.json`: its methods, its engine commands, a behaviour, or "undecided". A
+  registered flag that is off needs a reason, and an advertised one needs something registered.
+- `conn_mcp::Features` holds the seven feature services. `feature_services` in `serve.rs` builds
+  it once; the method `Deps`, the engine host and `/mcp` hold the same struct. Before, each of
+  the three named every service in a field of its own.
+- The engine reads the host registry, the remote rules and the pull request watch's wake from
+  the new `conn-source-control-core` (text in, text out), so it depends on no feature crate:
+  `cargo tree -p conn-engine` names `conn-contract`, `conn-provider`, `conn-provider-support`,
+  `conn-source-control-core`, `conn-support` and `conn-vcs`.
+- `stop_in_order` in `serve.rs` is the shutdown order, each part with its reason.
+- The 2 s reload poll runs on its own thread, `conn-reload`, not on the blocking pool. An idle
+  server holds 3 threads 20 s after its start; before, 6.
+
 **Effect outbox (2026-11-23):** effects commit with their command in `effect_outbox` and one
 worker runs them, as T3's `EffectOutbox.ts` and `EffectWorker.ts`. Before, they started after
 the commit returned, so a closed socket could lose a committed turn start (the run stayed
@@ -267,6 +285,15 @@ because a silent dead socket would otherwise hold its session forever. Proof: se
 - **Proof:** T3's settlement and compaction cases as unit tests; the sweep, its loop and the
   compaction on a real engine with a moved clock, including user activity between the decision
   and its command; the host's turn end starting the compaction (`host.rs`).
+- **The opt-out is advertised (2026-11-27):** `threadAutoSettleOptOut` is on, so web and mobile
+  show "Auto-settle behavior". Proof:
+  `an_opted_out_thread_stays_until_it_follows_the_settings_again` (`settlement/tests.rs`) on a
+  real engine with a moved clock: a thread set to never settle stays past the threshold, a
+  delegate set so stays behind its settled parent, and each settles at the next sweep once it
+  follows the settings again. These are the cases of T3's
+  `ProjectionSettlement.test.ts`, `ThreadSettlementService.test.ts` and
+  `Orchestrator.control-reads.test.ts`. **Not proven:** a run side by side against the T3
+  server. The day count starts at 1, so only the delegate case can run live.
 ## Provider switch handoff (2026-11-22)
 
 **Forks on another provider (2026-11-23):** as T3's `decideForkExecution`, a fork's first
@@ -1019,7 +1046,7 @@ the thread branch's PR. Before, the engine refused `thread.pull-request-link.syn
   pending requests stop at 1,024.
 - **Proof:** `pr-link-sync-diff` (new check, group 4) runs T3's own `PullRequestSyncReactor`,
   `ThreadPullRequestService` and `BackgroundPolicy` on stub services and Effect's test clock,
-  and ours through `conn-engine/examples/pr_link_sync_cases.rs` and
+  and ours through `conn-source-control/examples/pr_link_sync_cases.rs` and
   `conn-server/examples/background_gate.rs`, minute by minute on the same host answers. Each
   side applies its own commands. 22 cases, 157 sweeps: reads, commands and final threads
   equal (new link, quiet cadence, merged final plus request, not found, backoff, unknown
@@ -2517,7 +2544,7 @@ drops `ANTHROPIC_*`, `CLAUDE_*` and `CLAUDECODE`.
 The three foundations the pull request steps rest on are built and proven; on them, the
 engine's pull request links and five `/mcp` tools. No RPC method was added.
 
-- **The host definition registry** (`conn-source-control/src/registry/`): remote recognition in
+- **The host definition registry** (`conn-source-control-core/src/registry/`): remote recognition in
   T3's recognition order, change request URLs in claim order and per host, canonical repository
   keys, the selector, the project predicates, GitCafe's URL spelling, the thread link keys.
   `registry-diff.mjs` (new check) runs T3's own registry and ours on every literal of T3's

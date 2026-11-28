@@ -245,13 +245,7 @@ pub(super) fn register(table: &mut MethodTable, deps: &Deps) {
     table.unary(
         "orchestration.dispatchCommand",
         move |_, mut command: Command| {
-            // T3's `withCreationProvenance`: only the server stamps a link's origin or folds in
-            // a first message, so a client cannot.
-            if let Command::ThreadCreate(create) = &mut command {
-                create.link_origin = None;
-                create.delegated_from = None;
-                create.initial_message = None;
-            }
+            with_creation_provenance(&mut command);
             let e = e.clone();
             async move { e.dispatch(command).await.map_err(failure) }
         },
@@ -296,6 +290,30 @@ pub(super) fn register(table: &mut MethodTable, deps: &Deps) {
     );
 }
 
+/// T3's `withCreationProvenance` (`ws.ts`): a client's command is the user's. Only the server
+/// stamps a link's origin, folds in a first message, or names an agent that sent a message,
+/// so a client cannot. The engine then refuses a user's notice or delegated result.
+fn with_creation_provenance(command: &mut Command) {
+    use conn_contract::OrchestrationV2Actor::User;
+    match command {
+        Command::ThreadCreate(create) => {
+            create.link_origin = None;
+            create.delegated_from = None;
+            create.initial_message = None;
+            create.created_by = User;
+        }
+        Command::MessageDispatch(dispatch) => {
+            dispatch.created_by = User;
+            dispatch.sender_thread_id = None;
+            dispatch.linked_sender = None;
+        }
+        Command::ThreadFork(fork) => fork.created_by = User,
+        Command::ThreadMergeBack(merge) => merge.created_by = User,
+        Command::DelegatedTaskRequest(request) => request.created_by = User,
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,9 +322,10 @@ mod tests {
     use serde_json::json;
 
     /// T3's `withCreationProvenance`: only the server folds a first message into a create, so a
-    /// client's `initialMessage` is dropped and cannot skip admission.
+    /// client's `initialMessage` is dropped and cannot skip admission; a client's message is
+    /// the user's.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_client_create_drops_its_first_message() {
+    async fn a_client_command_carries_only_the_users_provenance() {
         let dir =
             std::env::temp_dir().join(format!("conn-server-orch-init-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -344,6 +363,54 @@ mod tests {
         assert_eq!(p["messages"], json!([]), "{p}");
         assert_eq!(p["runs"], json!([]), "{p}");
         assert_eq!(fake.sessions.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+        // A client's message is the user's: it cannot name an agent sender, a linked thread, a
+        // notice, or a delegated result.
+        let send = |id: &str, extra: Value| {
+            let mut command = json!({
+                "type": "message.dispatch", "commandId": format!("c-{id}"), "threadId": "t1",
+                "messageId": id, "text": id, "attachments": [],
+                "dispatchMode": {"type": "queue_after_active"},
+                "createdBy": "agent", "creationSource": "server",
+            });
+            for (key, value) in extra.as_object().unwrap() {
+                command[key] = value.clone();
+            }
+            command
+        };
+        let forged = send(
+            "m-forged",
+            json!({"senderThreadId": "t-other", "linkedSender":
+                {"environmentId": "env-x", "threadId": "t-x", "title": "Agent"}}),
+        );
+        dispatch(CallContext::default(), forged).await.unwrap();
+        let p = to_json(&engine.get_thread_projection("t1".into()).await.unwrap());
+        let message = p["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == "m-forged")
+            .unwrap();
+        assert_eq!(message["createdBy"], "user", "{message}");
+        assert!(message.get("senderThreadId").is_none(), "{message}");
+        assert!(message.get("linkedSender").is_none(), "{message}");
+        for extra in [
+            json!({"delegatedCompletion":
+                {"parentRunId": "run:t1:1", "generation": 1, "taskIds": ["node:x"]}}),
+            json!({"notification":
+                {"source": {"kind": "system"}, "outcome": "updated", "summary": "s"}}),
+        ] {
+            let refused = dispatch(CallContext::default(), send("m-auto", extra.clone())).await;
+            assert!(refused.is_err(), "{extra}");
+        }
+        let p = to_json(&engine.get_thread_projection("t1".into()).await.unwrap());
+        assert!(
+            !p["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["id"] == "m-auto")
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

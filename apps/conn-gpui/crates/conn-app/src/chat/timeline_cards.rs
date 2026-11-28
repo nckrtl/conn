@@ -102,7 +102,8 @@ fn pull_request_presentation(
 
 impl ChatView {
     /// A message another agent sent: a card headed `Agent`, its text two lines at rest and in full
-    /// when opened. The rest of the card is the button.
+    /// when opened. `Open thread` in the header opens the sender; the rest of the card is the
+    /// button that opens the text.
     pub(super) fn render_agent_message_card(
         &self,
         id: &str,
@@ -110,15 +111,14 @@ impl ChatView {
         sender: Option<&conn_state::AgentMessageSender>,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        let sender = match sender {
-            Some(conn_state::AgentMessageSender::LinkedTitle(title)) => Some(title.as_str()),
-            Some(conn_state::AgentMessageSender::LocalThread(id)) => {
-                self.local_sender_titles.get(id).map(String::as_str)
-            }
-            None => None,
-        };
-        let title_text = sender
-            .map(str::trim)
+        let view = sender
+            .and_then(|sender| self.sender_views.get(sender))
+            .cloned()
+            .unwrap_or_default();
+        let open = sender
+            .filter(|_| view.can_open)
+            .map(|sender| ChatEvent::OpenAgentSender(sender.clone()));
+        let title_text = Some(view.title.trim())
             .filter(|title| !title.is_empty() && *title != "Agent")
             .unwrap_or("Message");
         let key = format!("agent-msg-{id}");
@@ -132,15 +132,40 @@ impl ChatView {
         let hover = card_body_hover(colors, &self.tokens);
         let group = SharedString::from(format!("agent-msg-group-{id}"));
 
-        let header = card_header(false)
+        let header = card_header(open.is_some())
             .child(icons::icon(icons::ROBOT, 15.0, muted))
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .text_size(px(CARD_TEXT_PX))
                     .line_height(px(CARD_META_LINE_PX))
                     .text_color(muted)
                     .child("Agent"),
-            );
+            )
+            .children(open.map(|event| {
+                let hover_bg = hsla_alpha(self.tokens.foreground, 0.06);
+                let button = div()
+                    .id(SharedString::from(format!("agent-msg-open-{id}")))
+                    .a11y_button(format!("chat.agent-message.{id}.open"), "Open thread")
+                    .flex_shrink_0()
+                    .px(px(6.0))
+                    .rounded(px(6.0))
+                    .text_size(px(CARD_TEXT_PX))
+                    .line_height(px(CARD_META_LINE_PX))
+                    .text_color(muted)
+                    .tab_index(0)
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover_bg).text_color(fg))
+                    // A tap here opens the sender, not the card. Enter reaches only the focused
+                    // button, so it never toggles the card.
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_click(cx.listener(move |_, _, _, cx| cx.emit(event.clone())))
+                    .child("Open thread");
+                #[cfg(test)]
+                let button = gpui_kit::TestSupportExt::test_support(button);
+                button
+            }));
         let title = div()
             .relative()
             .pr(px(CARD_CHEVRON_ROOM_PX))

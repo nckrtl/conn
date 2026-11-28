@@ -8,6 +8,7 @@ mod approvals;
 mod coalesce;
 mod composer;
 mod core;
+mod details;
 mod feed;
 pub use feed::{
     FfiChangedFileRow, FfiCodeSpan, FfiConnToolIcon, FfiConnToolLabel, FfiFeedDetail, FfiFilePatch,
@@ -47,6 +48,10 @@ pub use crate::composer::{
     FfiImageInfo, FfiUploadListener, FfiUploadStatus, composer_restore_draft,
 };
 pub use crate::core::{ConnCore, CoreListener, FfiPullRequestOperation};
+pub use crate::details::{
+    FfiThreadAgentState, FfiThreadDetails, FfiThreadDetailsAgent, FfiThreadPullRequest,
+    FfiThreadPullRequestState, FfiVcsSummary, thread_link,
+};
 pub use crate::model_picker::{
     FfiModelControl, FfiModelPicker, FfiModelPickerRow, FfiModelPickerSection, FfiModelSave,
 };

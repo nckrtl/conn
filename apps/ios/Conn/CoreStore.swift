@@ -672,6 +672,24 @@ final class CoreStore {
         }
     }
 
+    /// What the thread details sheet lists (the core's `thread_details`).
+    func threadDetails(threadId: String) async -> FfiThreadDetails? {
+        guard let core else { return nil }
+        return await core.threadDetails(threadId: threadId)
+    }
+
+    /// The Git facts of a folder for the details sheet (`vcs.refreshStatus`, local only).
+    func vcsStatus(cwd: String) async throws -> FfiVcsSummary? {
+        guard status == .connected, let core else { return nil }
+        return try await core.vcsStatus(cwd: cwd)
+    }
+
+    /// "Initialize Git" (`vcs.init`), as desktop's details card does.
+    func initGit(cwd: String) async throws {
+        guard status == .connected, let core else { throw URLError(.notConnectedToInternet) }
+        try await core.initGit(cwd: cwd)
+    }
+
     func renameThread(threadId: String, title: String) async {
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard status == .connected, !trimmed.isEmpty, let core else { return }

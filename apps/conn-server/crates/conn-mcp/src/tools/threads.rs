@@ -10,7 +10,7 @@ use super::{
     Args, Cx, ToolError, ToolResult, bool_arg, fail, interaction_rank, internal, projects,
     runtime_rank, str_arg, u64_arg,
 };
-use crate::{time::now_iso, view};
+use crate::{Caller, ClientCaller, time::now_iso, view};
 
 const DEFAULT_LIST_LIMIT: usize = 10;
 const DEFAULT_READ_LIMIT: usize = 10;
@@ -847,6 +847,17 @@ pub(super) async fn send(cx: &Cx<'_>, args: &Args) -> ToolResult {
     });
     if let Some(sender) = sender {
         command["senderThreadId"] = json!(sender);
+    } else if let Caller::Client(ClientCaller {
+        sender_thread: Some(sender),
+        ..
+    }) = cx.caller
+    {
+        // A linked environment's agent has no thread here; the link names it.
+        command["linkedSender"] = json!({
+            "environmentId": sender.environment_id,
+            "threadId": sender.thread_id,
+            "title": sender.title,
+        });
     }
     if fresh {
         command["freshContext"] = json!(true);

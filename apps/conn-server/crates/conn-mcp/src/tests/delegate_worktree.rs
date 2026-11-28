@@ -359,6 +359,7 @@ async fn a_fenced_parents_worktree_child_runs_no_setup_script() {
         label: "Peer".into(),
         linked: true,
         narrowed: None,
+        sender_thread: None,
         scopes: None,
     });
     let mut c = Client::open(&f.service, link).await;

@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use conn_engine::BoxFuture;
 
 use super::*;
-use crate::{LinkAsk, LinkInfo, PeerCall, PeerFailure, Peers};
+use crate::{LinkAsk, LinkInfo, PeerCall, PeerFailure, PeerSender, Peers};
 
 #[derive(Default)]
 struct StandIn {
@@ -116,6 +116,7 @@ fn linked(access: &'static str) -> Caller {
         label: "T3 Code · other".into(),
         linked: true,
         narrowed: None,
+        sender_thread: None,
         scopes: None,
     })
 }
@@ -293,6 +294,49 @@ async fn a_peer_links_work_stays_within_its_link() {
         json!({"threadId": started["threadId"], "message": "x", "mode": "queue"}),
     )
     .await;
+    // A linked agent's send names its thread there (`T3-Sender-Thread`), as `linkedSender`.
+    let sender = PeerSender {
+        environment_id: "env-peer".into(),
+        thread_id: "thread-there".into(),
+        title: "Planner".into(),
+    };
+    let Caller::Client(mut named) = linked("auto") else {
+        unreachable!()
+    };
+    named.sender_thread = Some(sender);
+    let mut named = Client::open(&f.service, Caller::Client(named)).await;
+    let sent = named
+        .ok(
+            "conn_thread_send",
+            json!({"threadId": started["threadId"], "message": "from there", "mode": "steer"}),
+        )
+        .await;
+    let projection = f
+        .service
+        .config
+        .engine
+        .get_thread_projection(conn_contract::ThreadId::from(
+            started["threadId"].as_str().unwrap(),
+        ))
+        .await
+        .unwrap();
+    let message = projection["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["text"] == "from there")
+        .unwrap_or_else(|| panic!("{sent} {:#}", projection["messages"]));
+    let linked_sender =
+        json!({"environmentId": "env-peer", "threadId": "thread-there", "title": "Planner"});
+    assert_eq!(message["linkedSender"], linked_sender, "{sent}");
+    assert!(message.get("senderThreadId").is_none());
+    let item = projection["turnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["messageId"] == message["id"])
+        .unwrap_or_else(|| panic!("{sent} {:#}", projection["turnItems"]));
+    assert_eq!(item["linkedSender"], linked_sender);
     let (code, message) = link.failure("conn_environment_links", json!({})).await;
     assert_eq!(code, "capability_denied");
     assert!(

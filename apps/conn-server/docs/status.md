@@ -1516,6 +1516,7 @@ builder with a test that fails without the fix.
 - **Release `conn-server-v0.5.5`**: agents on linked environments drive the GPUI integrated browser and panels (#423), and linked-environment thread details list scheduled tasks (#426); the version bump is its own PR.
 - **Release `conn-server-v0.5.6`**: stricter provider approval checks and turn recovery after wakes and prompt-delivery failures (#438); the version bump is its own PR.
 - **Release `conn-server-v0.5.7`**: a parent wakes when its delegated task asks a question, and question wakes follow their question and task (#476, #488); delegated results and linked sends keep their sender (#482, #484); a delegated wake no longer jumps an older queued prompt (#490); the command reader refuses handler shapes it can't read (#489); threads open from a device database and catch up from changed rows (#479); server refactor (#477). The version bump is its own PR.
+- **Release `conn-server-v0.5.8`**: thread catch-up and thread-list wakes cost less with the same results (#498); Conn Server CI is native-only, generated files are frozen, and the server ships its bundled model list (#497), with Fable 5.2 keeping Fast Mode (#505); the Orbit register script follows the native layout (#495). The version bump is its own PR.
 
 ## Partly followed to Conn `444f032be7` (the 2026-11-18 sync)
 

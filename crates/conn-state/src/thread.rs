@@ -100,6 +100,12 @@ pub enum ItemStatus {
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum AgentMessageSender {
     LocalThread(String),
+    Linked {
+        environment_id: String,
+        thread_id: String,
+        title: String,
+    },
+    /// A linked sender in a message cache row saved before the cache kept its thread.
     LinkedTitle(String),
 }
 
@@ -2357,7 +2363,11 @@ fn map_user_message(item: UserMessageItem) -> Option<TimelineEntry> {
         text: item.text,
         created_by_agent: is_agent_origin(item.created_by, item.creation_source),
         sender: match item.linked_sender {
-            Some(sender) => Some(AgentMessageSender::LinkedTitle(sender.title)),
+            Some(sender) => Some(AgentMessageSender::Linked {
+                environment_id: sender.environment_id,
+                thread_id: sender.thread_id,
+                title: sender.title,
+            }),
             None => item.sender_thread_id.map(AgentMessageSender::LocalThread),
         },
         created_at: Some(item.started_at.unwrap_or(item.updated_at)),

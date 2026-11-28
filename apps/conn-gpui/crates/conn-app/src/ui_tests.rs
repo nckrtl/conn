@@ -456,6 +456,14 @@ fn agent_cards_use_local_and_linked_sender_titles(cx: &mut TestAppContext) {
             Some(conn_state::AgentMessageSender::LinkedTitle("Agent".into())),
             "Message",
         ),
+        (
+            Some(conn_state::AgentMessageSender::Linked {
+                environment_id: "env-linked".into(),
+                thread_id: "thread-linked".into(),
+                title: "Linked thread".into(),
+            }),
+            "Linked thread",
+        ),
         (None, "Message"),
     ] {
         let mut thread = kitchen_sink_thread();
@@ -485,6 +493,44 @@ fn agent_cards_use_local_and_linked_sender_titles(cx: &mut TestAppContext) {
         })
         .expect("agent message card");
     }
+}
+
+/// `Open thread` on an agent card opens the sender's thread without opening the card. A sender
+/// the shell does not know has no action.
+#[gpui_kit::test]
+fn agent_card_opens_the_sender_thread(cx: &mut TestAppContext) {
+    let (window, app) = mount_app(cx);
+    let mount = |cx: &mut TestAppContext, sender: &str| {
+        let mut thread = kitchen_sink_thread();
+        thread.entries.truncate(1);
+        let TimelineEntry::User {
+            created_by_agent,
+            sender: source,
+            ..
+        } = &mut thread.entries[0]
+        else {
+            panic!("user fixture")
+        };
+        *created_by_agent = true;
+        *source = Some(conn_state::AgentMessageSender::LocalThread(sender.into()));
+        cx.update(|cx| {
+            app.update(cx, |app, cx| {
+                app.set_shell(kitchen_sink_shell(), cx);
+                app.set_thread_for_test("thread-selected".into(), thread, cx);
+            })
+        });
+        let _ = cx.update_window(window, |_, window, cx| window.render_frame(cx));
+    };
+
+    mount(cx, "thread-unknown");
+    assert!(!labelled(cx, window, "Open thread"));
+
+    mount(cx, "thread-working-bg");
+    click_row(cx, window, "Open thread", MouseButton::Left);
+    assert_eq!(
+        cx.read(|cx| app.read(cx).selected_thread_for_test().map(str::to_owned)),
+        Some("thread-working-bg".to_owned())
+    );
 }
 
 #[gpui_kit::test]

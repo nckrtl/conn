@@ -550,7 +550,7 @@ directory, or the preload is not enough to preserve the browser toolbar. The
 November 7 sync removed the browser mount and the guest attachment in
 `Manager.prepareWebview`, while still typechecking. Preserve both the
 response-header and dictation attachments, in-page navigation notification,
-and guest cleanup when merging upstream preview-manager changes.
+and guest cleanup when porting selected upstream preview-manager fixes.
 
 Run `PreviewView.browser.test.tsx` as well as the toolbar relay and store tests.
 The browser test sends a page payload through the relay, checks that the

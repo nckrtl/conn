@@ -1677,8 +1677,8 @@ quarters of that change, and those parts cannot be generated. That upkeep is the
 this server, and it is the reason for the stop.
 
 The Conn Server still wins on two points: no wake delay, and about 250 MiB less while a thread
-is active. If those start to matter, or if Conn needs server features that collide with the
-nightly upstream merge, this work is the starting point.
+is active. If those start to matter, or if Conn needs server features that the T3 server
+does not have, this work is the starting point.
 
 Not measured: a T3 server's start time with many stored threads; the `claude` process and its
 MCP helpers inside a container (on a Mac: 145 MiB with minimal settings, 294 MiB with a user's

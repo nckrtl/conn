@@ -362,8 +362,8 @@ is the cost that grows. It also always answers over SSE. Ours is about 300 lines
   delegated task and its wake; every result checked against the tool's TS `outputSchema`; the
   catalog equal to `fixtures/ts-tools-list.json`; bounded credentials and sessions.
 - `node crates/conn-mcp/tools/gen-tools.mjs --check`: the served definitions
-  still match `apps/server`. The nightly upstream merge runs it; on failure, rerun without
-  `--check`, read the diff, and fix the handler if a schema changed.
+  still match `apps/server`. On failure, rerun without `--check`, read the diff, and fix the
+  handler if a schema changed.
 - `node crates/conn-mcp/tools/parity.mjs [--model] target/debug/examples/replay_server`:
   both servers on throwaway state (the T3 server gets a temp `T3CODE_HOME` and a free port),
   same inputs, outcomes and result shapes compared. By default it calls no model. Calling-thread proofs use the existing Claude CLI stand-in on T3 and the fake provider here; both use temporary homes. `--model` runs them too, with one Haiku turn on the T3 server.

@@ -373,6 +373,7 @@ enum AdaptiveColor {
     case emerald600400
     case emerald700300
     case violet600400
+    case rose600400
 
     func color(_ scheme: ColorScheme) -> Color {
         let (light, dark): (UInt32, UInt32) = switch self {
@@ -380,6 +381,7 @@ enum AdaptiveColor {
         case .emerald600400: (0x009966, 0x00D492)
         case .emerald700300: (0x007A55, 0x5EE9B5)
         case .violet600400: (0x7F22FE, 0xA684FF)
+        case .rose600400: (0xEC003F, 0xFF637E)
         }
         return Color(rgbHex: scheme == .dark ? dark : light)
     }

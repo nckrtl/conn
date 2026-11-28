@@ -1,6 +1,7 @@
 import DesignKit
 import SwiftUI
 import ImageIO
+import os
 import UIKit
 import UniformTypeIdentifiers
 
@@ -185,7 +186,8 @@ struct ConnComposerPill<Trailing: View>: View {
             }
             // Keyboard up the sheet is wider than the pill, so the controls move out with it.
             .padding(.horizontal, keyboardUp ? ComposerSheet.controlsInset : 4)
-            .padding(.vertical, 2)
+            .padding(.top, keyboardUp ? 2 + ComposerSheet.contentDrop : 2)
+            .padding(.bottom, keyboardUp ? 2 - ComposerSheet.contentDrop : 2)
             .foregroundStyle(theme.foreground)
             // The pill and the sheet are one Liquid Glass surface in two shapes, applied to the
             // content itself so the text and controls draw above the glass (as a separate background
@@ -194,6 +196,7 @@ struct ConnComposerPill<Trailing: View>: View {
             // before the glass; the negative padding after it keeps the layout where it was.
             .padding(.horizontal, keyboardUp ? ComposerSheet.screenInset : 0)
             .padding(.bottom, keyboardUp ? ComposerSheet.bottomBleed : 0)
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { ComposerHitchLog.width($0) }
             .glassEffect(.regular, in: shape)
             .overlay(alignment: .top) { ComposerSheetEdge(shape: shape, color: theme.border, visible: keyboardUp) }
             // Desktop: the composer card's border turns primary at 45% while a queued message is open.
@@ -210,6 +213,7 @@ struct ConnComposerPill<Trailing: View>: View {
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { note in
             setKeyboardUp(false, note)
         }
+        .onChange(of: inputFocused) { _, focused in if focused { ComposerHitchLog.focus() } }
         .onChange(of: draft.text) { dictation.error = nil }
         .onChange(of: draft.focusRequest) {
             selection = TextSelection(insertionPoint: draft.text.endIndex)
@@ -225,6 +229,7 @@ struct ConnComposerPill<Trailing: View>: View {
 
     /// The morph runs on the keyboard's own duration and curve, so it moves with the keyboard.
     private func setKeyboardUp(_ up: Bool, _ note: Notification) {
+        ComposerHitchLog.keyboard(note, up: up)
         guard up != keyboardUp else { return }
         withAnimation(KeyboardMotion.animation(note)) { keyboardUp = up }
     }
@@ -494,9 +499,9 @@ enum ComposerInputMetrics {
 }
 
 /// The keyboard-up sheet (lab `[data-keyboard="true"] .m-composer`). The box keeps its place: its
-/// bottom is `bottomGutter` above the keyboard and its own 2 pt padding puts the controls 4 pt
-/// clear. Only the surface grows: to the screen edges, and `keyboardCover` past the keyboard's top
-/// edge, which the keyboard covers (the lab's 32 pt bottom padding, 28 of it hidden).
+/// bottom is `bottomGutter` above the keyboard, and the controls sit 3 pt below its top and 3 pt
+/// clear of the keyboard. Only the surface grows: to the screen edges, and `keyboardCover` past
+/// the keyboard's top edge, which the keyboard covers (the lab's 31 pt bottom padding, 28 of it hidden).
 enum ComposerSheet {
     /// `ThreadComposer` and the new-thread screen inset the composer by this much on each side.
     static let screenInset: CGFloat = 12
@@ -505,6 +510,9 @@ enum ComposerSheet {
     static let topRadius: CGFloat = 28
     /// The sheet's content inset, against the pill's 4: its controls sit 6 pt further out.
     static let controlsInset: CGFloat = -2
+    /// What shows of the sheet runs `bottomGutter` past the box, down to the keyboard, so the
+    /// content moves down by half of it to sit in the middle (lab: 3 pt above and below).
+    static var contentDrop: CGFloat { bottomGutter / 2 }
     static let keyboardCover: CGFloat = 28
     static var bottomBleed: CGFloat { bottomGutter + keyboardCover }
 }
@@ -823,5 +831,83 @@ enum ComposerSelection {
         guard let selection, case let .selection(range) = selection.indices,
               range.lowerBound >= text.startIndex, range.upperBound <= text.endIndex else { return nil }
         return text.distance(from: text.startIndex, to: range.lowerBound)..<text.distance(from: text.startIndex, to: range.upperBound)
+    }
+}
+
+// MARK: - Temporary hitch log (build 125)
+
+/// Temporary (build 125): main-thread frame gaps from the moment the field takes focus (or the
+/// keyboard starts to hide) until 400 ms after the last keyboard notification, to find what stalls
+/// the width morph on the device. The width is SwiftUI's target, logged when layout applies it;
+/// SwiftUI interpolates the animation at render time, so per-frame widths are not visible here.
+/// Read with `log collect` (subsystem com.nckrtl.conn.ios, category composer-hitch).
+/// Remove this block, its three `ComposerHitchLog` calls and `import os` in this file together.
+@MainActor
+final class ComposerHitchLog: NSObject {
+    private static let shared = ComposerHitchLog()
+    private static let log = Logger(subsystem: "com.nckrtl.conn.ios", category: "composer-hitch")
+    private static let window: CFTimeInterval = 0.4
+
+    private var link: CADisplayLink?
+    private var kind = ""
+    private var start: CFTimeInterval = 0
+    private var end: CFTimeInterval = 0
+    private var last: CFTimeInterval = 0
+    private var gaps: [Int] = []
+    private var events: [String] = []
+    private var widths: [String] = []
+
+    static func focus() { shared.begin("focus") }
+
+    static func keyboard(_ note: Notification, up: Bool) {
+        let duration = note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? -1
+        let height = (note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect)?.height ?? -1
+        if shared.link == nil, !up { shared.begin("hide") }
+        shared.event("kb \(up ? "up" : "down") h=\(Int(height)) dur=\(String(format: "%.3f", duration))")
+    }
+
+    static func width(_ width: CGFloat) {
+        guard shared.link != nil else { return }
+        shared.widths.append(String(format: "%.1f@%d", width, shared.ms(CACurrentMediaTime())))
+    }
+
+    private func begin(_ kind: String) {
+        guard link == nil else { return }
+        self.kind = kind
+        start = CACurrentMediaTime()
+        end = start + Self.window
+        last = start
+        gaps = []
+        events = []
+        widths = []
+        let link = CADisplayLink(target: self, selector: #selector(tick))
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    private func event(_ text: String) {
+        guard link != nil else { return }
+        let now = CACurrentMediaTime()
+        end = max(end, now + Self.window)
+        events.append("\(text)@\(ms(now))")
+    }
+
+    private func ms(_ time: CFTimeInterval) -> Int { Int(((time - start) * 1000).rounded()) }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        let now = CACurrentMediaTime()
+        gaps.append(Int(((now - last) * 1000).rounded()))
+        last = now
+        guard now >= end else { return }
+        link.invalidate()
+        self.link = nil
+        let frame = Int((link.duration * 1000).rounded())
+        let stalls = gaps.filter { $0 > frame * 3 / 2 }
+        Self.log.notice("""
+            \(self.kind, privacy: .public): frame \(frame)ms, max gap \(self.gaps.max() ?? 0)ms, \
+            stalls \(stalls.count) (\(stalls.reduce(0, +))ms); events [\(self.events.joined(separator: ", "), privacy: .public)]; \
+            gaps [\(self.gaps.map(String.init).joined(separator: " "), privacy: .public)]; \
+            width target [\(self.widths.joined(separator: " "), privacy: .public)]
+            """)
     }
 }

@@ -18,7 +18,7 @@ use crate::drafts::{DraftBook, DraftContent, DraftThreadState, new_draft_id, now
 use crate::fixture::demo_shell_state;
 use crate::header::details_card::{
     DetailsCardProps, DetailsCopyTarget, EditorTarget, THREAD_DETAILS_CARD_GAP_PX,
-    ThreadDetailsState, render_thread_details_card, thread_cwd,
+    ThreadDetailsState, ThreadRecord, render_thread_details_card, thread_cwd,
 };
 use crate::header::{ChatHeaderProps, render_chat_header};
 use crate::shell::{CardJoin, inset_card, two_tone_divider};
@@ -35,6 +35,7 @@ use crate::sidebar::tree::SidebarTree;
 use crate::theme::{apply_kit_theme, hsla};
 use gpui_kit::prelude::FluentBuilder as _;
 
+mod agent_sender;
 mod child_approvals;
 pub(crate) mod details_schedules;
 pub(crate) mod details_tasks;
@@ -643,6 +644,9 @@ impl ConnApp {
                 }
                 crate::chat::ChatEvent::ForkFromRun { run_id } => {
                     app.fork_selected_from_run(run_id, cx);
+                }
+                crate::chat::ChatEvent::OpenAgentSender(sender) => {
+                    app.open_agent_sender(sender, cx);
                 }
                 crate::chat::ChatEvent::OpenThreadLink(link) => {
                     app.open_thread_link(link, cx);
@@ -1658,16 +1662,7 @@ impl ConnApp {
             chat.set_thread(
                 thread,
                 title,
-                |sender_id| {
-                    if self.linked_environment_of_thread(sender_id)
-                        != selected.and_then(|id| self.linked_environment_of_thread(id))
-                    {
-                        return None;
-                    }
-                    self.shell
-                        .find_thread(sender_id)
-                        .map(|shell| shell.title.as_str())
-                },
+                |sender| self.agent_sender_view(sender, selected),
                 cx,
             );
             chat.set_linked_pull_requests(linked_pull_requests, cx);
@@ -5887,15 +5882,10 @@ impl ConnApp {
 
     /// Loads VCS status (`vcs.refreshStatus`) and scheduled tasks for the open thread.
     fn refresh_thread_details(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(thread) = self
-            .layout
-            .selected_thread_id
-            .as_deref()
-            .and_then(|id| self.shell.find_thread(id))
-        else {
+        let Some(thread) = self.selected_thread_record() else {
             return;
         };
-        let thread_id = thread.id.clone();
+        let thread_id = thread.id().to_owned();
         let cwd = thread_cwd(&self.shell, thread);
         if self.thread_details.loaded_for.as_deref() != Some(thread_id.as_str()) {
             self.thread_details.vcs = None;
@@ -5993,10 +5983,7 @@ impl ConnApp {
         cx: &mut Context<'_, Self>,
     ) {
         let Some(path) = self
-            .layout
-            .selected_thread_id
-            .as_deref()
-            .and_then(|id| self.shell.find_thread(id))
+            .selected_thread_record()
             .and_then(|t| thread_cwd(&self.shell, t))
         else {
             return;
@@ -6014,10 +6001,7 @@ impl ConnApp {
     /// `vcs.init` for a non-git workspace (`Initialize Git`).
     pub(crate) fn init_git_for_thread(&mut self, cx: &mut Context<'_, Self>) {
         let Some(cwd) = self
-            .layout
-            .selected_thread_id
-            .as_deref()
-            .and_then(|id| self.shell.find_thread(id))
+            .selected_thread_record()
             .and_then(|t| thread_cwd(&self.shell, t))
         else {
             return;
@@ -6308,11 +6292,7 @@ impl ConnApp {
         // toggle, `max-h-[calc(100dvh-6.5rem)]`.
         if self.thread_details.open
             && self.draft.is_none()
-            && let Some(thread) = self
-                .layout
-                .selected_thread_id
-                .as_deref()
-                .and_then(|id| self.shell.find_thread(id))
+            && let Some(thread) = self.selected_thread_record()
         {
             let environment_label = self
                 .hover_environment_label(self.layout.selected_thread_id.as_deref())
@@ -6607,6 +6587,12 @@ impl ConnApp {
     expect(dead_code, reason = "called by views wired in later phases")
 )]
 impl ConnApp {
+    /// The selected thread for its details: the shell row, else the open thread's record.
+    pub(crate) fn selected_thread_record(&self) -> Option<ThreadRecord<'_>> {
+        let id = self.layout.selected_thread_id.as_deref()?;
+        ThreadRecord::resolve(&self.shell, self.thread(id), id)
+    }
+
     /// The selected thread's timeline, when subscribed.
     pub(crate) fn selected_timeline(&self) -> Option<&ThreadState> {
         self.layout

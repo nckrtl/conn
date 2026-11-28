@@ -47,13 +47,25 @@ export function contractCommands() {
 }
 
 /**
- * The command types the engine accepts: every one of `types` that heads a `match` arm in
- * crates/conn-engine/src/commands.rs.
+ * The command types the engine handles: every one of `types` that heads an arm of the `match`
+ * in `fn handler` of crates/conn-engine/src/commands.rs, read from its signature to its
+ * fallback arm. `fn refusal` names commands too, and the engine refuses those. Throws when the
+ * match is not found or holds no command, so a reshaped handler fails the check instead of
+ * emptying the set. tools/bump-report.mjs and crates/conn-server/tests/engine_commands.rs
+ * find the match by the same two anchors.
  */
 export function engineCommands(types) {
-  const file = NodePath.join(repoRoot, "crates/conn-engine/src/commands.rs");
-  const arms = NodeFS.readFileSync(file, "utf8").matchAll(/"([^"]+)"(?=\s*(?:=>|\|))/g);
-  return new Set(Array.from(arms, (m) => m[1]).filter((type) => types.has(type)));
+  const file = "crates/conn-engine/src/commands.rs";
+  const text = NodeFS.readFileSync(NodePath.join(repoRoot, file), "utf8");
+  const start = text.indexOf("fn handler(command_type: &str)");
+  const end = start === -1 ? -1 : text.indexOf("_ => return None", start);
+  if (end === -1) {
+    throw new Error(`${file}: no \`fn handler(command_type: &str)\` with a \`_ => return None\` arm`);
+  }
+  const arms = text.slice(start, end).matchAll(/"([^"]+)"(?=\s*(?:=>|\|))/g);
+  const handled = new Set(Array.from(arms, (m) => m[1]).filter((type) => types.has(type)));
+  if (handled.size === 0) throw new Error(`${file}: no contract command heads an arm of \`fn handler\``);
+  return handled;
 }
 
 /**

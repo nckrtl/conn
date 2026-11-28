@@ -2565,8 +2565,19 @@ impl Inner {
         if let Some(selection) = model_selection {
             command["modelSelection"] = selection;
         }
-        if message["context"].is_object() {
-            command["context"] = message["context"].clone();
+        // The same message id overwrites the stored message: keep who sent it and why
+        // (`EffectWorker.ts:385`).
+        for field in [
+            "context",
+            "notification",
+            "delegatedCompletion",
+            "scheduledTaskId",
+            "senderThreadId",
+            "linkedSender",
+        ] {
+            if message[field].is_object() || message[field].is_string() {
+                command[field] = message[field].clone();
+            }
         }
         if let Err(e) = self.dispatch_value(command).await {
             eprintln!("conn-engine: could not queue a declined steer: {e}");

@@ -905,6 +905,54 @@ fn deliver(tx: &mut Tx<'_>, thread_id: &str, settled: bool) -> StoreResult<Vec<E
     {
         return Ok(vec![]);
     }
+    // One wake per spawning run, as T3 keeps one cohort per run (`Orchestrator.ts:14386`).
+    let mut groups: Vec<(Option<String>, Vec<Value>)> = vec![];
+    for row in due {
+        let owner = row["runId"].as_str().map(str::to_owned);
+        match groups.iter_mut().find(|(run, _)| *run == owner) {
+            Some((_, rows)) => rows.push(row),
+            None => groups.push((owner, vec![row])),
+        }
+    }
+    let mut effects = vec![];
+    for (owner, rows) in groups {
+        effects.extend(wake(tx, thread_id, busy, owner.as_deref(), rows)?);
+    }
+    Ok(effects)
+}
+
+/// The next generation of `parent_run`'s delegated completions, from its durable cohort
+/// (an imported T3 run keeps its `nextGeneration`), and records the one after it.
+fn reserve_generation(
+    tx: &mut Tx<'_>,
+    thread_id: &str,
+    parent_run: &str,
+) -> StoreResult<Option<u64>> {
+    let Some(mut run) = tx.entity(thread_id, "runs", parent_run)? else {
+        return Ok(None);
+    };
+    let generation = run["delegatedCompletion"]["nextGeneration"]
+        .as_u64()
+        .unwrap_or(1)
+        .max(1);
+    let mut cohort = run["delegatedCompletion"].clone();
+    if !cohort.is_object() {
+        cohort = json!({"disposition": "open", "delivery": null});
+    }
+    cohort["nextGeneration"] = json!(generation + 1);
+    run["delegatedCompletion"] = cohort;
+    tx.append(Draft::new(thread_id, "run.updated", run).run(Some(parent_run)))?;
+    Ok(Some(generation))
+}
+
+/// Wakes `thread_id` with one message for `due`, the finished tasks of one spawning run.
+fn wake(
+    tx: &mut Tx<'_>,
+    thread_id: &str,
+    busy: bool,
+    parent_run: Option<&str>,
+    due: Vec<Value>,
+) -> StoreResult<Vec<Effect>> {
     let mut inline = 0;
     let parts: Vec<String> = due
         .iter()
@@ -940,6 +988,13 @@ fn deliver(tx: &mut Tx<'_>, thread_id: &str, settled: bool) -> StoreResult<Vec<E
             break;
         }
     }
+    let task_ids: Vec<&str> = due.iter().filter_map(|row| row["id"].as_str()).collect();
+    let completion = match parent_run {
+        Some(parent_run) => reserve_generation(tx, thread_id, parent_run)?.map(|generation| {
+            json!({"parentRunId": parent_run, "generation": generation, "taskIds": task_ids})
+        }),
+        None => None,
+    };
     let mut effects = vec![];
     for mut row in due {
         row["completionDelivery"] = json!({"state": "delivered", "observedByRunId": null});
@@ -962,15 +1017,16 @@ fn deliver(tx: &mut Tx<'_>, thread_id: &str, settled: bool) -> StoreResult<Vec<E
     {
         mode = json!({"type": "steer_active", "targetRunId":run["id"]});
     }
-    match dispatch(
-        tx,
-        json!({
-            "type": "message.dispatch", "commandId": command_id, "threadId": thread_id,
-            "messageId": format!("message:{command_id}"), "text": parts.join("\n\n"),
-            "attachments": [], "dispatchMode": mode,
-            "createdBy": "agent", "creationSource": "server",
-        }),
-    ) {
+    let mut command = json!({
+        "type": "message.dispatch", "commandId": command_id, "threadId": thread_id,
+        "messageId": format!("message:{command_id}"), "text": parts.join("\n\n"),
+        "attachments": [], "dispatchMode": mode,
+        "createdBy": "agent", "creationSource": "server",
+    });
+    if let Some(completion) = completion {
+        command["delegatedCompletion"] = completion;
+    }
+    match dispatch(tx, command) {
         Ok(more) => {
             effects.extend(more);
             let run_id = format!("run:{thread_id}:{ordinal}");

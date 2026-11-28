@@ -4,11 +4,11 @@ use conn_contract::from_json;
 use std::collections::HashMap;
 
 use conn_state::{
-    ItemStatus, LayoutState, LocalDateTime, RIGHT_PANEL_DEFAULT_WIDTH, RIGHT_PANEL_MAX_WIDTH,
-    RIGHT_PANEL_MIN_WIDTH, RightPanelTab, RunStatus, SIDEBAR_DEFAULT_WIDTH, SIDEBAR_MAX_WIDTH,
-    SIDEBAR_MIN_WIDTH, SecretRequestStatus, ShellChange, ShellState, ShellStreamItem, SubagentTone,
-    ThreadActivity, ThreadState, ThreadStreamItem, TimelineEntry, TurnCheckpointFile,
-    TurnItemStatus, UserInputAnswerValue, UserInputDraft, build_turn_diff_tree,
+    AgentMessageSender, ItemStatus, LayoutState, LocalDateTime, RIGHT_PANEL_DEFAULT_WIDTH,
+    RIGHT_PANEL_MAX_WIDTH, RIGHT_PANEL_MIN_WIDTH, RightPanelTab, RunStatus, SIDEBAR_DEFAULT_WIDTH,
+    SIDEBAR_MAX_WIDTH, SIDEBAR_MIN_WIDTH, SecretRequestStatus, ShellChange, ShellState,
+    ShellStreamItem, SubagentTone, ThreadActivity, ThreadState, ThreadStreamItem, TimelineEntry,
+    TurnCheckpointFile, TurnItemStatus, UserInputAnswerValue, UserInputDraft, build_turn_diff_tree,
     build_user_input_answers, collapsed_plan_preview, flatten_turn_diff_tree,
     format_chat_timestamp_tooltip, format_day_aware_timestamp, format_duration,
     format_subagent_display_title, plan_can_collapse, request_kind_label,
@@ -3214,6 +3214,70 @@ fn user_message_keeps_review_comments_from_context_records() {
     assert_eq!(review_comments[0].diff, "- a\n+ b");
     assert_eq!(review_comments[0].fence_language.as_deref(), Some("diff"));
     assert_eq!(text_without_review_comments(text), "");
+}
+
+/// An agent's message keeps who sent it: a thread on this environment by id, or a thread on a
+/// linked environment by environment, id and title. The linked sender wins when both arrive.
+#[test]
+fn agent_message_keeps_its_sender() {
+    let mut state = ThreadState::new("thread-inbox");
+    let agent_message = |seq: i64, id: &str, sender: Value| {
+        let mut item = json!({
+            "id": id,
+            "status": "completed",
+            "createdBy": "agent",
+            "creationSource": "mcp",
+            "type": "user_message",
+            "messageId": format!("msg-{id}"),
+            "inputIntent": "turn_start",
+            "text": "Report",
+            "attachments": []
+        });
+        if let (Some(item), Some(sender)) = (item.as_object_mut(), sender.as_object()) {
+            item.extend(sender.clone());
+        }
+        turn_item_event(seq, item)
+    };
+    assert!(state.apply(agent_message(
+        1,
+        "item-local",
+        json!({ "senderThreadId": "thread-sender" })
+    )));
+    assert!(state.apply(agent_message(
+        2,
+        "item-linked",
+        json!({
+            "senderThreadId": "thread-sender",
+            "linkedSender": {
+                "environmentId": "env-b",
+                "threadId": "thread-remote",
+                "title": "Release reviews"
+            }
+        })
+    )));
+    let senders: Vec<_> = state
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TimelineEntry::User {
+                created_by_agent: true,
+                sender,
+                ..
+            } => Some(sender.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        senders,
+        [
+            Some(AgentMessageSender::LocalThread("thread-sender".into())),
+            Some(AgentMessageSender::Linked {
+                environment_id: "env-b".into(),
+                thread_id: "thread-remote".into(),
+                title: "Release reviews".into(),
+            }),
+        ]
+    );
 }
 
 #[test]

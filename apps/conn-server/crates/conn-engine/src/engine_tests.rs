@@ -6856,6 +6856,50 @@ async fn a_claude_goal_resume_is_refused_before_it_stops_work() {
     );
 }
 
+/// Clients name a message's sender from its turn item (`session-logic.ts`): a direct start
+/// and a queued run's start both carry `senderThreadId` and `linkedSender`, as T3's do.
+#[tokio::test(flavor = "current_thread")]
+async fn turn_items_name_the_sender_of_started_and_queued_messages() {
+    let db = TempDb::new("sender-items");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let linked = json!({"environmentId": "env-b", "threadId": "t-b", "title": "Planner"});
+    let sent = |id: &str, text: &str, mode: Value| {
+        let mut command = message_with("t1", id, text, mode, None);
+        command["createdBy"] = json!("agent");
+        command["creationSource"] = json!("mcp");
+        command["senderThreadId"] = json!("t-sender");
+        command["linkedSender"] = linked.clone();
+        command
+    };
+    dispatch(
+        &engine,
+        sent("direct", "hang", json!({"type": "start_immediately"})),
+    )
+    .await;
+    dispatch(
+        &engine,
+        sent("queued", "later", json!({"type": "queue_after_active"})),
+    )
+    .await;
+    dispatch(
+        &engine,
+        json!({"type": "run.interrupt", "commandId": "stop", "threadId": "t1", "runId": "run:t1:1"}),
+    )
+    .await;
+    let p = run_to_end(&engine, "t1", "run:t1:2").await;
+    for id in ["message:direct", "message:queued"] {
+        let item = p["turnItems"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|i| i["messageId"] == id)
+            .unwrap_or_else(|| panic!("{id}: {:#}", p["turnItems"]));
+        assert_eq!(item["senderThreadId"], "t-sender", "{item}");
+        assert_eq!(item["linkedSender"], linked, "{item}");
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn declined_steers_keep_their_message_ids_and_fifo_priority() {
     let db = TempDb::new("steer-declined");
@@ -6869,18 +6913,30 @@ async fn declined_steers_keep_their_message_ids_and_fifo_priority() {
     dispatch(&engine, message("t1", "c2", "hang")).await;
     until_provider_turn(&mut thread).await;
     dispatch(&engine, message("t1", "c3", "queued first")).await;
-    for (id, text) in [("c4", "first steer"), ("c5", "second steer")] {
-        dispatch(
-            &engine,
-            message_with(
-                "t1",
-                id,
-                text,
-                json!({"type": "steer_active", "targetRunId": "run:t1:1"}),
-                None,
-            ),
-        )
-        .await;
+    // One steer is a delegated result and one a linked agent's send: the declined steer's
+    // follow-up keeps both (`EffectWorker.ts:385`).
+    let completion = json!({"parentRunId": "run:t1:1", "generation": 1, "taskIds": ["node:x"]});
+    let linked = json!({"environmentId": "env-b", "threadId": "t-b", "title": "Planner"});
+    let provenance = [
+        json!({"creationSource": "server", "delegatedCompletion": completion}),
+        json!({"creationSource": "mcp", "linkedSender": linked}),
+    ];
+    for ((id, text), extra) in [("c4", "first steer"), ("c5", "second steer")]
+        .into_iter()
+        .zip(provenance)
+    {
+        let mut command = message_with(
+            "t1",
+            id,
+            text,
+            json!({"type": "steer_active", "targetRunId": "run:t1:1"}),
+            None,
+        );
+        command["createdBy"] = json!("agent");
+        for (key, value) in extra.as_object().unwrap() {
+            command[key] = value.clone();
+        }
+        dispatch(&engine, command).await;
     }
     // The follow-up lands after the decline; wait for its run.
     loop {
@@ -6918,6 +6974,21 @@ async fn declined_steers_keep_their_message_ids_and_fifo_priority() {
     );
     // T3's timeline rule: a queued user message is not shown until its run starts.
     assert_eq!(item_texts(&p), ["turn_start hang"]);
+    let stored = |id: &str| {
+        p["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    let wake = stored("message:c4");
+    assert_eq!(wake["delegatedCompletion"], completion, "{wake}");
+    assert!(crate::commands::is_delegated_completion(&wake));
+    let sent = stored("message:c5");
+    assert_eq!(sent["linkedSender"], linked, "{sent}");
+    assert_eq!(sent["createdBy"], "agent");
     dispatch(
         &engine,
         json!({"type": "run.interrupt", "commandId": "stop", "threadId": "t1", "runId": "run:t1:1"}),
@@ -9025,6 +9096,11 @@ async fn a_delegated_task_runs_as_a_child_thread_and_wakes_its_parent() {
             "Delegated task node:delegated-task:d2 (Helper) [completed]:\necho: second"
         )
     );
+    // `delegatedCompletion` names the task, as T3's wake does: clients link it to the child.
+    assert_eq!(
+        wake["delegatedCompletion"],
+        json!({"parentRunId": "run:t1:1", "generation": 1, "taskIds": ["node:delegated-task:d2"]})
+    );
 
     // When the parent's turn ends, the queued wake runs and the first task is delivered too.
     dispatch(
@@ -9049,6 +9125,109 @@ async fn a_delegated_task_runs_as_a_child_thread_and_wakes_its_parent() {
         .collect();
     assert_eq!(texts.len(), 2);
     assert!(texts.iter().any(|t| t.contains("echo: look around")));
+    let mut completions: Vec<_> = parent["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m.get("delegatedCompletion"))
+        .cloned()
+        .collect();
+    completions.sort_by_key(|c| c["generation"].as_u64());
+    assert_eq!(
+        completions,
+        [
+            json!({"parentRunId": "run:t1:1", "generation": 1, "taskIds": ["node:delegated-task:d2"]}),
+            json!({"parentRunId": "run:t1:1", "generation": 2, "taskIds": ["node:delegated-task:d1"]}),
+        ],
+        "each wake of one spawning run takes the next generation"
+    );
+}
+
+/// Results that wait for the parent to settle are delivered one wake per spawning run, as
+/// T3 keeps one cohort per run: two tasks of run 2 share a wake, run 1's task gets its own,
+/// and each takes its run's next generation, an imported `nextGeneration` included.
+#[tokio::test(flavor = "current_thread")]
+async fn settled_results_wake_once_per_spawning_run() {
+    let db = TempDb::new("delegate-cohorts");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    // Run 1's task still works when run 1 ends.
+    dispatch(&engine, delegate("d1", "hang", None)).await;
+    let stop = |command: &str, thread: &str, run: &str| json!({"type": "run.interrupt", "commandId": command, "threadId": thread, "runId": run});
+    dispatch(&engine, stop("s1", "t1", "run:t1:1")).await;
+    run_to_end(&engine, "t1", "run:t1:1").await;
+    // Imported from T3, run 1's cohort already used generations 1 to 6.
+    engine
+        .inner()
+        .write(|tx| {
+            let mut run = tx.entity("t1", "runs", "run:t1:1")?.unwrap();
+            run["delegatedCompletion"] =
+                json!({"disposition": "open", "nextGeneration": 7, "delivery": null});
+            tx.append(crate::store::Draft::new("t1", "run.updated", run).run(Some("run:t1:1")))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    dispatch(&engine, message("t1", "c3", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    for (command, task) in [("d2", "second"), ("d3", "third")] {
+        let mut request = delegate(command, task, None);
+        request["parentRunId"] = json!("run:t1:2");
+        request["parentNodeId"] = json!("node:run:t1:2:root");
+        dispatch(&engine, request).await;
+        let child = format!("thread:delegated-task:{command}");
+        run_to_end(&engine, &child, &format!("run:{child}:1")).await;
+    }
+    let child = "thread:delegated-task:d1";
+    dispatch(&engine, stop("s2", child, &format!("run:{child}:1"))).await;
+    run_to_end(&engine, child, &format!("run:{child}:1")).await;
+    let parent = projection(&engine, "t1").await;
+    assert!(
+        parent["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m.get("delegatedCompletion").is_none()),
+        "settled_only results wait while run 2 works"
+    );
+    dispatch(&engine, stop("s3", "t1", "run:t1:2")).await;
+    let parent = run_to_end(&engine, "t1", "run:t1:4").await;
+    let mut completions: Vec<_> = parent["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m.get("delegatedCompletion"))
+        .cloned()
+        .collect();
+    completions.sort_by_key(|c| c["parentRunId"].as_str().map(str::to_owned));
+    assert_eq!(
+        completions,
+        [
+            json!({"parentRunId": "run:t1:1", "generation": 7, "taskIds": ["node:delegated-task:d1"]}),
+            json!({"parentRunId": "run:t1:2", "generation": 1,
+                "taskIds": ["node:delegated-task:d2", "node:delegated-task:d3"]}),
+        ]
+    );
+    let cohorts: Vec<_> = ["run:t1:1", "run:t1:2"]
+        .iter()
+        .map(|id| {
+            parent["runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == *id)
+                .unwrap()["delegatedCompletion"]["nextGeneration"]
+                .clone()
+        })
+        .collect();
+    assert_eq!(cohorts, [json!(8), json!(2)]);
 }
 
 /// Waits until `thread` has a pending runtime request, and returns it.

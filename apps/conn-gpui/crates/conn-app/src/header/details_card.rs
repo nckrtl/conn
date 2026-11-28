@@ -182,7 +182,7 @@ impl EditorTarget {
 /// Where a child agent is in its run.
 pub(crate) use conn_state::thread_details::ThreadAgentState as AgentState;
 /// Working directory the card's git rows use: the worktree, else the project root.
-pub(crate) use conn_state::thread_details::thread_cwd;
+pub(crate) use conn_state::thread_details::{ThreadRecord, thread_cwd};
 
 /// The status dot colour of a child agent.
 fn agent_dot(state: AgentState, tokens: &Tokens) -> Hsla {
@@ -278,9 +278,9 @@ impl Lineage<'_> {
 
 /// Collects parent/fork and child agents for `thread` (`conn_state::thread_details`).
 #[must_use]
-pub(crate) fn resolve_lineage<'a>(
+pub(crate) fn resolve_lineage<'a, 'b>(
     shell: &'a ShellState,
-    thread: &ThreadShell,
+    thread: impl Into<ThreadRecord<'b>>,
     timeline: Option<&ThreadState>,
     catalog: &ModelCatalog,
     now_secs: i64,
@@ -302,7 +302,7 @@ pub(crate) fn resolve_lineage<'a>(
 
 /// `#number: title` labels for the thread's linked PRs, current first.
 #[must_use]
-pub(crate) fn pull_request_lines(thread: &ThreadShell) -> Vec<String> {
+pub(crate) fn pull_request_lines(thread: ThreadRecord<'_>) -> Vec<String> {
     conn_state::thread_details::thread_pull_requests(thread)
         .iter()
         .map(conn_state::thread_details::ThreadPullRequest::line)
@@ -312,7 +312,8 @@ pub(crate) fn pull_request_lines(thread: &ThreadShell) -> Vec<String> {
 /// Props for [`render_thread_details_card`].
 pub(crate) struct DetailsCardProps<'a> {
     pub(crate) shell: &'a ShellState,
-    pub(crate) thread: &'a ThreadShell,
+    /// The shell row, else the open thread's record (`ThreadRecord::resolve`).
+    pub(crate) thread: ThreadRecord<'a>,
     pub(crate) task_links: Option<&'a conn_state::ThreadTaskLinks>,
     /// The thread's timeline: its `subagent` rows list the children on other environments.
     pub(crate) timeline: Option<&'a ThreadState>,
@@ -528,7 +529,7 @@ pub(crate) fn render_thread_details_card(
     body = body.when_some(tasks_section, |el, rows| el.child(rows));
 
     // Automations section (auto-hidden when nothing is bound and there is no error).
-    let bound = bound_tasks(&props.state.tasks, &thread.id);
+    let bound = bound_tasks(&props.state.tasks, thread.id());
     if !bound.is_empty() || props.state.tasks_error.is_some() {
         body = body.child(render_automations_section(props, &bound, cx));
     }
@@ -614,17 +615,14 @@ fn render_workspace_section(
 
     // Environment / host + workspace row (`RunContextSelector`, locked for server threads).
     let path = thread_cwd(props.shell, thread).unwrap_or_default();
-    let has_worktree = thread
-        .worktree_path
-        .as_deref()
-        .is_some_and(|p| !p.is_empty());
+    let has_worktree = thread.worktree_path().is_some();
     let workspace_icon = if has_worktree {
         "superhero/folder-git.svg"
     } else {
         "superhero/folder.svg"
     };
     let has_workspace = !path.is_empty();
-    let project = props.shell.project(&thread.project_id);
+    let project = props.shell.project(thread.project_id());
     let copy_path = path.clone();
     let workspace_label = if path.is_empty() {
         "No workspace path".to_owned()
@@ -804,7 +802,7 @@ fn render_workspace_section(
     rows = rows.child(split);
 
     // Project scripts (`ProjectScriptsControl displayMode="panel"`).
-    if let Some(project) = props.shell.project(&thread.project_id) {
+    if let Some(project) = props.shell.project(thread.project_id()) {
         if let Some(primary) = project.scripts.first() {
             let group = SharedString::from("details-scripts");
             let scripts_open = props.state.scripts_menu_open;
@@ -914,9 +912,8 @@ fn render_version_control_section(
 
     // Branch row: the thread's branch, else the checkout's current ref.
     let branch = thread
-        .branch
-        .clone()
-        .filter(|b| !b.is_empty())
+        .branch()
+        .map(str::to_owned)
         .or_else(|| props.state.vcs.as_ref().and_then(|v| v.ref_name.clone()));
     if is_repo != Some(false)
         && let Some(branch) = branch
@@ -1377,17 +1374,17 @@ pub(crate) fn thread_wakeups(props: &DetailsCardProps<'_>, now_secs: i64) -> Vec
     };
     let pending = props
         .thread
-        .pending_background_tasks
-        .as_ref()
+        .listed()
+        .and_then(|t| t.pending_background_tasks.as_ref())
         .and_then(Option::as_ref)
         .map_or(&[][..], Vec::as_slice);
     timeline.agent_wakeups(&WakeupContext {
         now_ms: now_secs.saturating_mul(1_000),
         pending,
-        provider: &props.thread.provider_instance_id,
+        provider: props.thread.provider_instance_id(),
         driver: props
             .catalog
-            .driver_for_instance(&props.thread.provider_instance_id),
+            .driver_for_instance(props.thread.provider_instance_id()),
     })
 }
 

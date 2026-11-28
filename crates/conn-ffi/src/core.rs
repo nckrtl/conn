@@ -140,6 +140,10 @@ enum PumpControl {
         sequence: Option<i64>,
         reply: oneshot::Sender<()>,
     },
+    ThreadDetails {
+        thread_id: String,
+        reply: oneshot::Sender<crate::details::FfiThreadDetails>,
+    },
     ModelPicker {
         thread_id: String,
         query: String,
@@ -949,6 +953,49 @@ impl ConnCore {
         self.call_json(SECRETS_ANSWER_REQUEST, payload)
             .await
             .map(|_| ())
+    }
+
+    /// What the thread details sheet lists for `thread_id`: from the shell, else from the open
+    /// thread, else only the id. `None` only once the core has shut down.
+    pub async fn thread_details(
+        &self,
+        thread_id: String,
+    ) -> Option<crate::details::FfiThreadDetails> {
+        let (reply, rx) = oneshot::channel();
+        self.ctrl_tx
+            .send(PumpControl::ThreadDetails { thread_id, reply })
+            .ok()?;
+        rx.await.ok()
+    }
+
+    /// The Git facts of `cwd` for the details sheet (`vcs.refreshStatus`, local only).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+    pub async fn vcs_status(&self, cwd: String) -> Result<crate::details::FfiVcsSummary, FfiError> {
+        let payload = serde_json::to_value(conn_contract::VcsRefreshStatusPayload {
+            cwd,
+            local_only: Some(true),
+        })
+        .map_err(|e| map_build_error("vcs.refreshStatus", e))?;
+        let value = self.call_json("vcs.refreshStatus", payload).await?;
+        serde_json::from_value::<conn_contract::VcsStatusResult>(value)
+            .map(Into::into)
+            .map_err(|e| FfiError::Rpc {
+                message: format!("unexpected vcs.refreshStatus reply: {e}"),
+            })
+    }
+
+    /// `Initialize Git` for a plain folder (`vcs.init`), as desktop's details card does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FfiError::Closed`] if disconnected, or the mapped transport/RPC [`FfiError`].
+    pub async fn init_git(&self, cwd: String) -> Result<(), FfiError> {
+        let payload = serde_json::to_value(conn_contract::VcsInitInput { cwd, kind: None })
+            .map_err(|e| map_build_error("vcs.init", e))?;
+        self.call_json("vcs.init", payload).await.map(|_| ())
     }
 
     /// The composer's model chip and the thread settings sheet's model list for `thread_id`.
@@ -1858,6 +1905,17 @@ impl PumpState {
                 now_ms,
             } => {
                 let _ = reply.send(self.finish_workspace_scan(&scan, after.as_deref(), now_ms));
+                true
+            }
+            PumpControl::ThreadDetails { thread_id, reply } => {
+                let details = crate::details::thread_details(
+                    &self.shell,
+                    self.threads.get(&thread_id),
+                    self.server_config.catalog(),
+                    &thread_id,
+                    now_epoch_ms() / 1000,
+                );
+                let _ = reply.send(details);
                 true
             }
             #[cfg(test)]

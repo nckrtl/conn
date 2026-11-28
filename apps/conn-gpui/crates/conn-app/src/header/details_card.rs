@@ -18,8 +18,8 @@
 use conn_contract::{ScheduledTaskRunStatus, VcsStatusResult};
 use conn_state::providers::ModelCatalog;
 use conn_state::{
-    AgentWakeup, ScheduledTask, ShellState, ThreadShell, ThreadState, TimelineEntry, WakeupContext,
-    WakeupKind, schedule_label,
+    AgentWakeup, ScheduledTask, ShellState, ThreadShell, ThreadState, WakeupContext, WakeupKind,
+    schedule_label,
 };
 use conn_theme::Tokens;
 use gpui_kit::prelude::FluentBuilder as _;
@@ -179,84 +179,23 @@ impl EditorTarget {
     }
 }
 
-/// Working directory the card's git rows use: the worktree, else the project root.
-#[must_use]
-pub(crate) fn thread_cwd(shell: &ShellState, thread: &ThreadShell) -> Option<String> {
-    thread
-        .worktree_path
-        .clone()
-        .filter(|p| !p.is_empty())
-        .or_else(|| {
-            shell
-                .project(&thread.project_id)
-                .map(|p| p.workspace_root.clone())
-                .filter(|p| !p.is_empty())
-        })
-}
-
 /// Where a child agent is in its run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AgentState {
-    Running,
-    Waiting,
-    Done,
-    Failed,
-    Stopped,
-    Idle,
-}
+pub(crate) use conn_state::thread_details::ThreadAgentState as AgentState;
+/// Working directory the card's git rows use: the worktree, else the project root.
+pub(crate) use conn_state::thread_details::{ThreadRecord, thread_cwd};
 
-impl AgentState {
-    fn is_live(self) -> bool {
-        matches!(self, Self::Running | Self::Waiting)
-    }
-
-    fn text(self) -> &'static str {
-        match self {
-            Self::Running => "Running",
-            Self::Waiting => "Waiting",
-            Self::Done => "Done",
-            Self::Failed => "Failed",
-            Self::Stopped => "Stopped",
-            Self::Idle => "Idle",
-        }
-    }
-
-    fn dot(self, tokens: &Tokens) -> Hsla {
-        match self {
-            Self::Running | Self::Waiting => hsla(tokens.info),
-            Self::Failed => hsla(tokens.destructive),
-            Self::Done => hsla(tokens.success),
-            Self::Stopped | Self::Idle => hsla_alpha(tokens.muted_foreground, 0.45),
-        }
-    }
-
-    fn from_shell(status: conn_contract::OrchestrationV2ShellThreadStatus) -> Self {
-        use conn_contract::OrchestrationV2ShellThreadStatus as S;
-        match status {
-            S::Preparing | S::Queued | S::Starting | S::Running => Self::Running,
-            S::Waiting => Self::Waiting,
-            S::Completed => Self::Done,
-            S::Failed => Self::Failed,
-            S::Interrupted | S::Cancelled | S::RolledBack => Self::Stopped,
-            S::Idle => Self::Idle,
-        }
-    }
-
-    fn from_item(status: conn_state::TurnItemStatus) -> Self {
-        use conn_state::TurnItemStatus as S;
-        match status {
-            S::Pending | S::Running => Self::Running,
-            S::Waiting => Self::Waiting,
-            S::Completed => Self::Done,
-            S::Failed => Self::Failed,
-            S::Cancelled | S::Interrupted => Self::Stopped,
-            S::Idle => Self::Idle,
-        }
+/// The status dot colour of a child agent.
+fn agent_dot(state: AgentState, tokens: &Tokens) -> Hsla {
+    match state {
+        AgentState::Running | AgentState::Waiting => hsla(tokens.info),
+        AgentState::Failed => hsla(tokens.destructive),
+        AgentState::Done => hsla(tokens.success),
+        AgentState::Stopped | AgentState::Idle => hsla_alpha(tokens.muted_foreground, 0.45),
     }
 }
 
-/// One child of the thread: a native subagent, a `delegate_task` child, or a child that runs on
-/// another linked environment (`ThreadRelationshipsControl.tsx`, `SubagentTimelineLink`).
+/// One child of the thread (`conn_state::thread_details::ThreadAgent`), its model named from
+/// the catalog and its provider resolved with what this app knows of linked environments.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AgentRow {
     /// Stable id for element ids: the child thread, else the timeline entry.
@@ -268,7 +207,7 @@ pub(crate) struct AgentRow {
     /// `on <label>` for a child on another environment.
     pub(crate) environment_label: Option<String>,
     pub(crate) title: String,
-    /// Provider driver or instance id, for the provider mark.
+    /// The key [`crate::icons::provider_mark`] draws (`crate::chat::subagent_provider`).
     pub(crate) provider: String,
     /// `<model> · <effort>`.
     pub(crate) model: Option<String>,
@@ -277,6 +216,38 @@ pub(crate) struct AgentRow {
 }
 
 impl AgentRow {
+    fn new(agent: conn_state::thread_details::ThreadAgent, sources: &AgentSources<'_>) -> Self {
+        // A child on another machine has the role `remote`: the driver its own environment
+        // lists, its own model there, or the core's model (its own, then the parent's record)
+        // names the provider.
+        let child = agent
+            .entry_id
+            .as_deref()
+            .and_then(|id| sources.children.get(id));
+        let (provider, _) = crate::chat::subagent_provider(
+            &agent.provider,
+            child.and_then(|child| child.driver.as_deref()),
+            child
+                .and_then(crate::chat::SubagentChild::selected_model)
+                .or(agent.model.as_ref()),
+            sources.catalog,
+        );
+        Self {
+            model: agent
+                .model
+                .as_ref()
+                .and_then(|model| crate::chat::subagent_model_text(sources.catalog, model)),
+            key: agent.key,
+            thread_id: agent.thread_id,
+            environment_id: agent.environment_id,
+            environment_label: agent.environment_label,
+            title: agent.title,
+            provider,
+            state: agent.state,
+            elapsed: agent.elapsed,
+        }
+    }
+
     /// `on nick · Opus 5.5 · medium`.
     pub(crate) fn meta(&self) -> Option<String> {
         let mut parts: Vec<String> = Vec::new();
@@ -320,296 +291,37 @@ impl Lineage<'_> {
     }
 }
 
-/// The parent's record of the model the subagent behind timeline entry `entry_id` runs.
-fn entry_record<'a>(
-    timeline: Option<&'a ThreadState>,
-    entry_id: &str,
-) -> Option<&'a conn_state::SubagentModel> {
-    let timeline = timeline?;
-    timeline
-        .subagent_of_entry
-        .get(entry_id)
-        .and_then(|subagent| timeline.subagent_models.get(subagent))
-        .or_else(|| timeline.subagent_models.get(entry_id))
-}
-
-/// The model text of the subagent behind timeline entry `entry_id`.
-fn entry_model(
-    timeline: Option<&ThreadState>,
-    entry_id: &str,
-    catalog: &ModelCatalog,
-) -> Option<String> {
-    crate::chat::subagent_model_text(catalog, entry_record(timeline, entry_id)?)
-}
-
-/// `13s`, `2m 4s`: how long a child ran, or has run, from its ISO-8601 start and end.
-fn agent_elapsed(
-    live: bool,
-    started_at: Option<&str>,
-    completed_at: Option<&str>,
-    now_secs: i64,
-) -> Option<String> {
-    let start = started_at.and_then(conn_state::parse_iso8601_epoch_ms)?;
-    let end = if live {
-        now_secs.saturating_mul(1000)
-    } else {
-        conn_state::parse_iso8601_epoch_ms(completed_at?)?
-    };
-    u64::try_from(end - start)
-        .ok()
-        .map(conn_state::format_duration)
-}
-
-/// A child that has a thread in the shell.
-fn shell_agent(
-    child: &ThreadShell,
-    timeline: Option<&ThreadState>,
-    sources: &AgentSources<'_>,
-    now_secs: i64,
-) -> AgentRow {
-    let catalog = sources.catalog;
-    let entry = timeline.and_then(|t| {
-        t.entries.iter().find_map(|e| match e {
-            TimelineEntry::Subagent {
-                id,
-                child_thread_id,
-                started_at,
-                completed_at,
-                ..
-            } if child_thread_id.as_deref() == Some(child.id.as_str()) => {
-                Some((id.as_str(), started_at.as_deref(), completed_at.as_deref()))
-            }
-            _ => None,
-        })
-    });
-    let live = crate::sidebar::thread_list::resolve_row_status(child).is_some_and(|s| {
-        matches!(
-            s,
-            crate::sidebar::thread_list::RowStatus::Working
-                | crate::sidebar::thread_list::RowStatus::Goal
-                | crate::sidebar::thread_list::RowStatus::Waiting
-        )
-    });
-    let state = match AgentState::from_shell(child.status) {
-        // A row the sidebar shows as working is running, whatever its last run says.
-        s if live && !s.is_live() => AgentState::Running,
-        s => s,
-    };
-    let run_started = child
-        .activity_run_started_at
-        .as_ref()
-        .and_then(Option::as_deref)
-        .or_else(|| {
-            child
-                .latest_run_started_at
-                .as_ref()
-                .and_then(Option::as_deref)
-        });
-    let run_completed = child
-        .latest_run_completed_at
-        .as_ref()
-        .and_then(Option::as_deref);
-    let elapsed = if state.is_live() {
-        agent_elapsed(true, run_started, None, now_secs)
-    } else {
-        agent_elapsed(false, run_started, run_completed, now_secs)
-            .or_else(|| entry.and_then(|(_, s, c)| agent_elapsed(false, s, c, now_secs)))
-    };
-    // The child's own selection first: the parent's subagent record can lack its options.
-    let own = conn_state::SubagentModel::from_selection(
-        &child.provider_instance_id,
-        &child.model_selection,
-    );
-    let model = crate::chat::subagent_model_text(catalog, &own)
-        .or_else(|| entry.and_then(|(id, ..)| entry_model(timeline, id, catalog)));
-    // The instance id names the provider, else the driver the child's environment lists for it,
-    // else its model.
-    let known = entry.and_then(|(id, ..)| sources.children.get(id));
-    let own_model = (own.model.is_some()).then_some(&own);
-    let (provider, _) = crate::chat::subagent_provider(
-        &child.provider_instance_id,
-        known.and_then(|known| known.driver.as_deref()),
-        own_model.or_else(|| entry.and_then(|(id, ..)| entry_record(timeline, id))),
-        catalog,
-    );
-    AgentRow {
-        key: child.id.clone(),
-        thread_id: child.id.clone(),
-        environment_id: None,
-        environment_label: None,
-        title: child.title.clone(),
-        provider,
-        model,
-        state,
-        elapsed,
-    }
-}
-
-/// Children the timeline lists but the shell does not: `delegate_task` children on another
-/// linked environment (`remote_child`), and native subagents whose thread is not loaded.
-fn timeline_agents(
-    shell: &ShellState,
-    timeline: Option<&ThreadState>,
-    sources: &AgentSources<'_>,
-    now_secs: i64,
-    seen: &mut std::collections::HashSet<String>,
-) -> Vec<AgentRow> {
-    let mut rows = Vec::new();
-    for entry in timeline.into_iter().flat_map(|t| &t.entries) {
-        let TimelineEntry::Subagent {
-            id,
-            child_thread_id,
-            title,
-            role,
-            status,
-            remote_child,
-            started_at,
-            completed_at,
-            ..
-        } = entry
-        else {
-            continue;
-        };
-        let (thread_id, environment_id, environment_label, title) = match remote_child {
-            Some(remote) => (
-                remote.thread_id.clone(),
-                Some(remote.environment_id.clone()),
-                Some(remote.label.clone()),
-                remote
-                    .title
-                    .clone()
-                    .filter(|t| !t.is_empty())
-                    .unwrap_or_else(|| title.clone()),
-            ),
-            None => {
-                let thread_id = child_thread_id.clone().unwrap_or_default();
-                // A child the shell lists is a shell row, unless the card hides it on purpose.
-                if let Some(child) = shell.find_thread(&thread_id) {
-                    if child.deleted_at.is_none()
-                        && child.lineage.side_chat != Some(true)
-                        && seen.insert(child.id.clone())
-                    {
-                        rows.push(shell_agent(child, timeline, sources, now_secs));
-                    }
-                    continue;
-                }
-                (thread_id, None, None, title.clone())
-            }
-        };
-        let key = if thread_id.is_empty() {
-            id.clone()
-        } else {
-            thread_id.clone()
-        };
-        if !seen.insert(key.clone()) {
-            continue;
-        }
-        let state = AgentState::from_item(*status);
-        // A child on another machine has the role `remote`: its own environment's driver, its
-        // own model, or the parent's record names the provider.
-        let child = sources.children.get(id);
-        let (provider, _) = crate::chat::subagent_provider(
-            role,
-            child.and_then(|child| child.driver.as_deref()),
-            child
-                .and_then(crate::chat::SubagentChild::selected_model)
-                .or_else(|| entry_record(timeline, id)),
-            sources.catalog,
-        );
-        rows.push(AgentRow {
-            key,
-            thread_id,
-            environment_id,
-            environment_label,
-            title,
-            provider,
-            model: entry_model(timeline, id, sources.catalog),
-            state,
-            elapsed: agent_elapsed(
-                !conn_state::subagent_settled(*status),
-                started_at.as_deref(),
-                completed_at.as_deref(),
-                now_secs,
-            ),
-        });
-    }
-    rows
-}
-
-/// Collects parent/fork and child agents for `thread`: the shell's children, then the children
-/// only its timeline lists (the ones on another environment).
+/// Collects parent/fork and child agents for `thread` (`conn_state::thread_details`).
 #[must_use]
-pub(crate) fn resolve_lineage<'a>(
+pub(crate) fn resolve_lineage<'a, 'b>(
     shell: &'a ShellState,
-    thread: &ThreadShell,
+    thread: impl Into<ThreadRecord<'b>>,
     timeline: Option<&ThreadState>,
     sources: &AgentSources<'_>,
     now_secs: i64,
 ) -> Lineage<'a> {
-    use conn_contract::OrchestrationV2AppThreadLineageRelationshipToParent as Rel;
-    let fork_source = match &thread.forked_from {
-        Some(conn_contract::OrchestrationV2TurnItemForkSource::Run(run)) => {
-            Some(run.thread_id.as_str())
-        }
-        _ => None,
+    let lineage = conn_state::thread_details::thread_lineage(shell, thread, timeline, now_secs);
+    let rows = |agents: Vec<conn_state::thread_details::ThreadAgent>| {
+        agents
+            .into_iter()
+            .map(|agent| AgentRow::new(agent, sources))
+            .collect()
     };
-    let parent_id = thread.lineage.parent_thread_id.as_deref().or(fork_source);
-    let is_fork =
-        fork_source.is_some() || matches!(thread.lineage.relationship_to_parent, Some(Rel::Fork));
-    let mut lineage = Lineage {
-        parent: parent_id.and_then(|id| shell.find_thread(id)),
-        is_fork,
-        ..Lineage::default()
-    };
-    let mut seen = std::collections::HashSet::new();
-    let mut rows = Vec::new();
-    for child in shell.threads.iter().chain(shell.archived_threads.iter()) {
-        if child.deleted_at.is_some()
-            || child.lineage.parent_thread_id.as_deref() != Some(thread.id.as_str())
-            || child.lineage.side_chat == Some(true)
-            || !seen.insert(child.id.clone())
-        {
-            continue;
-        }
-        rows.push(shell_agent(child, timeline, sources, now_secs));
+    Lineage {
+        parent: lineage.parent,
+        is_fork: lineage.is_fork,
+        running: rows(lineage.running),
+        previous: rows(lineage.previous),
     }
-    rows.extend(timeline_agents(
-        shell, timeline, sources, now_secs, &mut seen,
-    ));
-    for row in rows {
-        if row.state.is_live() {
-            lineage.running.push(row);
-        } else {
-            lineage.previous.push(row);
-        }
-    }
-    lineage
 }
 
 /// `#number: title` labels for the thread's linked PRs, current first.
 #[must_use]
-pub(crate) fn pull_request_lines(thread: &ThreadShell) -> Vec<String> {
-    let mut lines: Vec<String> = thread
-        .pull_requests
-        .as_deref()
-        .unwrap_or_default()
+pub(crate) fn pull_request_lines(thread: ThreadRecord<'_>) -> Vec<String> {
+    conn_state::thread_details::thread_pull_requests(thread)
         .iter()
-        .rev()
-        .map(|pr| match &pr.snapshot {
-            Some(snapshot) => format!("#{}: {}", pr.number, snapshot.title),
-            None => format!("#{}", pr.number),
-        })
-        .collect();
-    if lines.is_empty()
-        && let Some(pr) = thread
-            .branch_pull_request
-            .as_ref()
-            .and_then(Option::as_ref)
-            .or_else(|| thread.linked_pull_request.as_ref().and_then(Option::as_ref))
-    {
-        lines.push(format!("#{}", pr.number));
-    }
-    lines
+        .map(conn_state::thread_details::ThreadPullRequest::line)
+        .collect()
 }
 
 /// What names a child agent's model and provider: the parent environment's catalog and each
@@ -622,7 +334,8 @@ pub(crate) struct AgentSources<'a> {
 /// Props for [`render_thread_details_card`].
 pub(crate) struct DetailsCardProps<'a> {
     pub(crate) shell: &'a ShellState,
-    pub(crate) thread: &'a ThreadShell,
+    /// The shell row, else the open thread's record (`ThreadRecord::resolve`).
+    pub(crate) thread: ThreadRecord<'a>,
     pub(crate) task_links: Option<&'a conn_state::ThreadTaskLinks>,
     /// The thread's timeline: its `subagent` rows list the children on other environments.
     pub(crate) timeline: Option<&'a ThreadState>,
@@ -840,7 +553,7 @@ pub(crate) fn render_thread_details_card(
     body = body.when_some(tasks_section, |el, rows| el.child(rows));
 
     // Automations section (auto-hidden when nothing is bound and there is no error).
-    let bound = bound_tasks(&props.state.tasks, &thread.id);
+    let bound = bound_tasks(&props.state.tasks, thread.id());
     if !bound.is_empty() || props.state.tasks_error.is_some() {
         body = body.child(render_automations_section(props, &bound, cx));
     }
@@ -929,17 +642,14 @@ fn render_workspace_section(
 
     // Environment / host + workspace row (`RunContextSelector`, locked for server threads).
     let path = thread_cwd(props.shell, thread).unwrap_or_default();
-    let has_worktree = thread
-        .worktree_path
-        .as_deref()
-        .is_some_and(|p| !p.is_empty());
+    let has_worktree = thread.worktree_path().is_some();
     let workspace_icon = if has_worktree {
         "superhero/folder-git.svg"
     } else {
         "superhero/folder.svg"
     };
     let has_workspace = !path.is_empty();
-    let project = props.shell.project(&thread.project_id);
+    let project = props.shell.project(thread.project_id());
     let copy_path = path.clone();
     let workspace_label = if path.is_empty() {
         "No workspace path".to_owned()
@@ -1119,7 +829,7 @@ fn render_workspace_section(
     rows = rows.child(split);
 
     // Project scripts (`ProjectScriptsControl displayMode="panel"`).
-    if let Some(project) = props.shell.project(&thread.project_id) {
+    if let Some(project) = props.shell.project(thread.project_id()) {
         if let Some(primary) = project.scripts.first() {
             let group = SharedString::from("details-scripts");
             let scripts_open = props.state.scripts_menu_open;
@@ -1229,9 +939,8 @@ fn render_version_control_section(
 
     // Branch row: the thread's branch, else the checkout's current ref.
     let branch = thread
-        .branch
-        .clone()
-        .filter(|b| !b.is_empty())
+        .branch()
+        .map(str::to_owned)
         .or_else(|| props.state.vcs.as_ref().and_then(|v| v.ref_name.clone()));
     if is_repo != Some(false)
         && let Some(branch) = branch
@@ -1692,17 +1401,17 @@ pub(crate) fn thread_wakeups(props: &DetailsCardProps<'_>, now_secs: i64) -> Vec
     };
     let pending = props
         .thread
-        .pending_background_tasks
-        .as_ref()
+        .listed()
+        .and_then(|t| t.pending_background_tasks.as_ref())
         .and_then(Option::as_ref)
         .map_or(&[][..], Vec::as_slice);
     timeline.agent_wakeups(&WakeupContext {
         now_ms: now_secs.saturating_mul(1_000),
         pending,
-        provider: &props.thread.provider_instance_id,
+        provider: props.thread.provider_instance_id(),
         driver: props
             .catalog
-            .driver_for_instance(&props.thread.provider_instance_id),
+            .driver_for_instance(props.thread.provider_instance_id()),
     })
 }
 
@@ -1875,7 +1584,7 @@ fn agent_icon(provider: &str, state: AgentState, tokens: &Tokens) -> AnyElement 
         .child(mark)
         // Top right, as on the sidebar rows and subagent cards (Nick, #314).
         .child(crate::panels::chrome::status_dot_cutout(
-            state.dot(tokens),
+            agent_dot(state, tokens),
             hsla(tokens.popover),
             None,
             false,

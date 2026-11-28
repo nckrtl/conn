@@ -180,8 +180,7 @@ pub(crate) async fn subscribe_thread(
     let dedupe = input["acceptDedupedBodies"] == true;
     // T3's `shouldUseBoundedThreadSnapshot`: the newest window and a cursor for older pages.
     let bounded = input["acceptBoundedSnapshot"] == true;
-    // A bounded snapshot keeps its window's turn items whole; it is small already.
-    let omit_local = input["acceptCompactTurnItems"] == true && !bounded;
+    let omit_local = input["acceptCompactTurnItems"] == true;
     // Conn's own resume: the rows changed after this sequence, never "too old" (`wire.md`).
     let changes_after = input["changesAfterSequence"].as_u64();
     let wake = inner.thread_wakes.subscribe(&thread_id);
@@ -228,7 +227,9 @@ pub(crate) async fn subscribe_thread(
                 return Ok(None);
             }
             if bounded && let Some(window) = store.bounded_thread(&id)? {
-                let mut item = snapshot_item(window.projection, high, dedupe, false);
+                let mut projection = window.projection;
+                let omitted = omit_local && crate::history::omit_local_items(&mut projection);
+                let mut item = snapshot_item(projection, high, dedupe, omitted);
                 item["historyCursor"] = json!(window.history_cursor);
                 item["hasMoreHistory"] = json!(window.has_more_history);
                 item["latestLocalTurnOrdinal"] = json!(window.latest_local_turn_ordinal);

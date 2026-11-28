@@ -628,6 +628,30 @@ pub(crate) fn window_turn_items(
         .collect()
 }
 
+/// T3's `omitLocalVisibleTurnItems` (`acceptCompactTurnItems`): when `turnItems` starts with
+/// the items of the local visible rows, in order, it drops them, and the client restores them
+/// from `visibleTurnItems`. Whether it dropped any; otherwise the projection is unchanged.
+pub(crate) fn omit_local_items(projection: &mut Value) -> bool {
+    let thread_id = &projection["thread"]["id"];
+    let mut omitted = 0;
+    for row in array(&projection["visibleTurnItems"]) {
+        if !is_local(thread_id, row) {
+            continue;
+        }
+        if projection["turnItems"].get(omitted) != Some(&row["item"]) {
+            return false;
+        }
+        omitted += 1;
+    }
+    match projection["turnItems"].as_array_mut() {
+        Some(items) if omitted > 0 => {
+            items.drain(..omitted);
+            true
+        }
+        _ => false,
+    }
+}
+
 /// `buildBoundedThreadProjection`, step two: the plans and handoffs the window needs, older
 /// ones without their bodies, and the window's rows.
 pub(crate) fn finish(

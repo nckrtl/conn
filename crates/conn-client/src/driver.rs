@@ -388,7 +388,9 @@ impl DriverState {
             .get_mut(thread_id)
             .filter(|s| s.store_owned)
         {
-            sub.after_sequence = Some(sub.after_sequence.map_or(after, |seq| seq.max(after)));
+            // Exactly what the store committed, in commit order: a replacement window (say after
+            // a server restore) can move it down, and a reconnect must resume from there.
+            sub.after_sequence = Some(after);
         }
     }
 
@@ -1910,6 +1912,19 @@ mod tests {
                 .get("c")
                 .is_some_and(|s| s.request_id.is_some()),
             "the waiting thread was sent"
+        );
+    }
+
+    /// A replacement window committed at a lower sequence (a restored server) moves the
+    /// resume cursor down, so a reconnect does not skip the changes after it.
+    #[test]
+    fn a_lower_committed_cursor_wins() {
+        let mut state = state();
+        state.subscribe_from("t".into(), Some(1_000), 1);
+        state.set_cursor("t", 500);
+        assert_eq!(
+            state.thread_subs.get("t").and_then(|s| s.after_sequence),
+            Some(500)
         );
     }
 

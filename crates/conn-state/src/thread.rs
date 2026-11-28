@@ -812,6 +812,9 @@ pub struct ThreadState {
     messages: HashMap<String, TrackedMessage>,
     /// Where each assistant message and question sits in its run, by item id.
     places: HashMap<String, ItemPlace>,
+    /// The server's timeline place of each of the thread's own rows, by entry id: a row that
+    /// arrives late (a catch-up sends rows by when they last changed) still lands in order.
+    ordinals: HashMap<String, i64>,
 }
 
 impl ThreadState {
@@ -1323,6 +1326,8 @@ impl ThreadState {
             .map(|s| (s.id.clone(), SubagentRecord::from_subagent(s)))
             .collect();
         self.subagent_of_entry.clear();
+        self.ordinals.clear();
+        let own_thread = self.thread_id.clone();
         let mut entries = Vec::with_capacity(capacity);
         let mut entry_index: HashMap<String, usize> = HashMap::with_capacity(capacity);
         let mut ingest = |mut item: ProjectionTurnItem, source: Option<(String, String)>| {
@@ -1354,7 +1359,14 @@ impl ThreadState {
             if let Some((id, place)) = place_of_projection_item(&item) {
                 self.places.insert(id, place);
             }
+            let own = source
+                .as_ref()
+                .is_none_or(|(thread, _)| *thread == own_thread);
+            let ordinal = own.then(|| projection_item_ordinal(&item)).flatten();
             if let Some(entry) = map_projection_turn_item(item, source) {
+                if let Some(ordinal) = ordinal {
+                    self.ordinals.insert(entry.id().to_owned(), ordinal);
+                }
                 if let Some(&idx) = entry_index.get(entry.id()) {
                     entries[idx] = entry;
                 } else {
@@ -1465,12 +1477,20 @@ impl ThreadState {
             };
             let timing = extract_projection_timing(&item);
             let place = place_of_projection_item(&item);
+            let ordinal = (row.source_thread_id == self.thread_id)
+                .then(|| projection_item_ordinal(&item))
+                .flatten();
 
             let Some(entry) =
                 map_projection_turn_item(item, Some((row.source_thread_id, row.source_item_id)))
             else {
                 continue;
             };
+            if let Some(ordinal) = ordinal {
+                self.ordinals
+                    .entry(entry.id().to_owned())
+                    .or_insert(ordinal);
+            }
             self.task_links.observe_entry(&entry);
             if existing_ids.contains(entry.id()) {
                 continue;
@@ -1864,7 +1884,9 @@ impl ThreadState {
                 if let Some((id, place)) = place_of_turn_item(&ev.payload) {
                     self.places.insert(id, place);
                 }
+                let ordinal = turn_item_ordinal(&ev.payload);
                 if let Some(entry) = map_turn_item(ev.payload) {
+                    self.ordinals.insert(entry.id().to_owned(), ordinal);
                     self.task_links.observe_entry(&entry);
                     let mut changed = compaction_changed || detail_changed;
                     if matches!(entry, TimelineEntry::User { .. }) {
@@ -1888,7 +1910,7 @@ impl ThreadState {
                         });
                         changed |= self.entries.len() != before;
                     }
-                    changed |= upsert_entry(&mut self.entries, entry);
+                    changed |= upsert_entry(&mut self.entries, entry, Some(ordinal), &self.ordinals);
                     changed
                 } else {
                     self.schedule_calls.forget(&item_id);
@@ -2123,7 +2145,12 @@ fn map_item_status(status: TurnItemStatus) -> ItemStatus {
     }
 }
 
-fn upsert_entry(entries: &mut Vec<TimelineEntry>, entry: TimelineEntry) -> bool {
+fn upsert_entry(
+    entries: &mut Vec<TimelineEntry>,
+    entry: TimelineEntry,
+    ordinal: Option<i64>,
+    ordinals: &HashMap<String, i64>,
+) -> bool {
     if let Some(existing) = entries.iter_mut().find(|e| e.id() == entry.id()) {
         if *existing == entry {
             return false;
@@ -2155,13 +2182,92 @@ fn upsert_entry(entries: &mut Vec<TimelineEntry>, entry: TimelineEntry) -> bool 
         }
         entries.push(entry);
     } else {
+        // Before the queued rows, and before the first row the server places after it.
+        let later = |e: &TimelineEntry| {
+            ordinal.is_some_and(|ordinal| ordinals.get(e.id()).is_some_and(|o| *o > ordinal))
+        };
         let insert_pos = entries
             .iter()
-            .position(|e| matches!(e, TimelineEntry::QueuedUser { .. }))
+            .position(|e| matches!(e, TimelineEntry::QueuedUser { .. }) || later(e))
             .unwrap_or(entries.len());
         entries.insert(insert_pos, entry);
     }
     true
+}
+
+/// The server's timeline place of a streamed item.
+fn turn_item_ordinal(item: &TurnItem) -> i64 {
+    macro_rules! ordinal_of {
+        ($($v:ident),*) => {
+            match item { $(TurnItem::$v(i) => i.ordinal,)* }
+        };
+    }
+    ordinal_of!(
+        Notification,
+        UserMessage,
+        AssistantMessage,
+        Reasoning,
+        ProposedPlan,
+        TodoList,
+        UserInputRequest,
+        FileChange,
+        CommandExecution,
+        FileSearch,
+        WebSearch,
+        ApprovalRequest,
+        Checkpoint,
+        RunInterruptRequest,
+        RunInterruptResult,
+        SystemNotice,
+        Error,
+        Compaction,
+        Handoff,
+        Fork,
+        ThreadCreated,
+        SecretRequest,
+        LinkRequest,
+        Subagent,
+        DynamicTool
+    )
+}
+
+/// [`turn_item_ordinal`] for a projection row; `None` for an unknown item type.
+fn projection_item_ordinal(item: &ProjectionTurnItem) -> Option<i64> {
+    macro_rules! ordinal_of {
+        ($($v:ident),*) => {
+            match item {
+                $(ProjectionTurnItem::$v(i) => Some(i.ordinal),)*
+                ProjectionTurnItem::Unknown(_) => None,
+            }
+        };
+    }
+    ordinal_of!(
+        Notification,
+        UserMessage,
+        AssistantMessage,
+        Reasoning,
+        ProposedPlan,
+        TodoList,
+        UserInputRequest,
+        FileChange,
+        CommandExecution,
+        FileSearch,
+        WebSearch,
+        ApprovalRequest,
+        Checkpoint,
+        RunInterruptRequest,
+        RunInterruptResult,
+        SystemNotice,
+        Error,
+        Compaction,
+        Handoff,
+        Fork,
+        ThreadCreated,
+        SecretRequest,
+        LinkRequest,
+        Subagent,
+        DynamicTool
+    )
 }
 
 fn remove_entry(entries: &mut Vec<TimelineEntry>, id: &str) -> bool {

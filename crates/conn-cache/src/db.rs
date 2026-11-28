@@ -137,7 +137,22 @@ fn ms_of(record: &Value) -> i64 {
 
 /// Opens (or creates) the device database. A file from another schema version is emptied:
 /// the first catch-up downloads the kept windows again.
+/// The path [`open`] reads as "a database in memory".
+pub(crate) const IN_MEMORY: &str = ":memory:";
+
 pub(crate) async fn open(path: &Path) -> Result<SqlitePool, sqlx::Error> {
+    if path == Path::new(IN_MEMORY) {
+        // One connection, so every query sees the same in-memory database.
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .min_connections(1)
+            .idle_timeout(None)
+            .max_lifetime(None)
+            .connect_with(SqliteConnectOptions::new().in_memory(true))
+            .await?;
+        pool.execute(SCHEMA).await?;
+        return Ok(pool);
+    }
     let mut file = std::fs::OpenOptions::new();
     file.create(true).append(true);
     #[cfg(unix)]
@@ -392,13 +407,18 @@ pub(crate) async fn read_window(
              WHERE env = ? AND thread = ? AND ord IS NULL AND (
                kind IN (SELECT value FROM json_each(?)) OR live = 1
                OR run IN (SELECT value FROM json_each(?))
-               OR (kind = 'messages' AND id IN (SELECT value FROM json_each(?))))",
+               OR (kind = 'messages' AND id IN (SELECT value FROM json_each(?)))
+               -- A queued run has no row yet: its prompt and files live in its message.
+               OR (kind = 'messages' AND id IN (SELECT json_extract(body, '$.userMessageId')
+                   FROM rows WHERE env = ? AND thread = ? AND kind = 'runs' AND live = 1)))",
         )
         .bind(env)
         .bind(thread)
         .bind(always)
         .bind(serde_json::to_string(&scope).unwrap_or_default())
         .bind(serde_json::to_string(&message_ids).unwrap_or_default())
+        .bind(env)
+        .bind(thread)
         .fetch_all(pool)
         .await?
     } else {

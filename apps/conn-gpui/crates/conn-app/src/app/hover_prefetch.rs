@@ -126,7 +126,7 @@ impl ConnApp {
     /// Downloads the hovered thread's newest sent pictures to disk, as far as its timeline is
     /// known now, so opening it decodes them without the network.
     fn warm_thread_images(&mut self, thread_id: &str, cx: &mut Context<'_, Self>) {
-        let Some(thread) = self.threads.get(thread_id) else {
+        let Some(thread) = self.thread(thread_id) else {
             return;
         };
         let ids: Vec<String> = thread

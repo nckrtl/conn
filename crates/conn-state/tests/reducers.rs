@@ -3892,3 +3892,21 @@ fn an_older_page_brings_its_subagent_records() {
     );
     assert!(state.subagents.contains_key("sub-1"));
 }
+
+/// A catch-up sends rows by when they last changed, not by place: an approval answered after
+/// the reply that followed it arrives last, and still lands between the command and the reply.
+#[test]
+fn rows_arriving_out_of_place_land_by_their_server_ordinal() {
+    let tool = |id: &str| {
+        json!({"type": "dynamic_tool", "id": id, "toolName": "qa.probe", "status": "completed",
+            "input": {}, "output": {}})
+    };
+    let mut state = ThreadState::new("thread-cards");
+    for (sequence, id, ordinal) in [(26, "command", 2), (30, "reply", 4), (35, "approval", 3)] {
+        let mut fields = tool(id);
+        fields["ordinal"] = json!(ordinal);
+        state.apply(turn_item_event(sequence, fields));
+    }
+    let ids: Vec<&str> = state.entries.iter().map(|e| e.id()).collect();
+    assert_eq!(ids, ["command", "approval", "reply"]);
+}

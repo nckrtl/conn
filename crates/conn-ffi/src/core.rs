@@ -678,13 +678,23 @@ impl ConnCore {
                 ] {
                     let _ = tokio::fs::remove_file(dir.join(old)).await;
                 }
-                conn_cache::Engine::open(
+                let settings = conn_cache::Settings::default();
+                match conn_cache::Engine::open(
                     &dir.join(LOCAL_DATABASE),
                     &identity,
-                    connection,
-                    conn_cache::Settings::default(),
+                    connection.clone(),
+                    settings,
                 )
                 .await
+                {
+                    Ok(engine) => Ok(engine),
+                    // A device that cannot open the file (full, damaged) still shows threads,
+                    // from memory: nothing survives a relaunch, everything else works.
+                    Err(e) => {
+                        eprintln!("conn-ffi: device database failed ({e}); threads stay in memory");
+                        conn_cache::Engine::open_in_memory(&identity, connection, settings).await
+                    }
+                }
             })
             .await
             .map_err(|_| FfiError::Closed)?

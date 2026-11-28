@@ -117,7 +117,10 @@ const CLIENT_THREAD_SUBSCRIPTION = {
   acceptCompactTurnItems: true,
   acceptCompactIds: true,
   acceptDedupedBodies: true,
-} satisfies Required<Omit<OrchestrationV2SubscribeThreadInput, "threadId" | "afterSequence">>;
+  // `changesAfterSequence` is the Conn Server's resume for native clients; this server ignores it.
+} satisfies Required<
+  Omit<OrchestrationV2SubscribeThreadInput, "threadId" | "afterSequence" | "changesAfterSequence">
+>;
 type ShellResumeField = "afterSequence" | "httpSnapshotFallback" | "knownProjectIdentities";
 const CLIENT_SHELL_SUBSCRIPTION = {
   requestCompletionMarker: true,

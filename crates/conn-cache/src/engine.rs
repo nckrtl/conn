@@ -199,6 +199,19 @@ impl Engine {
         })
     }
 
+    /// [`Self::open`] on a database in memory, for when the file cannot be opened: the app
+    /// still draws and catches up its threads, and keeps nothing across a relaunch.
+    ///
+    /// # Errors
+    /// Returns the database error.
+    pub async fn open_in_memory(
+        env: &str,
+        connection: Connection,
+        settings: Settings,
+    ) -> Result<Self, sqlx::Error> {
+        Self::open(Path::new(db::IN_MEMORY), env, connection, settings).await
+    }
+
     #[must_use]
     pub fn images(&self) -> Images {
         Images {
@@ -511,6 +524,11 @@ impl Engine {
                 held.older = snapshot.history_cursor.clone().flatten();
             }
             held.state.apply(item);
+        }
+        // A kept thread whose stream already caught up in the background gets no second marker:
+        // its window from the device is current.
+        if self.subscribed.contains_key(id) && !self.catching_up.contains(id) {
+            held.state.synchronized = true;
         }
         self.held.insert(id.to_owned(), held);
         if self.perf.current_on_load.remove(id) {
@@ -1181,6 +1199,120 @@ mod tests {
         assert_eq!(saved.sequence, Some(42));
         assert!(!saved.synchronized, "drawn, not current");
         assert!(second.take_saved_shell().is_none(), "taken once");
+    }
+
+    /// A kept thread that caught up in the background opens current: its stream sends no
+    /// second `synchronized`, so the syncing bar must not wait for one.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_thread_caught_up_in_the_background_opens_current() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let path = dir.path().join("local.sqlite3");
+        let items = stream("thread_turn_stream.json");
+        let thread = items[0]["projection"]["thread"]["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        let mut engine = engine(
+            &path,
+            Settings {
+                threads_in_memory: Some(0),
+            },
+        )
+        .await;
+        open(&mut engine, &thread).await;
+        engine.handle(
+            &thread,
+            from_json(items[0].clone()).unwrap_or_else(|e| panic!("{e}")),
+        );
+        engine.handle(
+            &thread,
+            from_json(json!({"kind": "synchronized"})).unwrap_or_else(|e| panic!("{e}")),
+        );
+        engine.close_thread(&thread);
+        assert!(engine.thread(&thread).is_none(), "left memory");
+        open(&mut engine, &thread).await;
+        let state = engine.thread(&thread).unwrap_or_else(|| panic!("reopened"));
+        assert!(state.synchronized, "already current, no marker will come");
+        assert!(!state.entries.is_empty());
+    }
+
+    /// A queued run has no timeline row yet; its prompt and files are in its message, which a
+    /// window read from the device must bring along.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_window_brings_the_messages_of_queued_runs() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let pool = db::open(&dir.path().join("local.sqlite3"))
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut write = ThreadWrite {
+            record: Some(json!({"id": "t", "updatedAt": "2026-11-28T00:00:00.000Z"})),
+            seq: Some(1),
+            ..ThreadWrite::default()
+        };
+        write.put(rows::row(
+            OWN,
+            json!({"id": "i1", "ordinal": 1, "type": "user_message", "runId": "r1"}),
+        ));
+        write.put(rows::row(
+            "runs",
+            json!({"id": "r1", "status": "completed"}),
+        ));
+        write.put(rows::row(
+            "runs",
+            json!({"id": "r2", "status": "queued", "userMessageId": "m2"}),
+        ));
+        write.put(rows::row(
+            "messages",
+            json!({"id": "m2", "runId": "r2", "text": "later, with a file"}),
+        ));
+        let mut batch = HashMap::new();
+        batch.insert("t".to_owned(), write);
+        db::commit(&pool, "env", batch)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let window = db::read_window(&pool, "env", "t", None)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("a window"));
+        assert!(
+            window
+                .control
+                .iter()
+                .any(|row| row.kind == "messages" && row.id == "m2")
+        );
+    }
+
+    /// When the device file cannot be opened, the engine runs on a database in memory: threads
+    /// still store, open and draw.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn an_engine_in_memory_still_draws_threads() {
+        let rt = tokio::runtime::Handle::current();
+        let mut engine = Engine::open_in_memory(
+            "env",
+            connection(&rt),
+            Settings {
+                threads_in_memory: Some(0),
+            },
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+        let items = stream("thread_turn_stream.json");
+        let thread = items[0]["projection"]["thread"]["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        engine.handle(
+            &thread,
+            from_json(items[0].clone()).unwrap_or_else(|e| panic!("{e}")),
+        );
+        settle(&engine, &thread).await;
+        open(&mut engine, &thread).await;
+        assert!(
+            engine
+                .thread(&thread)
+                .is_some_and(|s| !s.entries.is_empty()),
+            "drawn from memory"
+        );
     }
 
     /// A stale thread keeps its cursor; a deleted thread leaves the device; closed threads

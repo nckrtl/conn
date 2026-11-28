@@ -1,12 +1,11 @@
 //! The primary server restarts under a running app: the app reconnects by itself, a message sent
-//! while the server was away goes through, the open thread loads again, and the offline cache's
-//! watched threads resume from their cursors instead of all asking for a full snapshot again.
+//! while the server was away goes through, the open thread loads again, and the engine's kept
+//! threads resume from their cursors instead of all asking for a full snapshot again.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
-use conn_cache::MessageCache;
 use conn_client::{ConnectionStatus, Credential, ServerConfig};
 use conn_state::testkit::{SyntheticThread, synthetic_thread_snapshot_json};
 use conn_wire::{Exit, FromClient, FromServer, Request, encode_server_frame};
@@ -115,7 +114,10 @@ fn reply(request: &Request, session: u8) -> Option<FromServer> {
         values,
     };
     match request.tag.as_str() {
-        "orchestration.subscribeShell" => Some(chunk(vec![shell_snapshot()])),
+        "orchestration.subscribeShell" => Some(chunk(vec![
+            shell_snapshot(),
+            json!({ "kind": "synchronized" }),
+        ])),
         "orchestration.subscribeThread" => {
             let id = request.payload["threadId"].as_str().unwrap_or_default();
             // After the restart the open thread has a second turn.
@@ -211,6 +213,8 @@ fn pump_until(
     server: &FakeServer,
 ) {
     for _ in 0..1000 {
+        // The engine brings its kept set in line on a timer.
+        cx.executor().advance_clock(Duration::from_millis(20));
         cx.run_until_parked();
         seen.extend(server.seen.try_iter());
         if cx.read(|cx| done(app.read(cx), seen)) {
@@ -232,9 +236,7 @@ fn subscribes<'a>(seen: &'a [Seen], session: u8, thread: &str) -> Vec<&'a Seen> 
 }
 
 fn entries(app: &ConnApp, thread: &str) -> usize {
-    app.threads
-        .get(thread)
-        .map_or(0, |state| state.entries.len())
+    app.thread(thread).map_or(0, |state| state.entries.len())
 }
 
 #[gpui_kit::test]
@@ -252,14 +254,11 @@ fn the_app_recovers_after_the_primary_server_restarts(cx: &mut TestAppContext) {
             orbit_server_id: None,
         }),
     );
-    // The offline cache watches every unsettled thread, as in the live app.
-    let cache = tempfile::tempdir().expect("cache directory");
-    let db = RT
-        .block_on(MessageCache::open(&cache.path().join("messages.sqlite3")))
-        .expect("cache");
+    // The engine keeps every unsettled thread, as in the live app.
+    let dir = tempfile::tempdir().expect("database folder");
     cx.update(|cx| {
-        app.update(cx, |app, _| {
-            app.offline.enable_for_test(cache.path().to_owned(), db);
+        app.update(cx, |app, cx| {
+            app.use_engine_for_test(&dir.path().join("threads.sqlite3"), cx);
         });
     });
 
@@ -276,7 +275,7 @@ fn the_app_recovers_after_the_primary_server_restarts(cx: &mut TestAppContext) {
     pump_until(
         cx,
         &app,
-        "every watched thread and the open one load",
+        "every kept thread and the open one load",
         |app, seen| {
             WATCHED.iter().all(|id| !subscribes(seen, 1, id).is_empty()) && entries(app, OPEN) > 0
         },
@@ -327,8 +326,9 @@ fn the_app_recovers_after_the_primary_server_restarts(cx: &mut TestAppContext) {
         &mut seen,
         &server,
     );
-    // Let the new session's shell reach the offline cache, which reconciles its watches.
+    // Let the new session's shell reach the engine, which brings its kept set in line.
     for _ in 0..50 {
+        cx.executor().advance_clock(Duration::from_millis(20));
         cx.run_until_parked();
         seen.extend(server.seen.try_iter());
         std::thread::sleep(Duration::from_millis(10));
@@ -350,7 +350,10 @@ fn the_app_recovers_after_the_primary_server_restarts(cx: &mut TestAppContext) {
             "{id} is resubscribed once after the restart, not refreshed again: {resubscribes:#?}"
         );
         assert!(
-            resubscribes[0].payload.get("afterSequence").is_some(),
+            resubscribes[0]
+                .payload
+                .get("changesAfterSequence")
+                .is_some(),
             "{id} resumes from its cursor: {:#?}",
             resubscribes[0]
         );

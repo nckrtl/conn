@@ -68,6 +68,8 @@ WHERE kind = 'turnItems' AND json_extract(body, '$.type') = 'run_interrupt_reque
 -- Threads that own a task in a linked environment (`has_remote_tasks`), for the shell trim.
 CREATE INDEX IF NOT EXISTS remote_task_owners ON entities(thread_id)
 WHERE kind = 'subagents' AND json_type(body, '$.remoteChild') = 'object';
+-- A thread's rows changed after a sequence (`thread_changes_after`).
+CREATE INDEX IF NOT EXISTS entities_by_seq ON entities(thread_id, seq);
 CREATE TABLE IF NOT EXISTS projects (
   id             TEXT PRIMARY KEY,
   workspace_root TEXT NOT NULL UNIQUE,
@@ -182,6 +184,27 @@ pub(crate) const COLLECTIONS: [&str; 15] = [
     "contextHandoffs",
     "contextTransfers",
 ];
+
+/// Every event type [`collection_of`] maps to a row, as SQL, for the rowless-event reads. The
+/// `rowless_events_by_thread` index is built from it at open; a test holds it to `collection_of`.
+const ROW_EVENT_TYPES: &str =
+    "'run.created','run.updated','run-attempt.created','run-attempt.updated','node.updated',
+  'subagent.updated','provider-session.attached','provider-session.updated',
+  'provider-thread.updated','provider-turn.updated','runtime-request.updated',
+  'message.updated','plan.updated','turn-item.updated','checkpoint-scope.created',
+  'checkpoint.captured','context-handoff.updated','context-transfer.created',
+  'context-transfer.updated'";
+
+/// The sequences of a thread's rows changed after `?2` and of its rowless events after it,
+/// each input bounded to its first `?3` by sequence.
+fn changed_seqs() -> String {
+    format!(
+        "SELECT seq FROM (SELECT seq FROM entities INDEXED BY entities_by_seq
+           WHERE thread_id = ?1 AND seq > ?2 ORDER BY seq LIMIT ?3)
+         UNION SELECT seq FROM (SELECT seq FROM events WHERE thread_id = ?1 AND seq > ?2
+           AND type NOT IN ({ROW_EVENT_TYPES}) ORDER BY seq LIMIT ?3)"
+    )
+}
 
 /// The projection collection an event type replaces an entity in. One line per event kind.
 fn collection_of(event_type: &str) -> Option<&'static str> {
@@ -317,6 +340,62 @@ pub(crate) struct ReplayStats {
     pub(crate) has_create: bool,
 }
 
+/// One wake per subscribed thread, so a thread stream reads the store only after a commit
+/// that appended to its own thread. Entries are weak: one lives while a stream holds it.
+#[derive(Default)]
+pub(crate) struct ThreadWakes(
+    std::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Weak<tokio::sync::watch::Sender<u64>>>,
+    >,
+);
+
+/// A stream's hold on its thread's wake.
+pub(crate) struct ThreadWake {
+    _sender: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+    pub(crate) rx: tokio::sync::watch::Receiver<u64>,
+}
+
+impl ThreadWakes {
+    pub(crate) fn subscribe(&self, thread_id: &str) -> ThreadWake {
+        let mut wakes = crate::lock(&self.0);
+        wakes.retain(|_, wake| wake.strong_count() > 0);
+        let sender = match wakes.get(thread_id).and_then(std::sync::Weak::upgrade) {
+            Some(sender) => sender,
+            None => {
+                let sender = std::sync::Arc::new(tokio::sync::watch::Sender::new(0));
+                wakes.insert(thread_id.to_owned(), std::sync::Arc::downgrade(&sender));
+                sender
+            }
+        };
+        ThreadWake {
+            rx: sender.subscribe(),
+            _sender: sender,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn raise_for_test(&self, thread_ids: &[String], high: u64) {
+        self.raise(thread_ids, high);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len_for_test(&self) -> usize {
+        crate::lock(&self.0).len()
+    }
+
+    fn raise(&self, thread_ids: &[String], high: u64) {
+        if thread_ids.is_empty() {
+            return;
+        }
+        let wakes = crate::lock(&self.0);
+        for id in thread_ids {
+            if let Some(sender) = wakes.get(id).and_then(std::sync::Weak::upgrade) {
+                sender.send_replace(high);
+            }
+        }
+    }
+}
+
 pub(crate) struct Store {
     conn: Connection,
     next_seq: u64,
@@ -344,6 +423,8 @@ pub(crate) struct Store {
     /// The latest committed sequence, sent by the commit itself (T3's `EventSink` publishes
     /// after its transaction), so a caller that goes away cannot keep clients from seeing it.
     pub(crate) published: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+    /// One wake per subscribed thread, raised by a commit that appended to that thread.
+    pub(crate) thread_wakes: std::sync::Arc<ThreadWakes>,
     pub(crate) limit_recovery_wake: std::sync::Arc<tokio::sync::Notify>,
     /// The engine that may write here ([`Store::take_ownership`]); `None` for a store opened
     /// without an engine.
@@ -462,6 +543,12 @@ impl Store {
         )
         .map_err(err)?;
         conn.execute_batch(SCHEMA).map_err(err)?;
+        // A thread's events that write no row (`thread_changes_after`).
+        conn.execute_batch(&format!(
+            "CREATE INDEX IF NOT EXISTS rowless_events_by_thread ON events(thread_id, seq)
+             WHERE type NOT IN ({ROW_EVENT_TYPES})"
+        ))
+        .map_err(err)?;
         conn.execute_batch(crate::outline::CREATE_INDEX)
             .map_err(err)?;
         conn.execute_batch(crate::attention::SCHEMA).map_err(err)?;
@@ -491,6 +578,7 @@ impl Store {
             thread_push: None,
             effects_wake: std::sync::Arc::default(),
             published: std::sync::Arc::new(tokio::sync::watch::Sender::new(high)),
+            thread_wakes: std::sync::Arc::default(),
             limit_recovery_wake: Default::default(),
             owner: None,
             #[cfg(test)]
@@ -668,6 +756,8 @@ impl Store {
             effects_wake: self.effects_wake.clone(),
             effects_written: false,
             published: self.published.clone(),
+            thread_wakes: self.thread_wakes.clone(),
+            appended: Vec::new(),
             limit_recovery_wake: self.limit_recovery_wake.clone(),
             owner: self.owner.clone(),
             now_ms,
@@ -1823,6 +1913,79 @@ impl Store {
         Ok(rows)
     }
 
+    /// One page of "what changed since `after`" for a thread: for each row changed after it,
+    /// the stored event that last wrote the row, and every event after it that writes no row,
+    /// at most `limit`, by sequence. Its size follows the changed rows, not the event count.
+    pub(crate) fn thread_changes_after(
+        &self,
+        thread_id: &str,
+        after: u64,
+        limit: usize,
+    ) -> StoreResult<Vec<(u64, Value)>> {
+        let sql = format!(
+            "SELECT seq, event FROM events WHERE seq IN ({}) ORDER BY seq LIMIT ?3",
+            changed_seqs()
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(err)?;
+        let rows = stmt
+            .query_map(params![thread_id, after as i64, limit as i64], |row| {
+                Ok((row.get::<_, i64>(0)? as u64, row.get::<_, String>(1)?))
+            })
+            .map_err(err)?
+            .map(|row| {
+                let (seq, text) = row.map_err(err)?;
+                Ok((seq, parse(text)?))
+            })
+            .collect::<StoreResult<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Whether the changes after `after` fit a catch-up: at most `max_items` changed rows and
+    /// rowless events, and at most `max_bytes` of their stored events. Reads at most
+    /// `max_items + 1` events, so a long gap costs no more than a short one to judge.
+    pub(crate) fn thread_changes_fit(
+        &self,
+        thread_id: &str,
+        after: u64,
+        max_items: usize,
+        max_bytes: u64,
+    ) -> StoreResult<bool> {
+        let sql = format!(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(event AS BLOB))), 0) FROM (
+               SELECT event FROM events WHERE seq IN ({}) ORDER BY seq LIMIT ?3)",
+            changed_seqs()
+        );
+        let (items, bytes): (i64, i64) = self
+            .conn
+            .query_row(
+                &sql,
+                params![thread_id, after as i64, (max_items + 1) as i64],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(err)?;
+        Ok(items as usize <= max_items && bytes as u64 <= max_bytes)
+    }
+
+    /// Whether rows a client holds as of `after` can no longer be patched by changed rows: a
+    /// run rolled back after it (the server now hides rows), or the thread was created again.
+    pub(crate) fn thread_changes_need_reset(
+        &self,
+        thread_id: &str,
+        after: u64,
+    ) -> StoreResult<bool> {
+        self.conn
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM entities INDEXED BY entities_by_seq
+                   WHERE thread_id = ?1 AND seq > ?2 AND kind = 'runs'
+                   AND json_extract(body, '$.status') = 'rolled_back')
+                 OR EXISTS (SELECT 1 FROM events WHERE thread_id = ?1 AND seq > ?2
+                   AND type = 'thread.created')",
+                params![thread_id, after as i64],
+                |row| row.get(0),
+            )
+            .map_err(err)
+    }
+
     /// Committed `command_execution` item updates and run updates of every thread after
     /// `after`, at most `limit`, as `(sequence, thread id, event)`, and the sequence the read
     /// covered: the high water for a short page, so rows that match nothing are read once.
@@ -2006,6 +2169,9 @@ pub(crate) struct Tx<'a> {
     effects_wake: std::sync::Arc<tokio::sync::Notify>,
     effects_written: bool,
     published: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+    thread_wakes: std::sync::Arc<ThreadWakes>,
+    /// Threads this write appended an event to, for their wakes.
+    appended: Vec<String>,
     limit_recovery_wake: std::sync::Arc<tokio::sync::Notify>,
     owner: Option<Owner>,
     now_ms: u64,
@@ -2378,6 +2544,9 @@ impl Tx<'_> {
                 params![seq as i64, thread_id, command_id, event_type, streaming, event.to_string()],
             )
             .map_err(err)?;
+        if !self.appended.contains(&thread_id) {
+            self.appended.push(thread_id.clone());
+        }
         // Every other event moves the thread's `updatedAt` to its time, in the row and in the
         // stored thread, as T3's `writeThreadTouches`.
         let row = &event["payload"];
@@ -3077,6 +3246,7 @@ impl Tx<'_> {
             }
             newer
         });
+        self.thread_wakes.raise(&self.appended, high);
         if self.attention_written
             && let Some(attention) = &self.attention
         {
@@ -3803,6 +3973,46 @@ mod tests {
 
     /// T3's `getAgentReplayStats`: the first 129 events after the cursor, in sequence order,
     /// and their payload JSON bytes; later events are never read.
+    /// The rowless-event list names exactly the event types that write a row.
+    #[test]
+    fn row_event_types_match_collection_of() {
+        let listed: Vec<&str> = ROW_EVENT_TYPES
+            .split(',')
+            .map(|t| t.trim().trim_matches('\''))
+            .collect();
+        for event_type in &listed {
+            assert!(
+                collection_of(event_type).is_some(),
+                "{event_type} writes a row"
+            );
+        }
+        let all = include_str!("store.rs");
+        let arms = all
+            .split("fn collection_of")
+            .nth(1)
+            .and_then(|rest| rest.split("_ => return None").next())
+            .unwrap_or_default();
+        let mapped = arms.matches("\" =>").count() + arms.matches("\" |").count();
+        assert_eq!(listed.len(), mapped, "every mapped type is listed");
+    }
+
+    /// The changes read stays on indexes: changed rows by thread and sequence, rowless events
+    /// through their partial index.
+    #[test]
+    fn the_changes_read_uses_its_indexes() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-engine-{}-changes-plan", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("engine.sqlite")).unwrap();
+        let sql = changed_seqs();
+        let plan = store
+            .query_plan(&sql, rusqlite::params!["t", 0, 10])
+            .join("\n");
+        assert!(plan.contains("rowless_events_by_thread"), "{plan}");
+        assert!(plan.contains("entities_by_seq"), "{plan}");
+    }
+
     #[test]
     fn replay_stats_read_at_most_129_events() {
         let dir =

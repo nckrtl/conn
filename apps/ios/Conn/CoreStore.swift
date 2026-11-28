@@ -42,12 +42,7 @@ final class CoreStore {
         return thread.orbitProjectSlug ?? shell.projects.first(where: { $0.id == thread.projectId })?.title
     }
     private let publications: InboxPublications
-    private var restoringLaunchInventory = false
-    private(set) var openThread: FfiThreadSnapshot? {
-        didSet { openThreadRevision &+= 1 }
-    }
-    /// Counts `openThread` changes, so views can cache work derived from it without comparing it.
-    @ObservationIgnored private(set) var openThreadRevision = 0
+    private(set) var openThread: FfiThreadSnapshot?
     /// The last session state lines (`logState`), newest last, for the offline pill's details.
     private(set) var sessionHistory: [String] = []
     private(set) var openThreadId: String?
@@ -115,6 +110,7 @@ final class CoreStore {
     func retrySavedConnection() {
         guard let saved = coldLaunchSession else { return }
         if case .idle = state?.phase {
+            perfMark(stage: "swift.store_launch")
             session?.launch(saved: saved)
         } else {
             session?.retry()
@@ -174,7 +170,6 @@ final class CoreStore {
     private var hasPrimaryInventory = false
 
     var showsWorkspace: Bool {
-        guard !restoringLaunchInventory else { return false }
         if hasPrimaryInventory { return true }
         // A saved primary can be unavailable while a linked machine already has its inventory.
         return scope.isEmpty && (coldLaunchSession != nil || hasConnected)
@@ -182,7 +177,7 @@ final class CoreStore {
     }
 
     private func updateWorkspaceVisibility() {
-        guard !hasPrimaryInventory, !restoringLaunchInventory else { return }
+        guard !hasPrimaryInventory else { return }
         if shell != nil && (hasConnected || coldLaunchSession != nil || offlineReader != nil) {
             hasPrimaryInventory = true
         }
@@ -231,6 +226,7 @@ final class CoreStore {
         gatewayURL = ProcessInfo.processInfo.environment["CONN_TEST_TASK_GATEWAY"]
         if arguments.contains("--test-unreachable-gateway") { gatewayURL = "https://127.0.0.1:1" }
         #endif
+        perfMark(stage: "swift.store_session_new")
         do {
             session = try ConnSession(
                 gatewayUrl: gatewayURL,
@@ -265,43 +261,41 @@ final class CoreStore {
             session?.restore(saved: saved)
         }
         coldLaunchSession = saved
-        if scope.isEmpty { restoreLaunchInventory() }
-        if let identity = saved?.environmentId ?? saved?.orbitServerId, let session {
+        if scope.isEmpty {
+            openRestoredThread()
+            drawLaunchView()
+        }
+    }
+
+    /// Draws each saved server's thread list, and the restored thread, from the device while
+    /// its connection is still being found. The connection's own snapshots replace them.
+    private func drawLaunchView() {
+        for owner in inboxOwners {
+            guard let session = owner.session, let saved = owner.coldLaunchSession,
+                  let identity = saved.environmentId ?? saved.orbitServerId else { continue }
+            let threadId = owner === self ? openThreadId : nil
             Task {
-                guard let reader = await session.savedOfflineReader(identity: identity),
-                      coldLaunchSession != nil, offlineReader == nil,
-                      state?.environmentId.map({ $0 == identity }) ?? true else { return }
-                offlineReader = reader
-                if let id = openThreadId { restoreThread(id) }
+                let view = await session.launchView(identity: identity, threadId: threadId)
+                guard owner.coldLaunchSession != nil, owner.environmentId == identity || saved.orbitServerId == identity
+                else { return }
+                if owner.shell == nil, let shell = view.shell { owner.shell = shell }
+                if let thread = view.thread, owner.openThreadId == thread.threadId, owner.openThread == nil {
+                    owner.openThread = thread
+                }
+                owner.updateWorkspaceVisibility()
             }
         }
     }
 
-    private func restoreLaunchInventory() {
-        let sources = inboxOwners.compactMap { owner -> (CoreStore, ConnSession, String)? in
-            guard let session = owner.session, let saved = owner.coldLaunchSession,
-                  let id = saved.environmentId ?? saved.orbitServerId else { return nil }
-            return (owner, session, id)
-        }
-        guard !sources.isEmpty else { return }
-        restoringLaunchInventory = true
-        Task {
-            await withTaskGroup(of: (Int, FfiShellSnapshot?).self) { group in
-                for (index, source) in sources.enumerated() {
-                    let (_, session, identity) = source
-                    group.addTask { (index, await session.cachedShell(identity: identity)) }
-                }
-                for await (index, snapshot) in group {
-                    let (owner, _, identity) = sources[index]
-                    if let snapshot, owner.shell == nil,
-                       owner.environmentId == identity || owner.coldLaunchSession?.orbitServerId == identity {
-                        owner.shell = snapshot
-                    }
-                }
-            }
-            restoringLaunchInventory = false
-            updateWorkspaceVisibility()
-        }
+    /// Opens the thread the workspace will restore (its saved route) at launch, before any view
+    /// exists, so its rows are in place when the thread view appears instead of arriving after
+    /// the push while the main thread is busy. The view's own `openThread` then finds it open.
+    private func openRestoredThread() {
+        guard let environment = environmentId, pendingLink == nil,
+              let data = UserDefaults.standard.data(forKey: "workspace.route." + environment),
+              let route = try? JSONDecoder().decode(WorkspaceRoute.self, from: data),
+              case let .thread(threadId, scope: routeScope) = route, routeScope.isEmpty else { return }
+        openThread(threadId)
     }
 
     func discoverLinked() async {
@@ -427,6 +421,7 @@ final class CoreStore {
     }
 
     func openThread(_ threadId: String) {
+        perfMark(stage: "swift.open_thread_call")
         if openThreadId != threadId { openThread = nil }
         Self.openLog.info("open thread=\(threadId, privacy: .public)")
         firstSnapshotLog = threadId
@@ -434,7 +429,11 @@ final class CoreStore {
         // The session closes the scope's other thread, and subscribes this one now or as soon as
         // a connection attaches.
         session?.openThread(threadId: threadId)
-        restoreThread(threadId)
+    }
+
+    /// Older rows above the open thread; its next snapshot carries them.
+    func loadEarlier(threadId: String) {
+        core?.loadEarlier(threadId: threadId)
     }
 
     func closeThread(_ threadId: String) {
@@ -772,17 +771,6 @@ final class CoreStore {
         UserDefaults.standard.removeObject(forKey: "linkedSessions")
     }
 
-    private func restoreThread(_ id: String) {
-        guard let reader = offlineReader, openThread == nil else { return }
-        Task {
-            guard let cached = try? await reader.recent(thread: id),
-                  offlineReader === reader, openThreadId == id,
-                  openThread == nil, !cached.entries.isEmpty else { return }
-            logFirstSnapshot(cached, source: "disk")
-            openThread = cached
-        }
-    }
-
     func reconnect() {
         session?.retry()
     }
@@ -800,9 +788,9 @@ final class CoreStore {
     }
 
     func handleScenePhase(_ phase: ScenePhase) {
+        perfMark(stage: "swift.scene_\(phase)")
         switch phase {
         case .active: session?.foreground()
-        // The core stops its warm thread streams until the app is active again.
         case .background: session?.background()
         default: return
         }
@@ -964,17 +952,11 @@ final class CoreStore {
         }
     }
 
-    /// The cache's saved inbox stands in until the server's arrives.
+    /// The connection's image cache and prompt reader, once its device database is open.
     private func showOffline(_ reader: OfflineReader, connection: UInt64) {
         readerConnection = connection
         offlineReader = reader
-        Task {
-            let saved = await reader.savedShell()
-            guard state?.connectionId == connection else { return }
-            if shell == nil, let saved { shell = saved }
-            updateWorkspaceVisibility()
-            if let id = openThreadId { restoreThread(id) }
-        }
+        updateWorkspaceVisibility()
     }
 
     fileprivate func handleShell(connectionId: UInt64) {
@@ -989,6 +971,7 @@ final class CoreStore {
     fileprivate func handleThread(_ snapshot: FfiThreadSnapshot, connectionId: UInt64) {
         guard session?.state().connectionId == connectionId else { return }
         // An equal snapshot would still re-run every view that reads the thread.
+        if openThreadId == snapshot.threadId, openThread == nil { perfMark(stage: "swift.first_open_snapshot") }
         if openThreadId == snapshot.threadId, openThread != snapshot {
             logFirstSnapshot(snapshot, source: "core")
             BodyCount.tick("store.thread")

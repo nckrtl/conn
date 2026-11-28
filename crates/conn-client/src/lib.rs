@@ -189,6 +189,11 @@ pub enum ClientEvent {
         thread_id: String,
         item: conn_contract::OrchestrationV2ThreadStreamItem,
     },
+    /// A store-owned thread stream sent an item this client cannot decode: the store must
+    /// keep its cursor where it is, so the next catch-up sends the change again.
+    ThreadStale {
+        thread_id: String,
+    },
     /// Server→desktop agent panel request (`panels.requests`: `panel_open`, `database_query`,
     /// `mcp_connect`, `mcp_call`). Auto-resubscribed on WebSocket reconnect.
     PanelRequest(conn_contract::source::DesktopPanelRequest),
@@ -882,6 +887,27 @@ impl Connection {
         let _ = self
             .cmd_tx
             .send(Command::SubscribeThread(thread_id.to_owned()));
+    }
+
+    /// Subscribes `thread_id` for a local store that owns its cursor: the stream opens with the
+    /// rows changed after `after` (`changesAfterSequence`), or a bounded snapshot when `after` is
+    /// `None` or the server cannot patch. The cursor moves only through
+    /// [`Self::set_thread_cursor`]. Subscribing again re-ranks it: lower `priority` resubscribes
+    /// first after a reconnect.
+    pub fn subscribe_thread_from(&self, thread_id: &str, after: Option<i64>, priority: u32) {
+        let _ = self.cmd_tx.send(Command::SubscribeThreadFrom {
+            thread_id: thread_id.to_owned(),
+            after,
+            priority,
+        });
+    }
+
+    /// The store committed `thread_id` through `after`; a reconnect resumes from there.
+    pub fn set_thread_cursor(&self, thread_id: &str, after: i64) {
+        let _ = self.cmd_tx.send(Command::SetThreadCursor {
+            thread_id: thread_id.to_owned(),
+            after,
+        });
     }
 
     /// Requests a new bounded projection even when a previous stream can resume.

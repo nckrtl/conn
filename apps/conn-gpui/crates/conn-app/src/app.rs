@@ -41,15 +41,11 @@ pub(crate) mod details_schedules;
 pub(crate) mod details_tasks;
 mod hover_prefetch;
 mod linked;
-mod offline;
 mod preview;
 mod rail_workspaces;
 #[cfg(test)]
 mod reconnect_tests;
 mod regions;
-mod residency;
-#[cfg(test)]
-mod residency_tests;
 mod send_pending;
 #[cfg(test)]
 mod send_pending_tests;
@@ -61,6 +57,7 @@ mod thread_links;
 #[cfg(test)]
 mod thread_links_tests;
 mod thread_panels;
+mod threads;
 
 pub(crate) use self::sidebar_more::PressMode;
 
@@ -275,7 +272,6 @@ struct FilesSubscription {
 pub(crate) struct ConnApp {
     tokens: Tokens,
     geometry: ShellGeometry,
-    offline: offline::Offline,
     shell: ShellState,
     /// What the primary shell items applied since the app last caught up with them changed
     /// ([`ConnApp::settle_shell`]): a burst of items is settled once.
@@ -295,8 +291,8 @@ pub(crate) struct ConnApp {
     /// True when the active connection came from `CONN_GPUI_*` env vars (skip overwriting
     /// persisted user `server.json`).
     env_pinned_server: bool,
-    /// Timelines of subscribed threads, by thread id.
-    threads: HashMap<String, ThreadState>,
+    /// Thread state: each environment's engine, and what is open in it (`app/threads.rs`).
+    threads: threads::Threads,
     chat: Entity<crate::chat::ChatView>,
     right_panel: Entity<crate::panels::RightPanel>,
     /// Thread streams the server ended (for example a thread launched a moment before the
@@ -447,21 +443,17 @@ pub(crate) struct ConnApp {
     /// Child threads subscribed for their approvals (`app/child_approvals.rs`).
     child_approvals: child_approvals::ChildApprovals,
     /// Thread stream started by sidebar hover (`app/hover_prefetch.rs`).
-    speculative: hover_prefetch::SpeculativeThreads<Connection>,
-    /// Threads a draft launch subscribed directly, until they are opened.
-    launched_threads: HashSet<String>,
-    /// The threads opened last, whose timelines stay in memory (`app/residency.rs`).
-    recent_threads: residency::RecentThreads,
+    speculative: hover_prefetch::SpeculativeThreads,
     /// Live control socket server handle (dropped on app exit).
     _control_server: Option<conn_desktop::control::ControlServerHandle>,
     /// Background task draining `conn://` URLs and Unix control socket requests.
     _activation_task: Option<gpui_kit::Task<()>>,
-    /// Thread id currently subscribed via `orchestration.subscribeThread` on `self.connection`.
-    subscribed_thread_id: Option<String>,
     /// Thread opened at this instant, for `CONN_GPUI_PERF_LOG` stage timings.
     perf_open: Option<(String, std::time::Instant)>,
     /// `perf_open` not yet handed to the chat view (which logs the first paint).
     perf_open_pending_chat: bool,
+    /// `sync.shell_current` not yet logged for this connection.
+    perf_shell_pending: bool,
     /// Project id currently subscribed to `annotations.subscribe` on `self.connection`.
     subscribed_annotation_project: Option<String>,
     files_subscription: Option<FilesSubscription>,
@@ -816,11 +808,7 @@ impl ConnApp {
         let keystroke_interceptor = cx.intercept_keystrokes(move |event, window, cx| {
             let _ = this.update(cx, |app, cx| app.intercept_keystroke(event, window, cx));
         });
-        let offline = if connection.is_some() {
-            offline::Offline::new()
-        } else {
-            offline::Offline::default()
-        };
+        let threads = threads::Threads::new(connection.is_some());
         let (preview_ui_tx, preview_ui_rx) = tokio::sync::mpsc::unbounded_channel();
         let regions = regions::ShellRegions::new(cx);
         let mut app = Self {
@@ -837,7 +825,7 @@ impl ConnApp {
             status: None,
             sends: send_pending::PendingSends::default(),
             env_pinned_server,
-            threads: HashMap::new(),
+            threads,
             chat,
             right_panel,
             ended_threads: HashSet::new(),
@@ -919,26 +907,24 @@ impl ConnApp {
             orbit,
             pending_open_thread: None,
             sender_open_generation: 0,
-            offline,
             linked: linked::LinkedEnvironments::load(),
             child_approvals: child_approvals::ChildApprovals::default(),
             speculative: hover_prefetch::SpeculativeThreads::default(),
-            launched_threads: HashSet::new(),
-            recent_threads: residency::RecentThreads::default(),
             _control_server: None,
             _activation_task: None,
-            subscribed_thread_id: None,
             thread_hover: ThreadHoverState::default(),
             perf_open: None,
             perf_open_pending_chat: false,
+            perf_shell_pending: true,
             subscribed_annotation_project: None,
             files_subscription: None,
             annotations: Vec::new(),
             annotation_watching_threads: HashSet::new(),
             annotation_last_sent: HashMap::new(),
         };
-        app.restore_offline_shell();
-        app.expire_offline(cx);
+        if let (Some(env), Some(connection)) = (app.server_url.clone(), app.connection.clone()) {
+            app.start_engine(&env, connection, cx);
+        }
         app.restore_saved_drafts(cx);
         app.restore_thread_panels(cx);
         let preview_handles = app.preview_host.handles();
@@ -1519,7 +1505,7 @@ impl ConnApp {
         self.refresh_selected_outline(cx);
         self.sync_chat_environment(cx);
         self.sync_thread_directory(cx);
-        let child_approvals = self.sync_child_approvals();
+        let child_approvals = self.sync_child_approvals(cx);
         self.sync_files_subscription();
         let selected = self.layout.selected_thread_id.as_deref();
         let shell_thread = selected.and_then(|id| self.shell.find_thread(id));
@@ -1546,9 +1532,18 @@ impl ConnApp {
                     .and_then(|d| self.shell.project(&d.project_id))
                     .map(|p| p.workspace_root.clone())
             });
+        let perf_open = if self.perf_open_pending_chat {
+            self.perf_open_pending_chat = false;
+            self.perf_open.clone()
+        } else {
+            None
+        };
+        let perf_source = selected
+            .filter(|_| conn_client::perf::enabled())
+            .and_then(|id| self.thread_source(id));
         let thread_connected = selected.is_some_and(|id| self.thread_connected(id));
         let outline = selected.and_then(|id| self.cached_outline(id));
-        let timeline = selected.and_then(|id| self.threads.get(id));
+        let timeline = selected.and_then(|id| self.thread(id));
         let fallback = selected.map(conn_state::ThreadState::new);
         let thread = timeline.or(fallback.as_ref());
         let subagent_children = thread
@@ -1656,16 +1651,13 @@ impl ConnApp {
         let branch_context = self.branch_context(shell_thread, &branch);
         let has_projects = self.shell.projects.iter().any(|p| p.archived_at.is_none());
         let connected = self.connection.is_some();
-        let perf_open = if self.perf_open_pending_chat {
-            self.perf_open_pending_chat = false;
-            self.perf_open.clone()
-        } else {
-            None
-        };
         let preferred_editor = self.thread_details.preferred_editor;
         self.chat.update(cx, |chat, cx| {
             if let Some((perf_thread, opened_at)) = perf_open {
                 chat.set_perf_open(perf_thread, opened_at);
+            }
+            if let Some(source) = perf_source {
+                chat.set_perf_source(source);
             }
             chat.set_shell_availability(has_projects, connected, cx);
             chat.set_draft(draft_view, cx);
@@ -1732,8 +1724,8 @@ impl ConnApp {
 
     /// Applies one batch of the primary connection's events. A run of shell items is applied
     /// item by item but settled once ([`Self::settle_shell`]), before the next event of another
-    /// kind and at the end, so a burst re-merges the linked shells and refreshes the offline
-    /// cache once, not once per item.
+    /// kind and at the end, so a burst re-merges the linked shells and brings the kept threads in
+    /// line once, not once per item.
     fn apply_batch(
         &mut self,
         batch: Vec<ClientEvent>,
@@ -1758,9 +1750,8 @@ impl ConnApp {
         }
         self.settle_shell(cx);
         if shell_changed {
-            self.offline_follow_shell(cx);
+            self.schedule_kept(cx);
         }
-        self.schedule_offline_save(cx);
         if status_changed {
             self.refresh_settings_orbit_info(cx);
         }
@@ -1786,11 +1777,10 @@ impl ConnApp {
             return;
         };
         self.merge_after_primary_change(&change);
-        // The saved shell holds threads and projects. Items that only move the sequence are not
-        // worth rewriting megabytes for.
-        if change.projects_changed || !change.threads_changed.is_empty() {
-            self.offline.shell_changed();
+        if self.shell.synchronized && std::mem::take(&mut self.perf_shell_pending) {
+            conn_client::perf::shell_current();
         }
+        self.save_primary_shell(false);
         if self.shell.synchronized
             && self
                 .layout
@@ -1798,7 +1788,6 @@ impl ConnApp {
                 .as_deref()
                 .is_some_and(|id| self.shell.find_thread(id).is_none())
         {
-            self.unsubscribe_open_thread();
             self.layout.selected_thread_id = None;
         }
         self.release_settled_drop();
@@ -1818,7 +1807,12 @@ impl ConnApp {
         {
             self.pending_open_thread = None;
             self.select_thread(pending_id, cx);
-        } else if self.layout.selected_thread_id.is_none() && self.draft.is_none() {
+        } else if self.layout.selected_thread_id.is_none()
+            && self.draft.is_none()
+            // A saved list's order is the last launch's: open the newest thread only once the
+            // server's list says which one that is now.
+            && self.shell.synchronized
+        {
             let initial = self
                 .shell
                 .top_level_active_threads()
@@ -1832,8 +1826,8 @@ impl ConnApp {
         }
     }
 
-    /// Whether `event` can change what the window shows. Items of the offline cache's background
-    /// thread streams cannot, and there are hundreds of those streams.
+    /// Whether `event` can change what the window shows. Items of the engine's kept thread
+    /// streams cannot, and there are hundreds of those streams.
     fn event_shows(&self, event: &ClientEvent) -> bool {
         match event {
             ClientEvent::Thread { thread_id, .. } => self.thread_on_screen(thread_id),
@@ -1841,12 +1835,10 @@ impl ConnApp {
         }
     }
 
-    /// Whether `thread_id`'s timeline feeds the window: it is open, launching, or a child whose
-    /// approval its parent shows.
+    /// Whether `thread_id`'s timeline feeds the window: it is selected, or a child whose approval
+    /// its parent shows.
     fn thread_on_screen(&self, thread_id: &str) -> bool {
         self.layout.selected_thread_id.as_deref() == Some(thread_id)
-            || self.subscribed_thread_id.as_deref() == Some(thread_id)
-            || self.launched_threads.contains(thread_id)
             || self.child_approvals.holds(thread_id)
     }
 
@@ -1873,11 +1865,7 @@ impl ConnApp {
                     // A reconnect may reach another server: its next snapshot confirms who.
                     self.primary_confirmed = false;
                 }
-                if !matches!(status, ConnectionStatus::Connected)
-                    && let Some(env) = self.server_url.as_deref()
-                {
-                    self.offline.disconnected(env);
-                }
+                self.perf_shell_pending = true;
                 self.status = Some(status);
             }
             ClientEvent::BearerIssued(token) => {
@@ -1903,9 +1891,6 @@ impl ConnApp {
                 self.apply_shell_item(item);
                 self.settle_shell(cx);
             }
-            // A late item of a stream dropped with its reducer finds nobody to apply to.
-            ClientEvent::Thread { thread_id, .. }
-                if self.thread_item_is_orphaned(self.server_url.as_deref(), &thread_id) => {}
             ClientEvent::Thread { thread_id, item } => {
                 let perf_kind = self
                     .perf_open
@@ -1913,24 +1898,22 @@ impl ConnApp {
                     .filter(|(id, _)| *id == thread_id)
                     .map(|(_, opened_at)| (thread_stream_item_kind(&item), *opened_at));
                 let apply_start = std::time::Instant::now();
-                if let Some(env) = self.server_url.clone() {
-                    self.apply_cache_stream(&env, &thread_id, item);
-                } else {
-                    self.threads
-                        .entry(thread_id.clone())
-                        .or_insert_with(|| ThreadState::new(&thread_id))
-                        .apply(item);
-                }
+                let env = self.server_url.clone();
+                self.apply_thread_item(env.as_deref(), &thread_id, item);
                 if let Some((kind, opened_at)) = perf_kind
                     && kind != "event"
                 {
                     conn_client::perf_log!(
                         "app.applied thread={thread_id} kind={kind} entries={} apply_ms={:.1} +{:.1}ms",
-                        self.threads.get(&thread_id).map_or(0, |t| t.entries.len()),
+                        self.thread(&thread_id).map_or(0, |t| t.entries.len()),
                         conn_client::perf::ms_since(apply_start),
                         conn_client::perf::ms_since(opened_at),
                     );
                 }
+            }
+            ClientEvent::ThreadStale { thread_id } => {
+                let env = self.server_url.clone();
+                self.thread_stale(env.as_deref(), &thread_id);
             }
             ClientEvent::ServerConfig(event) => self.apply_server_config_event(*event, cx),
             ClientEvent::PanelRequest(request) => {
@@ -1961,16 +1944,15 @@ impl ConnApp {
                         (None, None) => {}
                     }
                 }
-                // A stream nobody wants any more (closed thread, dropped prefetch) stays down.
-                if tag == "orchestration.subscribeThread"
-                    && self.threads.contains_key(&key)
-                    && self.thread_stream_wanted(&key)
-                {
+                if tag == "orchestration.subscribeThread" && self.keeps_stream(&key) {
+                    // A refused stream stays down until the next connection: asking again at once
+                    // loops against a server that refuses it.
                     if let Some(error) = error {
                         eprintln!("thread stream {key} ended: {error}");
+                    } else {
+                        self.ended_threads.insert(key);
+                        self.resubscribe_ended_threads();
                     }
-                    self.ended_threads.insert(key);
-                    self.resubscribe_ended_threads();
                 }
             }
         }
@@ -2052,15 +2034,6 @@ impl ConnApp {
 
     /// Resubscribes ended thread streams whose thread the shell now lists.
     fn resubscribe_ended_threads(&mut self) {
-        let released: Vec<String> = self
-            .ended_threads
-            .iter()
-            .filter(|id| !self.thread_stream_wanted(id))
-            .cloned()
-            .collect();
-        for id in released {
-            self.ended_threads.remove(&id);
-        }
         let ready: Vec<String> = self
             .ended_threads
             .iter()
@@ -2068,142 +2041,25 @@ impl ConnApp {
             .cloned()
             .collect();
         for id in ready {
-            let Some(connection) = self.connection_for_thread(&id) else {
-                continue;
-            };
             self.ended_threads.remove(&id);
-            connection.subscribe_thread(&id);
+            self.resubscribe_thread(&id);
         }
     }
 
-    /// Selects `thread_id` and subscribes to its timeline once.
+    /// Selects `thread_id`; the next chat sync opens it in its environment's engine.
     fn open_thread(&mut self, thread_id: String) {
-        self.restore_offline_chat(&thread_id);
         self.park_active_draft();
         if conn_client::perf::enabled()
             && self.layout.selected_thread_id.as_deref() != Some(thread_id.as_str())
         {
-            let cached = self.threads.get(&thread_id).map(|t| t.entries.len());
+            let cached = self.thread(&thread_id).map(|t| t.entries.len());
             conn_client::perf_log!("app.open_thread thread={thread_id} cached_entries={cached:?}");
             self.perf_open = Some((thread_id.clone(), std::time::Instant::now()));
             self.perf_open_pending_chat = true;
         }
-        if self.connection.is_some()
-            && self.subscribed_thread_id.as_deref() != Some(thread_id.as_str())
-        {
-            self.subscribe_open_thread(&thread_id);
-        }
-        self.recent_threads.touch(&thread_id);
+        // A hover prefetch of this thread is the open thread now.
+        self.speculative.promote(&thread_id);
         self.layout.selected_thread_id = Some(thread_id);
-        // The thread left behind may be one too many to keep (`app/residency.rs`).
-        self.evict_cold_threads();
-    }
-
-    /// Fetches the next older history page for the currently selected bounded thread and prepends
-    /// its entries into [`ThreadState`] without losing the user's scroll position.
-    fn load_earlier_history(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(thread_id) = self.layout.selected_thread_id.clone() else {
-            return;
-        };
-        if self.load_cached_page(&thread_id) {
-            self.sync_chat(cx);
-            return;
-        }
-        let Some(connection) = self
-            .connection_for_thread(&thread_id)
-            .filter(|_| self.thread_connected(&thread_id))
-        else {
-            if let Some(thread) = self.threads.get_mut(&thread_id) {
-                thread.has_more_history = false;
-            }
-            self.sync_chat(cx);
-            return;
-        };
-        let env = self.cache_env(&thread_id).map(str::to_owned);
-        let snapshot_cursor = self.offline.snapshot_cursor(env.as_deref(), &thread_id);
-        let (cursor, anchor) = {
-            let Some(thread) = self.threads.get_mut(&thread_id) else {
-                return;
-            };
-            if !thread.has_more_history || thread.loading_earlier {
-                return;
-            }
-            let Some(first) = thread.entries.first() else {
-                return;
-            };
-            thread.loading_earlier = true;
-            (thread.history_cursor.clone(), first.id().to_owned())
-        };
-        self.sync_chat(cx);
-
-        let generation = self.connection_gen;
-        let serial = self.offline.snapshot_serial(env.as_deref(), &thread_id);
-        let expected_anchor = anchor.clone();
-        let expected_cursor = cursor.clone();
-        let req_thread_id = thread_id.clone();
-
-        cx.spawn(async move |this, cx| {
-            let task = crate::live::RT.spawn(async move {
-                if let Some(cursor) = cursor {
-                    connection
-                        .fetch_thread_history_page(&req_thread_id, &cursor)
-                        .await
-                } else {
-                    let cursor = snapshot_cursor.ok_or_else(|| {
-                        conn_client::ClientError::Connection(
-                            "waiting for the bounded thread snapshot".to_owned(),
-                        )
-                    })?;
-                    connection
-                        .fetch_history_before_message(&req_thread_id, &cursor, &anchor)
-                        .await
-                }
-            });
-            let result = match task.await {
-                Ok(res) => res,
-                Err(join_err) => Err(conn_client::ClientError::Connection(format!(
-                    "thread history task failed: {join_err}"
-                ))),
-            };
-            let _ = this.update(cx, |app, cx| {
-                if app.connection_gen != generation
-                    || app.cache_env(&thread_id) != env.as_deref()
-                    || app.offline.snapshot_serial(env.as_deref(), &thread_id) != serial
-                {
-                    return;
-                }
-                if let Some(thread) = app.threads.get_mut(&thread_id) {
-                    if thread.history_cursor == expected_cursor
-                        && thread
-                            .entries
-                            .first()
-                            .is_some_and(|entry| entry.id() == expected_anchor)
-                    {
-                        match result {
-                            Ok(page) => {
-                                thread.prepend_history_page(page);
-                                if let Some(env) = &env {
-                                    app.offline.task_links_changed(env, &thread_id);
-                                    app.schedule_offline_save(cx);
-                                }
-                            }
-                            Err(err) => {
-                                eprintln!(
-                                    "conn-app: failed to load earlier history ({thread_id}): {err}"
-                                );
-                                thread.loading_earlier = false;
-                            }
-                        }
-                    } else {
-                        thread.loading_earlier = false;
-                    }
-                }
-                if app.layout.selected_thread_id.as_deref() == Some(thread_id.as_str()) {
-                    app.sync_chat(cx);
-                }
-            });
-        })
-        .detach();
     }
 
     #[cfg(feature = "automation")]
@@ -2398,7 +2254,6 @@ impl ConnApp {
         window: Option<&mut Window>,
         cx: &mut Context<'_, Self>,
     ) {
-        self.unsubscribe_open_thread();
         self.layout.selected_project_id = Some(session.project_id.clone());
         self.layout.selected_thread_id = None;
         let frozen = self.sidebar_row_of_opening_draft(&session, cx);
@@ -2830,7 +2685,7 @@ impl ConnApp {
                     .layout
                     .selected_thread_id
                     .as_deref()
-                    .and_then(|id| self.threads.get(id))
+                    .and_then(|id| self.thread(id))
                     .is_some_and(|t| t.working),
         }
     }
@@ -2887,7 +2742,7 @@ impl ConnApp {
             .project(&thread.project_id)?
             .workspace_root
             .clone();
-        let working = self.threads.get(&thread.id).is_some_and(|t| t.working);
+        let working = self.thread(&thread.id).is_some_and(|t| t.working);
         Some((root, thread.worktree_path.clone(), working))
     }
 
@@ -3200,9 +3055,11 @@ impl ConnApp {
                                 .to_owned(),
                         };
                         if let Ok(res) = parsed {
-                            let mut state = ThreadState::new(final_thread_id.clone());
-                            state.apply_projection(res.projection, res.sequence);
-                            app.threads.insert(final_thread_id.clone(), state);
+                            app.remember_launch(
+                                final_thread_id.clone(),
+                                res.projection,
+                                res.sequence,
+                            );
                         }
                         // The thread replaces the draft (`finalizePromotedDraftThread`). Someone who
                         // moved on to another thread meanwhile stays there.
@@ -3225,8 +3082,6 @@ impl ConnApp {
                         }
                         app.record_launched_thread(&final_thread_id, &project_id);
                         app.ended_threads.remove(&final_thread_id);
-                        app.claim_launched_stream(&final_thread_id);
-                        connection.subscribe_thread(&final_thread_id);
                         app.chat.update(cx, |chat, cx| chat.set_error(None, cx));
                         app.sync_chat(cx);
                         app.settle_drafts(cx);
@@ -3332,7 +3187,7 @@ impl ConnApp {
         send_window: Option<gpui_kit::AnyWindowHandle>,
         cx: &mut Context<'_, Self>,
     ) {
-        let thread = self.threads.get(&thread_id);
+        let thread = self.thread(&thread_id);
         let working = thread.is_some_and(|t| t.working);
         // Steer the running turn when asked (`steer_active`); otherwise queue after it.
         let steer_target = if working && dispatch == crate::chat::SendDispatch::Steer {
@@ -3405,8 +3260,7 @@ impl ConnApp {
             return;
         };
         let pending = self
-            .threads
-            .get(&thread_id)
+            .thread(&thread_id)
             .map(conn_state::ThreadState::pending_approvals)
             .unwrap_or_default();
         // Approvals the typing guard holds stay unseen and pending (`shownPendingApprovalIds`).
@@ -3532,8 +3386,7 @@ impl ConnApp {
                 }
                 let arrived = crate::chat::approval_arrived(
                     &pending_before,
-                    &app.threads
-                        .get(&thread_id)
+                    &app.thread(&thread_id)
                         .map(conn_state::ThreadState::pending_approvals)
                         .unwrap_or_default(),
                 );
@@ -3611,8 +3464,7 @@ impl ConnApp {
             return;
         };
         let Some(request_id) = self
-            .threads
-            .get(&thread_id)
+            .thread(&thread_id)
             .and_then(|t| t.approval_requests.get(entry_id))
             .cloned()
         else {
@@ -3764,8 +3616,7 @@ impl ConnApp {
             return;
         };
         let active_run_id = self
-            .threads
-            .get(&thread_id)
+            .thread(&thread_id)
             .and_then(|t| t.active_run_id().map(str::to_owned));
         let command = match active_run_id {
             Some(target_run_id) => {
@@ -4208,7 +4059,7 @@ impl ConnApp {
         }
 
         let entry_count = state.entries.len();
-        self.threads.insert(thread_id.clone(), state);
+        self.insert_local_thread(thread_id.clone(), state);
         self.layout.selected_thread_id = Some(thread_id.clone());
         self.park_active_draft();
 
@@ -5010,7 +4861,7 @@ impl ConnApp {
         thread: ThreadState,
         cx: &mut Context<'_, Self>,
     ) {
-        self.threads.insert(thread_id.clone(), thread);
+        self.insert_local_thread(thread_id.clone(), thread);
         self.layout.selected_thread_id = Some(thread_id.clone());
         if let Some(shell_thread) = self.shell.find_thread(&thread_id) {
             self.layout.selected_project_id = Some(shell_thread.project_id.clone());
@@ -5909,7 +5760,6 @@ impl ConnApp {
                 app.forget_thread_draft(&deleted, cx);
                 app.release_thread_panel(&owner, cx);
                 app.forget_thread_terminal(terminal_env.as_deref(), &deleted, cx);
-                app.recent_threads.remove(&deleted);
             },
         );
     }
@@ -5943,7 +5793,8 @@ impl ConnApp {
                     let minute = now / 60;
                     let new_minute = minute != last_minute;
                     if new_minute {
-                        app.expire_offline(cx);
+                        // Threads leave the keep window as time passes.
+                        app.schedule_kept(cx);
                     }
                     if app.thread_details.open || new_minute {
                         last_minute = minute;
@@ -6746,7 +6597,7 @@ impl ConnApp {
     /// The selected thread for its details: the shell row, else the open thread's record.
     pub(crate) fn selected_thread_record(&self) -> Option<ThreadRecord<'_>> {
         let id = self.layout.selected_thread_id.as_deref()?;
-        ThreadRecord::resolve(&self.shell, self.threads.get(id), id)
+        ThreadRecord::resolve(&self.shell, self.thread(id), id)
     }
 
     /// The selected thread's timeline, when subscribed.
@@ -6754,7 +6605,7 @@ impl ConnApp {
         self.layout
             .selected_thread_id
             .as_deref()
-            .and_then(|id| self.threads.get(id))
+            .and_then(|id| self.thread(id))
     }
 
     pub(crate) fn connection(&self) -> Option<&Connection> {
@@ -6939,8 +6790,7 @@ impl ConnApp {
         };
         let watching = self.annotation_watching_threads.contains(&thread_id);
         let thread_idle = !self
-            .threads
-            .get(&thread_id)
+            .thread(&thread_id)
             .is_some_and(|timeline| timeline.working);
         let last_sent = self
             .annotation_last_sent
@@ -7621,16 +7471,14 @@ impl ConnApp {
     /// Forgets the old server's shell, threads and selection when the app switches servers.
     /// Right-panel tabs stay: they are not the server's, and the thread may come back.
     fn reset_environment_state(&mut self) {
-        self.offline = offline::Offline::new();
+        self.threads.reset();
         self.primary_confirmed = false;
         self.reset_linked_environments();
         self.scratch_project_id = None;
         self.scratch_workspace_root = None;
         self.shell = ShellState::default();
         self.server_config = std::sync::Arc::default();
-        self.threads.clear();
         self.ended_threads.clear();
-        self.subscribed_thread_id = None;
         self.reset_child_approvals();
         self.reset_speculative();
         self.subscribed_annotation_project = None;
@@ -7667,7 +7515,9 @@ impl ConnApp {
         Self::pump_events(generation, orbit_server_id, events, cx);
 
         self.connection = Some(connection.clone());
-        self.restore_offline_shell();
+        if let Some(env) = self.server_url.clone() {
+            self.start_engine(&env, connection.clone(), cx);
+        }
         let environment_key = self.server_url.clone();
         self.chat.update(cx, |chat, cx| {
             chat.set_error(None, cx);

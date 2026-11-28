@@ -241,6 +241,55 @@ impl Transport for WebSocket {
     }
 }
 
+/// The main `/ws` socket: permessage-deflate when the client offers it (browsers do).
+/// Neither direction keeps its deflate context between messages, so an idle connection holds
+/// no deflate state: a message borrows it from [`DEFLATE_POOL`] and gives it back. A catch-up
+/// chunk carries up to [`MAX_CHUNK_VALUES`] items, so most of the gain stays within a message.
+pub fn deflate_options(max_message_bytes: usize) -> yawc::Options {
+    static DEFLATE_POOL: std::sync::LazyLock<yawc::DeflatePool> =
+        std::sync::LazyLock::new(|| yawc::DeflatePool::new(2));
+    yawc::Options::default()
+        .with_max_payload_read(max_message_bytes)
+        .with_utf8()
+        .with_compression_level(yawc::CompressionLevel::fast())
+        .server_no_context_takeover()
+        .client_no_context_takeover()
+        .with_deflate_pool(DEFLATE_POOL.clone())
+        .with_compression_threshold(256)
+}
+
+impl Transport for yawc::HttpWebSocket {
+    async fn recv(&mut self) -> Incoming {
+        loop {
+            return match self.next_frame().await {
+                Ok(frame) => match frame.opcode() {
+                    // `with_utf8` checked the text already.
+                    yawc::OpCode::Text => match String::from_utf8(frame.into_payload().into()) {
+                        Ok(text) => Incoming::Text(text),
+                        Err(_) => Incoming::Closed,
+                    },
+                    yawc::OpCode::Close => Incoming::Closed,
+                    // yawc answers pings itself.
+                    _ => continue,
+                },
+                Err(yawc::WebSocketError::FrameTooLarge) => Incoming::TooLarge,
+                Err(_) => Incoming::Closed,
+            };
+        }
+    }
+
+    async fn send(&mut self, text: String) -> bool {
+        futures_util::SinkExt::send(self, yawc::Frame::text(text))
+            .await
+            .is_ok()
+    }
+
+    async fn close(&mut self, code: u16, reason: &'static str) {
+        let frame = yawc::Frame::close(code.into(), reason);
+        let _ = futures_util::SinkExt::send(self, frame).await;
+    }
+}
+
 /// A frame from a call task to the loop.
 #[derive(Debug)]
 enum Out {

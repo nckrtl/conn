@@ -1,17 +1,15 @@
-//! Sidebar hover prefetch: resting on a thread row starts a speculative `subscribeThread`, a click
-//! reuses it, and one that goes unused is released (`app/hover_prefetch.rs`).
+//! Sidebar hover prefetch: resting on a thread row opens it, a click reuses its stream, and one
+//! that goes unused closes (`app/hover_prefetch.rs`).
 
 use std::time::Duration;
 
 use conn_client::{Credential, ServerConfig};
-use conn_contract::from_json;
 use futures::StreamExt as _;
 use gpui_kit::{Entity, TestAppContext, point, px};
-use serde_json::json;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
-use super::{kitchen_sink_shell, kitchen_sink_thread, mount_app_with_server};
+use super::{kitchen_sink_shell, mount_app_with_server};
 use crate::app::ConnApp;
 use crate::live::RT;
 use crate::sidebar::hover_card_state::OPEN_DELAY;
@@ -160,19 +158,18 @@ fn hovering_a_thread_prefetches_it_once_and_a_click_reuses_the_stream(cx: &mut T
     );
 }
 
-/// Rapid hovering keeps one stream and its reducer: the previous entry goes, its reducer with it
-/// when the prefetch created it; late items of its stream do not bring it back; an ended stream
-/// nobody wants is not asked for again; and an entry nobody hovers again expires.
+/// Rapid hovering keeps one thread open: the previous entry closes, a row that is still hovered
+/// keeps its entry past the TTL, and an entry nobody hovers again closes.
 #[gpui_kit::test]
-fn rapid_hover_keeps_one_speculative_stream_and_its_cached_thread(cx: &mut TestAppContext) {
+fn rapid_hover_keeps_one_prefetched_thread_open(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let (server, _requests) = thread_subscribe_server();
     let (_window, app) = mount_app_with_server(cx, Some(server));
     wait_until_connected(cx, &app);
     let speculative =
         |cx: &mut TestAppContext| cx.read(|cx| app.read(cx).speculative_threads_for_test());
-    let cached =
-        |cx: &mut TestAppContext, id: &str| cx.read(|cx| app.read(cx).thread_cached_for_test(id));
+    let open =
+        |cx: &mut TestAppContext, id: &str| cx.read(|cx| app.read(cx).thread_open_for_test(id));
     let prefetch = |cx: &mut TestAppContext, id: &str| {
         cx.update(|cx| {
             app.update(cx, |app, cx| app.prefetch_hovered_thread(id, cx));
@@ -180,82 +177,41 @@ fn rapid_hover_keeps_one_speculative_stream_and_its_cached_thread(cx: &mut TestA
     };
 
     cx.update(|cx| {
-        app.update(cx, |app, cx| {
-            app.set_shell(kitchen_sink_shell(), cx);
-            // Two cached threads; the last one is the selected one.
-            app.set_thread_for_test("thread-working-bg".to_owned(), kitchen_sink_thread(), cx);
-            app.set_thread_for_test("thread-waiting".to_owned(), kitchen_sink_thread(), cx);
-        });
+        app.update(cx, |app, cx| app.set_shell(kitchen_sink_shell(), cx));
     });
     prefetch(cx, "thread-working-bg");
     assert_eq!(speculative(cx), ["thread-working-bg"]);
+    assert!(open(cx, "thread-working-bg"));
     prefetch(cx, "thread-pinned");
     assert_eq!(speculative(cx), ["thread-pinned"]);
-    assert!(
-        cached(cx, "thread-working-bg"),
-        "a thread cached before the prefetch keeps its reducer"
-    );
-    // Its stream was released, so its end is not retried.
-    cx.update(|cx| {
-        app.update(cx, |app, cx| {
-            app.end_thread_stream_for_test("thread-working-bg", cx)
-        });
-    });
-    assert!(!cx.read(|cx| app.read(cx).ended_thread_for_test("thread-working-bg")));
-
-    prefetch(cx, "thread-failed");
-    assert_eq!(speculative(cx), ["thread-failed"]);
-    assert!(
-        !cached(cx, "thread-pinned"),
-        "a reducer the prefetch created goes with its entry"
-    );
-
-    // A late item of the dropped stream finds no reducer and does not bring one back.
-    let late: conn_contract::OrchestrationV2ThreadStreamItem =
-        match from_json(json!({ "kind": "synchronized" })) {
-            Ok(item) => item,
-            Err(err) => panic!("synchronized item must decode: {err}"),
-        };
-    cx.update(|cx| {
-        app.update(cx, |app, cx| {
-            app.apply_thread_item_for_test("thread-pinned", late, cx)
-        });
-    });
-    assert!(!cached(cx, "thread-pinned"));
-
-    // Hovering again later starts over.
-    prefetch(cx, "thread-pinned");
-    assert!(cached(cx, "thread-pinned"));
-    assert_eq!(speculative(cx), ["thread-pinned"]);
-    assert!(!cached(cx, "thread-failed"));
+    assert!(open(cx, "thread-pinned"));
+    assert!(!open(cx, "thread-working-bg"), "the previous entry closed");
 
     // A row that is still hovered keeps its entry past the TTL.
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.open_thread_hover_for_test("thread-pinned", cx);
-            app.expire_speculative_for_test(Duration::from_secs(120));
+            app.expire_speculative_for_test(Duration::from_secs(120), cx);
         });
     });
     assert_eq!(speculative(cx), ["thread-pinned"]);
-    assert!(cached(cx, "thread-pinned"));
+    assert!(open(cx, "thread-pinned"));
 
-    // An abandoned entry expires with its reducer.
+    // An abandoned entry closes.
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.dismiss_thread_hover(cx);
-            app.expire_speculative_for_test(Duration::from_secs(240));
+            app.expire_speculative_for_test(Duration::from_secs(240), cx);
         });
     });
     assert!(speculative(cx).is_empty());
-    assert!(!cached(cx, "thread-pinned"));
-    assert!(cached(cx, "thread-working-bg"));
-    assert!(cached(cx, "thread-waiting"));
+    assert!(!open(cx, "thread-pinned"));
 }
 
-/// A thread a draft launch subscribed directly has an owner: hovering it, selected or in the
-/// background, starts no prefetch, so no prefetch can end that stream later.
+/// A thread that is open already is current: hovering it starts no prefetch, so the entry never
+/// closes a thread the screen shows.
 #[gpui_kit::test]
-fn hovering_a_launched_thread_never_takes_its_stream(cx: &mut TestAppContext) {
+fn hovering_an_open_thread_starts_no_prefetch(cx: &mut TestAppContext) {
     cx.executor().allow_parking();
     let (server, _requests) = thread_subscribe_server();
     let (_window, app) = mount_app_with_server(cx, Some(server));
@@ -263,25 +219,16 @@ fn hovering_a_launched_thread_never_takes_its_stream(cx: &mut TestAppContext) {
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.set_shell(kitchen_sink_shell(), cx);
-            // The launch result: cached, subscribed by the launch, and selected.
-            app.set_thread_for_test("thread-pinned".to_owned(), kitchen_sink_thread(), cx);
-            app.claim_launched_stream_for_test("thread-pinned");
-            // A second launch the user left for another thread.
-            app.set_thread_for_test("thread-failed".to_owned(), kitchen_sink_thread(), cx);
-            app.claim_launched_stream_for_test("thread-failed");
             app.select_thread("thread-waiting", cx);
-            for id in ["thread-pinned", "thread-failed"] {
-                app.prefetch_hovered_thread(id, cx);
-            }
+            app.prefetch_hovered_thread("thread-waiting", cx);
         });
     });
     assert!(
         cx.read(|cx| app.read(cx).speculative_threads_for_test())
             .is_empty(),
-        "a launched stream keeps its owner"
+        "the open thread needs no prefetch"
     );
-    assert!(cx.read(|cx| app.read(cx).thread_cached_for_test("thread-pinned")));
-    assert!(cx.read(|cx| app.read(cx).thread_cached_for_test("thread-failed")));
+    assert!(cx.read(|cx| app.read(cx).thread_open_for_test("thread-waiting")));
 }
 
 /// The pointer has to rest for the open delay: a row the pointer only passes, and a list that is
@@ -383,78 +330,5 @@ fn no_prefetch_while_a_thread_menu_is_open(cx: &mut TestAppContext) {
     assert!(
         cx.read(|cx| app.read(cx).speculative_threads_for_test())
             .is_empty()
-    );
-}
-
-/// The same thread id on two environments: a prefetch of one drops nothing of the other's offline
-/// cache, and an item of a stream nobody holds on its own environment is still dropped.
-#[gpui_kit::test]
-fn a_prefetch_compares_environment_and_thread_id_not_the_thread_id_alone(cx: &mut TestAppContext) {
-    cx.executor().allow_parking();
-    let (server, _requests) = thread_subscribe_server();
-    let (_window, app) = mount_app_with_server(cx, Some(server));
-    wait_until_connected(cx, &app);
-    cx.update(|cx| {
-        app.update(cx, |app, cx| app.set_shell(kitchen_sink_shell(), cx));
-    });
-    // `thread-pinned` lives on the primary environment; `other` is a second one with a thread of
-    // the same id.
-    let primary = cx
-        .read(|cx| app.read(cx).cache_env_for_test("thread-pinned"))
-        .expect("the primary environment has an id");
-    let other = "other-env";
-    let orphaned = |cx: &mut TestAppContext, env: &str| {
-        cx.read(|cx| {
-            app.read(cx)
-                .thread_item_is_orphaned_for_test(Some(env), "thread-pinned")
-        })
-    };
-    let cached = |cx: &mut TestAppContext| {
-        cx.read(|cx| app.read(cx).thread_cached_for_test("thread-pinned"))
-    };
-
-    // Prefetching the primary's thread keeps the primary's items, not a stray stream of the
-    // other environment that nothing holds there.
-    cx.update(|cx| {
-        app.update(cx, |app, cx| {
-            app.prefetch_hovered_thread("thread-pinned", cx)
-        });
-    });
-    assert!(cached(cx));
-    assert!(
-        !orphaned(cx, &primary),
-        "the prefetched thread's own items stay"
-    );
-    assert!(
-        orphaned(cx, other),
-        "the prefetch of the primary's thread is not the other environment's stream"
-    );
-
-    // The other environment's offline cache watches its own copy: its items are kept.
-    cx.update(|cx| {
-        app.update(cx, |app, _| {
-            app.watch_cache_stream_for_test(other, "thread-pinned")
-        });
-    });
-    assert!(
-        !orphaned(cx, other),
-        "the other environment's cache items stay"
-    );
-
-    // Moving the prefetch to another row drops the primary's reducer, and with it the primary's
-    // late items. The other environment's cached copy stays.
-    cx.update(|cx| {
-        app.update(cx, |app, cx| {
-            app.prefetch_hovered_thread("thread-failed", cx)
-        });
-    });
-    assert!(!cached(cx), "the reducer the prefetch created is gone");
-    assert!(
-        orphaned(cx, &primary),
-        "a late item of the dropped stream is dropped"
-    );
-    assert!(
-        !orphaned(cx, other),
-        "dropping the primary's prefetch keeps the other environment's cache items"
     );
 }

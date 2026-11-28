@@ -21,12 +21,15 @@ use conn_desktop::orbit::linked::{
     LinkedPlanInput, confirm_gone_environments, plan_linked_environments,
 };
 use conn_desktop::orbit::{LinkedEnvironmentSettings, LinkedStore};
+use conn_state::ShellChange;
 use conn_state::environments::{LinkedShellSnapshot, LinkedShells, Origins};
-use conn_state::{ShellChange, ThreadState};
 use gpui_kit::Context;
 
 use super::ConnApp;
 use crate::panels::terminal_target::{SessionKey, TerminalTarget, is_local_server_url};
+
+/// How often a linked shell is written at most: the file is megabytes.
+pub(super) const SHELL_SAVE_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Orders the writes of linked shells: a later snapshot is never overwritten by an earlier one
 /// that ran slowly, and the quit's write lands last.
@@ -87,8 +90,6 @@ pub(super) struct LinkedEnvironments {
     pair_attempted_at_ms: HashMap<String, i64>,
     /// Where each linked environment answers, for the chat's per-environment draft key.
     urls: HashMap<String, String>,
-    /// The environment the open thread's subscription lives on; `None` is the primary one.
-    subscribed_env: Option<String>,
     /// A child opened from its parent before the linked shell lists it.
     opened_child: Option<(String, String)>,
     /// The General scratch project a linked environment made before its shell lists it.
@@ -182,31 +183,6 @@ impl LinkedEnvironments {
 
     pub(super) fn shell_for_cache(&self, env: &str) -> Option<&conn_state::ShellState> {
         self.shells.shell(env)
-    }
-
-    /// Every linked environment's shell, in order.
-    pub(super) fn cache_shells(&self) -> Vec<(&str, &conn_state::ShellState)> {
-        self.shells.iter().collect()
-    }
-
-    pub(super) fn cache_threads(
-        &self,
-        predicate: impl Fn(&conn_state::ThreadShell) -> bool,
-    ) -> Vec<(String, String)> {
-        let mut keys = Vec::new();
-        for env in self.shells.environments() {
-            if let Some(shell) = self.shells.shell(&env.id) {
-                keys.extend(
-                    shell
-                        .threads
-                        .iter()
-                        .chain(&shell.archived_threads)
-                        .filter(|t| predicate(t))
-                        .map(|t| (env.id.clone(), t.id.clone())),
-                );
-            }
-        }
-        keys
     }
 
     /// Lists `environment_id` again from its saved snapshot (it was switched back on).
@@ -433,15 +409,6 @@ impl ConnApp {
         let status = match self.linked_environment_of_thread(id) {
             Some(env) => self.linked.statuses.get(env),
             None => self.status.as_ref(),
-        };
-        matches!(status, Some(ConnectionStatus::Connected))
-    }
-
-    pub(super) fn cache_environment_connected(&self, env: &str) -> bool {
-        let status = if self.server_url.as_deref() == Some(env) {
-            self.status.as_ref()
-        } else {
-            self.linked.statuses.get(env)
         };
         matches!(status, Some(ConnectionStatus::Connected))
     }
@@ -682,47 +649,6 @@ impl ConnApp {
             .update(cx, |panel, cx| panel.set_connection(Some(connection), cx));
     }
 
-    /// Subscribes the open thread's timeline on its environment's connection, after ending the
-    /// previous subscription on the connection it lives on.
-    pub(super) fn subscribe_open_thread(&mut self, thread_id: &str) {
-        self.unsubscribe_open_thread();
-        let environment = self
-            .linked_environment_of_thread(thread_id)
-            .map(str::to_owned);
-        let Some(connection) = self.connection_for_thread(thread_id) else {
-            return;
-        };
-        self.threads
-            .entry(thread_id.to_owned())
-            .or_insert_with(|| ThreadState::new(thread_id.to_owned()));
-        // A hover prefetch of this thread becomes the open stream: the client holds it already, so
-        // this subscribe sends nothing again.
-        self.speculative.promote(thread_id);
-        self.launched_threads.remove(thread_id);
-        connection.subscribe_thread(thread_id);
-        self.subscribed_thread_id = Some(thread_id.to_owned());
-        self.linked.subscribed_env = environment;
-    }
-
-    /// Ends the open thread's subscription on the connection it was made on.
-    pub(super) fn unsubscribe_open_thread(&mut self) {
-        let Some(previous) = self.subscribed_thread_id.take() else {
-            return;
-        };
-        let owner = self.linked.subscribed_env.take();
-        let connection = match &owner {
-            Some(environment) => self.linked_connection(environment),
-            None => self.connection.clone(),
-        };
-        if let Some(connection) = connection
-            && !self
-                .offline
-                .watching(owner.as_deref().or(self.server_url.as_deref()), &previous)
-        {
-            connection.unsubscribe_thread(&previous);
-        }
-    }
-
     /// Merges the linked environments' shells into `self.shell` again. Call after the primary
     /// shell or a linked one changed.
     pub(super) fn remerge_linked_shells(&mut self) {
@@ -738,8 +664,6 @@ impl ConnApp {
             &self.linked.origins,
         );
         self.linked.merges.full += 1;
-        // Rows may have moved between environments: the offline cache looks at every thread.
-        self.offline.note_all_threads();
     }
 
     /// Catches the merged shell up with primary shell items it already applied in place. Only a
@@ -752,7 +676,6 @@ impl ConnApp {
         {
             self.remerge_linked_shells();
         }
-        self.offline.note_change(change);
     }
 
     /// Catches the merged shell up with the linked environments' shell changes of one batch:
@@ -780,11 +703,10 @@ impl ConnApp {
                 return;
             }
             self.linked.merges.in_place += 1;
-            self.offline.note_threads(&ids);
         }
     }
 
-    /// Catches up with one batch's linked shell changes: the merged shell, the offline cache and
+    /// Catches up with one batch's linked shell changes: the merged shell, the kept threads and
     /// the Settled shelf, once for the whole batch.
     fn settle_linked_changes(
         &mut self,
@@ -795,7 +717,7 @@ impl ConnApp {
             return;
         }
         self.merge_linked_changes(changes);
-        self.offline_follow_shell(cx);
+        self.schedule_kept(cx);
         self.drive_older_pages(cx);
         // A thread started on a linked environment opens once it is listed.
         if let Some(pending_id) = self.pending_open_thread.clone()
@@ -824,7 +746,6 @@ impl ConnApp {
             })
             .collect();
         self.settle_linked_changes(changes, cx);
-        self.schedule_offline_save(cx);
         self.sync_chat(cx);
         cx.notify();
     }
@@ -917,13 +838,12 @@ impl ConnApp {
             .saved_at
             .get(environment)
             .map_or(Duration::ZERO, |at| {
-                super::offline::SHELL_SAVE_INTERVAL
-                    .saturating_sub(now.saturating_duration_since(*at))
+                SHELL_SAVE_INTERVAL.saturating_sub(now.saturating_duration_since(*at))
             })
     }
 
     /// Captures the dirty shells that are due: every one with `flush`, else those not saved within
-    /// [`super::offline::SHELL_SAVE_INTERVAL`]. Only a synced shell is saved, never one that was
+    /// [`SHELL_SAVE_INTERVAL`]. Only a synced shell is saved, never one that was
     /// merely restored. An unsynced one stays dirty until it syncs.
     fn take_linked_shell_writes(&mut self, flush: bool) -> Vec<ShellWrite> {
         let now = Instant::now();
@@ -960,7 +880,7 @@ impl ConnApp {
 
     /// Saves the shells that changed, off the main thread (Conn:
     /// `EnvironmentShellState.persistLatest`). A shell is written at most every
-    /// [`super::offline::SHELL_SAVE_INTERVAL`]: the file is megabytes, and a running thread changes
+    /// [`SHELL_SAVE_INTERVAL`]: the file is megabytes, and a running thread changes
     /// the shell every few seconds. A change inside the interval waits for a timer, and the quit
     /// writes what is left ([`Self::linked_on_quit`]).
     fn schedule_linked_shell_save(&mut self, cx: &mut Context<'_, Self>) {
@@ -999,9 +919,31 @@ impl ConnApp {
         .detach();
     }
 
-    /// Writes the dirty linked shells at quit, at once and in this call, the way
-    /// [`Self::offline_on_quit`] writes the primary one. Waits for a write in flight, so this
-    /// one lands last.
+    /// The writes a quit runs: the primary thread list (queued on its engine), the linked
+    /// shells, then the panel layout (the write in flight finishes, and the latest layout
+    /// follows if it differs).
+    ///
+    /// GPUI gives every quit hook 200 ms in total. The two run side by side, so a slow panel
+    /// write cannot keep the shells from being written: their writes have no await point.
+    pub(super) fn quit_saves(
+        &mut self,
+        cx: &mut Context<'_, Self>,
+    ) -> impl std::future::Future<Output = ()> + use<> {
+        let primary = self.save_primary_shell(true);
+        let linked = self.linked_on_quit();
+        let panels = self.thread_panels_on_quit(cx);
+        async move {
+            let primary = async move {
+                if let Some(written) = primary {
+                    written.await;
+                }
+            };
+            futures::future::join3(primary, linked, panels).await;
+        }
+    }
+
+    /// Writes the dirty linked shells at quit, at once and in this call. Waits for a write in
+    /// flight, so this one lands last.
     pub(super) fn linked_on_quit(&mut self) -> impl std::future::Future<Output = ()> + use<> {
         let store = self.linked.store.clone();
         let writes = if store.is_some() {
@@ -1115,9 +1057,9 @@ impl ConnApp {
         if enabled {
             self.linked.restore_cached(environment_id);
         } else {
-            self.forget_linked_environment(environment_id);
             if let Some(set) = self.linked.set.as_mut() {
                 set.disconnect(environment_id);
+                self.stop_engine(environment_id);
             }
             self.linked.statuses.remove(environment_id);
             self.linked.shells.remove(environment_id);
@@ -1410,7 +1352,6 @@ impl ConnApp {
         self.linked.machines.clear();
         self.linked.configs.clear();
         self.linked.scratch_roots.clear();
-        self.linked.subscribed_env = None;
         self.linked.chat_env = None;
     }
 
@@ -1459,9 +1400,9 @@ impl ConnApp {
             if self.linked.pairing.remove(environment_id) {
                 continue;
             }
-            self.forget_linked_environment(environment_id);
             if let Some(set) = self.linked.set.as_mut() {
                 set.disconnect(environment_id);
+                self.stop_engine(environment_id);
             }
             self.linked.statuses.remove(environment_id);
             // An asleep or unreachable environment keeps listing its saved threads; one the user
@@ -1486,9 +1427,9 @@ impl ConnApp {
             confirm_gone_environments(&known, &targets, &self.linked.missing_since_ms, now);
         self.linked.missing_since_ms = verdict.missing_since_ms;
         for environment_id in &verdict.gone {
-            self.forget_linked_environment(environment_id);
             if let Some(set) = self.linked.set.as_mut() {
                 set.disconnect(environment_id);
+                self.stop_engine(environment_id);
             }
             changed |= self.linked.shells.remove(environment_id);
             self.linked.statuses.remove(environment_id);
@@ -1645,16 +1586,18 @@ impl ConnApp {
             .insert(environment_id.clone(), config.http_base_url.to_string());
         self.linked.shells.ensure(&environment_id, &label);
         let device_name = self.device_name();
-        if let Some(set) = self.linked.set.as_mut() {
-            // Its threads' agents drive their panels here too (`startAgentPanelRequests`
-            // follows every connected environment).
-            set.connect(EnvironmentTarget {
-                environment_id,
-                label,
-                config,
-            })
-            .subscribe_panel_requests(Some(device_name));
-        }
+        let Some(set) = self.linked.set.as_mut() else {
+            return;
+        };
+        // Its threads' agents drive their panels here too (`startAgentPanelRequests`
+        // follows every connected environment).
+        let connection = set.connect(EnvironmentTarget {
+            environment_id: environment_id.clone(),
+            label,
+            config,
+        });
+        connection.subscribe_panel_requests(Some(device_name));
+        self.start_engine(&environment_id, connection, cx);
     }
 
     fn pump_linked_events(
@@ -1676,7 +1619,6 @@ impl ConnApp {
                         .collect();
                     let shells_changed = !changes.is_empty();
                     app.settle_linked_changes(changes, cx);
-                    app.schedule_offline_save(cx);
                     app.schedule_linked_shell_save(cx);
                     if shows || shells_changed {
                         app.sync_chat(cx);
@@ -1714,7 +1656,7 @@ impl ConnApp {
         match event {
             ClientEvent::Status(status) => {
                 if !matches!(status, ConnectionStatus::Connected) {
-                    self.offline.disconnected(&environment_id);
+                    self.linked_shell_synced(&environment_id, false);
                 }
                 if let ConnectionStatus::Failed(message) = &status
                     && is_auth_failure(message)
@@ -1722,9 +1664,9 @@ impl ConnApp {
                     // The stored token no longer works: the next fleet change pairs again.
                     self.orbit.sessions.remove_bearer(&environment_id);
                     self.orbit.persist_sessions();
-                    self.forget_linked_environment(&environment_id);
                     if let Some(set) = self.linked.set.as_mut() {
                         set.disconnect(&environment_id);
+                        self.stop_engine(&environment_id);
                     }
                 }
                 self.linked.statuses.insert(environment_id, status);
@@ -1750,7 +1692,15 @@ impl ConnApp {
                 None
             }
             ClientEvent::Shell(item) => {
+                let synchronized = matches!(
+                    item,
+                    conn_contract::OrchestrationV2ShellStreamItem::Synchronized(_)
+                );
                 let change = self.linked.shells.apply(&environment_id, item)?;
+                if synchronized {
+                    self.linked_shell_synced(&environment_id, true);
+                    self.schedule_kept(cx);
+                }
                 if change.snapshot_required
                     && let Some(connection) = self.linked_connection(&environment_id)
                 {
@@ -1766,27 +1716,24 @@ impl ConnApp {
                 self.linked.dirty.insert(environment_id.clone());
                 Some((environment_id, change))
             }
-            // A late item of a stream dropped with its reducer finds nobody to apply to.
-            ClientEvent::Thread { thread_id, .. }
-                if self.thread_item_is_orphaned(Some(&environment_id), &thread_id) =>
-            {
+            ClientEvent::Thread { thread_id, item } => {
+                self.apply_thread_item(Some(&environment_id), &thread_id, item);
                 None
             }
-            ClientEvent::Thread { thread_id, item } => {
-                self.apply_cache_stream(&environment_id, &thread_id, item);
+            ClientEvent::ThreadStale { thread_id } => {
+                self.thread_stale(Some(&environment_id), &thread_id);
                 None
             }
             ClientEvent::StreamEnded { tag, key, error } => {
-                // A stream nobody wants any more (closed thread, dropped prefetch) stays down.
-                if tag == "orchestration.subscribeThread"
-                    && self.threads.contains_key(&key)
-                    && self.thread_stream_wanted(&key)
-                {
+                if tag == "orchestration.subscribeThread" && self.keeps_stream(&key) {
+                    // A refused stream stays down until the next connection: asking again at once
+                    // loops against a server that refuses it.
                     if let Some(error) = error {
                         eprintln!("thread stream {key} ended: {error}");
+                    } else {
+                        self.ended_threads.insert(key);
+                        self.resubscribe_ended_threads();
                     }
-                    self.ended_threads.insert(key);
-                    self.resubscribe_ended_threads();
                 }
                 None
             }
@@ -1934,9 +1881,7 @@ mod tests {
                 );
                 app.linked.saved_at.insert(
                     "mini".to_owned(),
-                    Instant::now()
-                        - super::super::offline::SHELL_SAVE_INTERVAL
-                        - Duration::from_secs(1),
+                    Instant::now() - super::SHELL_SAVE_INTERVAL - Duration::from_secs(1),
                 );
                 assert_eq!(writes(app, false), 1, "written once the interval passed");
 

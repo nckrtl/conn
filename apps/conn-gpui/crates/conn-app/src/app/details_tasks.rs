@@ -33,7 +33,7 @@ impl ConnApp {
         let (snapshot, next) = state.task_links.next_page()?;
         Some((
             HistoryRequest {
-                environment: self.cache_env(id)?.to_owned(),
+                environment: self.thread_env(id)?.to_owned(),
                 thread: id.to_owned(),
                 generation: self.connection_gen,
                 snapshot: snapshot.to_owned(),
@@ -100,7 +100,7 @@ impl ConnApp {
         if &current != target || next != cursor {
             return None;
         }
-        let state = self.threads.get_mut(&target.thread)?;
+        let state = self.thread_mut(&target.thread)?;
         if !state.task_links.apply_page(&target.snapshot, cursor, page) {
             return None;
         }
@@ -108,9 +108,6 @@ impl ConnApp {
             .task_links
             .next_page()
             .map(|(_, cursor)| cursor.to_owned());
-        self.offline
-            .task_links_changed(&target.environment, &target.thread);
-        self.schedule_offline_save(cx);
         cx.notify();
         next
     }

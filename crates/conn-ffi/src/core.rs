@@ -39,11 +39,13 @@ const TAG_SUBSCRIBE_THREAD: &str = "orchestration.subscribeThread";
 const TAG_LAUNCH_THREAD: &str = "orchestration.launchThread";
 const TAG_ENSURE_SCRATCH: &str = "projects.ensureScratch";
 const TAG_REFRESH_PROVIDERS: &str = "server.refreshProviders";
-/// How long a live thread's changes wait before its rendered state is saved for a cold start.
-const VIEW_SAVE_DEBOUNCE: Duration = Duration::from_millis(1000);
+/// How long the kept set waits after a shell change, so a burst of changes ranks once.
+const KEPT_DEBOUNCE: Duration = Duration::from_millis(1000);
 /// Events the pump handles before it looks at controls again, so an `OpenThread` or a send never
 /// waits for a whole backlog to drain.
 const MAX_EVENTS_PER_DRAIN: usize = 64;
+/// The thread engine's database in a pairing's cache directory.
+pub(crate) const LOCAL_DATABASE: &str = "conn-local-v1.sqlite3";
 /// Maximum time `Drop` waits for worker threads to wind down when dropped off-runtime.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -108,9 +110,24 @@ enum PumpControl {
         conn_state::OlderPageRequest,
         Option<conn_contract::OrchestrationV2OlderSettledThreadsPage>,
     ),
-    EnableOffline(Arc<crate::OfflineReader>),
+    /// The device database is open: the engine and the image reader on it.
+    EnableEngine(Box<conn_cache::Engine>, Arc<crate::OfflineReader>),
     OpenThread(String),
+    /// The window [`conn_cache::Engine::open_thread`] read from the device.
+    FinishOpen {
+        thread_id: String,
+        window: Option<conn_cache::Window>,
+        read_ms: f64,
+    },
     CloseThread(String),
+    LoadEarlier(String),
+    /// Saves the thread list for the next launch now (the app goes to the background).
+    SaveShell,
+    /// The window [`conn_cache::Engine::older`] read.
+    FinishEarlier {
+        thread_id: String,
+        window: Option<conn_cache::Window>,
+    },
     /// A reply leaves: its pending row shows until the server's row for it arrives.
     QueueSend {
         thread_id: String,
@@ -122,8 +139,6 @@ enum PumpControl {
         key: String,
         accepted: bool,
     },
-    /// The app came to the foreground (`true`) or went to the background (`false`).
-    SetForeground(bool),
     /// A queued run's files as the thread knows them; `None` once it left the queue.
     QueuedAttachments {
         thread_id: String,
@@ -317,6 +332,11 @@ impl ConnCore {
         self.shell_watch.borrow().clone()
     }
 
+    /// Saves the thread list for the next launch now.
+    pub(crate) fn save_shell(&self) {
+        let _ = self.ctrl_tx.send(PumpControl::SaveShell);
+    }
+
     /// Starts a connection. `orbit_server_id` marks an Orbit session: its bearers are reported
     /// with that id, and a rejected bearer ends it so the session can re-pair through Orbit.
     pub(crate) fn start(
@@ -390,7 +410,7 @@ impl ConnCore {
         runtime_handle.spawn(run_pump(
             connection.clone(),
             events_rx,
-            ctrl_rx,
+            (ctrl_rx, ctrl_tx.clone()),
             listener,
             Arc::clone(&thread_runs),
             (shell_watch_tx, status_watch_tx, limits_tx),
@@ -639,25 +659,55 @@ impl ConnCore {
         Self::start(server_url, credential, listener, None)
     }
 
-    /// Opens this pairing's cache on the connection runtime.
-    /// `identity` names the server the cache belongs to (its Orbit server id or environment id),
-    /// not its URL: another server at the same URL must not read this one's cache.
+    /// Opens this pairing's device database (the thread engine's) on the connection runtime.
+    /// `identity` names the server the database belongs to (its Orbit server id or environment
+    /// id), not its URL: another server at the same URL must not read this one's threads.
     pub async fn prepare_offline(
         &self,
         directory: String,
         identity: String,
     ) -> Result<Arc<crate::OfflineReader>, FfiError> {
-        let reader = self
+        let connection = self.connection.clone();
+        let engine = self
             .runtime_handle
-            .spawn(crate::OfflineReader::open(
-                directory.into(),
-                identity,
-                Some(self.connection.clone()),
-            ))
+            .spawn(async move {
+                let dir = std::path::PathBuf::from(directory);
+                // The offline cache this database replaces.
+                for old in [
+                    "messages.sqlite3",
+                    "messages.sqlite3-wal",
+                    "messages.sqlite3-shm",
+                    "shell.json",
+                    "shell.tmp",
+                ] {
+                    let _ = tokio::fs::remove_file(dir.join(old)).await;
+                }
+                let settings = conn_cache::Settings::default();
+                match conn_cache::Engine::open(
+                    &dir.join(LOCAL_DATABASE),
+                    &identity,
+                    connection.clone(),
+                    settings,
+                )
+                .await
+                {
+                    Ok(engine) => Ok(engine),
+                    // A device that cannot open the file (full, damaged) still shows threads,
+                    // from memory: nothing survives a relaunch, everything else works.
+                    Err(e) => {
+                        eprintln!("conn-ffi: device database failed ({e}); threads stay in memory");
+                        conn_cache::Engine::open_in_memory(&identity, connection, settings).await
+                    }
+                }
+            })
             .await
-            .map_err(|_| FfiError::Closed)??;
+            .map_err(|_| FfiError::Closed)?
+            .map_err(|e| FfiError::Connection {
+                message: e.to_string(),
+            })?;
+        let reader = crate::OfflineReader::new(engine.images(), self.connection.clone());
         self.ctrl_tx
-            .send(PumpControl::EnableOffline(reader.clone()))
+            .send(PumpControl::EnableEngine(Box::new(engine), reader.clone()))
             .map_err(|_| FfiError::Closed)?;
         *self
             .image_reader
@@ -750,12 +800,21 @@ impl ConnCore {
         let _ = self.ctrl_tx.send(PumpControl::OpenThread(thread_id));
     }
 
-    /// Unsubscribes from `thread_id` while retaining its cached timeline for fast re-open.
+    /// Leaves `thread_id`; the last few closed threads stay in memory for a quick return.
     pub fn close_thread(&self, thread_id: String) {
         if self.disconnected.load(Ordering::Acquire) {
             return;
         }
         let _ = self.ctrl_tx.send(PumpControl::CloseThread(thread_id));
+    }
+
+    /// Loads older rows above an open thread: from the device, else from the server. The next
+    /// snapshot carries them.
+    pub fn load_earlier(&self, thread_id: String) {
+        if self.disconnected.load(Ordering::Acquire) {
+            return;
+        }
+        let _ = self.ctrl_tx.send(PumpControl::LoadEarlier(thread_id));
     }
 
     /// Dispatches a user message to `thread_id` via `orchestration.dispatchCommand`.
@@ -1367,12 +1426,6 @@ impl ConnCore {
         self.connection.reconnect();
     }
 
-    /// Keeps a few recent threads subscribed while `true` (the app is in the foreground), so
-    /// opening one shows its latest state at once; `false` drops them until the next `true`.
-    pub fn set_foreground(&self, foreground: bool) {
-        let _ = self.ctrl_tx.send(PumpControl::SetForeground(foreground));
-    }
-
     /// Closes the connection and stops the background event pump. Safe to call more than once.
     pub fn disconnect(&self) {
         if self.disconnected.swap(true, Ordering::AcqRel) {
@@ -1381,6 +1434,19 @@ impl ConnCore {
         let _ = self.ctrl_tx.send(PumpControl::Shutdown);
         self.connection.close();
     }
+}
+
+fn is_thread_deleted(item: &OrchestrationV2ThreadStreamItem) -> bool {
+    matches!(
+        item,
+        OrchestrationV2ThreadStreamItem::Event(event)
+            if matches!(
+                &event.event,
+                conn_contract::OrchestrationV2DomainEvent::ThreadArchived(ev)
+                    if ev.r#type
+                        == conn_contract::OrchestrationV2DomainEventThreadArchivedType::ThreadDeleted
+            )
+    )
 }
 
 fn parse_server_url(raw: &str) -> Result<url::Url, FfiError> {
@@ -1417,26 +1483,24 @@ pub(crate) struct PumpStats {
 
 struct PumpState {
     stats: PumpStats,
-    offline: Option<crate::offline::SyncState>,
-    seed_offline_threads: bool,
+    /// The thread engine, once the device database is open ([`ConnCore::prepare_offline`]).
+    engine: Option<conn_cache::Engine>,
+    reader: Option<Arc<crate::OfflineReader>>,
+    /// Sends device reads back into the pump.
+    ctrl_tx: mpsc::UnboundedSender<PumpControl>,
     identity: SessionIdentity,
     connection: Connection,
     listener: Arc<dyn CoreListener>,
     shell: ShellState,
+    /// The thread list saved on the device, published until the server's shell is.
+    saved_shell: Option<FfiShellSnapshot>,
     server_config: ServerConfigState,
     /// Workspace scan history by `(instance_id, cwd)`.
     workspace_scans: HashMap<(String, String), WorkspaceScanState>,
-    threads: HashMap<String, ThreadState>,
     open_threads: HashSet<String>,
-    /// Threads kept subscribed in the background ([`conn_state::warm`]). Open threads may be
-    /// warm too; a thread's stream runs while it is open or warm.
-    warm_threads: HashSet<String>,
-    foreground: bool,
-    /// When the warm set picks again after a shell change.
-    warm_due: Option<Instant>,
-    /// Live threads whose rendered state changed since it was last saved, and when to save.
-    views_dirty: HashSet<String>,
-    views_due: Option<Instant>,
+    /// When the engine's kept set follows the shell again; `kept_once` after the first time.
+    kept_due: Option<Instant>,
+    kept_once: bool,
     ended_threads: HashSet<String>,
     shell_snapshot_required: bool,
     pending_older_page: Option<oneshot::Sender<Option<conn_state::OlderPageRequest>>>,
@@ -1453,11 +1517,15 @@ struct PumpState {
     shell_watch: watch::Sender<Option<FfiShellSnapshot>>,
     status_watch: watch::Sender<FfiConnectionStatus>,
     limits: watch::Sender<FfiComposerLimits>,
+    /// `conn_client::perf` lines still to log: the shell of this connection, opened threads.
+    perf_shell_pending: bool,
+    perf_drawn_pending: HashSet<String>,
 }
 
 impl PumpState {
     fn new(
         connection: Connection,
+        ctrl_tx: mpsc::UnboundedSender<PumpControl>,
         listener: Arc<dyn CoreListener>,
         thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
         (shell_watch, status_watch, limits): (
@@ -1469,21 +1537,19 @@ impl PumpState {
     ) -> Self {
         Self {
             stats: PumpStats::default(),
-            offline: None,
-            seed_offline_threads: false,
+            engine: None,
+            reader: None,
+            ctrl_tx,
             identity,
             connection,
             listener,
             shell: ShellState::default(),
+            saved_shell: None,
             server_config: ServerConfigState::new(),
             workspace_scans: HashMap::new(),
-            threads: HashMap::new(),
             open_threads: HashSet::new(),
-            warm_threads: HashSet::new(),
-            foreground: true,
-            warm_due: None,
-            views_dirty: HashSet::new(),
-            views_due: None,
+            kept_due: None,
+            kept_once: false,
             ended_threads: HashSet::new(),
             shell_snapshot_required: false,
             pending_older_page: None,
@@ -1496,6 +1562,8 @@ impl PumpState {
             shell_watch,
             status_watch,
             limits,
+            perf_shell_pending: true,
+            perf_drawn_pending: HashSet::new(),
         }
     }
 
@@ -1504,8 +1572,7 @@ impl PumpState {
             .find_thread(thread_id)
             .map(ThreadSnapshotMeta::from_shell)
             .or_else(|| {
-                self.threads
-                    .get(thread_id)
+                self.thread(thread_id)
                     .and_then(ThreadState::thread)
                     .map(ThreadSnapshotMeta::from_app_thread)
             })
@@ -1520,7 +1587,7 @@ impl PumpState {
             .find_thread(thread_id)
             .map(PickerThread::from_shell)
             .or_else(|| {
-                let state = self.threads.get(thread_id)?;
+                let state = self.thread(thread_id)?;
                 let thread = state.thread()?;
                 Some(PickerThread::from_projection(
                     thread,
@@ -1662,8 +1729,8 @@ impl PumpState {
     fn sync_shell_run_meta(&self) {
         if let Ok(mut guard) = self.thread_runs.write() {
             for thread in &self.shell.threads {
-                // Keep live ThreadState authoritative for subscribed threads.
-                if self.threads.contains_key(&thread.id) {
+                // A thread in memory is authoritative.
+                if self.thread(&thread.id).is_some() {
                     continue;
                 }
                 guard.insert(
@@ -1697,71 +1764,89 @@ impl PumpState {
                 }
                 if self.shell.synchronized {
                     self.emit_or_buffer_shell(build_shell_snapshot(&self.shell));
+                    self.save_shell(false);
                 }
                 true
             }
-            PumpControl::EnableOffline(reader) => {
-                self.offline = Some(crate::offline::SyncState::new(reader));
-                self.seed_offline_threads = true;
-                for thread_id in self.live_threads() {
-                    self.view_changed(&thread_id);
+            PumpControl::EnableEngine(mut engine, reader) => {
+                let saved = engine.take_saved_shell();
+                self.engine = Some(*engine);
+                self.reader = Some(reader);
+                if let Some(saved) = saved.filter(|_| !self.shell.synchronized) {
+                    self.publish_saved_shell(build_shell_snapshot(&saved));
                 }
-                if self.shell.synchronized && !self.coalescer.has_pending_shell() {
-                    self.sync_offline_shell();
+                self.kept_once = false;
+                self.schedule_kept();
+                let open: Vec<String> = self.open_threads.iter().cloned().collect();
+                for thread_id in open {
+                    self.open_in_engine(&thread_id);
                 }
                 true
             }
             PumpControl::OpenThread(thread_id) => {
-                let is_newly_opened = self.open_threads.insert(thread_id.clone());
+                self.open_threads.insert(thread_id.clone());
                 self.ended_threads.remove(&thread_id);
-                let cached = self
-                    .threads
-                    .get(&thread_id)
-                    .filter(|_| {
-                        self.offline
-                            .as_ref()
-                            .is_none_or(|sync| sync.may_read(&thread_id))
-                    })
-                    .is_some_and(|state| state.synchronized || !state.entries.is_empty());
+                if conn_client::perf::enabled() {
+                    self.perf_drawn_pending.insert(thread_id.clone());
+                }
                 // The app shows nothing for this thread yet: the first snapshot always goes out.
                 self.published.remove(&thread_id);
-                self.threads
-                    .entry(thread_id.clone())
-                    .or_insert_with(|| ThreadState::new(thread_id.clone()));
-                conn_client::perf_log!(
-                    "ffi.open thread={thread_id} warm={} cached={}",
-                    self.warm_threads.contains(&thread_id),
-                    cached
-                );
-                if is_newly_opened {
-                    self.follow_live_threads();
-                    if !self.warm_threads.contains(&thread_id) {
-                        self.connection.subscribe_thread(&thread_id);
+                self.open_in_engine(&thread_id);
+                true
+            }
+            PumpControl::FinishOpen {
+                thread_id,
+                window,
+                read_ms,
+            } => {
+                let Some(engine) = &mut self.engine else {
+                    return true;
+                };
+                let local = window.is_some();
+                if engine.finish_open(&thread_id, window) {
+                    // Stream items that waited for the window are applied now.
+                    if let Some(state) = self.thread(&thread_id) {
+                        self.update_thread_run_meta(&thread_id, state);
                     }
-                }
-                if cached {
-                    self.coalescer.force_thread(&thread_id);
+                    let shown = self.show_if_open(&thread_id);
+                    conn_client::perf_log!(
+                        "ffi.open_local thread={thread_id} read_ms={read_ms:.1} local={local} shown={shown}"
+                    );
                 }
                 true
             }
             PumpControl::CloseThread(thread_id) => {
-                let was_open = self.open_threads.remove(&thread_id);
+                self.open_threads.remove(&thread_id);
                 self.ended_threads.remove(&thread_id);
                 self.coalescer.cancel_thread(&thread_id);
                 self.published.remove(&thread_id);
-                if was_open && !self.warm_threads.contains(&thread_id) {
-                    self.save_views();
-                    self.connection.unsubscribe_thread(&thread_id);
-                    self.follow_live_threads();
+                if let Some(engine) = &mut self.engine {
+                    engine.close_thread(&thread_id);
                 }
                 true
             }
-            PumpControl::SetForeground(foreground) => {
-                if self.foreground != foreground {
-                    self.foreground = foreground;
-                    // The app may be killed in the background: save what it shows first.
-                    self.save_views();
-                    self.rewarm();
+            PumpControl::SaveShell => {
+                self.save_shell(true);
+                true
+            }
+            PumpControl::LoadEarlier(thread_id) => {
+                if let Some(pending) = self.engine.as_mut().and_then(|e| e.older(&thread_id)) {
+                    self.coalescer.mark_thread(&thread_id);
+                    let tx = self.ctrl_tx.clone();
+                    tokio::spawn(async move {
+                        let window = pending.await.ok().flatten();
+                        let _ = tx.send(PumpControl::FinishEarlier { thread_id, window });
+                    });
+                }
+                true
+            }
+            PumpControl::FinishEarlier { thread_id, window } => {
+                if let Some(engine) = &mut self.engine {
+                    let added = engine.finish_older(&thread_id, window);
+                    conn_client::perf_log!("ffi.earlier thread={thread_id} added={added}");
+                    if self.open_threads.contains(&thread_id) {
+                        self.coalescer.force_thread(&thread_id);
+                    }
                 }
                 true
             }
@@ -1792,7 +1877,7 @@ impl PumpState {
                 run_id,
                 reply,
             } => {
-                let files = self.threads.get(&thread_id).and_then(|state| {
+                let files = self.thread(&thread_id).and_then(|state| {
                     state.entries.iter().find_map(|entry| match entry {
                         conn_state::TimelineEntry::QueuedUser {
                             run_id: queued,
@@ -1816,29 +1901,26 @@ impl PumpState {
                 sequence,
                 reply,
             } => {
-                if let Some(projection) = *projection {
-                    let mut state = ThreadState::new(thread_id.clone());
-                    state.apply_projection(projection, sequence);
-                    if let Some(sync) = &mut self.offline {
-                        sync.thread(&state, sequence);
+                // The launch reply is the thread's first window: store it, then open from it.
+                if let (Some(engine), Some(projection), Some(sequence)) =
+                    (&mut self.engine, *projection, sequence)
+                {
+                    let snapshot = json!({
+                        "kind": "snapshot",
+                        "snapshotSequence": sequence,
+                        "projection": projection,
+                    });
+                    match conn_contract::from_json::<OrchestrationV2ThreadStreamItem>(snapshot) {
+                        Ok(item) => {
+                            engine.handle(&thread_id, item);
+                        }
+                        Err(error) => warn!("conn-ffi launch projection: {error}"),
                     }
-                    self.update_thread_run_meta(&thread_id, &state);
-                    self.threads.insert(thread_id.clone(), state);
-                    self.open_threads.insert(thread_id.clone());
-                    self.ended_threads.remove(&thread_id);
-                    self.follow_live_threads();
-                    self.connection.subscribe_thread(&thread_id);
-                    self.published.remove(&thread_id);
-                    self.coalescer.force_thread(&thread_id);
-                } else {
-                    self.threads
-                        .entry(thread_id.clone())
-                        .or_insert_with(|| ThreadState::new(thread_id.clone()));
-                    self.open_threads.insert(thread_id.clone());
-                    self.ended_threads.remove(&thread_id);
-                    self.follow_live_threads();
-                    self.connection.subscribe_thread(&thread_id);
                 }
+                self.open_threads.insert(thread_id.clone());
+                self.ended_threads.remove(&thread_id);
+                self.published.remove(&thread_id);
+                self.open_in_engine(&thread_id);
                 let _ = reply.send(());
                 true
             }
@@ -1910,7 +1992,7 @@ impl PumpState {
             PumpControl::ThreadDetails { thread_id, reply } => {
                 let details = crate::details::thread_details(
                     &self.shell,
-                    self.threads.get(&thread_id),
+                    self.thread(&thread_id),
                     self.server_config.catalog(),
                     &thread_id,
                     now_epoch_ms() / 1000,
@@ -1931,10 +2013,14 @@ impl PumpState {
         self.stats.events += 1;
         match event {
             ClientEvent::Status(status) => {
+                if conn_client::perf::enabled() {
+                    conn_client::perf::mark(&format!("core.status_{status:?}").replace(' ', ""));
+                }
                 // The driver resumes from its last received sequence, even mid-replay. Keep
                 // reducing into this shell, but publish only after this subscription's marker.
                 self.invalidate_shell();
                 self.shell_snapshot_required = false;
+                self.perf_shell_pending = true;
                 self.status_changed_at_ms = now_epoch_ms();
                 let ffi_status: FfiConnectionStatus = status.into();
                 self.status_watch.send_replace(ffi_status.clone());
@@ -1956,7 +2042,8 @@ impl PumpState {
                 if self.shell.synchronized {
                     self.sync_shell_run_meta();
                     self.emit_or_buffer_shell(build_shell_snapshot(&self.shell));
-                    self.schedule_rewarm();
+                    self.schedule_kept();
+                    self.save_shell(false);
                 }
                 if !change.threads_changed.is_empty() {
                     self.resubscribe_ended_threads();
@@ -1972,8 +2059,7 @@ impl PumpState {
                 for thread_id in change.threads_changed {
                     if self.open_threads.contains(&thread_id)
                         && self
-                            .threads
-                            .get(&thread_id)
+                            .thread(&thread_id)
                             .is_some_and(|state| state.synchronized || !state.entries.is_empty())
                     {
                         self.coalescer.mark_thread(&thread_id);
@@ -1981,37 +2067,34 @@ impl PumpState {
                 }
             }
             ClientEvent::Thread { thread_id, item } => {
+                if self.engine.is_none() {
+                    return;
+                }
                 let force_emit = matches!(
                     item,
                     OrchestrationV2ThreadStreamItem::Snapshot(_)
                         | OrchestrationV2ThreadStreamItem::Synchronized(_)
                 );
-                if matches!(item, OrchestrationV2ThreadStreamItem::Snapshot(_))
-                    && let Some(sends) = self.outbox.get_mut(&thread_id)
-                {
+                let is_snapshot = matches!(item, OrchestrationV2ThreadStreamItem::Snapshot(_));
+                if is_snapshot && let Some(sends) = self.outbox.get_mut(&thread_id) {
                     for send in sends.iter_mut().filter(|send| send.acked) {
                         send.superseded = true;
                     }
                 }
+                let deleted = is_thread_deleted(&item);
                 let meta_before = self.resolve_thread_meta(&thread_id);
-                let state = self
-                    .threads
-                    .entry(thread_id.clone())
-                    .or_insert_with(|| ThreadState::new(thread_id.clone()));
-                let snapshot_sequence = match &item {
-                    OrchestrationV2ThreadStreamItem::Snapshot(s) => Some(s.snapshot_sequence),
-                    _ => None,
-                };
-                let was_deleted = state.deleted;
                 let applying = Instant::now();
-                let changed = state.apply(item);
+                let changed = self
+                    .engine
+                    .as_mut()
+                    .is_some_and(|engine| engine.handle(&thread_id, item));
                 let apply_ms = conn_client::perf::ms_since(applying);
-                let deleted_now = state.deleted && !was_deleted;
-                if changed && let Some(sync) = &mut self.offline {
-                    sync.thread(state, snapshot_sequence);
+                if let Some(state) = self.thread(&thread_id) {
+                    if changed && let Some(reader) = &self.reader {
+                        reader.bind_picks(state);
+                    }
+                    self.update_thread_run_meta(&thread_id, state);
                 }
-                let working = state.working;
-                let active_run_id = state.active_run_id().map(str::to_owned);
                 // A thread-level event (model, title, ...) changes the header, not the timeline.
                 let meta = self.resolve_thread_meta(&thread_id);
                 let emit = changed || force_emit || meta != meta_before;
@@ -2019,26 +2102,19 @@ impl PumpState {
                 if open && emit {
                     self.coalescer.mark_thread(&thread_id);
                 }
-                if snapshot_sequence.is_some() || force_emit {
+                if force_emit {
                     conn_client::perf_log!(
                         "ffi.thread_applied thread={thread_id} apply_ms={apply_ms:.1} marked={}",
                         open && emit
                     );
                 }
-                if let Ok(mut guard) = self.thread_runs.write() {
-                    guard.insert(
-                        thread_id.clone(),
-                        ThreadRunMeta {
-                            working,
-                            active_run_id,
-                        },
-                    );
-                }
-                if emit {
-                    self.view_changed(&thread_id);
-                }
-                if deleted_now {
+                if deleted {
                     self.listener.on_thread_deleted(thread_id);
+                }
+            }
+            ClientEvent::ThreadStale { thread_id } => {
+                if let Some(engine) = &mut self.engine {
+                    engine.mark_stale(&thread_id);
                 }
             }
             ClientEvent::StreamEnded { tag, key, error } => {
@@ -2052,7 +2128,7 @@ impl PumpState {
                         self.shell_snapshot_required = false;
                         self.connection.subscribe_shell_with_idle_subagents();
                     }
-                } else if tag == TAG_SUBSCRIBE_THREAD && self.subscribed(&key) {
+                } else if tag == TAG_SUBSCRIBE_THREAD {
                     self.ended_threads.insert(key);
                     if error.is_none() {
                         self.resubscribe_ended_threads();
@@ -2085,149 +2161,90 @@ impl PumpState {
         }
     }
 
-    fn subscribed(&self, id: &str) -> bool {
-        self.open_threads.contains(id) || self.warm_threads.contains(id)
+    /// The thread as the engine holds it in memory.
+    fn thread(&self, id: &str) -> Option<&ThreadState> {
+        self.engine.as_ref()?.thread(id)
     }
 
-    /// Threads whose stream runs: the open ones and the warm ones.
-    fn live_threads(&self) -> HashSet<String> {
-        self.open_threads
-            .union(&self.warm_threads)
-            .cloned()
-            .collect()
-    }
-
-    /// Lets the offline cache follow the live threads' streams.
-    fn follow_live_threads(&mut self) {
-        let live = self.live_threads();
-        if let Some(sync) = &mut self.offline {
-            sync.follow(&self.shell, &live);
-        }
-    }
-
-    /// Picks the warm set again soon: the first pick at once, later ones after a short pause
-    /// so a burst of shell events picks once.
-    fn schedule_rewarm(&mut self) {
-        if !self.foreground {
+    /// Opens a thread in the engine: one in memory publishes at once, one on the device
+    /// publishes when its window is read ([`PumpControl::FinishOpen`]).
+    fn open_in_engine(&mut self, thread_id: &str) {
+        let Some(engine) = &mut self.engine else {
             return;
-        }
-        if self.warm_threads.is_empty() && self.warm_due.is_none() {
-            self.rewarm();
-        } else if self.warm_due.is_none() {
-            self.warm_due = Some(
-                Instant::now() + Duration::from_millis(conn_state::warm::WARM_REPICK_DEBOUNCE_MS),
-            );
-        }
-    }
-
-    /// Subscribes the threads [`conn_state::warm::pick_warm_threads`] picks and drops the
-    /// others. In the background, or before the shell is known, no thread is warm. A thread
-    /// that leaves the set keeps its state, as a closed thread does.
-    fn rewarm(&mut self) {
-        self.warm_due = None;
-        let picked = if self.foreground && self.shell.synchronized {
-            conn_state::warm::pick_warm_threads(
-                &self.shell,
-                now_epoch_ms(),
-                conn_state::warm::WARM_THREAD_CAP,
-            )
-        } else {
-            Vec::new()
         };
-        let target: HashSet<String> = picked.iter().cloned().collect();
-        if target == self.warm_threads {
+        let in_memory = engine.thread(thread_id).is_some();
+        let stored = engine.stored(thread_id);
+        conn_client::perf_log!("ffi.open thread={thread_id} warm={in_memory} cached={stored}");
+        match engine.open_thread(thread_id) {
+            None => {
+                self.show_if_open(thread_id);
+            }
+            Some(pending) => self.finish_open_later(thread_id.to_owned(), pending),
+        }
+    }
+
+    /// Reads a window off the pump and finishes the open with it ([`PumpControl::FinishOpen`]).
+    fn finish_open_later(&self, thread_id: String, pending: conn_cache::Pending) {
+        let tx = self.ctrl_tx.clone();
+        tokio::spawn(async move {
+            let reading = Instant::now();
+            let window = pending.await.ok().flatten();
+            let _ = tx.send(PumpControl::FinishOpen {
+                thread_id,
+                window,
+                read_ms: conn_client::perf::ms_since(reading),
+            });
+        });
+    }
+
+    /// Publishes an open thread at once when there is something to draw.
+    fn show_if_open(&mut self, thread_id: &str) -> bool {
+        let shown = self.open_threads.contains(thread_id)
+            && self
+                .thread(thread_id)
+                .is_some_and(|state| state.synchronized || !state.entries.is_empty());
+        if shown {
+            self.coalescer.force_thread(thread_id);
+        }
+        shown
+    }
+
+    /// Lets the kept set follow the shell soon: the first time at once, later after a pause
+    /// so a burst of shell events ranks once.
+    fn schedule_kept(&mut self) {
+        if self.engine.is_none() || !self.shell.synchronized {
             return;
         }
-        let dropped: Vec<String> = self.warm_threads.difference(&target).cloned().collect();
-        // Best first: the server answers subscriptions in order, so a thread that needs the
-        // user or works streams its snapshot before quieter ones.
-        let added: Vec<String> = picked
-            .into_iter()
-            .filter(|id| !self.warm_threads.contains(id))
-            .collect();
-        self.warm_threads = target;
-        for id in &dropped {
-            if !self.open_threads.contains(id) {
-                self.ended_threads.remove(id);
-                self.connection.unsubscribe_thread(id);
-            }
-        }
-        // The cache writers follow first, so a warm stream's first snapshot is written.
-        self.follow_live_threads();
-        for id in &added {
-            self.threads
-                .entry(id.clone())
-                .or_insert_with(|| ThreadState::new(id.clone()));
-            if !self.open_threads.contains(id) {
-                self.connection.subscribe_thread(id);
-            }
-        }
-        conn_client::perf_log!(
-            "ffi.warm added={} dropped={} warm={}",
-            added.len(),
-            dropped.len(),
-            self.warm_threads.len()
-        );
-    }
-
-    fn rewarm_due(&mut self) {
-        if self.warm_due.is_some_and(|due| due <= Instant::now()) {
-            self.rewarm();
+        if !self.kept_once {
+            self.update_kept();
+        } else if self.kept_due.is_none() {
+            self.kept_due = Some(Instant::now() + KEPT_DEBOUNCE);
         }
     }
 
-    /// The pump's next timer: a coalesced snapshot, a warm-set pick or a view save.
+    fn update_kept(&mut self) {
+        self.kept_due = None;
+        if !self.shell.synchronized {
+            return;
+        }
+        if let Some(engine) = &mut self.engine {
+            engine.update_kept(&self.shell);
+            self.kept_once = true;
+        }
+    }
+
+    /// The pump's next timer: a coalesced snapshot or a kept-set update.
     fn next_deadline(&self) -> Option<Instant> {
-        [
-            self.coalescer.next_deadline(),
-            self.warm_due,
-            self.views_due,
-        ]
-        .into_iter()
-        .flatten()
-        .min()
-    }
-
-    /// Marks a live thread's rendered state for saving ([`VIEW_SAVE_DEBOUNCE`]).
-    fn view_changed(&mut self, thread_id: &str) {
-        if self.offline.is_none() || !self.subscribed(thread_id) {
-            return;
-        }
-        self.views_dirty.insert(thread_id.to_owned());
-        self.views_due
-            .get_or_insert_with(|| Instant::now() + VIEW_SAVE_DEBOUNCE);
-    }
-
-    /// Saves the changed live threads' rendered state: the run, work groups and their
-    /// timings, subagents, queued messages and requests, as the app would show them.
-    fn save_views(&mut self) {
-        self.views_due = None;
-        let dirty = std::mem::take(&mut self.views_dirty);
-        let Some(sync) = &self.offline else {
-            return;
-        };
-        for thread_id in dirty {
-            let Some(state) = self
-                .threads
-                .get(&thread_id)
-                .filter(|state| state.synchronized && !state.deleted)
-            else {
-                continue;
-            };
-            let meta = self.resolve_thread_meta(&thread_id);
-            sync.save_view(build_thread_snapshot(
-                state,
-                meta.as_ref(),
-                self.server_config.catalog(),
-            ));
-        }
+        [self.coalescer.next_deadline(), self.kept_due]
+            .into_iter()
+            .flatten()
+            .min()
     }
 
     /// Runs the timers that are due.
     fn timers_due(&mut self) {
-        self.rewarm_due();
-        if self.views_due.is_some_and(|due| due <= Instant::now()) {
-            self.save_views();
+        if self.kept_due.is_some_and(|due| due <= Instant::now()) {
+            self.update_kept();
         }
     }
 
@@ -2235,12 +2252,14 @@ impl PumpState {
         let ready: Vec<String> = self
             .ended_threads
             .iter()
-            .filter(|id| self.subscribed(id) && self.shell.find_thread(id).is_some())
+            .filter(|id| self.shell.find_thread(id).is_some())
             .cloned()
             .collect();
         for id in ready {
             self.ended_threads.remove(&id);
-            self.connection.subscribe_thread(&id);
+            if let Some(engine) = &mut self.engine {
+                engine.resubscribe(&id);
+            }
         }
     }
 
@@ -2256,25 +2275,33 @@ impl PumpState {
     fn invalidate_shell(&mut self) {
         self.shell.synchronized = false;
         self.coalescer.reset_shell();
-        self.shell_watch.send_replace(None);
+        self.shell_watch.send_replace(self.saved_shell.clone());
     }
 
-    fn sync_offline_shell(&mut self) {
-        let live = self.live_threads();
-        if let Some(sync) = &mut self.offline {
-            sync.shell(&self.shell, &live);
-            if std::mem::take(&mut self.seed_offline_threads) {
-                for state in self.threads.values() {
-                    sync.thread(state, state.sequence);
-                }
-            }
+    /// Draws the thread list saved on the device until the server's shell arrives.
+    fn publish_saved_shell(&mut self, snapshot: FfiShellSnapshot) {
+        self.saved_shell = Some(snapshot.clone());
+        self.shell_watch.send_replace(Some(snapshot.clone()));
+        self.listener.on_shell(snapshot);
+        conn_client::perf::shell_cached();
+    }
+
+    /// Saves a synchronized thread list for the next launch: throttled, unless `now`.
+    fn save_shell(&mut self, now: bool) {
+        if self.shell.synchronized
+            && let Some(engine) = &mut self.engine
+        {
+            engine.save_shell(&self.shell, now);
         }
     }
 
     fn publish_shell(&mut self, snapshot: FfiShellSnapshot) {
-        self.sync_offline_shell();
+        self.saved_shell = None;
         self.shell_watch.send_replace(Some(snapshot.clone()));
         self.listener.on_shell(snapshot);
+        if std::mem::take(&mut self.perf_shell_pending) {
+            conn_client::perf::shell_current();
+        }
         if let Some(reply) = self.pending_older_page.take() {
             self.begin_older_page(reply);
         }
@@ -2292,7 +2319,7 @@ impl PumpState {
         if !self.open_threads.contains(thread_id) {
             return;
         }
-        let Some(state) = self.threads.get(thread_id) else {
+        let Some(state) = self.thread(thread_id) else {
             return;
         };
         let meta = self.resolve_thread_meta(thread_id);
@@ -2313,7 +2340,12 @@ impl PumpState {
         self.published
             .insert(thread_id.to_owned(), snapshot.clone());
         self.stats.published += 1;
+        let drawn = !snapshot.entries.is_empty() && self.perf_drawn_pending.remove(thread_id);
         self.listener.on_thread(snapshot);
+        if drawn {
+            let source = self.engine.as_ref().and_then(|e| e.source(thread_id));
+            conn_client::perf::open_drawn(thread_id, source.unwrap_or("server"));
+        }
     }
 
     fn flush_due(&mut self) {
@@ -2365,7 +2397,10 @@ impl PumpState {
 async fn run_pump(
     connection: Connection,
     mut events_rx: mpsc::Receiver<ClientEvent>,
-    mut ctrl_rx: mpsc::UnboundedReceiver<PumpControl>,
+    (mut ctrl_rx, ctrl_tx): (
+        mpsc::UnboundedReceiver<PumpControl>,
+        mpsc::UnboundedSender<PumpControl>,
+    ),
     listener: Arc<dyn CoreListener>,
     thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
     (shell_watch, status_watch, limits): (
@@ -2380,6 +2415,7 @@ async fn run_pump(
     }
     let mut state = PumpState::new(
         connection,
+        ctrl_tx,
         listener,
         thread_runs,
         (shell_watch, status_watch, limits),
@@ -2532,6 +2568,15 @@ mod tests {
             guard.deleted.push(thread_id);
             self.notify.notify_all();
         }
+    }
+
+    /// Opens the device database a session would open, in a fresh directory.
+    fn enable_engine(core: &ConnCore) -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        futures::executor::block_on(
+            core.prepare_offline(dir.path().to_string_lossy().into_owned(), "env".into()),
+        )?;
+        Ok(dir)
     }
 
     #[test]
@@ -2792,6 +2837,7 @@ mod tests {
             },
             listener.clone(),
         )?;
+        let _cache = enable_engine(&core)?;
 
         assert!(
             listener.wait_for(Duration::from_secs(5), |s| {
@@ -3396,6 +3442,7 @@ mod tests {
             },
             listener.clone(),
         )?;
+        let _cache = enable_engine(&core)?;
         assert!(
             listener.wait_for(Duration::from_secs(5), |s| {
                 s.providers_changed >= 1 && s.shells.last().is_some_and(|sh| sh.synchronized)
@@ -3552,288 +3599,6 @@ mod tests {
             dispatched.payload["modelSelection"]["model"].as_str(),
             Some("model-a"),
             "the switch back to A is sent"
-        );
-
-        core.disconnect();
-        let _ = stop_tx.send(());
-        let _ = server_thread.join();
-        Ok(())
-    }
-
-    fn warm_shell_thread(
-        id: &str,
-        minute: u32,
-        edit: impl FnOnce(&mut serde_json::Value),
-    ) -> serde_json::Value {
-        let mut thread = json!({
-            "createdBy": "user",
-            "creationSource": "web",
-            "id": id,
-            "projectId": "p1",
-            "title": format!("Thread {id}"),
-            "providerInstanceId": "claudeAgent",
-            "modelSelection": { "instanceId": "claudeAgent", "model": "claude-haiku-5-5" },
-            "runtimeMode": "full-access",
-            "interactionMode": "default",
-            "branch": null,
-            "worktreePath": null,
-            "lineage": { "rootThreadId": id, "parentThreadId": null, "relationshipToParent": null },
-            "forkedFrom": null,
-            "activeProviderThreadId": null,
-            "latestRunId": null,
-            "activeRunId": null,
-            "status": "idle",
-            "pendingRuntimeRequest": null,
-            "latestVisibleMessage": null,
-            "latestUserMessageAt": null,
-            "hasActionableProposedPlan": false,
-            "itemCount": 0,
-            "visibleItemCount": 0,
-            "createdAt": "2026-11-13T09:00:00.000Z",
-            "updatedAt": format!("2026-11-13T09:{minute:02}:00.000Z"),
-            "archivedAt": null,
-            "settledOverride": null,
-            "settledAt": null,
-            "deletedAt": null
-        });
-        edit(&mut thread);
-        thread
-    }
-
-    /// What the mock server saw: `sub <thread>` per subscribeThread, `stop <thread>` per interrupt.
-    type WireLog = Arc<Mutex<Vec<String>>>;
-
-    fn count(log: &WireLog, line: &str) -> usize {
-        log.lock()
-            .expect("log")
-            .iter()
-            .filter(|l| *l == line)
-            .count()
-    }
-
-    fn wait_log(log: &WireLog, pred: impl Fn(&[String]) -> bool) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while Instant::now() < deadline {
-            if pred(&log.lock().expect("log")) {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        pred(&log.lock().expect("log"))
-    }
-
-    #[test]
-    #[expect(
-        clippy::panic_in_result_fn,
-        reason = "test uses assert! for diffs while propagating setup errors with ?"
-    )]
-    fn warm_threads_follow_the_shell_open_close_and_foreground()
-    -> Result<(), Box<dyn std::error::Error>> {
-        use conn_state::warm::WARM_THREAD_CAP;
-        // 14 unsettled threads (w00 oldest .. w13 newest), one settled, one subagent child.
-        let mut threads: Vec<serde_json::Value> = (0..14)
-            .map(|i| warm_shell_thread(&format!("w{i:02}"), i, |_| {}))
-            .collect();
-        threads.push(warm_shell_thread("settled", 50, |t| {
-            t["settledAt"] = json!("2026-11-13T09:50:00.000Z");
-        }));
-        threads.push(warm_shell_thread("child", 51, |t| {
-            t["lineage"]["parentThreadId"] = json!("w13");
-            t["lineage"]["relationshipToParent"] = json!("subagent");
-        }));
-        let shell = json!({ "kind": "snapshot", "snapshot": {
-            "schemaVersion": 1,
-            "snapshotSequence": 1,
-            "projects": [],
-            "threads": threads,
-            "archivedThreads": []
-        }});
-        let thread_snapshot: serde_json::Value =
-            serde_json::from_str(&conn_state::testkit::synthetic_thread_snapshot_json(
-                conn_state::testkit::SyntheticThread {
-                    turns: 2,
-                    commands_per_turn: 1,
-                    command_output_bytes: 8,
-                    assistant_bytes: 8,
-                },
-            ))?;
-
-        let server_rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        let log: WireLog = Arc::default();
-        let server_log = log.clone();
-        let addr = server_rt.block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").await?;
-            let addr = listener.local_addr()?;
-            tokio::spawn(async move {
-                let Ok((tcp, _)) = listener.accept().await else {
-                    return;
-                };
-                let Ok(mut ws) = tokio_tungstenite::accept_async(tcp).await else {
-                    return;
-                };
-                let mut streams: HashMap<String, String> = HashMap::new();
-                while let Some(Ok(Message::Text(text))) = ws.next().await {
-                    let Ok(frames) = conn_wire::decode_client_message(&text) else {
-                        continue;
-                    };
-                    for frame in frames {
-                        let mut send = Vec::new();
-                        match frame {
-                            FromClient::Request(req)
-                                if req.tag == "orchestration.subscribeShell" =>
-                            {
-                                send.push(FromServer::Chunk {
-                                    request_id: req.id,
-                                    values: vec![shell.clone(), json!({ "kind": "synchronized" })],
-                                });
-                            }
-                            FromClient::Request(req)
-                                if req.tag == "orchestration.subscribeThread" =>
-                            {
-                                let thread_id = req.payload["threadId"]
-                                    .as_str()
-                                    .unwrap_or_default()
-                                    .to_owned();
-                                server_log
-                                    .lock()
-                                    .expect("log")
-                                    .push(format!("sub {thread_id}"));
-                                streams.insert(format!("{:?}", req.id), thread_id.clone());
-                                let mut snap = thread_snapshot.clone();
-                                snap["projection"]["thread"]["id"] = json!(thread_id);
-                                send.push(FromServer::Chunk {
-                                    request_id: req.id,
-                                    values: vec![snap, json!({ "kind": "synchronized" })],
-                                });
-                            }
-                            FromClient::Interrupt { request_id } => {
-                                if let Some(thread_id) = streams.remove(&format!("{request_id:?}"))
-                                {
-                                    server_log
-                                        .lock()
-                                        .expect("log")
-                                        .push(format!("stop {thread_id}"));
-                                }
-                            }
-                            _ => {}
-                        }
-                        for frame in send {
-                            let _ = ws
-                                .send(Message::Text(encode_server_frame(&frame).into()))
-                                .await;
-                        }
-                    }
-                }
-            });
-            Ok::<_, std::io::Error>(addr)
-        })?;
-        let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
-        let server_thread = std::thread::spawn(move || {
-            server_rt.block_on(async {
-                let _ = stop_rx.await;
-            });
-        });
-
-        let listener = Arc::new(RecordingListener::default());
-        let core = ConnCore::connect(
-            format!("http://{addr}"),
-            FfiCredential::Bearer {
-                token: "test-bearer".to_owned(),
-            },
-            listener.clone(),
-        )?;
-        let cache = tempfile::tempdir()?;
-        let reader = futures::executor::block_on(core.prepare_offline(
-            cache.path().to_string_lossy().into_owned(),
-            "env".to_owned(),
-        ))?;
-        let warm: Vec<String> = (14 - WARM_THREAD_CAP..14)
-            .map(|i| format!("w{i:02}"))
-            .collect();
-        assert!(
-            wait_log(&log, |l| l.len() >= WARM_THREAD_CAP),
-            "the newest threads are subscribed once the shell is known"
-        );
-        std::thread::sleep(Duration::from_millis(200));
-        let mut subscribed: Vec<String> = log.lock().expect("log").clone();
-        subscribed.sort();
-        let expected: Vec<String> = warm.iter().map(|id| format!("sub {id}")).collect();
-        assert_eq!(
-            subscribed, expected,
-            "only the capped warm set; no settled or child thread"
-        );
-        assert!(
-            listener.inner.lock().expect("listener").threads.is_empty(),
-            "warm threads that are not open send no snapshot to the app"
-        );
-
-        // A warm thread opens from memory, synchronized, without a new subscription, and stays
-        // subscribed when it closes.
-        let hot = warm[WARM_THREAD_CAP - 1].clone();
-        core.open_thread(hot.clone());
-        assert!(
-            listener.wait_for(Duration::from_secs(2), |s| s.threads.iter().any(|t| t
-                .thread_id
-                == hot
-                && t.synchronized
-                && !t.entries.is_empty())),
-            "a warm thread shows its live state on open"
-        );
-        core.close_thread(hot.clone());
-        std::thread::sleep(Duration::from_millis(200));
-        assert_eq!(
-            count(&log, &format!("sub {hot}")),
-            1,
-            "no second subscription"
-        );
-        assert_eq!(
-            count(&log, &format!("stop {hot}")),
-            0,
-            "closing keeps a warm thread"
-        );
-
-        // A cold thread subscribes on open and stops on close.
-        core.open_thread("w00".to_owned());
-        assert!(wait_log(&log, |l| l.iter().any(|x| x == "sub w00")));
-        core.close_thread("w00".to_owned());
-        assert!(wait_log(&log, |l| l.iter().any(|x| x == "stop w00")));
-
-        // The background stops every warm stream; the foreground starts them again.
-        core.set_foreground(false);
-        assert!(
-            wait_log(&log, |l| warm
-                .iter()
-                .all(|id| l.contains(&format!("stop {id}")))),
-            "the background stops the warm threads"
-        );
-        // Before they stop, the background saves what each warm thread shows.
-        let check = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()?;
-        let saved = check.block_on(async {
-            let deadline = Instant::now() + Duration::from_secs(5);
-            loop {
-                let mut all = true;
-                for id in &warm {
-                    all &= reader.db.view("env", id).await.ok().flatten().is_some();
-                }
-                if all || Instant::now() > deadline {
-                    return all;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        });
-        assert!(saved, "every warm thread's view is saved for a cold start");
-        core.set_foreground(true);
-        assert!(
-            wait_log(&log, |l| warm.iter().all(|id| l
-                .iter()
-                .filter(|x| **x == format!("sub {id}"))
-                .count()
-                == 2)),
-            "the foreground subscribes them again"
         );
 
         core.disconnect();

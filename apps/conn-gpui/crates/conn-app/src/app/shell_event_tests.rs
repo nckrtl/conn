@@ -1,11 +1,9 @@
-//! Shell events at fleet scale: a burst of shell items merges the linked shells at most once,
-//! a linked change updates the merged list in place, the offline cache watches only threads
-//! whose stream can change, and its incremental expiry and watches match a full sweep.
+//! Shell events at fleet scale: a burst of shell items merges the linked shells at most once, and
+//! a linked change updates the merged list in place.
 //!
 //! `shell_event_bench` (ignored) times one batch on a 4,800-thread fleet shaped like Nick's:
 //! `cargo test --release -p conn-app --bin conn-app shell_event_bench -- --ignored --nocapture`.
 
-use conn_cache::MessageCache;
 use conn_client::ClientEvent;
 use conn_contract::from_json;
 use conn_state::{ShellState, ShellStreamItem};
@@ -13,7 +11,6 @@ use gpui_kit::{Entity, TestAppContext};
 use serde_json::{Value, json};
 
 use super::ConnApp;
-use crate::live::RT;
 use crate::ui_tests::mount_app;
 
 const PRIMARY: &str = "http://primary.test";
@@ -279,20 +276,15 @@ fn small_fleet() -> (EnvShape, Vec<(&'static str, EnvShape)>) {
     )
 }
 
-/// Mounts the app on `fleet`, with the offline cache on, and returns its cache directory.
+/// Mounts the app on `fleet`.
 fn mount_fleet(
     cx: &mut TestAppContext,
     (primary, linked): (EnvShape, Vec<(&'static str, EnvShape)>),
-) -> (Entity<ConnApp>, tempfile::TempDir) {
+) -> Entity<ConnApp> {
     let (_, app) = mount_app(cx);
-    let cache = tempfile::tempdir().expect("cache directory");
-    let db = RT
-        .block_on(MessageCache::open(&cache.path().join("messages.sqlite3")))
-        .expect("cache");
     cx.update(|cx| {
         app.update(cx, |app, cx| {
             app.server_url = Some(PRIMARY.to_owned());
-            app.offline.enable_for_test(cache.path().to_owned(), db);
             for (env, shape) in &linked {
                 let mut shell = ShellState::default();
                 shell.apply(snapshot(&format!("p-{env}"), env_threads(shape)));
@@ -302,7 +294,7 @@ fn mount_fleet(
             app.apply_batch_for_test(vec![ClientEvent::Shell(primary_snapshot)], cx);
         });
     });
-    (app, cache)
+    app
 }
 
 fn counts(cx: &mut TestAppContext, app: &Entity<ConnApp>) -> super::linked::MergeCounts {
@@ -321,7 +313,7 @@ fn renamed(id: &str, project: &str, title: &str) -> Value {
 
 #[gpui_kit::test]
 fn a_burst_of_primary_shell_items_merges_the_linked_shells_at_most_once(cx: &mut TestAppContext) {
-    let (app, _cache) = mount_fleet(cx, small_fleet());
+    let app = mount_fleet(cx, small_fleet());
     for expanded in [false, true] {
         cx.update(|cx| app.update(cx, |app, _| app.sidebar.settled_expanded = expanded));
         let before = counts(cx, &app);
@@ -389,7 +381,7 @@ fn a_burst_of_primary_shell_items_merges_the_linked_shells_at_most_once(cx: &mut
 
 #[gpui_kit::test]
 fn a_linked_shell_change_updates_the_merged_list_in_place(cx: &mut TestAppContext) {
-    let (app, _cache) = mount_fleet(cx, small_fleet());
+    let app = mount_fleet(cx, small_fleet());
     cx.update(|cx| app.update(cx, |app, _| app.sidebar.settled_expanded = true));
     let before = counts(cx, &app);
     cx.update(|cx| {
@@ -443,282 +435,14 @@ fn a_linked_shell_change_updates_the_merged_list_in_place(cx: &mut TestAppContex
     );
 }
 
-fn desired(cx: &mut TestAppContext, app: &Entity<ConnApp>) -> Vec<(String, String)> {
-    cx.read(|cx| app.read(cx).offline.desired_for_test())
-}
-
-fn watched(desired: &[(String, String)], id: &str) -> bool {
-    desired.iter().any(|(_, thread)| thread == id)
-}
-
-#[gpui_kit::test]
-fn the_cache_watches_unsettled_threads_and_live_children_only(cx: &mut TestAppContext) {
-    let (app, _cache) = mount_fleet(cx, small_fleet());
-    let watching = desired(cx, &app);
-    // Per environment: 4 unsettled top-level threads and 2 running children; the 4 finished
-    // children and every settled thread are not watched.
-    assert_eq!(watching.len(), 3 * 6, "{watching:#?}");
-    assert!(watched(&watching, "nick-top-0"));
-    assert!(watched(&watching, "nick-child-1"), "a running child");
-    assert!(!watched(&watching, "nick-child-2"), "a finished child");
-    assert!(!watched(&watching, "nick-top-5"), "a settled thread");
-    assert!(watched(&watching, "mini-child-0"), "a linked running child");
-
-    // A child finishes: it stays watched while its last items may arrive, and its watch ends
-    // once they are saved (`a_subagent_that_just_finished_keeps_its_last_message_offline`). A
-    // finished child runs again: it is watched again.
-    cx.update(|cx| {
-        app.update(cx, |app, cx| {
-            let done = thread_json(
-                "nick-child-1",
-                "p-nick",
-                Some("nick-top-1"),
-                Run::Completed,
-                None,
-                now_ms(),
-            );
-            let again = thread_json(
-                "nick-child-2",
-                "p-nick",
-                Some("nick-top-2"),
-                Run::Running,
-                None,
-                now_ms(),
-            );
-            app.apply_batch_for_test(
-                vec![
-                    ClientEvent::Shell(updated(50, done)),
-                    ClientEvent::Shell(updated(51, again)),
-                ],
-                cx,
-            );
-        });
-    });
-    let watching = desired(cx, &app);
-    assert!(
-        watched(&watching, "nick-child-1"),
-        "kept for its last items"
-    );
-    assert!(watched(&watching, "nick-child-2"));
-    assert_eq!(watching.len(), 3 * 6 + 1);
-    settle_after(cx, &app, std::time::Duration::from_secs(31));
-    let watching = desired(cx, &app);
-    assert!(!watched(&watching, "nick-child-1"), "a finished child");
-    assert!(watched(&watching, "nick-child-2"));
-    assert_eq!(watching.len(), 3 * 6);
-}
-
-/// Looks at the children that finished as the clock stands `after` from now.
-fn settle_after(cx: &mut TestAppContext, app: &Entity<ConnApp>, after: std::time::Duration) {
-    cx.update(|cx| {
-        app.update(cx, |app, cx| {
-            app.settle_finishing_at(std::time::Instant::now() + after, cx);
-        })
-    });
-}
-
-fn finish(cx: &mut TestAppContext, app: &Entity<ConnApp>, id: &str, parent: &str) {
-    cx.update(|cx| {
-        app.update(cx, |app, cx| {
-            let done = thread_json(id, "p-nick", Some(parent), Run::Completed, None, now_ms());
-            app.apply_batch_for_test(vec![ClientEvent::Shell(updated(50, done))], cx);
-        });
-    });
-}
-
-/// The shell reports a subagent completed before its final message reaches the cache. The
-/// cache keeps following it, saves the message, and then drops the watch.
-#[gpui_kit::test]
-fn a_subagent_that_just_finished_keeps_its_last_message_offline(cx: &mut TestAppContext) {
-    use super::reconnect_tests::thread_snapshot;
-
-    let (app, _cache) = mount_fleet(cx, small_fleet());
-    let id = "nick-child-1";
-    // The thread snapshot at `sequence` with `turns` turns; its run has ended when `ended`.
-    let stream = |sequence, turns, ended: bool| {
-        let mut snapshot = thread_snapshot(id, sequence, turns);
-        if ended {
-            let run = &mut snapshot["projection"]["runs"][0];
-            run["status"] = json!("completed");
-            run["completedAt"] = json!("2026-11-13T13:37:20.000Z");
-        }
-        from_json(snapshot).expect("snapshot")
-    };
-    cx.update(|cx| {
-        app.update(cx, |app, _| {
-            app.apply_cache_stream(PRIMARY, id, stream(20, 1, false));
-            app.save_offline_now_for_test();
-        })
-    });
-    let before = cx.read(|cx| app.read(cx).cached_rows_for_test(id));
-    assert!(before > 0, "the first turn is cached");
-
-    finish(cx, &app, id, "nick-top-1");
-    assert!(watched(&desired(cx, &app), id), "still watched");
-
-    // The final message arrives after the status flip, while the stream's run still runs.
-    cx.update(|cx| {
-        app.update(cx, |app, _| {
-            app.apply_cache_stream(PRIMARY, id, stream(21, 2, false));
-            app.save_offline_now_for_test();
-        })
-    });
-    settle_after(cx, &app, std::time::Duration::from_secs(3));
-    assert!(
-        watched(&desired(cx, &app), id),
-        "the stream has not shown the run end"
-    );
-
-    // The run ends. Unsaved, it holds the watch.
-    cx.update(|cx| {
-        app.update(cx, |app, _| {
-            app.apply_cache_stream(PRIMARY, id, stream(22, 2, true))
-        })
-    });
-    settle_after(cx, &app, std::time::Duration::from_secs(3));
-    assert!(watched(&desired(cx, &app), id), "the end is unsaved");
-
-    // Saved: the watch ends, and the cache holds the message.
-    cx.update(|cx| app.update(cx, |app, _| app.save_offline_now_for_test()));
-    settle_after(cx, &app, std::time::Duration::from_secs(3));
-    assert!(!watched(&desired(cx, &app), id), "no longer watched");
-    let after = cx.read(|cx| app.read(cx).cached_rows_for_test(id));
-    assert!(
-        after > before,
-        "the final message is cached: {before} → {after}"
-    );
-}
-
-/// A finished subagent whose stream says nothing is not watched for good.
-#[gpui_kit::test]
-fn a_finished_subagent_with_a_silent_stream_is_dropped_after_a_while(cx: &mut TestAppContext) {
-    let (app, _cache) = mount_fleet(cx, small_fleet());
-    finish(cx, &app, "nick-child-1", "nick-top-1");
-    settle_after(cx, &app, std::time::Duration::from_secs(3));
-    assert!(
-        watched(&desired(cx, &app), "nick-child-1"),
-        "within the grace"
-    );
-    settle_after(cx, &app, std::time::Duration::from_secs(31));
-    assert!(
-        !watched(&desired(cx, &app), "nick-child-1"),
-        "past the grace"
-    );
-}
-
-/// After `step`, the incremental expiry and watches hold what a full sweep decides.
-fn assert_matches_sweep(cx: &mut TestAppContext, app: &Entity<ConnApp>, step: &str) {
-    let incremental = cx.read(|cx| {
-        let app = app.read(cx);
-        (
-            app.offline.expiry_for_test(),
-            app.offline.desired_for_test(),
-        )
-    });
-    let swept = cx.update(|cx| {
-        app.update(cx, |app, cx| {
-            app.offline.note_all_threads();
-            app.offline_follow_shell(cx);
-            (
-                app.offline.expiry_for_test(),
-                app.offline.desired_for_test(),
-            )
-        })
-    });
-    assert_eq!(incremental, swept, "after {step}");
-}
-
-#[gpui_kit::test]
-fn incremental_expiry_and_watches_match_a_full_sweep(cx: &mut TestAppContext) {
-    let (app, _cache) = mount_fleet(cx, small_fleet());
-    assert_matches_sweep(cx, &app, "the snapshot");
-    let (expired, deadlines) = cx.read(|cx| {
-        let (deadlines, expired) = app.read(cx).offline.expiry_for_test();
-        (expired.len(), deadlines.len())
-    });
-    assert!(expired > 0, "settled more than a day ago");
-    assert!(deadlines > 0, "settled less than a day ago");
-
-    let steps: Vec<(&str, Vec<ShellStreamItem>)> = vec![
-        (
-            "a thread settles two days ago",
-            vec![updated(
-                60,
-                thread_json("nick-top-0", "p-nick", None, Run::Idle, Some(48), now_ms()),
-            )],
-        ),
-        (
-            "an expired thread is unsettled",
-            vec![updated(
-                61,
-                thread_json("nick-top-5", "p-nick", None, Run::Idle, None, now_ms()),
-            )],
-        ),
-        (
-            "a thread settles an hour ago and another is removed",
-            vec![
-                updated(
-                    62,
-                    thread_json("nick-top-1", "p-nick", None, Run::Idle, Some(1), now_ms()),
-                ),
-                removed(63, "nick-top-6"),
-            ],
-        ),
-    ];
-    for (step, items) in steps {
-        cx.update(|cx| {
-            app.update(cx, |app, cx| {
-                app.apply_batch_for_test(items.into_iter().map(ClientEvent::Shell).collect(), cx);
-            });
-        });
-        assert_matches_sweep(cx, &app, step);
-    }
-
-    // A linked environment's change goes the same way.
-    cx.update(|cx| {
-        app.update(cx, |app, cx| {
-            app.apply_linked_shell_batch_for_test(
-                "mini",
-                vec![
-                    updated(
-                        70,
-                        thread_json("mini-top-0", "p-mini", None, Run::Idle, Some(30), now_ms()),
-                    ),
-                    updated(
-                        71,
-                        thread_json(
-                            "mini-child-3",
-                            "p-mini",
-                            Some("mini-top-3"),
-                            Run::Running,
-                            None,
-                            now_ms(),
-                        ),
-                    ),
-                ],
-                cx,
-            );
-        });
-    });
-    assert_matches_sweep(cx, &app, "a linked change");
-}
-
-/// One batch on Nick's fleet: how often it merges, how long it takes and how many streams the
-/// cache watches.
+/// One batch on Nick's fleet: how often it merges and how long it takes.
 #[gpui_kit::test]
 #[ignore = "bench: run with --release --ignored --nocapture"]
 fn shell_event_bench(cx: &mut TestAppContext) {
-    let (app, _cache) = mount_fleet(cx, fleet());
+    let app = mount_fleet(cx, fleet());
     cx.update(|cx| app.update(cx, |app, _| app.sidebar.settled_expanded = true));
-    let (threads, watching) = cx.read(|cx| {
-        let app = app.read(cx);
-        (
-            app.shell.threads.len(),
-            app.offline.desired_for_test().len(),
-        )
-    });
+    let threads = cx.read(|cx| app.read(cx).shell.threads.len());
     println!("merged threads: {threads}");
-    println!("watched streams: {watching}");
     const ROUNDS: i64 = 50;
     let start = std::time::Instant::now();
     let listed = cx.read(|cx| {

@@ -1633,6 +1633,183 @@ async fn a_resume_bounds_stored_payloads_and_coalesced_items_as_t3() {
     assert_eq!(resume(after).await[0]["kind"], "snapshot");
 }
 
+/// `changesAfterSequence` (`wire.md`): a gap past T3's replay limit but within the changes
+/// budget gets each changed row's last event once, in order, then `synchronized` and live
+/// events; a longer gap, a rollback or a foreign cursor gets the bounded snapshot instead.
+#[tokio::test(flavor = "current_thread")]
+async fn a_changes_resume_sends_each_changed_row_once_and_resets_on_a_rollback() {
+    let db = TempDb::new("changes");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut live = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut live).await;
+    dispatch(&engine, message("t1", "m0", "first")).await;
+    until_run_ends(&mut live).await;
+    let after = engine.inner().db(|s| s.high_water()).await;
+    for turn in 1..=9 {
+        dispatch(&engine, message("t1", &format!("m{turn}"), "again")).await;
+        until_run_ends(&mut live).await;
+    }
+    let events = engine
+        .inner()
+        .db(move |s| s.thread_events_after("t1", after, 10_000))
+        .await
+        .unwrap();
+    assert!(
+        events.len() > 128,
+        "past T3's replay limit: {}",
+        events.len()
+    );
+
+    let subscribe = |input: Value| engine.subscribe_thread(from_json(input).unwrap());
+    let mut resumed = subscribe(json!({"threadId": "t1", "afterSequence": after,
+        "changesAfterSequence": after, "requestCompletionMarker": true}))
+    .await
+    .unwrap();
+    let mut items = vec![];
+    loop {
+        let item = next(&mut resumed).await;
+        if item["kind"] == "synchronized" {
+            break;
+        }
+        items.push(item);
+    }
+    let sequences: Vec<u64> = items
+        .iter()
+        .map(|i| i["sequence"].as_u64().unwrap())
+        .collect();
+    assert!(items.iter().all(|i| i["kind"] == "event"));
+    assert!(
+        sequences.windows(2).all(|w| w[0] < w[1]),
+        "ascending, no repeats"
+    );
+    assert!(sequences.iter().all(|seq| *seq > after));
+    assert!(
+        items.len() < events.len(),
+        "{} of {} events",
+        items.len(),
+        events.len()
+    );
+    let rows: std::collections::HashSet<(String, String)> = items
+        .iter()
+        .filter(|i| i["event"]["type"].as_str().unwrap().ends_with(".updated"))
+        .map(|i| {
+            (
+                i["event"]["type"].as_str().unwrap().to_owned(),
+                i["event"]["payload"]["id"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_owned(),
+            )
+        })
+        .collect();
+    let updated = items
+        .iter()
+        .filter(|i| i["event"]["type"].as_str().unwrap().ends_with(".updated"))
+        .count();
+    assert_eq!(rows.len(), updated, "one item per changed row");
+    // Each changed row is sent at its newest state: the stored row's own body.
+    let stored = engine
+        .inner()
+        .db(move |s| {
+            s.query_json(
+                "SELECT body FROM entities WHERE thread_id = 't1' AND kind = 'turnItems' AND seq > ?1",
+                [after as i64],
+            )
+        })
+        .await
+        .unwrap();
+    assert!(stored.len() >= 16, "two items a turn: {}", stored.len());
+    for row in &stored {
+        let sent = items
+            .iter()
+            .rev()
+            .find(|i| {
+                i["event"]["payload"]["id"] == row["id"]
+                    && i["event"]["type"] == "turn-item.updated"
+            })
+            .expect("changed turn item sent");
+        assert_eq!(sent["event"]["payload"], *row);
+    }
+    // Live events follow on the same stream.
+    dispatch(&engine, message("t1", "m21", "live")).await;
+    assert_eq!(next(&mut resumed).await["kind"], "event");
+    drop(resumed);
+
+    // The same read without the flag is T3's: a snapshot.
+    let mut plain = subscribe(json!({"threadId": "t1", "afterSequence": after}))
+        .await
+        .unwrap();
+    assert_eq!(next(&mut plain).await["kind"], "snapshot");
+    drop(plain);
+
+    // A long gap (past 256 changed rows) gets the newest window: changes grow with time away.
+    let short = engine.inner().db(|s| s.high_water()).await;
+    for turn in 22..=60 {
+        dispatch(&engine, message("t1", &format!("m{turn}"), "long")).await;
+        until_run_ends(&mut live).await;
+    }
+    let mut long = subscribe(json!({"threadId": "t1", "changesAfterSequence": short,
+        "acceptBoundedSnapshot": true, "requestCompletionMarker": true}))
+    .await
+    .unwrap();
+    assert_eq!(
+        next(&mut long).await["kind"],
+        "snapshot",
+        "a long gap gets the window"
+    );
+    assert_eq!(next(&mut long).await["kind"], "synchronized");
+    drop(long);
+
+    // A run rolled back after the cursor: the rows cannot be patched, so a fresh window.
+    let latest = engine.inner().db(|s| s.high_water()).await;
+    {
+        let conn = rusqlite::Connection::open(db.path()).unwrap();
+        conn.execute(
+            "UPDATE entities SET seq = ?1, body = json_set(body, '$.status', 'rolled_back')
+             WHERE thread_id = 't1' AND kind = 'runs'
+             AND id = (SELECT id FROM entities WHERE thread_id = 't1' AND kind = 'runs' ORDER BY seq DESC LIMIT 1)",
+            [latest as i64],
+        )
+        .unwrap();
+    }
+    let mut reset = subscribe(json!({"threadId": "t1", "changesAfterSequence": latest - 1,
+        "acceptBoundedSnapshot": true}))
+    .await
+    .unwrap();
+    assert_eq!(next(&mut reset).await["kind"], "snapshot");
+    // A cursor from another database (above the high water) resets too.
+    let mut foreign = subscribe(json!({"threadId": "t1", "changesAfterSequence": latest + 1000}))
+        .await
+        .unwrap();
+    assert_eq!(next(&mut foreign).await["kind"], "snapshot");
+}
+
+/// A thread stream wakes only for its own thread's commits; a wake lives while a stream holds it.
+#[test]
+fn a_thread_wake_rises_only_for_its_own_thread() {
+    let wakes = crate::store::ThreadWakes::default();
+    let mut one = wakes.subscribe("t1");
+    let two = wakes.subscribe("t2");
+    let one_again = wakes.subscribe("t1");
+    wakes.raise_for_test(&["t1".to_owned()], 7);
+    assert!(one.rx.has_changed().unwrap());
+    assert!(one_again.rx.has_changed().unwrap());
+    assert!(!two.rx.has_changed().unwrap());
+    assert_eq!(*one.rx.borrow_and_update(), 7);
+    drop((one, one_again, two));
+    assert_eq!(wakes.len_for_test(), 2);
+    let _three = wakes.subscribe("t3");
+    assert_eq!(
+        wakes.len_for_test(),
+        1,
+        "dead wakes go at the next subscribe"
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn interrupt_and_permission_answers_reach_the_provider() {
     let db = TempDb::new("interrupt");

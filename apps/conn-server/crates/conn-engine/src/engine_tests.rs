@@ -1738,6 +1738,21 @@ async fn a_changes_resume_sends_each_changed_row_once_and_resets_on_a_rollback()
     dispatch(&engine, message("t1", "m21", "live")).await;
     assert_eq!(next(&mut resumed).await["kind"], "event");
     drop(resumed);
+    until_run_ends(&mut live).await;
+
+    // A client already at the high water gets no rows, then live events after its cursor.
+    let high = engine.inner().db(|s| s.high_water()).await;
+    let mut current = subscribe(json!({"threadId": "t1", "changesAfterSequence": high,
+        "requestCompletionMarker": true}))
+    .await
+    .unwrap();
+    assert_eq!(next(&mut current).await["kind"], "synchronized");
+    dispatch(&engine, message("t1", "m21b", "live")).await;
+    let first = next(&mut current).await;
+    assert_eq!(first["kind"], "event");
+    assert_eq!(first["sequence"], high + 1);
+    drop(current);
+    until_run_ends(&mut live).await;
 
     // The same read without the flag is T3's: a snapshot.
     let mut plain = subscribe(json!({"threadId": "t1", "afterSequence": after}))
@@ -16231,6 +16246,36 @@ async fn a_bounded_snapshot_holds_ten_turns_and_pages_back() {
         );
     }
     assert_eq!(view["hasMoreHistory"], true);
+    // Compact: the window's local items travel once, in `visibleTurnItems`. Restored as the
+    // client does (`restoreLocalVisibleTurnItems`), they are the whole window's turn items.
+    assert_eq!(view["turnItemsOmitLocalVisible"], true);
+    let mut whole = engine
+        .subscribe_thread(
+            from_json(json!({"threadId": "t1", "acceptBoundedSnapshot": true,
+                "acceptDedupedBodies": true}))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let whole = next(&mut whole).await;
+    assert_eq!(whole.get("turnItemsOmitLocalVisible"), None);
+    assert_eq!(
+        whole["projection"]["visibleTurnItems"],
+        view["projection"]["visibleTurnItems"]
+    );
+    let restored: Vec<Value> = view["projection"]["visibleTurnItems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["visibility"] == "local" || row["sourceThreadId"] == "t1")
+        .map(|row| row["item"].clone())
+        .chain(view["projection"]["turnItems"].as_array().unwrap().clone())
+        .collect();
+    assert!(view["projection"]["turnItems"].as_array().unwrap().len() < restored.len());
+    assert_eq!(Value::from(restored), whole["projection"]["turnItems"]);
+    for key in ["historyCursor", "hasMoreHistory", "latestLocalTurnOrdinal"] {
+        assert_eq!(view[key], whole[key], "{key}");
+    }
     dispatch(&engine, create("unrelated", "unrelated-create")).await;
     let mut reconnected = engine.subscribe_thread(
         from_json(json!({"threadId":"t1", "acceptBoundedSnapshot":true, "acceptCompactTurnItems":true, "acceptDedupedBodies":true})).unwrap()

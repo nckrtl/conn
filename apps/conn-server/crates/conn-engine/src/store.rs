@@ -206,6 +206,20 @@ fn changed_seqs() -> String {
     )
 }
 
+/// Whether a thread's rows changed after `?2` hold a rolled-back run, or its events a second
+/// `thread.created`. The runs are picked from `entities_by_seq` alone, which holds `kind`, so
+/// only their bodies are read. The rowless-event filter lets `thread.created` use its index.
+fn need_reset_sql() -> String {
+    format!(
+        "SELECT EXISTS (SELECT 1 FROM entities WHERE thread_id = ?1 AND kind = 'runs'
+           AND id IN (SELECT id FROM entities INDEXED BY entities_by_seq
+             WHERE thread_id = ?1 AND seq > ?2 AND kind = 'runs')
+           AND json_extract(body, '$.status') = 'rolled_back')
+         OR EXISTS (SELECT 1 FROM events WHERE thread_id = ?1 AND seq > ?2
+           AND type = 'thread.created' AND type NOT IN ({ROW_EVENT_TYPES}))"
+    )
+}
+
 /// The projection collection an event type replaces an entity in. One line per event kind.
 fn collection_of(event_type: &str) -> Option<&'static str> {
     Some(match event_type {
@@ -423,6 +437,9 @@ pub(crate) struct Store {
     /// The latest committed sequence, sent by the commit itself (T3's `EventSink` publishes
     /// after its transaction), so a caller that goes away cannot keep clients from seeing it.
     pub(crate) published: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+    /// The sequence of the last commit that wrote a shell change, for shell streams: most
+    /// commits (a streamed item, a node update) change no shell row.
+    pub(crate) shell_published: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
     /// One wake per subscribed thread, raised by a commit that appended to that thread.
     pub(crate) thread_wakes: std::sync::Arc<ThreadWakes>,
     pub(crate) limit_recovery_wake: std::sync::Arc<tokio::sync::Notify>,
@@ -578,6 +595,7 @@ impl Store {
             thread_push: None,
             effects_wake: std::sync::Arc::default(),
             published: std::sync::Arc::new(tokio::sync::watch::Sender::new(high)),
+            shell_published: std::sync::Arc::new(tokio::sync::watch::Sender::new(high)),
             thread_wakes: std::sync::Arc::default(),
             limit_recovery_wake: Default::default(),
             owner: None,
@@ -756,6 +774,8 @@ impl Store {
             effects_wake: self.effects_wake.clone(),
             effects_written: false,
             published: self.published.clone(),
+            shell_published: self.shell_published.clone(),
+            shell_written: false,
             thread_wakes: self.thread_wakes.clone(),
             appended: Vec::new(),
             limit_recovery_wake: self.limit_recovery_wake.clone(),
@@ -1940,30 +1960,40 @@ impl Store {
         Ok(rows)
     }
 
-    /// Whether the changes after `after` fit a catch-up: at most `max_items` changed rows and
-    /// rowless events, and at most `max_bytes` of their stored events. Reads at most
+    /// The changes after `after` when they fit a catch-up, as [`Self::thread_changes_after`]
+    /// returns them: at most `max_items` changed rows and rowless events, and at most
+    /// `max_bytes` of their stored events. `None` when they do not. Reads at most
     /// `max_items + 1` events, so a long gap costs no more than a short one to judge.
-    pub(crate) fn thread_changes_fit(
+    pub(crate) fn thread_changes_if_fit(
         &self,
         thread_id: &str,
         after: u64,
         max_items: usize,
         max_bytes: u64,
-    ) -> StoreResult<bool> {
+    ) -> StoreResult<Option<Vec<(u64, Value)>>> {
         let sql = format!(
-            "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(event AS BLOB))), 0) FROM (
-               SELECT event FROM events WHERE seq IN ({}) ORDER BY seq LIMIT ?3)",
+            "SELECT seq, event FROM events WHERE seq IN ({}) ORDER BY seq LIMIT ?3",
             changed_seqs()
         );
-        let (items, bytes): (i64, i64) = self
-            .conn
-            .query_row(
-                &sql,
-                params![thread_id, after as i64, (max_items + 1) as i64],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+        let mut stmt = self.conn.prepare(&sql).map_err(err)?;
+        let mut rows = stmt
+            .query(params![thread_id, after as i64, (max_items + 1) as i64])
             .map_err(err)?;
-        Ok(items as usize <= max_items && bytes as u64 <= max_bytes)
+        let mut texts = Vec::new();
+        let mut bytes = 0u64;
+        while let Some(row) = rows.next().map_err(err)? {
+            let text: String = row.get(1).map_err(err)?;
+            bytes += text.len() as u64;
+            if texts.len() == max_items || bytes > max_bytes {
+                return Ok(None);
+            }
+            texts.push((row.get::<_, i64>(0).map_err(err)? as u64, text));
+        }
+        texts
+            .into_iter()
+            .map(|(seq, text)| Ok((seq, parse(text)?)))
+            .collect::<StoreResult<Vec<_>>>()
+            .map(Some)
     }
 
     /// Whether rows a client holds as of `after` can no longer be patched by changed rows: a
@@ -1974,15 +2004,9 @@ impl Store {
         after: u64,
     ) -> StoreResult<bool> {
         self.conn
-            .query_row(
-                "SELECT EXISTS (SELECT 1 FROM entities INDEXED BY entities_by_seq
-                   WHERE thread_id = ?1 AND seq > ?2 AND kind = 'runs'
-                   AND json_extract(body, '$.status') = 'rolled_back')
-                 OR EXISTS (SELECT 1 FROM events WHERE thread_id = ?1 AND seq > ?2
-                   AND type = 'thread.created')",
-                params![thread_id, after as i64],
-                |row| row.get(0),
-            )
+            .query_row(&need_reset_sql(), params![thread_id, after as i64], |row| {
+                row.get(0)
+            })
             .map_err(err)
     }
 
@@ -2169,6 +2193,8 @@ pub(crate) struct Tx<'a> {
     effects_wake: std::sync::Arc<tokio::sync::Notify>,
     effects_written: bool,
     published: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+    shell_published: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+    shell_written: bool,
     thread_wakes: std::sync::Arc<ThreadWakes>,
     /// Threads this write appended an event to, for their wakes.
     appended: Vec<String>,
@@ -2996,6 +3022,7 @@ impl Tx<'_> {
                 params![seq as i64, item.to_string()],
             )
             .map_err(err)?;
+        self.shell_written = true;
         Ok(seq)
     }
 
@@ -3192,6 +3219,7 @@ impl Tx<'_> {
                     params![seq as i64, item.to_string()],
                 )
                 .map_err(err)?;
+            self.shell_written = true;
         }
         let high = self.next_seq - 1;
         // A command that wrote nothing answers its own thread's latest sequence, as T3's
@@ -3246,6 +3274,15 @@ impl Tx<'_> {
             }
             newer
         });
+        if self.shell_written {
+            self.shell_published.send_if_modified(|published| {
+                let newer = high > *published;
+                if newer {
+                    *published = high;
+                }
+                newer
+            });
+        }
         self.thread_wakes.raise(&self.appended, high);
         if self.attention_written
             && let Some(attention) = &self.attention
@@ -4011,6 +4048,14 @@ mod tests {
             .join("\n");
         assert!(plan.contains("rowless_events_by_thread"), "{plan}");
         assert!(plan.contains("entities_by_seq"), "{plan}");
+        let plan = store
+            .query_plan(&need_reset_sql(), rusqlite::params!["t", 0])
+            .join("\n");
+        assert!(
+            plan.contains("COVERING INDEX entities_by_seq"),
+            "runs picked without reading bodies: {plan}"
+        );
+        assert!(plan.contains("rowless_events_by_thread"), "{plan}");
     }
 
     #[test]
@@ -4045,6 +4090,132 @@ mod tests {
                 has_create: false,
             }
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Shell streams wake only for commits that write a shell change; every commit still
+    /// publishes its sequence.
+    #[test]
+    fn only_a_shell_change_wakes_shell_streams() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-engine-{}-shell-wake", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = Store::open(&dir.join("engine.sqlite")).unwrap();
+        let mut shell = store.shell_published.subscribe();
+        let mut any = store.published.subscribe();
+        // An event of a thread with no row changes no shell row.
+        let mut tx = store.tx().unwrap();
+        tx.append(Draft::new(
+            "ghost",
+            "message.updated",
+            json!({"id": "m1", "role": "assistant", "text": "x", "streaming": true}),
+        ))
+        .unwrap();
+        tx.commit(None).unwrap();
+        assert!(any.has_changed().unwrap());
+        assert!(!shell.has_changed().unwrap(), "no shell change, no wake");
+        any.mark_unchanged();
+        let mut tx = store.tx().unwrap();
+        let created = tx
+            .append(Draft::new(
+                "t1",
+                "thread.created",
+                json!({"id": "t1", "projectId": "p", "title": "T"}),
+            ))
+            .unwrap();
+        tx.commit(None).unwrap();
+        assert!(any.has_changed().unwrap());
+        assert!(
+            shell.has_changed().unwrap(),
+            "a new thread row wakes shells"
+        );
+        assert_eq!(*shell.borrow_and_update(), created);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A changes resume resets for a run rolled back after its cursor, or a thread created
+    /// again after it; not for older ones, other runs, or another thread's.
+    #[test]
+    fn a_changes_resume_resets_only_for_later_rollbacks_and_creates() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-engine-{}-changes-reset", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("engine.sqlite")).unwrap();
+        store
+            .conn
+            .execute_batch(
+                r#"INSERT INTO entities (thread_id, kind, id, first_seq, seq, body) VALUES
+                     ('t1', 'runs', 'r1', 1, 10, '{"status":"rolled_back"}'),
+                     ('t1', 'runs', 'r2', 2, 20, '{"status":"completed"}'),
+                     ('t1', 'turnItems', 'i1', 3, 30, '{"status":"rolled_back"}'),
+                     ('t2', 'runs', 'r3', 4, 40, '{"status":"rolled_back"}');
+                   INSERT INTO events (seq, thread_id, type, event) VALUES
+                     (1, 't1', 'thread.created', '{}'),
+                     (50, 't3', 'thread.created', '{}'),
+                     (60, 't3', 'thread.created', '{}');"#,
+            )
+            .unwrap();
+        let reset = |thread: &str, after| store.thread_changes_need_reset(thread, after).unwrap();
+        assert!(reset("t1", 9), "r1 rolled back after the cursor");
+        assert!(!reset("t1", 10), "r1 rolled back at the cursor");
+        assert!(
+            !reset("t1", 20),
+            "a completed run and a non-run row do not reset"
+        );
+        assert!(reset("t2", 39));
+        assert!(!reset("t2", 40));
+        assert!(reset("t3", 50), "created again after the cursor");
+        assert!(!reset("t3", 60));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Changes that fit come back as the changes page reads them; one row or byte past either
+    /// budget gives none.
+    #[test]
+    fn changes_that_fit_are_the_changes_page() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-engine-{}-changes-fit", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("engine.sqlite")).unwrap();
+        let event = |seq: i64, kind: &str| {
+            let text = format!(r#"{{"type":"{kind}","n":{seq}}}"#);
+            store
+                .conn
+                .execute(
+                    "INSERT INTO events (seq, thread_id, type, event) VALUES (?1, 't1', ?2, ?3)",
+                    params![seq, kind, text],
+                )
+                .unwrap();
+            text.len() as u64
+        };
+        // A row written twice is one change, at its last write; the rest are rowless.
+        event(1, "turn-item.updated");
+        let mut bytes = event(2, "turn-item.updated");
+        store
+            .conn
+            .execute(
+                "INSERT INTO entities (thread_id, kind, id, first_seq, seq, body)
+                 VALUES ('t1', 'turnItems', 'i1', 1, 2, '{}')",
+                [],
+            )
+            .unwrap();
+        for seq in 3..=256 {
+            bytes += event(seq, "thread.visited");
+        }
+        let page = store.thread_changes_after("t1", 0, 256).unwrap();
+        assert_eq!(page.len(), 255);
+        let fit = |max_items, max_bytes| {
+            store
+                .thread_changes_if_fit("t1", 0, max_items, max_bytes)
+                .unwrap()
+        };
+        assert_eq!(fit(256, bytes), Some(page.clone()));
+        assert_eq!(fit(255, bytes), Some(page));
+        assert_eq!(fit(254, bytes), None, "one row past the budget");
+        assert_eq!(fit(256, bytes - 1), None, "one byte past the budget");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -82,7 +82,7 @@ pub(crate) async fn subscribe_shell(
     let omit_idle = input["omitIdleSubagents"] == true;
     let omit_older = input["omitOlderSettled"] == true;
     // Subscribe before reading, so a commit between the read and the first wait still wakes us.
-    let mut wake = inner.notify.subscribe();
+    let mut wake = inner.shell_notify.subscribe();
     let (first, mut cursor) = inner
         .db(move |store| -> Result<(Vec<Value>, u64), String> {
             let high = store.high_water();
@@ -160,9 +160,12 @@ pub(crate) fn can_replay(after: u64, high: u64, imported: u64) -> bool {
     after <= high && (imported == 0 || after > imported)
 }
 
-/// A thread stream's first items, the cursor live reads go on from, and the sequence a
-/// `changesAfterSequence` opening pages changed rows from.
-type Opening = (Vec<Value>, u64, Option<u64>);
+/// One page of changed rows and the high water read with it.
+type ChangesPage = (Vec<(u64, Value)>, u64);
+
+/// A thread stream's first items, the cursor live reads go on from, and the first page of
+/// changed rows of a `changesAfterSequence` opening.
+type Opening = (Vec<Value>, u64, Option<ChangesPage>);
 
 pub(crate) async fn subscribe_thread(
     inner: Arc<Inner>,
@@ -177,8 +180,7 @@ pub(crate) async fn subscribe_thread(
     let dedupe = input["acceptDedupedBodies"] == true;
     // T3's `shouldUseBoundedThreadSnapshot`: the newest window and a cursor for older pages.
     let bounded = input["acceptBoundedSnapshot"] == true;
-    // A bounded snapshot keeps its window's turn items whole; it is small already.
-    let omit_local = input["acceptCompactTurnItems"] == true && !bounded;
+    let omit_local = input["acceptCompactTurnItems"] == true;
     // Conn's own resume: the rows changed after this sequence, never "too old" (`wire.md`).
     let changes_after = input["changesAfterSequence"].as_u64();
     let wake = inner.thread_wakes.subscribe(&thread_id);
@@ -187,22 +189,28 @@ pub(crate) async fn subscribe_thread(
         .db(move |store| -> Result<Option<Opening>, String> {
             let high = store.high_water();
             let imported = store.imported_through();
+            // Nothing changed since the client's cursor: no change reads, and no page read.
+            if let Some(after) = changes_after.filter(|after| *after == high)
+                && can_replay(after, high, imported)
+                && store.thread_known(&id)?
+            {
+                return Ok(Some((vec![], high, None)));
+            }
             // Rows a client holds are patched by changed rows unless the server now hides some
             // (a rollback) or the thread was created again; then the snapshot below replaces them.
             // A long gap gets the newest window instead: changes grow with time away, a window
             // does not. A deleted thread keeps the changes, which end in `thread.deleted`.
+            // `CHANGES_MAX_ITEMS` is one page, so changes that fit are the whole first page.
             if let Some(after) = changes_after.filter(|after| can_replay(*after, high, imported))
                 && store.thread_known(&id)?
                 && !store.thread_changes_need_reset(&id, after)?
-                && (!store.thread_exists(&id)?
-                    || store.thread_changes_fit(
-                        &id,
-                        after,
-                        CHANGES_MAX_ITEMS,
-                        CHANGES_MAX_BYTES,
-                    )?)
+                && let Some(page) = if store.thread_exists(&id)? {
+                    store.thread_changes_if_fit(&id, after, CHANGES_MAX_ITEMS, CHANGES_MAX_BYTES)?
+                } else {
+                    Some(store.thread_changes_after(&id, after, LIVE_READ_BATCH)?)
+                }
             {
-                return Ok(Some((vec![], after, Some(after))));
+                return Ok(Some((vec![], after, Some((page, high)))));
             }
             let first = |items, high| Ok(Some((items, high, None)));
             // T3 replays a resumed stream before it looks for the thread (`ws.ts`), so a
@@ -219,7 +227,9 @@ pub(crate) async fn subscribe_thread(
                 return Ok(None);
             }
             if bounded && let Some(window) = store.bounded_thread(&id)? {
-                let mut item = snapshot_item(window.projection, high, dedupe, false);
+                let mut projection = window.projection;
+                let omitted = omit_local && crate::history::omit_local_items(&mut projection);
+                let mut item = snapshot_item(projection, high, dedupe, omitted);
                 item["historyCursor"] = json!(window.history_cursor);
                 item["hasMoreHistory"] = json!(window.has_more_history);
                 item["latestLocalTurnOrdinal"] = json!(window.latest_local_turn_ordinal);
@@ -251,22 +261,9 @@ pub(crate) async fn subscribe_thread(
         }
         // Pages of changed rows. A row a commit changes meanwhile comes again in a later page,
         // newer; the last page's read of the high water is where live events go on.
-        if changes.is_some() {
+        if let Some(mut next) = changes {
             loop {
-                let (id, after) = (thread_id.clone(), cursor);
-                let page = inner
-                    .db(move |store| {
-                        let page = store.thread_changes_after(&id, after, LIVE_READ_BATCH)?;
-                        Ok::<_, String>((page, store.high_water()))
-                    })
-                    .await;
-                let (page, high) = match page {
-                    Ok(page) => page,
-                    Err(e) => {
-                        fail(&tx, error(e)).await;
-                        return;
-                    }
-                };
+                let (page, high) = next;
                 let full = page.len() == LIVE_READ_BATCH;
                 for change in page {
                     cursor = change.0;
@@ -278,6 +275,20 @@ pub(crate) async fn subscribe_thread(
                     cursor = cursor.max(high);
                     break;
                 }
+                let (id, after) = (thread_id.clone(), cursor);
+                next = match inner
+                    .db(move |store| {
+                        let page = store.thread_changes_after(&id, after, LIVE_READ_BATCH)?;
+                        Ok::<_, String>((page, store.high_water()))
+                    })
+                    .await
+                {
+                    Ok(page) => page,
+                    Err(e) => {
+                        fail(&tx, error(e)).await;
+                        return;
+                    }
+                };
             }
         }
         if marker && !send(&tx, json!({"kind": "synchronized"}), error).await {

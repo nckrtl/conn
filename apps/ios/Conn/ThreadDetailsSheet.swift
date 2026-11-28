@@ -97,8 +97,15 @@ struct ThreadDetailsSheet: View {
 
     @ViewBuilder
     private func sections(_ details: FfiThreadDetails) -> some View {
+        // Running subagents come first, where the medium detent shows them.
+        if !details.running.isEmpty { subagents(details) }
         if !details.pullRequests.isEmpty { pullRequests(details.pullRequests) }
         git(details)
+        if details.running.isEmpty && !details.previous.isEmpty { subagents(details) }
+    }
+
+    @ViewBuilder
+    private func subagents(_ details: FfiThreadDetails) -> some View {
         if !details.running.isEmpty || !details.previous.isEmpty {
             DetailsSection(title: details.subagentsTitle) {
                 ForEach(details.running, id: \.key) { agent in agentRow(agent) }

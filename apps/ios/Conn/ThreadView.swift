@@ -28,7 +28,6 @@ struct ThreadView: View {
     /// The last feed shown, kept while another thread covers this one.
     @State private var retainedSnapshot: FfiThreadSnapshot?
     private static let titleInset: CGFloat = 16 + 44 + 16
-    @State private var showsAgents = false
     @State private var showsDetails = false
     /// What a details row asked for, done once the sheet has gone.
     @State private var afterDetails: (() -> Void)?
@@ -171,9 +170,8 @@ struct ThreadView: View {
         ThreadFeedHost(
             threadId: threadId,
             rows: feedRows,
-            // The stack gap and 1 pt end marker under the last row; over a capsule, 10 less.
-            bottomPadding: capsuleShown ? ThreadFeed.spacing - 8 : ThreadFeed.spacing + 2,
-            capsuleInset: capsuleShown ? Self.floatingRowHeight : 0,
+            // The stack gap and 1 pt end marker under the last row, whatever floats above the composer.
+            bottomPadding: ThreadFeed.spacing + 2,
             forceJump: readingWindow != nil,
             hasContent: snapshot != nil,
             scrollRequest: scrollRequest,
@@ -232,13 +230,6 @@ struct ThreadView: View {
         .onGeometryChange(for: CGSize.self) { $0.size } action: { viewSize = $0 }
         .animation(.easeOut(duration: 0.2), value: snapshot?.pendingApprovals.first?.requestId)
         .animation(.easeOut(duration: 0.2), value: pendingQuestion?.requestId)
-        .sheet(isPresented: $showsAgents) {
-            ThreadAgentsSheet(agents: turnSubagents) { agent in
-                guard let child = agent.child else { return }
-                showsAgents = false
-                onOpenThread(child, agent.environment)
-            }
-        }
         .sheet(isPresented: $showsDetails, onDismiss: {
             let action = afterDetails
             afterDetails = nil
@@ -482,7 +473,6 @@ struct ThreadView: View {
             pendingQuestion: pendingQuestion,
             isWorking: isWorking,
             readingHistory: readingWindow != nil,
-            historyNotice: historyNotice,
             viewHeight: viewSize.height,
             modelDriver: modelPicker?.selectedDriver,
             modelLabel: modelPicker?.selectedLabel ?? snapshot?.modelLabel,
@@ -499,24 +489,11 @@ struct ThreadView: View {
         if case let .tool(_, kind, title, _, .running, _, _, _)? = last {
             return (connToolLabel(title: title)?.displayName ?? (title.isEmpty ? kind : title), "thinking")
         }
-        let waiting = turnSubagents.filter { !$0.settled }.count
+        let waiting = snapshot.turnAgents?.agents.filter { !$0.settled }.count ?? 0
         if waiting > 0 {
             return (waiting == 1 ? "Waiting on a subagent" : "Waiting on \(waiting) subagents", "thinking")
         }
         return ("Thinking", "thinking")
-    }
-
-    struct TurnSubagent: Identifiable {
-        let id: String
-        let title: String
-        let child: String?
-        let environment: String?
-        let settled: Bool
-        let status: String
-        let state: FfiTurnItemStatus
-        let provider: String?
-        let model: String?
-        let updatedAt: String?
     }
 
     /// Logs the first frame that draws this thread's messages, once per open.
@@ -526,43 +503,24 @@ struct ThreadView: View {
         frameLogged.thread = threadId
         frameLogged.openedAt = openedAt
         let ms = Int(Date().timeIntervalSince(openedAt) * 1000)
-        CoreStore.openLog.info("frame thread=\(threadId, privacy: .public) entries=\(snapshot.entries.count) capsule=\(turnSubagents.count) ms=\(ms)")
+        CoreStore.openLog.info("frame thread=\(threadId, privacy: .public) entries=\(snapshot.entries.count) ms=\(ms)")
     }
 
-    /// The latest turn's agents, plus any still live from an earlier turn, from the projection's
-    /// subagents and runs (the core's `turn_agents`, mobile's `deriveThreadTurnSubagents`): there
-    /// with the first projection, and a delegated completion row never ends the turn.
-    private var turnSubagents: [TurnSubagent] {
-        (snapshot?.turnAgents?.agents ?? []).map { agent in
-            TurnSubagent(id: agent.id, title: agent.title, child: agent.childThreadId,
-                         environment: agent.environmentId, settled: agent.settled,
-                         status: agent.statusLabel, state: agent.status, provider: agent.provider,
-                         model: agent.model, updatedAt: agent.completedAt ?? agent.startedAt ?? agent.updatedAt)
-        }
+    /// The one status that floats above the composer. The history notice answers the reader's
+    /// tap, so it wins; "Not connected" hides "Syncing".
+    private var floatingStatus: FeedFloatingControl.Status? {
+        if let historyNotice { return .history(historyNotice) }
+        if store.showsOffline && !store.showsSavedConnectionAlert { return .offline }
+        if snapshot.map({ !$0.synchronized }) ?? false && readingWindow == nil { return .syncing }
+        return nil
     }
-
-    /// Mobile's `FloatingWorkingControl`, above the approvals and the composer: a glass capsule for
-    /// the running subagents ("2/3", or "3 done" once they settle) and the jump-to-latest circle,
-    /// 16 apart, 12 above the composer.
-    private var syncing: Bool {
-        snapshot.map { !$0.synchronized } ?? false && !store.showsOffline && readingWindow == nil
-    }
-
-    /// The agents or syncing capsule floats over the end of the feed.
-    private var capsuleShown: Bool { !turnSubagents.isEmpty || syncing }
-
-    /// The floating row: the 44 pt control and 9.25 pt under it (a 12 pt gap to the composer).
-    static let floatingRowHeight: CGFloat = 44 + 9.25
 
     private var floatingControl: some View {
         FeedFloatingControl(
             chrome: chrome,
-            agents: turnSubagents,
-            liveCount: Int(snapshot?.turnAgents?.liveCount ?? 0),
-            settledCount: Int(snapshot?.turnAgents?.settledCount ?? 0),
-            syncing: syncing,
-            onJump: { latest() },
-            onAgents: { showsAgents = true }
+            status: floatingStatus,
+            store: store,
+            onJump: { latest() }
         )
     }
 
@@ -696,30 +654,36 @@ private final class FrameLog {
     var openedAt: Date?
 }
 
-/// The floating row over the end of the feed. It is a separate host from the composer, and never
-/// changes the feed's inset itself, so the jump circle coming and going can't move the feed and
-/// flip itself again.
+/// The floating row over the end of the feed: one short status and the jump-to-latest circle. It
+/// is a separate host from the composer and never changes the feed's inset, so neither a status
+/// nor the jump circle coming and going can move the thread.
 struct FeedFloatingControl: View {
+    enum Status: Equatable {
+        case syncing
+        case offline
+        case history(String)
+    }
+
     let chrome: FeedChrome
-    let agents: [ThreadView.TurnSubagent]
-    let liveCount: Int
-    let settledCount: Int
-    let syncing: Bool
+    let status: Status?
+    let store: CoreStore
     let onJump: () -> Void
-    let onAgents: () -> Void
     @Environment(\.connTheme) private var theme
-    @Namespace private var floatingGlass
 
     var body: some View {
         let showsJump = chrome.showsJump
-        let visible = showsJump || !agents.isEmpty || syncing
+        let visible = showsJump || status != nil
         // Merge spacing 8, as the composer's container had: the controls never blend.
         GlassEffectContainer(spacing: 8) {
             // The row stays in place, so the jump circle can fade and shrink out, the reverse of how
             // it appears; removing the row with it used to cut the exit short.
-            HStack(spacing: 16) {
-                if syncing { syncingCapsule }
-                if !agents.isEmpty { agentsCapsule }
+            HStack(alignment: .bottom, spacing: 16) {
+                if let status {
+                    statusView(status)
+                        // Every status sits on the 12 pt line above the composer, as the capsule does.
+                        .padding(.bottom, 2.75)
+                        .transition(.opacity)
+                }
                 if showsJump {
                     Button {
                         UISelectionFeedbackGenerator().selectionChanged()
@@ -729,11 +693,7 @@ struct FeedFloatingControl: View {
                             .foregroundStyle(theme.foreground)
                             .frame(width: 38.5, height: 38.5)
                             .glassEffect(.regular.interactive(), in: .circle)
-                            // The glass container draws the circle, so the glass makes its own
-                            // entrance and exit: alone it materializes, beside the agents capsule it
-                            // morphs out of and back into it. The chevron only fades in place.
-                            .glassEffectID("jump", in: floatingGlass)
-                            .glassEffectTransition(agents.isEmpty ? .materialize : .matchedGeometry)
+                            .glassEffectTransition(.materialize)
                             .frame(width: 44, height: 44)
                             .contentShape(Rectangle())
                     }
@@ -748,9 +708,11 @@ struct FeedFloatingControl: View {
         .frame(maxWidth: .infinity)
         // The 38.5 pt circle sits 2.75 pt inside its 44 pt frame: 9.25 more makes a 12 pt gap.
         .padding(.bottom, visible ? 9.25 : 0)
+        .padding(.horizontal, 16)
         .frame(maxHeight: .infinity, alignment: .bottom)
-        // The capsule re-centres as the jump circle morphs in or out, both ways.
+        // A status fades in and out where it sits; the row re-centres as the jump circle comes and goes.
         .animation(.smooth(duration: 0.35), value: showsJump)
+        .animation(.easeOut(duration: 0.25), value: status)
         .animation(.smooth(duration: 0.35), value: visible)
         // The host's own space: the frame is where its pass-through view lets touches in.
         .coordinateSpace(.named(Self.space))
@@ -758,50 +720,36 @@ struct FeedFloatingControl: View {
 
     private static let space = "feed.floating"
 
-    /// "Syncing" while the feed still shows cached state, in the agents capsule's style.
-    private var syncingCapsule: some View {
-        HStack(spacing: 6) {
-            ProgressView().controlSize(.mini).tint(theme.mutedForeground)
-            Text("Syncing")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(theme.foreground)
+    @ViewBuilder
+    private func statusView(_ status: Status) -> some View {
+        switch status {
+        case .offline:
+            OfflinePill(store: store)
+                .accessibilityIdentifier("thread.offline")
+        case .syncing:
+            capsule(id: "thread.syncing", label: "Syncing the latest messages") {
+                ProgressView().controlSize(.mini).tint(theme.mutedForeground)
+                Text("Syncing")
+            }
+        case let .history(notice):
+            capsule(id: "thread.historyNotice", label: notice) {
+                Text(notice).lineLimit(2).multilineTextAlignment(.center)
+            }
         }
-        .padding(.horizontal, 12)
-        .frame(height: 38.5)
-        .glassEffect(.regular, in: .capsule)
-        .frame(height: 44)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Syncing the latest messages")
-        .accessibilityIdentifier("thread.syncing")
     }
 
-    private var agentsCapsule: some View {
-        let label = liveCount > 0 ? "\(liveCount)/\(agents.count)" : "\(settledCount) done"
-        return Button {
-            UISelectionFeedbackGenerator().selectionChanged()
-            onAgents()
-        } label: {
-            HStack(spacing: 6) {
-                ThreadGlyph(name: "users", size: 14)
-                    .font(.system(size: 13))
-                    .foregroundStyle(theme.mutedForeground)
-                Text(label)
-                    .font(.system(size: 12, weight: .medium))
-                    .monospacedDigit()
-                    .foregroundStyle(theme.foreground)
-            }
+    /// Lab `.m-float-status`: 12 pt medium text in a 38.5 pt glass capsule.
+    private func capsule(id: String, label: String, @ViewBuilder content: () -> some View) -> some View {
+        HStack(spacing: 6) { content() }
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(theme.foreground)
             .padding(.horizontal, 12)
-            // Mobile's 38.5pt control in a 44pt target, like the jump circle beside it.
-            .frame(height: 38.5)
-            .glassEffect(.regular.interactive(), in: .capsule)
-            .glassEffectID("agents", in: floatingGlass)
-            .frame(height: 44)
-            .contentShape(Capsule())
-        }
-        .accessibilityLabel(liveCount > 0 ? "Open agents, \(liveCount) of \(agents.count) agents working"
-                            : "Open agents, \(settledCount) done")
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("thread.agents")
+            .frame(minHeight: 38.5)
+            .fixedSize(horizontal: false, vertical: true)
+            .glassEffect(.regular, in: .capsule)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(label)
+            .accessibilityIdentifier(id)
     }
 }
 

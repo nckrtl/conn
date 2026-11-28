@@ -6,6 +6,11 @@
 //   GET /grow?lines=N   appends N lines to the streaming reply and pushes a snapshot
 //   GET /add            appends a new streaming reply after the current one (a new feed row)
 //   GET /reset          starts over
+//   GET /hold           holds back `synchronized` for threads opened next, so they show "Syncing"
+//   GET /sync           sends the held `synchronized` markers
+//   GET /drop?ms=N      closes every socket and refuses new ones for N ms, so the app reconnects
+//   GET /older          pushes snapshots that say older history exists (a history cursor), for
+//                       "Earlier messages"; sent once the thread is open, so opening fetches none
 import { readFileSync } from "node:fs";
 import { deflateSync } from "node:zlib";
 
@@ -42,6 +47,11 @@ const sequences = new Map();
 const subscribers = new Map();
 let streamLines = 0;
 let extraReplies = 0;
+let holdSync = false;
+let olderHistory = false;
+let held = [];
+const sockets = new Set();
+let refuseUntil = 0;
 
 // A 300 x 900 PNG, so a loaded image is taller than the 4:3 tile it shows before it loads.
 function png(width, height) {
@@ -160,7 +170,8 @@ function snapshot(id) {
     projections.set(id, buildProjection(id));
     sequences.set(id, sequences.get(id) ?? 1);
   }
-  return { kind: "snapshot", snapshotSequence: sequences.get(id), projection: projections.get(id) };
+  const cursor = olderHistory ? { historyCursor: "older:" + id, hasMoreHistory: true } : {};
+  return { kind: "snapshot", snapshotSequence: sequences.get(id), projection: projections.get(id), ...cursor };
 }
 
 function push(id) {
@@ -178,11 +189,39 @@ const server = Bun.serve({
   fetch(req, server) {
     const url = new URL(req.url);
     const path = url.pathname;
+    if (path === "/ws" && Date.now() < refuseUntil) return new Response(null, { status: 503 });
     if (path === "/ws" && server.upgrade(req)) return;
     if (path === "/reset") {
       projections.clear();
       streamLines = 0;
       extraReplies = 0;
+      holdSync = false;
+      olderHistory = false;
+      held = [];
+      refuseUntil = 0;
+      return Response.json({ ok: true });
+    }
+    if (path === "/older") {
+      olderHistory = true;
+      for (const id of subscribers.keys()) push(id);
+      return Response.json({ ok: true });
+    }
+    if (path === "/hold") {
+      holdSync = true;
+      return Response.json({ ok: true });
+    }
+    if (path === "/sync") {
+      holdSync = false;
+      for (const sub of held.splice(0)) {
+        try {
+          sub.ws.send(JSON.stringify({ _tag: "Chunk", requestId: sub.requestId, values: [marker] }));
+        } catch {}
+      }
+      return Response.json({ ok: true });
+    }
+    if (path === "/drop") {
+      refuseUntil = Date.now() + Number(url.searchParams.get("ms") ?? 0);
+      for (const ws of sockets) ws.close();
       return Response.json({ ok: true });
     }
     if (path === "/grow") {
@@ -206,6 +245,9 @@ const server = Bun.serve({
     return new Response(null, { status: 404 });
   },
   websocket: {
+    open(ws) {
+      sockets.add(ws);
+    },
     message(ws, text) {
       for (const frame of [JSON.parse(text)].flat()) {
         if (frame._tag === "Ping") { ws.send(JSON.stringify({ _tag: "Pong" })); continue; }
@@ -218,7 +260,12 @@ const server = Bun.serve({
           const list = (subscribers.get(id) ?? []).filter((s) => s.ws !== ws);
           list.push({ ws, requestId: frame.id });
           subscribers.set(id, list);
-          chunk(snapshot(id));
+          if (holdSync) {
+            held.push({ ws, requestId: frame.id });
+            ws.send(JSON.stringify({ _tag: "Chunk", requestId: frame.id, values: [snapshot(id)] }));
+          } else {
+            chunk(snapshot(id));
+          }
         } else if (frame.tag === "assets.createUrl") {
           const value = { relativeUrl: "/assets/" + frame.payload.resource.attachmentId, expiresAt: Date.now() + 3_600_000 };
           ws.send(JSON.stringify({ _tag: "Exit", requestId: frame.id, exit: { _tag: "Success", value } }));
@@ -230,6 +277,7 @@ const server = Bun.serve({
       }
     },
     close(ws) {
+      sockets.delete(ws);
       for (const [id, list] of subscribers) subscribers.set(id, list.filter((s) => s.ws !== ws));
     },
   },

@@ -48,6 +48,9 @@ final class ThreadDetailsUITests: XCTestCase {
         XCTAssertTrue(row.waitForExistence(timeout: 30), "inbox row \(thread)")
         row.tap()
         XCTAssertTrue(element("thread.composer").waitForExistence(timeout: 10), "composer")
+        // Running subagents live in the details sheet; nothing floats above the composer for them.
+        XCTAssertFalse(element("thread.agents").exists, "no agents capsule")
+        shot("details-thread")
         let more = element("thread.moreButton")
         XCTAssertTrue(more.waitForExistence(timeout: 5), "··· button")
         more.tap()
@@ -85,6 +88,10 @@ final class ThreadDetailsUITests: XCTestCase {
         XCTAssertTrue(element("thread.details.copyPath").exists, "Copy folder path row")
         XCTAssertTrue(element("thread.details.copyPath").label.contains("~/apps/conn"), "folder label")
 
+        // Running subagents come first, in view at the medium detent.
+        XCTAssertTrue(app.staticTexts["Subagents · 2 running"].isHittable, "running subagents in view")
+        XCTAssertTrue(element("thread.details.agent.qchild0").isHittable, "first running subagent in view")
+
         // A copy row says "Copied" for a moment.
         element("thread.details.copyLink").tap()
         XCTAssertTrue(element("thread.details.copyLink").label.contains("Copied"), "copied feedback")
@@ -111,7 +118,6 @@ final class ThreadDetailsUITests: XCTestCase {
         XCTAssertTrue(element("thread.details.changes").label.contains("+764"), "changes count")
 
         // Subagents: two running with model labels, the rest behind "Previous agents".
-        XCTAssertTrue(app.staticTexts["Subagents · 2 running"].exists, "subagents heading")
         let running = scrollTo("thread.details.agent.qchild0")
         XCTAssertTrue(running.exists, "running subagent")
         XCTAssertTrue(running.label.contains("Opus 5.5 · high"), "model label: \(running.label)")

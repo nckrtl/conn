@@ -13,7 +13,7 @@ use conn_contract::{
 };
 
 use crate::{
-    ShellState, SubagentModel, ThreadShell, ThreadState, TimelineEntry, TurnItemStatus,
+    RunStatus, ShellState, SubagentModel, ThreadShell, ThreadState, TimelineEntry, TurnItemStatus,
     format_duration, parse_iso8601_epoch_ms, providers::ModelCatalog, sidebar_rows::parks_at_idle,
     subagent_settled,
 };
@@ -499,8 +499,93 @@ fn timeline_agents(
     rows
 }
 
+/// The subagents the open thread's projection lists without a timeline row (a bounded snapshot
+/// leaves older rows out), so a running child shows from the first projection, as the turn's
+/// agents do (`ThreadState::turn_agents`).
+fn record_agents(
+    shell: &ShellState,
+    timeline: Option<&ThreadState>,
+    now_secs: i64,
+    seen: &mut HashSet<String>,
+) -> Vec<ThreadAgent> {
+    let Some(timeline) = timeline else {
+        return Vec::new();
+    };
+    let listed: HashSet<&str> = timeline
+        .entries
+        .iter()
+        .filter_map(|entry| match entry {
+            TimelineEntry::Subagent { id, .. } => Some(
+                timeline
+                    .subagent_of_entry
+                    .get(id)
+                    .map_or(id.as_str(), String::as_str),
+            ),
+            _ => None,
+        })
+        .collect();
+    let mut records: Vec<_> = timeline
+        .subagents
+        .values()
+        .filter(|record| !listed.contains(record.id.as_str()))
+        .filter(|record| {
+            record
+                .run_id
+                .as_deref()
+                .and_then(|run| timeline.run_status(run))
+                != Some(RunStatus::RolledBack)
+        })
+        .collect();
+    records.sort_by(|a, b| (&a.started_at, &a.id).cmp(&(&b.started_at, &b.id)));
+    let mut rows = Vec::new();
+    for record in records {
+        let (thread_id, environment_id) = match &record.remote_child {
+            Some((environment, thread)) => (thread.clone(), Some(environment.clone())),
+            None => (record.child_thread_id.clone().unwrap_or_default(), None),
+        };
+        if environment_id.is_none()
+            && let Some(child) = shell.find_thread(&thread_id)
+        {
+            if child.deleted_at.is_none()
+                && child.lineage.side_chat != Some(true)
+                && seen.insert(child.id.clone())
+            {
+                rows.push(shell_agent(child, Some(timeline), now_secs));
+            }
+            continue;
+        }
+        let key = if thread_id.is_empty() {
+            record.id.clone()
+        } else {
+            thread_id.clone()
+        };
+        if !seen.insert(key.clone()) {
+            continue;
+        }
+        rows.push(ThreadAgent {
+            key,
+            thread_id,
+            environment_id,
+            environment_label: None,
+            entry_id: None,
+            title: record.title.clone(),
+            provider: record.provider_instance_id.clone(),
+            model: timeline.subagent_models.get(&record.id).cloned(),
+            state: ThreadAgentState::from_item(record.status),
+            elapsed: agent_elapsed(
+                record.live(),
+                record.started_at.as_deref(),
+                record.completed_at.as_deref(),
+                now_secs,
+            ),
+        });
+    }
+    rows
+}
+
 /// The parent (or fork source) and child agents of `thread`: the shell's children, then the
-/// children only its timeline lists (the ones on another environment).
+/// children only its timeline lists (the ones on another environment), then the subagents only
+/// its projection lists.
 #[must_use]
 pub fn thread_lineage<'a, 'b>(
     shell: &'a ShellState,
@@ -535,6 +620,7 @@ pub fn thread_lineage<'a, 'b>(
         rows.push(shell_agent(child, timeline, now_secs));
     }
     rows.extend(timeline_agents(shell, timeline, now_secs, &mut seen));
+    rows.extend(record_agents(shell, timeline, now_secs, &mut seen));
     for row in rows {
         if row.state.is_live() {
             lineage.running.push(row);

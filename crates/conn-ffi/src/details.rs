@@ -328,6 +328,50 @@ mod tests {
         assert_eq!(details.folder.as_deref(), Some("/Users/nick/apps"));
     }
 
+    /// The iPhone has no agents capsule: the sheet lists the projection's subagents even before
+    /// their timeline rows load.
+    #[test]
+    fn subagents_without_a_timeline_row_still_list() {
+        let shell = shell();
+        let raw = synthetic_thread_snapshot_json(SyntheticThread {
+            turns: 1,
+            commands_per_turn: 0,
+            command_output_bytes: 0,
+            assistant_bytes: 8,
+        });
+        let mut snapshot: Value = serde_json::from_str(&raw).unwrap();
+        let projection = &mut snapshot["projection"];
+        projection["thread"]["id"] = json!("t");
+        projection["thread"]["projectId"] = json!("p");
+        let run = projection["runs"][0]["id"].clone();
+        let agent = |id: &str, status: &str| {
+            json!({
+                "id": id, "threadId": "t", "runId": run, "parentNodeId": "node:parent",
+                "origin": "app_owned", "createdBy": "agent", "driver": "codex",
+                "providerInstanceId": "codex", "providerThreadId": null,
+                "childThreadId": format!("child-{id}"), "remoteChild": null,
+                "nativeTaskRef": null, "prompt": "Review", "title": format!("Agent {id}"),
+                "model": "gpt-5.5", "modelSelection": null, "executedModel": null,
+                "completionWake": null, "completionDelivery": null, "cancelledRunId": null,
+                "status": status, "progress": null, "workflow": null, "result": null,
+                "startedAt": "2026-11-28T10:00:00Z", "completedAt": null,
+                "updatedAt": "2026-11-28T10:00:00Z"
+            })
+        };
+        projection["subagents"] = json!([agent("a", "running"), agent("b", "completed")]);
+        let item: OrchestrationV2ThreadStreamItem = serde_json::from_value(snapshot).unwrap();
+        let mut timeline = ThreadState::new("t");
+        timeline.apply(item);
+
+        let details = thread_details(&shell, Some(&timeline), &ModelCatalog::default(), "t", 0);
+        let keys = |agents: &[FfiThreadDetailsAgent]| {
+            agents.iter().map(|a| a.key.clone()).collect::<Vec<_>>()
+        };
+        assert_eq!(keys(&details.running), ["child-a"]);
+        assert_eq!(keys(&details.previous), ["child-b"]);
+        assert_eq!(details.subagents_title, "Subagents · 1 running");
+    }
+
     #[test]
     fn a_thread_neither_listed_nor_open_still_has_details() {
         let shell = shell();

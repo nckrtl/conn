@@ -70,8 +70,6 @@ struct ThreadFeedHost: UIViewControllerRepresentable {
     let rows: [FeedRow]
     /// Below the last row: the stack gap and end marker the SwiftUI feed had.
     let bottomPadding: CGFloat
-    /// The agents or syncing capsule's row, which the end of the feed sits above.
-    let capsuleInset: CGFloat
     /// Reading an older window: the jump button shows wherever the reader is.
     let forceJump: Bool
     let hasContent: Bool
@@ -91,7 +89,7 @@ struct ThreadFeedHost: UIViewControllerRepresentable {
         controller.forceJump = forceJump
         controller.hasContent = hasContent
         controller.reset(thread: threadId)
-        controller.setBars(composer: composer, floating: floating, capsuleInset: capsuleInset)
+        controller.setBars(composer: composer, floating: floating)
         controller.update(rows: rows, bottomPadding: bottomPadding)
         controller.perform(scrollRequest)
     }
@@ -116,7 +114,6 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
     private let floatingHost = UIHostingController(rootView: AnyView(EmptyView()))
     private let floatingContainer = PassthroughView()
     private let topEdge = UIView()
-    private var capsuleInset: CGFloat = 0
     private var thread: String?
     private var lastRequest: UUID?
     /// An animated scroll the feed started (Jump, a settle at the end): the follow waits for it.
@@ -262,7 +259,7 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
         layout.invalidateLayout()
     }
 
-    func setBars(composer: AnyView, floating: AnyView, capsuleInset: CGFloat) {
+    func setBars(composer: AnyView, floating: AnyView) {
         let theme = theme
         composerHost.rootView = AnyView(
             composer
@@ -273,10 +270,6 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
             floating
                 .environment(\.connTheme, theme)
         )
-        if self.capsuleInset != capsuleInset {
-            self.capsuleInset = capsuleInset
-            view.setNeedsLayout()
-        }
     }
 
     func update(rows newRows: [FeedRow], bottomPadding: CGFloat) {
@@ -590,7 +583,8 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
     override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         let cv = collectionView
-        let bottom = max(0, view.bounds.maxY - composerHost.view.frame.minY) + capsuleInset
+        // Only the composer sets the inset: what floats above it never moves the feed.
+        let bottom = max(0, view.bounds.maxY - composerHost.view.frame.minY)
         let inset = UIEdgeInsets(top: view.safeAreaInsets.top, left: 0, bottom: bottom, right: 0)
         if cv.contentInset != inset {
             layout.invalidateLayout()

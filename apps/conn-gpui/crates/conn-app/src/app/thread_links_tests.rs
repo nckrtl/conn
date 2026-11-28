@@ -7,7 +7,7 @@ use super::thread_links::LinkEnvironment;
 use crate::chat::ChatEvent;
 use crate::chat::thread_links::{ThreadLink, parse_thread_link};
 use crate::sidebar::thread_menu::ThreadMenuAction;
-use crate::ui_tests::{kitchen_sink_shell, mount_app};
+use crate::ui_tests::{kitchen_sink_shell, mount_app, server_config_of as config_of};
 
 fn link(environment: &str, thread: &str) -> ThreadLink {
     ThreadLink {
@@ -125,20 +125,6 @@ fn a_clicked_thread_chip_opens_its_thread(cx: &mut TestAppContext) {
         });
     });
     assert_eq!(selected(cx, &app).as_deref(), Some("thread-selected"));
-}
-
-/// The config a server that calls itself `environment_id` reports (a recorded `snapshot`).
-fn config_of(environment_id: &str) -> std::sync::Arc<conn_state::providers::ServerConfigState> {
-    let mut snapshot: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../../../../crates/conn-state/tests/fixtures/server-config-snapshot.json"
-    ))
-    .expect("the server config fixture is JSON");
-    snapshot["config"]["environment"]["environmentId"] = serde_json::json!(environment_id);
-    let event: conn_contract::ServerConfigStreamEvent =
-        conn_contract::from_json(snapshot).expect("the server config fixture decodes");
-    let mut state = conn_state::providers::ServerConfigState::new();
-    state.apply(event);
-    std::sync::Arc::new(state)
 }
 
 fn copied_link(

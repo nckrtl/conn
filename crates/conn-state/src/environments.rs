@@ -40,6 +40,10 @@ pub struct LinkedShellSnapshot {
     pub sequence: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     older: Option<crate::shell::OlderSettled>,
+    /// The id the environment's server config reports for itself, when it differs from
+    /// `environment_id` or is known at all. A file without it says nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub configured_environment_id: Option<String>,
 }
 
 impl LinkedShellSnapshot {
@@ -57,6 +61,7 @@ impl LinkedShellSnapshot {
             archived_threads: shell.archived_threads.clone(),
             sequence: shell.sequence,
             older: None,
+            configured_environment_id: None,
         }
     }
 
@@ -101,6 +106,8 @@ impl LinkedShellSnapshot {
 struct LinkedShell {
     label: String,
     shell: ShellState,
+    /// The id this environment's server config reports for itself, once known (or cached).
+    configured_id: Option<String>,
 }
 
 /// One shell per linked environment, in the order the environments were first seen.
@@ -108,6 +115,8 @@ struct LinkedShell {
 pub struct LinkedShells {
     order: Vec<String>,
     shells: HashMap<String, LinkedShell>,
+    /// The id the primary environment's server config reports for itself.
+    primary_configured_id: Option<String>,
 }
 
 impl LinkedShells {
@@ -123,8 +132,59 @@ impl LinkedShells {
             LinkedShell {
                 label: label.to_owned(),
                 shell: ShellState::default(),
+                configured_id: None,
             },
         );
+    }
+
+    /// Records the environment id `environment_id`'s server config reports for itself. A task's
+    /// `delegatedFrom` carries that id, while merges name the environment by an Orbit target id
+    /// or URL. Ignored for an environment not held. Returns whether it changed; the merged shell
+    /// takes it at the next [`Self::merge_into`], and the next [`Self::snapshot`] keeps it.
+    pub fn set_configured_environment_id(
+        &mut self,
+        environment_id: &str,
+        configured: &str,
+    ) -> bool {
+        let Some(linked) = self.shells.get_mut(environment_id) else {
+            return false;
+        };
+        if linked.configured_id.as_deref() == Some(configured) {
+            return false;
+        }
+        linked.configured_id = Some(configured.to_owned());
+        true
+    }
+
+    /// Records the environment id the primary environment's server config reports for itself.
+    /// Returns whether it changed.
+    pub fn set_primary_configured_id(&mut self, configured: Option<&str>) -> bool {
+        if self.primary_configured_id.as_deref() == configured {
+            return false;
+        }
+        self.primary_configured_id = configured.map(str::to_owned);
+        true
+    }
+
+    /// The configured ids of the held environments and the primary one, each to the id a merge
+    /// names it by, where they differ. Two held environments that report one id (a copied state
+    /// home) resolve to the first by id; the primary one wins over both.
+    fn environment_aliases(&self, primary_id: &str) -> HashMap<String, String> {
+        let mut ids: Vec<&String> = self.shells.keys().collect();
+        ids.sort_unstable();
+        let mut aliases: HashMap<String, String> = HashMap::new();
+        for id in ids {
+            if let Some(configured) = self.shells[id].configured_id.as_ref() {
+                aliases
+                    .entry(configured.clone())
+                    .or_insert_with(|| id.clone());
+            }
+        }
+        if let Some(configured) = &self.primary_configured_id {
+            aliases.insert(configured.clone(), primary_id.to_owned());
+        }
+        aliases.retain(|alias, id| alias != id);
+        aliases
     }
 
     /// Forgets an environment and everything it listed.
@@ -149,11 +209,11 @@ impl LinkedShells {
         if shell.sequence.is_none() && shell.threads.is_empty() && shell.projects.is_empty() {
             return None;
         }
-        Some(LinkedShellSnapshot::capture(
-            environment_id,
-            &linked.label,
-            shell,
-        ))
+        let mut snapshot = LinkedShellSnapshot::capture(environment_id, &linked.label, shell);
+        snapshot
+            .configured_environment_id
+            .clone_from(&linked.configured_id);
+        Some(snapshot)
     }
 
     /// Lists a saved environment from its last snapshot, before (or without) a connection.
@@ -163,6 +223,11 @@ impl LinkedShells {
         let Some(linked) = self.shells.get_mut(&snapshot.environment_id) else {
             return;
         };
+        if linked.configured_id.is_none() {
+            linked
+                .configured_id
+                .clone_from(&snapshot.configured_environment_id);
+        }
         if linked.shell.sequence.is_some() {
             return;
         }
@@ -327,6 +392,7 @@ impl LinkedShells {
             .filter_map(|id| self.shells.get(id).map(|linked| (id, linked)))
             .collect();
         shell.set_environment_id(primary_id);
+        shell.set_environment_aliases(&self.environment_aliases(primary_id));
         let added = shell
             .extend_with_environments(held.iter().map(|(id, linked)| (id.as_str(), &linked.shell)));
         for ((id, linked), added) in held.into_iter().zip(added) {
@@ -1701,6 +1767,115 @@ mod tests {
         let merged = from_b.merged("b", "b", &shell_of(vec![shared()]));
         assert_eq!(
             merged.shell.subagent_request("shared"),
+            Some(crate::shell::PendingSubagentRequest::Approval)
+        );
+    }
+    /// A task on `nick-target` asks for approval; its `delegatedFrom` names its parent's server
+    /// by the id that server's config reports.
+    fn delegated_task(parent_env_configured_id: &str) -> ShellStreamItem {
+        let task = thread_json("task", "p", |t| {
+            t["delegatedFrom"] = json!({
+                "environmentId": parent_env_configured_id,
+                "threadId": "parent",
+                "title": "P"
+            });
+            t["status"] = json!("running");
+            t["pendingRuntimeRequest"] =
+                json!({"id": "r", "kind": "command", "createdAt": "2026-11-13T09:00:00.000Z"});
+        });
+        snapshot(vec![], vec![task], vec![])
+    }
+
+    fn parent_shell() -> ShellState {
+        let mut shell = ShellState::default();
+        shell.apply(snapshot(
+            vec![],
+            vec![thread_json("parent", "p", |_| {})],
+            vec![],
+        ));
+        shell
+    }
+
+    #[test]
+    fn a_delegated_tasks_approval_reaches_a_parent_merged_under_another_id() {
+        // The app knows both servers by Orbit target ids.
+        let primary = parent_shell();
+        let mut linked = LinkedShells::default();
+        linked.ensure("nick-target", "nick");
+        linked.apply("nick-target", delegated_task("agent-config"));
+        assert!(linked.set_primary_configured_id(Some("agent-config")));
+        assert!(linked.set_configured_environment_id("nick-target", "nick-config"));
+        let merged = linked.merged("agent-target", "agent", &primary);
+        assert_eq!(
+            merged.shell.subagent_request("parent"),
+            Some(crate::shell::PendingSubagentRequest::Approval)
+        );
+    }
+
+    #[test]
+    fn a_cached_linked_parent_keeps_its_configured_id_across_a_relaunch() {
+        // The parent's machine reported its config once, then went to sleep.
+        let mut before = LinkedShells::default();
+        before.ensure("agent-target", "agent");
+        before.restore("agent-target", parent_shell());
+        before.set_configured_environment_id("agent-target", "agent-config");
+        let bytes = before
+            .snapshot("agent-target")
+            .expect("a shell to save")
+            .to_json()
+            .expect("serializes");
+        // Relaunch: the parent lists from its cache; the task's machine is connected.
+        let mut linked = LinkedShells::default();
+        linked.restore_snapshot(LinkedShellSnapshot::from_json(&bytes).expect("reads"));
+        linked.ensure("nick-target", "nick");
+        linked.apply("nick-target", delegated_task("agent-config"));
+        let merged = linked.merged("primary", "primary", &ShellState::default());
+        assert_eq!(
+            merged.shell.subagent_request("parent"),
+            Some(crate::shell::PendingSubagentRequest::Approval)
+        );
+    }
+
+    #[test]
+    fn a_cache_without_a_configured_id_still_reads() {
+        let mut linked = LinkedShells::default();
+        linked.ensure("agent-target", "agent");
+        linked.restore("agent-target", parent_shell());
+        let mut json: Value = serde_json::from_slice(
+            &linked
+                .snapshot("agent-target")
+                .expect("a shell")
+                .to_json()
+                .expect("json"),
+        )
+        .expect("json");
+        assert!(json.get("configuredEnvironmentId").is_none());
+        json.as_object_mut()
+            .expect("object")
+            .remove("configuredEnvironmentId");
+        let snapshot = LinkedShellSnapshot::from_json(&serde_json::to_vec(&json).expect("json"))
+            .expect("an old cache reads");
+        assert_eq!(snapshot.configured_environment_id, None);
+    }
+
+    #[test]
+    fn a_removed_environment_drops_out_of_an_alias_two_environments_share() {
+        // Both linked machines report `shared-config` (a copied state home); the parent lives on
+        // `b-target`, and `a-target` sorts first.
+        let mut linked = LinkedShells::default();
+        linked.ensure("a-target", "a");
+        linked.restore("a-target", ShellState::default());
+        linked.set_configured_environment_id("a-target", "shared-config");
+        linked.ensure("b-target", "b");
+        linked.restore("b-target", parent_shell());
+        linked.set_configured_environment_id("b-target", "shared-config");
+        linked.ensure("nick-target", "nick");
+        linked.apply("nick-target", delegated_task("shared-config"));
+        // `a-target` is switched off: its shell goes, and so does its claim on the id.
+        assert!(linked.remove("a-target"));
+        let merged = linked.merged("primary", "primary", &ShellState::default());
+        assert_eq!(
+            merged.shell.subagent_request("parent"),
             Some(crate::shell::PendingSubagentRequest::Approval)
         );
     }

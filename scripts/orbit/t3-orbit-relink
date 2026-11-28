@@ -8,13 +8,16 @@
 # link to that environment (the Gateway holds an admin session on every registered T3 server) and
 # links again with the same addresses and access. Linking again replaces the old link.
 # The T3 CLI command defaults to `t3`. With --service-label, the CLI is the binary that launchd job runs
-# now, found by t3-orbit-register --print-cli (installed next to this script). Run it daily, like
+# now, found by t3-orbit-register --print-cli (installed next to this script, or in apps/conn-server/orbit in a checkout). Run it daily, like
 # t3-orbit-register (see apps/conn-gpui/docs/reference/conn-features.md, "Orbit registration").
 set -eu
 
 if [ "${1:-}" = --service-label ]; then
     [ $# -eq 2 ] || { echo "usage: t3-orbit-relink [--service-label LABEL] [T3 CLI COMMAND...]" >&2; exit 64; }
-    cli=$(sh "$(dirname "$0")/t3-orbit-register" --service-label "$2" --print-cli http://unused) || exit $?
+    # Installed copies sit side by side; in a checkout the register script lives with Conn Server.
+    register="$(dirname "$0")/t3-orbit-register"
+    [ -f "$register" ] || register="$(dirname "$0")/../../apps/conn-server/orbit/t3-orbit-register"
+    cli=$(sh "$register" --service-label "$2" --print-cli http://unused) || exit $?
     set -- "$cli"
 fi
 [ $# -ge 1 ] || set -- t3

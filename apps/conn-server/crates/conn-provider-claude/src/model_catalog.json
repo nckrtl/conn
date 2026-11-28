@@ -188,50 +188,65 @@
     "claude-fable-5.2"
    ],
    "booleans": [
-    "ultracode"
+    "ultracode",
+    "fastMode"
    ],
    "efforts": {
     "": {
      "apiModelId": "claude-fable-5-2",
      "effort": "medium",
      "promptEffort": null,
-     "settings": {}
+     "settings": {
+      "fastMode": false
+     }
     },
     "low": {
      "apiModelId": "claude-fable-5-2",
      "effort": "low",
      "promptEffort": null,
-     "settings": {}
+     "settings": {
+      "fastMode": false
+     }
     },
     "medium": {
      "apiModelId": "claude-fable-5-2",
      "effort": "medium",
      "promptEffort": null,
-     "settings": {}
+     "settings": {
+      "fastMode": false
+     }
     },
     "high": {
      "apiModelId": "claude-fable-5-2",
      "effort": "high",
      "promptEffort": null,
-     "settings": {}
+     "settings": {
+      "fastMode": false
+     }
     },
     "xhigh": {
      "apiModelId": "claude-fable-5-2",
      "effort": "xhigh",
      "promptEffort": null,
-     "settings": {}
+     "settings": {
+      "fastMode": false
+     }
     },
     "max": {
      "apiModelId": "claude-fable-5-2",
      "effort": "max",
      "promptEffort": null,
-     "settings": {}
+     "settings": {
+      "fastMode": false
+     }
     },
     "ultrathink": {
      "apiModelId": "claude-fable-5-2",
      "effort": "medium",
      "promptEffort": "ultrathink",
-     "settings": {}
+     "settings": {
+      "fastMode": false
+     }
     }
    },
    "flags": {
@@ -240,6 +255,7 @@
      "effort": "medium",
      "promptEffort": null,
      "settings": {
+      "fastMode": false,
       "ultracode": true
      }
     },
@@ -248,7 +264,24 @@
      "effort": "medium",
      "promptEffort": null,
      "settings": {
+      "fastMode": false,
       "ultracode": false
+     }
+    },
+    "fastMode=true": {
+     "apiModelId": "claude-fable-5-2",
+     "effort": "medium",
+     "promptEffort": null,
+     "settings": {
+      "fastMode": true
+     }
+    },
+    "fastMode=false": {
+     "apiModelId": "claude-fable-5-2",
+     "effort": "medium",
+     "promptEffort": null,
+     "settings": {
+      "fastMode": false
      }
     }
    }
@@ -1280,6 +1313,11 @@
      {
       "id": "ultracode",
       "label": "Ultracode",
+      "type": "boolean"
+     },
+     {
+      "id": "fastMode",
+      "label": "Fast Mode",
       "type": "boolean"
      }
     ]

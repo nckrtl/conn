@@ -206,6 +206,20 @@ fn changed_seqs() -> String {
     )
 }
 
+/// Whether a thread's rows changed after `?2` hold a rolled-back run, or its events a second
+/// `thread.created`. The runs are picked from `entities_by_seq` alone, which holds `kind`, so
+/// only their bodies are read. The rowless-event filter lets `thread.created` use its index.
+fn need_reset_sql() -> String {
+    format!(
+        "SELECT EXISTS (SELECT 1 FROM entities WHERE thread_id = ?1 AND kind = 'runs'
+           AND id IN (SELECT id FROM entities INDEXED BY entities_by_seq
+             WHERE thread_id = ?1 AND seq > ?2 AND kind = 'runs')
+           AND json_extract(body, '$.status') = 'rolled_back')
+         OR EXISTS (SELECT 1 FROM events WHERE thread_id = ?1 AND seq > ?2
+           AND type = 'thread.created' AND type NOT IN ({ROW_EVENT_TYPES}))"
+    )
+}
+
 /// The projection collection an event type replaces an entity in. One line per event kind.
 fn collection_of(event_type: &str) -> Option<&'static str> {
     Some(match event_type {
@@ -1984,15 +1998,9 @@ impl Store {
         after: u64,
     ) -> StoreResult<bool> {
         self.conn
-            .query_row(
-                "SELECT EXISTS (SELECT 1 FROM entities INDEXED BY entities_by_seq
-                   WHERE thread_id = ?1 AND seq > ?2 AND kind = 'runs'
-                   AND json_extract(body, '$.status') = 'rolled_back')
-                 OR EXISTS (SELECT 1 FROM events WHERE thread_id = ?1 AND seq > ?2
-                   AND type = 'thread.created')",
-                params![thread_id, after as i64],
-                |row| row.get(0),
-            )
+            .query_row(&need_reset_sql(), params![thread_id, after as i64], |row| {
+                row.get(0)
+            })
             .map_err(err)
     }
 
@@ -4021,6 +4029,14 @@ mod tests {
             .join("\n");
         assert!(plan.contains("rowless_events_by_thread"), "{plan}");
         assert!(plan.contains("entities_by_seq"), "{plan}");
+        let plan = store
+            .query_plan(&need_reset_sql(), rusqlite::params!["t", 0])
+            .join("\n");
+        assert!(
+            plan.contains("COVERING INDEX entities_by_seq"),
+            "runs picked without reading bodies: {plan}"
+        );
+        assert!(plan.contains("rowless_events_by_thread"), "{plan}");
     }
 
     #[test]
@@ -4055,6 +4071,43 @@ mod tests {
                 has_create: false,
             }
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A changes resume resets for a run rolled back after its cursor, or a thread created
+    /// again after it; not for older ones, other runs, or another thread's.
+    #[test]
+    fn a_changes_resume_resets_only_for_later_rollbacks_and_creates() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-engine-{}-changes-reset", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("engine.sqlite")).unwrap();
+        store
+            .conn
+            .execute_batch(
+                r#"INSERT INTO entities (thread_id, kind, id, first_seq, seq, body) VALUES
+                     ('t1', 'runs', 'r1', 1, 10, '{"status":"rolled_back"}'),
+                     ('t1', 'runs', 'r2', 2, 20, '{"status":"completed"}'),
+                     ('t1', 'turnItems', 'i1', 3, 30, '{"status":"rolled_back"}'),
+                     ('t2', 'runs', 'r3', 4, 40, '{"status":"rolled_back"}');
+                   INSERT INTO events (seq, thread_id, type, event) VALUES
+                     (1, 't1', 'thread.created', '{}'),
+                     (50, 't3', 'thread.created', '{}'),
+                     (60, 't3', 'thread.created', '{}');"#,
+            )
+            .unwrap();
+        let reset = |thread: &str, after| store.thread_changes_need_reset(thread, after).unwrap();
+        assert!(reset("t1", 9), "r1 rolled back after the cursor");
+        assert!(!reset("t1", 10), "r1 rolled back at the cursor");
+        assert!(
+            !reset("t1", 20),
+            "a completed run and a non-run row do not reset"
+        );
+        assert!(reset("t2", 39));
+        assert!(!reset("t2", 40));
+        assert!(reset("t3", 50), "created again after the cursor");
+        assert!(!reset("t3", 60));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

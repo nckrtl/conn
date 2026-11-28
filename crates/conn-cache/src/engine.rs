@@ -21,6 +21,9 @@ use tokio::sync::{mpsc, oneshot};
 use crate::db::{self, ThreadIndex, ThreadWrite, Window};
 use crate::rows::{self, Change, OWN};
 
+/// How often a changed thread list is saved at most. It is megabytes, and only a cache.
+const SHELL_SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The one setting: which threads stay on the device follows the thread list, not a setting.
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
@@ -65,8 +68,8 @@ impl Images {
 
 enum Job {
     Write(String, ThreadWrite),
-    /// The thread list to save, as `LinkedShellSnapshot` JSON.
-    Shell(Vec<u8>),
+    /// The thread list to save; the task writes it as `LinkedShellSnapshot` JSON.
+    Shell(Box<ShellState>),
     Read {
         thread: String,
         before: Option<f64>,
@@ -118,6 +121,8 @@ pub struct Engine {
     /// answers.
     saved_shell: Option<ShellState>,
     shell_saved_at: Option<std::time::Instant>,
+    /// The shell sequence last saved: an unchanged list is not written again.
+    shell_saved_sequence: Option<Option<i64>>,
     next_generation: u64,
     runtime: tokio::runtime::Handle,
     perf: Perf,
@@ -177,6 +182,7 @@ impl Engine {
             index,
             saved_shell,
             shell_saved_at: None,
+            shell_saved_sequence: None,
             held: HashMap::new(),
             loading: HashMap::new(),
             open: vec![],
@@ -630,19 +636,23 @@ impl Engine {
         self.saved_shell.take()
     }
 
-    /// Saves the thread list for the next launch: at most every few seconds, unless `now` (for
-    /// going to the background or quitting). Call it with a synchronized shell.
-    pub fn save_shell(&mut self, shell: &ShellState, now: bool) {
-        const EVERY: std::time::Duration = std::time::Duration::from_secs(5);
-        if !now && self.shell_saved_at.is_some_and(|at| at.elapsed() < EVERY) {
-            return;
-        }
+    /// Whether a thread list at `sequence` should be saved now: always when `now` (going to
+    /// the background or quitting), else only when it changed and the last save is
+    /// [`SHELL_SAVE_EVERY`] old. The list is a cache; the server's shell replaces it.
+    #[must_use]
+    pub fn shell_save_due(&self, sequence: Option<i64>, now: bool) -> bool {
+        now || (self.shell_saved_sequence != Some(sequence)
+            && self
+                .shell_saved_at
+                .is_none_or(|at| at.elapsed() >= SHELL_SAVE_EVERY))
+    }
+
+    /// Saves a synchronized thread list for the next launch. The database task serializes and
+    /// writes it, off the caller's thread. Ask [`Self::shell_save_due`] first.
+    pub fn save_shell(&mut self, shell: ShellState) {
         self.shell_saved_at = Some(std::time::Instant::now());
-        let snapshot =
-            conn_state::environments::LinkedShellSnapshot::capture_inventory(&self.env, shell);
-        if let Ok(bytes) = snapshot.to_json() {
-            let _ = self.jobs.send(Job::Shell(bytes));
-        }
+        self.shell_saved_sequence = Some(shell.sequence);
+        let _ = self.jobs.send(Job::Shell(Box::new(shell)));
     }
 
     /// Resolves once everything queued before this call is written, for a quit that must not
@@ -661,8 +671,14 @@ impl Engine {
     /// shell only: a thread missing from a shell is judged by its stored record, never by its
     /// absence.
     pub fn update_kept(&mut self, shell: &ShellState) {
+        self.update_kept_where(shell, |_| true);
+    }
+
+    /// [`Self::update_kept`] on the threads of `shell` that `own` accepts: a merged list judged
+    /// for one environment without copying it.
+    pub fn update_kept_where(&mut self, shell: &ShellState, own: impl Fn(&str) -> bool) {
         let mut want: HashMap<String, (u8, i64)> = HashMap::new();
-        for thread in shell.top_level_active_threads() {
+        for thread in shell.top_level_active_threads().filter(|t| own(&t.id)) {
             let tier = match shell.activity(&thread.id) {
                 ThreadActivity::NeedsAttention => 1,
                 ThreadActivity::Working => 2,
@@ -672,7 +688,7 @@ impl Engine {
             want.insert(thread.id.clone(), (tier, updated));
         }
         for (id, ix) in &self.index {
-            let shown = shell.find_thread(id);
+            let shown = shell.find_thread(id).filter(|_| own(id));
             if shown.is_some_and(|t| t.deleted_at.is_some()) {
                 continue;
             }
@@ -835,7 +851,7 @@ async fn run(
     // Threads whose rows a failed write lost: their cursor stays until a fresh window, so a
     // later write cannot move it past the lost change.
     let mut frozen: HashSet<String> = HashSet::new();
-    let mut shell: Option<Vec<u8>> = None;
+    let mut shell: Option<Box<ShellState>> = None;
     while let Some(job) = jobs.recv().await {
         let mut next = Some(job);
         while let Some(job) = next.take().or_else(|| jobs.try_recv().ok()) {
@@ -851,13 +867,21 @@ async fn run(
                     before,
                     reply,
                 } => reads.push((thread, before, reply)),
-                Job::Shell(bytes) => shell = Some(bytes),
+                Job::Shell(list) => shell = Some(list),
             }
         }
-        if let Some(bytes) = shell.take()
-            && let Err(e) = db::write_shell(&pool, &env, &bytes).await
-        {
-            eprintln!("conn-cache: shell save failed: {e}");
+        if let Some(list) = shell.take() {
+            let saved =
+                conn_state::environments::LinkedShellSnapshot::capture_inventory(&env, &list);
+            drop(list);
+            match saved.to_json() {
+                Ok(bytes) => {
+                    if let Err(e) = db::write_shell(&pool, &env, &bytes).await {
+                        eprintln!("conn-cache: shell save failed: {e}");
+                    }
+                }
+                Err(e) => eprintln!("conn-cache: shell save failed: {e}"),
+            }
         }
         if !batch.is_empty() {
             let mut writes = std::mem::take(&mut batch);
@@ -1223,6 +1247,45 @@ mod tests {
         );
     }
 
+    /// Environments on one device file share its connection: their batches queue instead of
+    /// one failing on a locked file, and every cursor moves with its rows.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn environments_on_one_file_all_commit() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let path = dir.path().join("local.sqlite3");
+        let items = stream("thread_turn_stream.json");
+        let thread = items[0]["projection"]["thread"]["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        let rt = tokio::runtime::Handle::current();
+        let mut engines = vec![];
+        for env in ["a", "b", "c", "d"] {
+            let engine = Engine::open(&path, env, connection(&rt), Settings::default())
+                .await
+                .unwrap_or_else(|e| panic!("open: {e}"));
+            engines.push(engine);
+        }
+        for engine in &mut engines {
+            for item in &items {
+                engine.handle(
+                    &thread,
+                    from_json(item.clone()).unwrap_or_else(|e| panic!("{e}")),
+                );
+            }
+        }
+        for engine in &engines {
+            settle(engine, &thread).await;
+        }
+        let last = items.iter().filter_map(|i| i["sequence"].as_i64()).max();
+        for env in ["a", "b", "c", "d"] {
+            let index = db::read_index(&engines[0].pool, env)
+                .await
+                .unwrap_or_default();
+            assert_eq!(index.get(&thread).and_then(|ix| ix.cursor), last, "{env}");
+        }
+    }
+
     /// The thread list saved on one launch draws on the next, before the server answers.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_saved_thread_list_opens_with_the_next_launch() {
@@ -1235,7 +1298,10 @@ mod tests {
         assert!(!path.exists(), "a peek creates no file");
         let mut first = engine(&path, Settings::default()).await;
         assert!(first.take_saved_shell().is_none());
-        first.save_shell(&shell, true);
+        assert!(first.shell_save_due(shell.sequence, false));
+        first.save_shell(shell.clone());
+        assert!(!first.shell_save_due(shell.sequence, false), "unchanged");
+        assert!(first.shell_save_due(shell.sequence, true), "at quit");
         settle(&first, "any").await;
         drop(first);
         let peeked = peek(&path, "env", None).await.shell;

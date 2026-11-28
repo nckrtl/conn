@@ -1,6 +1,6 @@
 //! The device database: the server's rows for the kept threads, one line per thread with the
-//! sequence its rows are current to, and the image cache. One connection per environment;
-//! every read and write of an environment goes through its one task ([`crate::engine`]).
+//! sequence its rows are current to, and the image cache. One connection per file, shared by
+//! every environment; each environment reads and writes through its one task ([`crate::engine`]).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -140,6 +140,11 @@ fn ms_of(record: &Value) -> i64 {
 /// The path [`open`] reads as "a database in memory".
 pub(crate) const IN_MEMORY: &str = ":memory:";
 
+/// One pool per file for the whole process: every environment's task shares its one
+/// connection, so their writes queue in the pool instead of failing on `SQLITE_BUSY`.
+static POOLS: std::sync::Mutex<Vec<(std::path::PathBuf, SqlitePool)>> =
+    std::sync::Mutex::new(Vec::new());
+
 pub(crate) async fn open(path: &Path) -> Result<SqlitePool, sqlx::Error> {
     if path == Path::new(IN_MEMORY) {
         // One connection, so every query sees the same in-memory database.
@@ -153,6 +158,44 @@ pub(crate) async fn open(path: &Path) -> Result<SqlitePool, sqlx::Error> {
         pool.execute(SCHEMA).await?;
         return Ok(pool);
     }
+    if let Some(pool) = shared(path) {
+        return Ok(pool);
+    }
+    let pool = open_file(path).await?;
+    // Another environment may have opened the file meanwhile: keep the first pool.
+    let first = {
+        let mut pools = POOLS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        pools.retain(|(_, pool)| !pool.is_closed());
+        let first = pools
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, pool)| pool.clone());
+        if first.is_none() {
+            pools.push((path.to_owned(), pool.clone()));
+        }
+        first
+    };
+    match first {
+        Some(first) => {
+            pool.close().await;
+            Ok(first)
+        }
+        None => Ok(pool),
+    }
+}
+
+fn shared(path: &Path) -> Option<SqlitePool> {
+    POOLS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .find(|(p, pool)| p == path && !pool.is_closed())
+        .map(|(_, pool)| pool.clone())
+}
+
+async fn open_file(path: &Path) -> Result<SqlitePool, sqlx::Error> {
     let mut file = std::fs::OpenOptions::new();
     file.create(true).append(true);
     #[cfg(unix)]
@@ -175,14 +218,15 @@ pub(crate) async fn open(path: &Path) -> Result<SqlitePool, sqlx::Error> {
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(&pool)
         .await?;
-    if version != SCHEMA_VERSION {
-        pool.execute(
-            "DROP TABLE IF EXISTS rows; DROP TABLE IF EXISTS threads;
-             DROP TABLE IF EXISTS messages; DROP TABLE IF EXISTS thread_views;
-             DROP TABLE IF EXISTS thread_task_links; DROP TABLE IF EXISTS thread_outlines;",
-        )
-        .await?;
+    if version == SCHEMA_VERSION {
+        return Ok(pool);
     }
+    pool.execute(
+        "DROP TABLE IF EXISTS rows; DROP TABLE IF EXISTS threads;
+         DROP TABLE IF EXISTS messages; DROP TABLE IF EXISTS thread_views;
+         DROP TABLE IF EXISTS thread_task_links; DROP TABLE IF EXISTS thread_outlines;",
+    )
+    .await?;
     pool.execute(SCHEMA).await?;
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "PRAGMA user_version = {SCHEMA_VERSION}"

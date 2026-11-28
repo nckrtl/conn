@@ -2286,12 +2286,14 @@ impl PumpState {
         conn_client::perf::shell_cached();
     }
 
-    /// Saves a synchronized thread list for the next launch: throttled, unless `now`.
+    /// Saves a synchronized thread list for the next launch when it changed and the engine's
+    /// interval passed, or at once when `now`. The engine's task serializes it.
     fn save_shell(&mut self, now: bool) {
         if self.shell.synchronized
             && let Some(engine) = &mut self.engine
+            && engine.shell_save_due(self.shell.sequence, now)
         {
-            engine.save_shell(&self.shell, now);
+            engine.save_shell(self.shell.clone());
         }
     }
 

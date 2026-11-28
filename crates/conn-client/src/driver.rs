@@ -1227,8 +1227,8 @@ where
         accept_bounded_snapshot: Some(true),
         accept_deferred_work: None,
         accept_compact_turn_items: Some(true),
-        // A store keeps rows as the server sends them, so it takes whole bodies.
-        accept_deduped_bodies: (!store_owned).then_some(true),
+        // A store fills deduped bodies in from the same snapshot before it writes rows.
+        accept_deduped_bodies: Some(true),
         accept_compact_ids: None,
     };
     let payload = serde_json::to_value(&input)

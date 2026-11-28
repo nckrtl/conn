@@ -11,6 +11,7 @@ struct ConnApp: App {
     init() {
         Self.anchorPerfLog()
         ConnSymbols.install()
+        perfMark(stage: "swift.symbols_installed")
         // Mobile's `HEADER_TITLE_STYLE`: every native header title is 18pt, weight 500.
         UINavigationBar.appearance().titleTextAttributes = [
             .font: UIFont.systemFont(ofSize: 18, weight: .medium),
@@ -20,6 +21,7 @@ struct ConnApp: App {
             UIColor(ConnTheme.resolve(for: traits.userInterfaceStyle == .dark ? .dark : .light).mutedForeground)
         }
         let store = CoreStore()
+        perfMark(stage: "swift.store_ready")
         _store = State(initialValue: store)
         // Push taps can arrive at launch, before the first view appears.
         ConnAppDelegate.store = store
@@ -35,6 +37,7 @@ struct ConnApp: App {
         guard sysctl(&mib, 4, &info, &size, nil, 0) == 0 else { return }
         let start = info.kp_proc.p_un.__p_starttime
         perfSetProcessStart(epochMs: Double(start.tv_sec) * 1000 + Double(start.tv_usec) / 1000)
+        perfMark(stage: "swift.app_init")
     }
 
     var body: some Scene {

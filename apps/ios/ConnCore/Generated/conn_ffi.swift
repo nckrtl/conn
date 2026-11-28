@@ -19555,6 +19555,16 @@ fileprivate func uniffiFutureContinuationCallback(handle: UInt64, pollResult: In
     }
 }
 /**
+ * A named point on the launch path from Swift (`mark.<stage>`), for the perf log only.
+ */
+public func perfMark(stage: String)  {try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_func_perf_mark(
+        FfiConverterString.lower(stage),uniffiCallStatus
+    )
+}
+}
+/**
  * When the process started (Unix ms), for the `sync.*` perf lines (`CONN_PERF_LOG_FILE`).
  */
 public func perfSetProcessStart(epochMs: Double)  {try! rustCall() {
@@ -19798,6 +19808,9 @@ private let initializationResult: InitializationResult = {
     let scaffolding_contract_version = ffi_conn_ffi_uniffi_contract_version()
     if bindings_contract_version != scaffolding_contract_version {
         return InitializationResult.contractVersionMismatch
+    }
+    if (uniffi_conn_ffi_checksum_func_perf_mark() != 45260) {
+        return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_func_perf_set_process_start() != 57481) {
         return InitializationResult.apiChecksumMismatch

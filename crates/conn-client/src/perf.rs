@@ -94,6 +94,14 @@ fn sync(stage: std::fmt::Arguments<'_>) {
     }
 }
 
+/// A named point on the launch path (`mark.<stage> +<ms since process start>`), for finding
+/// where time goes before the first draw.
+pub fn mark(stage: &str) {
+    if enabled() {
+        write(format_args!("mark.{stage} +{:.1}ms", ms_since_start()));
+    }
+}
+
 /// The thread list is drawn from data on the device.
 pub fn shell_cached() {
     sync(format_args!("shell_cached"));

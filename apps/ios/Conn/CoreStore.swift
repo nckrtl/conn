@@ -110,6 +110,7 @@ final class CoreStore {
     func retrySavedConnection() {
         guard let saved = coldLaunchSession else { return }
         if case .idle = state?.phase {
+            perfMark(stage: "swift.store_launch")
             session?.launch(saved: saved)
         } else {
             session?.retry()
@@ -225,6 +226,7 @@ final class CoreStore {
         gatewayURL = ProcessInfo.processInfo.environment["CONN_TEST_TASK_GATEWAY"]
         if arguments.contains("--test-unreachable-gateway") { gatewayURL = "https://127.0.0.1:1" }
         #endif
+        perfMark(stage: "swift.store_session_new")
         do {
             session = try ConnSession(
                 gatewayUrl: gatewayURL,
@@ -259,6 +261,18 @@ final class CoreStore {
             session?.restore(saved: saved)
         }
         coldLaunchSession = saved
+        if scope.isEmpty { openRestoredThread() }
+    }
+
+    /// Opens the thread the workspace will restore (its saved route) at launch, before any view
+    /// exists, so its rows are in place when the thread view appears instead of arriving after
+    /// the push while the main thread is busy. The view's own `openThread` then finds it open.
+    private func openRestoredThread() {
+        guard let environment = environmentId, pendingLink == nil,
+              let data = UserDefaults.standard.data(forKey: "workspace.route." + environment),
+              let route = try? JSONDecoder().decode(WorkspaceRoute.self, from: data),
+              case let .thread(threadId, scope: routeScope) = route, routeScope.isEmpty else { return }
+        openThread(threadId)
     }
 
     func discoverLinked() async {
@@ -384,6 +398,7 @@ final class CoreStore {
     }
 
     func openThread(_ threadId: String) {
+        perfMark(stage: "swift.open_thread_call")
         if openThreadId != threadId { openThread = nil }
         Self.openLog.info("open thread=\(threadId, privacy: .public)")
         firstSnapshotLog = threadId
@@ -732,6 +747,7 @@ final class CoreStore {
     }
 
     func handleScenePhase(_ phase: ScenePhase) {
+        perfMark(stage: "swift.scene_\(phase)")
         switch phase {
         case .active: session?.foreground()
         case .background: session?.background()
@@ -914,6 +930,7 @@ final class CoreStore {
     fileprivate func handleThread(_ snapshot: FfiThreadSnapshot, connectionId: UInt64) {
         guard session?.state().connectionId == connectionId else { return }
         // An equal snapshot would still re-run every view that reads the thread.
+        if openThreadId == snapshot.threadId, openThread == nil { perfMark(stage: "swift.first_open_snapshot") }
         if openThreadId == snapshot.threadId, openThread != snapshot {
             logFirstSnapshot(snapshot, source: "core")
             BodyCount.tick("store.thread")

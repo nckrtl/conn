@@ -1945,6 +1945,9 @@ impl PumpState {
         self.stats.events += 1;
         match event {
             ClientEvent::Status(status) => {
+                if conn_client::perf::enabled() {
+                    conn_client::perf::mark(&format!("core.status_{status:?}").replace(' ', ""));
+                }
                 // The driver resumes from its last received sequence, even mid-replay. Keep
                 // reducing into this shell, but publish only after this subscription's marker.
                 self.invalidate_shell();

@@ -1212,6 +1212,11 @@ void uniffi_conn_ffi_fn_method_sessionlistener_on_providers_changed(uint64_t ptr
 void uniffi_conn_ffi_fn_method_sessionlistener_on_thread_deleted(uint64_t ptr, uint64_t connection_id, RustBuffer thread_id, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_PERF_MARK
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_PERF_MARK
+void uniffi_conn_ffi_fn_func_perf_mark(RustBuffer stage, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_PERF_SET_PROCESS_START
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_PERF_SET_PROCESS_START
 void uniffi_conn_ffi_fn_func_perf_set_process_start(double epoch_ms, RustCallStatus *_Nonnull out_status
@@ -1566,6 +1571,12 @@ void ffi_conn_ffi_rust_future_free_void(uint64_t handle
 #ifndef UNIFFI_FFIDEF_FFI_CONN_FFI_RUST_FUTURE_COMPLETE_VOID
 #define UNIFFI_FFIDEF_FFI_CONN_FFI_RUST_FUTURE_COMPLETE_VOID
 void ffi_conn_ffi_rust_future_complete_void(uint64_t handle, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_PERF_MARK
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_PERF_MARK
+uint16_t uniffi_conn_ffi_checksum_func_perf_mark(void
+    
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_PERF_SET_PROCESS_START

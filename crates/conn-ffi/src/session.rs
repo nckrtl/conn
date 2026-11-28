@@ -1054,6 +1054,7 @@ impl ConnSession {
         server_url: String,
         environment_id: Option<String>,
     ) {
+        conn_client::perf::mark("session.attached");
         self.step(|m| m.attached(id, core, server_url, environment_id));
     }
 
@@ -1099,9 +1100,11 @@ impl ConnSession {
                 let Some(this) = self.this.upgrade() else {
                     return;
                 };
-                self.orbit
-                    .handle()
-                    .spawn(async move { this.run_attempt(id, target, saved, credential).await });
+                conn_client::perf::mark("session.start");
+                self.orbit.handle().spawn(async move {
+                    conn_client::perf::mark("session.attempt_runs");
+                    this.run_attempt(id, target, saved, credential).await;
+                });
             }
             Effect::FetchEnvironment { id, server_url } => {
                 let Some(this) = self.this.upgrade() else {
@@ -1176,10 +1179,12 @@ impl ConnSession {
     }
 
     async fn open_offline(&self, id: u64, core: &ConnCore, dir: PathBuf, identity: String) {
-        match core
+        conn_client::perf::mark("offline.open_start");
+        let opened = core
             .prepare_offline(dir.to_string_lossy().into_owned(), identity)
-            .await
-        {
+            .await;
+        conn_client::perf::mark("offline.open_done");
+        match opened {
             Ok(reader) if self.is_current(id) => {
                 *self.offline.lock().unwrap_or_else(|e| e.into_inner()) = Some((id, reader));
                 self.step(|m| m.offline_ready(id));
@@ -1411,11 +1416,13 @@ impl ConnSession {
 
     /// The app's main session at launch: a saved manual server, else the primary agent.
     pub fn launch(&self, saved: Option<FfiSavedSession>) {
+        conn_client::perf::mark("session.launch");
         self.step(|m| m.launch(saved));
     }
 
     /// A linked environment's session at launch: its saved Orbit environment or manual server.
     pub fn restore(&self, saved: Option<FfiSavedSession>) {
+        conn_client::perf::mark("session.restore");
         self.step(|m| m.restore(saved));
     }
 

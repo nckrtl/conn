@@ -30,8 +30,7 @@
       "entry": [
         // These fixture scripts are injected into a browser page by path.
         "fixtures/*/*.js",
-        // Conn fork tools run by hand (symbols, vendored tarballs, local signing).
-        "build-conn-symbols.ts",
+        // Conn fork tools run by hand (icons, vendored tarballs, local signing).
         "generate-conn-icons.ts",
         "export-conn-android-icons.ts",
         "build-conn-vendored-tarball.ts",

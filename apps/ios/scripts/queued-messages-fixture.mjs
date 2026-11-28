@@ -7,6 +7,8 @@
 // contains "[fail]" is refused.
 // The details sheet: "qdetails" has four linked PRs and child threads (two running, nine
 // finished), its folder a Git repo with changes; "qplain" is in a plain folder until `vcs.init`.
+// "qolder" is an older settled thread the shell leaves out: only its own stream serves it, so it
+// opens from a `conn://thread/primary/qolder` link.
 import { readFileSync } from "node:fs";
 
 const root = process.argv[2];
@@ -100,6 +102,17 @@ for (const [i, def] of detailsThreads.entries()) {
 }
 threads.push(...children);
 
+// Served by subscribeThread only, never by the shell.
+const unlisted = [{
+  ...base, id: "qolder", title: "Trace the stale inbox badge", projectId: "project-apps", branch: "fix/older",
+  worktreePath: "/Users/nick/apps/conn-older",
+  pullRequests: [prLink(1920, "Clear the inbox badge on read", "merged", false, 3000)],
+  lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: "qolder" },
+  createdAt: iso(now - 3 * 86_400_000), updatedAt: iso(now - 3 * 86_400_000),
+  settledOverride: "settled", settledAt: iso(now - 3 * 86_400_000), status: "idle",
+}];
+threadDefs.push({ id: "qolder", title: unlisted[0].title, running: false, queued: 0 });
+
 const queuedTexts = [
   "Check dark mode on Polar.",
   "Then run the simulator UI test and attach the screenshots.",
@@ -129,10 +142,11 @@ function turnItem(run, mid, role, text, at, threadId, ordinal, status = "complet
 
 function buildProjection(id) {
   const def = threadDefs.find((t) => t.id === id) ?? threadDefs[2];
-  const thread = threads.find((t) => t.id === def.id);
+  const thread = threads.find((t) => t.id === def.id) ?? unlisted.find((t) => t.id === def.id);
   const p = structuredClone(stream.projection);
   const template = p.runs[0];
-  Object.assign(p.thread, { id: def.id, title: thread.title, projectId: thread.projectId, branch: thread.branch });
+  Object.assign(p.thread, { id: def.id, title: thread.title, projectId: thread.projectId, branch: thread.branch,
+    worktreePath: thread.worktreePath ?? null, pullRequests: thread.pullRequests ?? [] });
   p.turnItems = [];
   p.messages = [];
   p.runs = [];

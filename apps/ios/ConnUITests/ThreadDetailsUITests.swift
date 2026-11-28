@@ -2,7 +2,8 @@ import XCTest
 
 /// The thread details sheet against `scripts/queued-messages-fixture.mjs`
 /// (`PORT=47931 bun apps/ios/scripts/queued-messages-fixture.mjs .` from the repo root): thread
-/// "qdetails" has four linked PRs and eleven child threads, "qplain" a folder without Git.
+/// "qdetails" has four linked PRs and eleven child threads, "qplain" a folder without Git, and
+/// "qolder" is an older settled thread the shell leaves out.
 /// Skipped unless `CONN_PROOF_SERVER` is set (`TEST_RUNNER_CONN_PROOF_SERVER=http://…`).
 @MainActor
 final class ThreadDetailsUITests: XCTestCase {
@@ -144,6 +145,30 @@ final class ThreadDetailsUITests: XCTestCase {
         let sent = try commands().first(where: { $0["type"] as? String == "vcs.init" })
         XCTAssertEqual(sent?["cwd"] as? String, "/Users/nick/notes", "vcs.init for the thread's folder")
         XCTAssertTrue(element("thread.details.branch").waitForExistence(timeout: 5), "branch after init")
+    }
+
+    /// A thread the shell does not list (older settled, opened from a link) reads its details from
+    /// its own stream instead of opening an empty sheet.
+    func testThreadMissingFromTheShellStillShowsItsDetails() throws {
+        app.launch()
+        XCTAssertTrue(element("inbox.thread.qdetails").waitForExistence(timeout: 30), "inbox")
+        XCTAssertFalse(element("inbox.thread.qolder").exists, "the shell leaves qolder out")
+        app.open(try XCTUnwrap(URL(string: "conn://thread/primary/qolder")))
+        XCTAssertTrue(element("thread.composer").waitForExistence(timeout: 15), "composer")
+        let more = element("thread.moreButton")
+        XCTAssertTrue(more.waitForExistence(timeout: 5), "··· button")
+        more.tap()
+        XCTAssertTrue(app.navigationBars["Thread details"].waitForExistence(timeout: 5), "details sheet")
+
+        XCTAssertTrue(element("thread.details.outline").waitForExistence(timeout: 5), "Thread outline row")
+        XCTAssertTrue(element("thread.details.copyLink").exists, "Copy thread link row")
+        let path = element("thread.details.copyPath")
+        XCTAssertTrue(path.waitForExistence(timeout: 10), "Copy folder path row")
+        XCTAssertTrue(path.label.contains("~/apps/conn-older"), "the open thread's worktree: \(path.label)")
+        XCTAssertTrue(element("thread.details.machine").label.contains("apps"), "project on the machine row")
+        XCTAssertTrue(element("thread.details.pr.1920").exists, "the open thread's linked PR")
+        XCTAssertTrue(scrollTo("thread.details.branch").label.contains("fix/older"), "the open thread's branch")
+        shot("details-unlisted-thread")
     }
 
     func testOutlineRowOpensTheOutline() throws {

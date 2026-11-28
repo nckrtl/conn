@@ -3,7 +3,8 @@ import UIKit
 
 /// Desktop's thread details card as a sheet (lab `ThreadDetailsSheet`): opens at the medium
 /// detent, pulls to large, and pushes "Previous agents" inside its own stack. The rows come from
-/// the core's `thread_details` (`conn_state::thread_details`).
+/// the core's `thread_details` (`conn_state::thread_details`). The rows that need no data (Thread
+/// outline, Copy thread link) always show; the others fill in once the details arrive.
 struct ThreadDetailsSheet: View {
     let store: CoreStore
     let threadId: String
@@ -33,7 +34,7 @@ struct ThreadDetailsSheet: View {
         NavigationStack(path: $path) {
             ScrollView {
                 VStack(spacing: 24) {
-                    if let details { panel(details) }
+                    panel(details)
                 }
                 .padding(EdgeInsets(top: 6, leading: 16, bottom: 40, trailing: 16))
             }
@@ -61,10 +62,10 @@ struct ThreadDetailsSheet: View {
     // MARK: Pages
 
     @ViewBuilder
-    private func panel(_ details: FfiThreadDetails) -> some View {
+    private func panel(_ details: FfiThreadDetails?) -> some View {
         DetailsSection {
             DetailsRow(icon: glyph("desktop"), label: machine) {
-                if let project = details.projectTitle {
+                if let project = details?.projectTitle {
                     HStack(spacing: 6) {
                         ThreadGlyph(name: "folder", size: 18).foregroundStyle(theme.mutedForeground)
                         Text(project).foregroundStyle(theme.foreground)
@@ -83,14 +84,19 @@ struct ThreadDetailsSheet: View {
                     DetailsRow(icon: glyph("link"), label: "Copy thread link") { copiedMark("link") }
                 }
             }
-            if let folder = details.folder {
+            if let folder = details?.folder {
                 DetailsButton(id: "thread.details.copyPath", action: { copy("path", folder) }) {
                     DetailsRow(icon: glyph("copy"), label: "Copy folder path") {
-                        copiedMark("path") { Text(details.folderLabel ?? folder).truncationMode(.head) }
+                        copiedMark("path") { Text(details?.folderLabel ?? folder).truncationMode(.head) }
                     }
                 }
             }
         }
+        if let details { sections(details) }
+    }
+
+    @ViewBuilder
+    private func sections(_ details: FfiThreadDetails) -> some View {
         if !details.pullRequests.isEmpty { pullRequests(details.pullRequests) }
         git(details)
         if !details.running.isEmpty || !details.previous.isEmpty {
@@ -298,9 +304,15 @@ struct ThreadDetailsSheet: View {
     private var hasRunningAgents: Bool { details?.running.isEmpty == false }
 
     /// What the rows read from: the shell (projects, children, PRs) and the open thread's feed.
+    /// The connection and sync flags are in it because a new connection starts with an empty
+    /// core shell while `store.shell` keeps the last inbox: without them the sheet would never ask
+    /// again once that connection's shell arrived.
     private var refreshKey: Int {
-        feedSignature(store.shell?.threads.count, store.openThread?.entries.count,
-                      store.openThread?.turnAgents, store.openThread?.branch)
+        feedSignature(store.state?.connectionId, store.status, store.shell?.synchronized,
+                      store.shell?.threads.count, store.shell?.threads.contains { $0.id == threadId },
+                      store.openThread?.synchronized, store.openThread?.entries.count,
+                      store.openThread?.turnAgents, store.openThread?.branch,
+                      store.openThread?.projectId)
     }
 
     private func refresh() async {

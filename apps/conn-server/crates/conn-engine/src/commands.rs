@@ -423,6 +423,10 @@ struct MessageDispatch {
     text: String,
     attachments: Vec<Value>,
     sender_thread_id: Option<String>,
+    /// A linked environment's thread that sent this (`T3-Sender-Thread`).
+    linked_sender: Option<Value>,
+    /// The delegated tasks whose results this wake carries.
+    delegated_completion: Option<Value>,
     context: Option<Value>,
     model_selection: Option<Value>,
     created_by: String,
@@ -1106,9 +1110,7 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
             message["followsThreadSelection"] = json!(true);
         }
     }
-    if let Some(sender) = &c.sender_thread_id {
-        message["senderThreadId"] = json!(sender);
-    }
+    sender_fields(&mut message, &c);
     if let Some(mode) = &c.idle_compaction {
         message["idleCompaction"] = json!(mode);
     }
@@ -1348,6 +1350,19 @@ fn end_preparation_item(
     Ok(())
 }
 
+/// Who sent a message: a thread here, a linked environment's thread, a delegated result.
+fn sender_fields(message: &mut Value, c: &MessageDispatch) {
+    if let Some(sender) = &c.sender_thread_id {
+        message["senderThreadId"] = json!(sender);
+    }
+    if let Some(sender) = &c.linked_sender {
+        message["linkedSender"] = sender.clone();
+    }
+    if let Some(completion) = &c.delegated_completion {
+        message["delegatedCompletion"] = completion.clone();
+    }
+}
+
 fn user_message_item(
     c: &MessageDispatch,
     run_id: &str,
@@ -1385,6 +1400,12 @@ fn user_message_item(
     }
     if let Some(task) = &c.scheduled_task_id {
         item["scheduledTaskId"] = json!(task);
+    }
+    if let Some(sender) = &c.sender_thread_id {
+        item["senderThreadId"] = json!(sender);
+    }
+    if let Some(sender) = &c.linked_sender {
+        item["linkedSender"] = sender.clone();
     }
     if c.fresh_context == Some(true) {
         item["freshContext"] = json!(true);
@@ -1497,9 +1518,7 @@ fn steer_into(tx: &mut Tx<'_>, c: &MessageDispatch, target: &Value) -> Outcome {
     if let Some(context) = &c.context {
         message["context"] = context.clone();
     }
-    if let Some(sender) = &c.sender_thread_id {
-        message["senderThreadId"] = json!(sender);
-    }
+    sender_fields(&mut message, c);
     tx.append(draft("message.updated", message))?;
     let ordinal = target["ordinal"].as_u64().unwrap_or(1);
     tx.append(draft(
@@ -2326,7 +2345,14 @@ fn queued_message_promote_to_steer(tx: &mut Tx<'_>, command: Value) -> Outcome {
             "creationSource": message["creationSource"],
             "dispatchMode": {"type": "steer_active", "targetRunId": c.target_run_id},
         });
-        for field in ["context", "notification", "scheduledTaskId"] {
+        for field in [
+            "context",
+            "notification",
+            "scheduledTaskId",
+            "senderThreadId",
+            "linkedSender",
+            "delegatedCompletion",
+        ] {
             if message[field].is_object() || message[field].is_string() {
                 command[field] = message[field].clone();
             }
@@ -2358,7 +2384,15 @@ fn queued_message_promote_to_steer(tx: &mut Tx<'_>, command: Value) -> Outcome {
         steer_follow_up_of_run_id: None,
         restart_continuation_of_run_id: None,
         usage_limit_continuation_of_run_id: None,
-        sender_thread_id: None,
+        sender_thread_id: message["senderThreadId"].as_str().map(str::to_owned),
+        linked_sender: message
+            .get("linkedSender")
+            .filter(|v| v.is_object())
+            .cloned(),
+        delegated_completion: message
+            .get("delegatedCompletion")
+            .filter(|v| v.is_object())
+            .cloned(),
         title_seed: None,
         target_capabilities: None,
         notification: message

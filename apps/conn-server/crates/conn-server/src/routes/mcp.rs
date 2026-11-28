@@ -20,7 +20,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::any,
 };
-use conn_mcp::{Caller, ClientCaller, McpConfig, McpService};
+use conn_mcp::{Caller, ClientCaller, McpConfig, McpService, PeerSender};
 use serde_json::json;
 
 use crate::{AppState, methods::Deps};
@@ -139,6 +139,27 @@ fn mode_limit(headers: &HeaderMap) -> Option<Option<(&'static str, &'static str)
     Some(Some((runtime, interaction)))
 }
 
+/// `withSenderThread`: `T3-Sender-Thread: <environmentId>/<threadId>/<title>`, each
+/// URI-encoded, from a linked client. A malformed header only loses the name.
+fn sender_thread(headers: &HeaderMap) -> Option<PeerSender> {
+    let text = headers.get("t3-sender-thread")?.to_str().ok()?.trim();
+    let mut parts = text.split('/');
+    let (environment, thread, title) = (parts.next()?, parts.next()?, parts.next()?);
+    if parts.next().is_some() {
+        return None;
+    }
+    let decode = conn_files::assets::decode_component;
+    let (environment_id, thread_id) = (decode(environment)?, decode(thread)?);
+    if environment_id.trim().is_empty() || thread_id.trim().is_empty() {
+        return None;
+    }
+    Some(PeerSender {
+        environment_id,
+        thread_id,
+        title: decode(title)?,
+    })
+}
+
 fn json_refusal(status: StatusCode, error: &str, message: &str) -> Response {
     (
         status,
@@ -206,6 +227,9 @@ async fn mcp(
                 );
             };
             client.narrowed = limit;
+            if client.linked {
+                client.sender_thread = sender_thread(&headers);
+            }
             // A link waits while Linked environments is off here.
             if client.linked && state.deps.peers.as_ref().is_none_or(|p| !p.enabled()) {
                 return json_refusal(
@@ -244,6 +268,7 @@ fn client_caller(auth: &crate::auth::AuthStore, token: &str) -> Option<Caller> {
             label: client.label,
             linked: client.peer_link,
             narrowed: None,
+            sender_thread: None,
             scopes: None,
         }));
     }
@@ -267,4 +292,41 @@ fn bearer(headers: &HeaderMap) -> Option<&str> {
         .eq_ignore_ascii_case("bearer")
         .then(|| token.trim())
         .filter(|t| !t.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(value: &str) -> Option<PeerSender> {
+        let mut headers = HeaderMap::new();
+        headers.insert("t3-sender-thread", HeaderValue::from_str(value).unwrap());
+        sender_thread(&headers)
+    }
+
+    #[test]
+    fn the_sender_header_decodes_as_t3_writes_it() {
+        let enc = conn_support::ids::encode_component;
+        let header = ["env-a", "thread:1", "Fix a/b 🚀"].map(enc).join("/");
+        assert_eq!(
+            parse(&header),
+            Some(PeerSender {
+                environment_id: "env-a".into(),
+                thread_id: "thread:1".into(),
+                title: "Fix a/b 🚀".into(),
+            })
+        );
+        assert_eq!(
+            parse("env-a/thread-1/").map(|s| s.title),
+            Some(String::new())
+        );
+        for bad in [
+            "env-a/thread-1",
+            "env-a/thread-1/t/extra",
+            "env-a/%zz/t",
+            "/thread-1/t",
+        ] {
+            assert_eq!(parse(bad), None, "{bad}");
+        }
+    }
 }

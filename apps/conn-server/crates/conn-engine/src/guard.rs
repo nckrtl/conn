@@ -90,6 +90,7 @@ pub fn is_frozen_message(
         "notification",
         "scheduledTaskId",
         "senderThreadId",
+        "linkedSender",
     ]
     .iter()
     .all(|key| message.get(key).is_none_or(Value::is_null));

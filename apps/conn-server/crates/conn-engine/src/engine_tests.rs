@@ -8848,6 +8848,11 @@ async fn a_delegated_task_runs_as_a_child_thread_and_wakes_its_parent() {
             "Delegated task node:delegated-task:d2 (Helper) [completed]:\necho: second"
         )
     );
+    // `delegatedCompletion` names the task, as T3's wake does: clients link it to the child.
+    assert_eq!(
+        wake["delegatedCompletion"],
+        json!({"parentRunId": "run:t1:1", "generation": 1, "taskIds": ["node:delegated-task:d2"]})
+    );
 
     // When the parent's turn ends, the queued wake runs and the first task is delivered too.
     dispatch(
@@ -8872,6 +8877,22 @@ async fn a_delegated_task_runs_as_a_child_thread_and_wakes_its_parent() {
         .collect();
     assert_eq!(texts.len(), 2);
     assert!(texts.iter().any(|t| t.contains("echo: look around")));
+    let mut completions: Vec<_> = parent["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m.get("delegatedCompletion"))
+        .cloned()
+        .collect();
+    completions.sort_by_key(|c| c["generation"].as_u64());
+    assert_eq!(
+        completions,
+        [
+            json!({"parentRunId": "run:t1:1", "generation": 1, "taskIds": ["node:delegated-task:d2"]}),
+            json!({"parentRunId": "run:t1:1", "generation": 2, "taskIds": ["node:delegated-task:d1"]}),
+        ],
+        "each wake of one spawning run takes the next generation"
+    );
 }
 
 /// Waits until `thread` has a pending runtime request, and returns it.

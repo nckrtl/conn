@@ -3078,6 +3078,115 @@ done
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Grok through the AI router: the grok CLI (1.0.52) sends inference and its model list
+    /// to `GROK_MODELS_BASE_URL` with `XAI_API_KEY` as the bearer, so Orbit posts both as
+    /// instance variables, the key `sensitive`. The key moves to the secret store, GET hides
+    /// it, and the stub `grok` is started with both, from the same running registry.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_posted_grok_instance_launches_the_cli_with_the_router_url_and_key() {
+        let dir = temp("grok-router");
+        let grok_path = dir.join("bin").join("grok");
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        let seen = dir.join("launches");
+        conn_support::test_util::executable(
+            &grok_path,
+            &format!(
+                r#"#!/bin/sh
+printf '%s|%s|%s\n' "$*" "$GROK_MODELS_BASE_URL" "$XAI_API_KEY" >> '{seen}'
+case "$1" in
+  --version) echo 'grok 1.0.52'; exit 0 ;;
+  models) printf 'You are using XAI_API_KEY.\n\nDefault model: grok-4.6\n\nAvailable models:\n  * grok-4.6 (default)\n'; exit 0 ;;
+  inspect) echo '{{}}'; exit 0 ;;
+esac
+while IFS= read -r line; do
+  id=${{line##*,\"id\":}}
+  id=${{id%%[,\}}]*}}
+  case "$line" in
+    *'"method":"initialize"'*) printf '{{"jsonrpc":"2.0","id":%s,"result":{{"protocolVersion":1,"agentCapabilities":{{}}}}}}\n' "$id" ;;
+    *'"method":'*) printf '{{"jsonrpc":"2.0","id":%s,"result":{{}}}}\n' "$id" ;;
+  esac
+done
+"#,
+                seen = seen.display()
+            ),
+        )
+        .unwrap();
+        let config = conn_provider_acp::AcpConfig::default();
+        let registry = Arc::new(crate::instances::Instances::new(
+            &[conn_provider_acp::GROK.driver],
+            Arc::new(move |id: &str, _: &str, entry: Option<&Value>| {
+                Some(Arc::new(conn_provider_acp::AcpProvider::with_settings(
+                    id.into(),
+                    &conn_provider_acp::GROK,
+                    config.clone(),
+                    conn_provider_acp::GrokSettings::from_instance(entry),
+                )) as Arc<dyn conn_provider::Provider>)
+            }),
+        ));
+        let (addr, auth, deps) = serve_settings(&dir, Some(registry.clone())).await;
+        registry
+            .reconcile(
+                &deps.providers,
+                &deps.environment.as_ref().unwrap().settings.raw(),
+            )
+            .await;
+        crate::methods::provider::start_status_refresh(&deps);
+        let mut statuses = deps.provider_status.subscribe();
+
+        let admin = token(&auth, &["providers:manage"]);
+        let instance = json!({"driver": "grok", "enabled": true,
+            "config": {"binaryPath": grok_path.display().to_string()},
+            "environment": [
+                {"name": "GROK_MODELS_BASE_URL", "value": "http://router:8317/v1", "sensitive": false},
+                {"name": "XAI_API_KEY", "value": "router-key-5d6e", "sensitive": true}]});
+        let (status, body) = instances_post(
+            addr,
+            &admin,
+            json!([{"operation": "upsert", "instanceId": "grokRouted", "instance": instance}]),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert!(!body.to_string().contains("router-key-5d6e"), "{body}");
+        let environment = &body["providerInstances"]["grokRouted"]["environment"];
+        assert_eq!(environment[0]["value"], "http://router:8317/v1");
+        assert_eq!(environment[1]["valueRedacted"], true);
+        let file = std::fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(!file.contains("router-key-5d6e"), "{file}");
+
+        let entry = tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                if let Some(entry) = deps
+                    .providers
+                    .get("grokRouted")
+                    .and_then(|p| p.server_provider_entry(""))
+                    .filter(|entry| entry["status"] == "ready")
+                {
+                    return entry;
+                }
+                statuses.changed().await.unwrap();
+            }
+        })
+        .await
+        .expect("the instance did not become ready");
+        assert_eq!(entry["driver"], "grok");
+        assert_eq!(entry["auth"]["type"], "api_key", "{entry}");
+        let launches = std::fs::read_to_string(&seen).unwrap();
+        assert!(
+            launches
+                .lines()
+                .any(|l| l == "agent stdio|http://router:8317/v1|router-key-5d6e"),
+            "{launches}"
+        );
+        assert!(
+            launches
+                .lines()
+                .all(|l| l.ends_with("|http://router:8317/v1|router-key-5d6e")),
+            "{launches}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `requiredScopesForProjectMutation` holds over HTTP as over `/ws`: scripts run on the
     /// host, so a session without `settings:write` may not store them.
     #[tokio::test(flavor = "current_thread")]

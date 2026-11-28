@@ -789,6 +789,21 @@ gaps in the crate README, "Antigravity"). The server lists the default `antigrav
   opens a throwaway session in a scratch folder and closes it, as T3's health check now does,
   so the entry is `ready` with its models after start. `--version` keeps the version.
 
+## Grok through the AI router (2026-11-28)
+
+Orbit points a grok instance at its AI router with two instance variables:
+`GROK_MODELS_BASE_URL` = `http://<router>:8317/v1`, and `XAI_API_KEY` = the router key, marked
+`sensitive`. The driver needed no change: it already passes the instance's variables to
+every grok process, secrets included. Details are in the crate README, Wire, "Another endpoint".
+
+- **Proof:** `a_posted_grok_instance_launches_the_cli_with_the_router_url_and_key` posts that
+  instance over `POST /api/settings/provider-instances`. The key leaves `settings.json` and the
+  response. A stub `grok` is started with both variables and reports `api_key` auth.
+- **The CLI (hand run, 2026-11-28):** grok 1.0.52 (linux-x64 from npm) against a local stub
+  router. `grok models` and ACP `session/new` listed the stub's models.
+  A prompt sent `POST /v1/chat/completions` to the stub with `Bearer <key>`. No live router
+  turn has run yet.
+
 ## Environment themes (2026-11-20)
 
 Agents can restyle the clients with `conn_theme_read` and `conn_theme_set`, and clients that ask

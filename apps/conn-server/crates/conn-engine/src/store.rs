@@ -1940,30 +1940,40 @@ impl Store {
         Ok(rows)
     }
 
-    /// Whether the changes after `after` fit a catch-up: at most `max_items` changed rows and
-    /// rowless events, and at most `max_bytes` of their stored events. Reads at most
+    /// The changes after `after` when they fit a catch-up, as [`Self::thread_changes_after`]
+    /// returns them: at most `max_items` changed rows and rowless events, and at most
+    /// `max_bytes` of their stored events. `None` when they do not. Reads at most
     /// `max_items + 1` events, so a long gap costs no more than a short one to judge.
-    pub(crate) fn thread_changes_fit(
+    pub(crate) fn thread_changes_if_fit(
         &self,
         thread_id: &str,
         after: u64,
         max_items: usize,
         max_bytes: u64,
-    ) -> StoreResult<bool> {
+    ) -> StoreResult<Option<Vec<(u64, Value)>>> {
         let sql = format!(
-            "SELECT COUNT(*), COALESCE(SUM(LENGTH(CAST(event AS BLOB))), 0) FROM (
-               SELECT event FROM events WHERE seq IN ({}) ORDER BY seq LIMIT ?3)",
+            "SELECT seq, event FROM events WHERE seq IN ({}) ORDER BY seq LIMIT ?3",
             changed_seqs()
         );
-        let (items, bytes): (i64, i64) = self
-            .conn
-            .query_row(
-                &sql,
-                params![thread_id, after as i64, (max_items + 1) as i64],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
+        let mut stmt = self.conn.prepare(&sql).map_err(err)?;
+        let mut rows = stmt
+            .query(params![thread_id, after as i64, (max_items + 1) as i64])
             .map_err(err)?;
-        Ok(items as usize <= max_items && bytes as u64 <= max_bytes)
+        let mut texts = Vec::new();
+        let mut bytes = 0u64;
+        while let Some(row) = rows.next().map_err(err)? {
+            let text: String = row.get(1).map_err(err)?;
+            bytes += text.len() as u64;
+            if texts.len() == max_items || bytes > max_bytes {
+                return Ok(None);
+            }
+            texts.push((row.get::<_, i64>(0).map_err(err)? as u64, text));
+        }
+        texts
+            .into_iter()
+            .map(|(seq, text)| Ok((seq, parse(text)?)))
+            .collect::<StoreResult<Vec<_>>>()
+            .map(Some)
     }
 
     /// Whether rows a client holds as of `after` can no longer be patched by changed rows: a
@@ -4045,6 +4055,54 @@ mod tests {
                 has_create: false,
             }
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Changes that fit come back as the changes page reads them; one row or byte past either
+    /// budget gives none.
+    #[test]
+    fn changes_that_fit_are_the_changes_page() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-engine-{}-changes-fit", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let store = Store::open(&dir.join("engine.sqlite")).unwrap();
+        let event = |seq: i64, kind: &str| {
+            let text = format!(r#"{{"type":"{kind}","n":{seq}}}"#);
+            store
+                .conn
+                .execute(
+                    "INSERT INTO events (seq, thread_id, type, event) VALUES (?1, 't1', ?2, ?3)",
+                    params![seq, kind, text],
+                )
+                .unwrap();
+            text.len() as u64
+        };
+        // A row written twice is one change, at its last write; the rest are rowless.
+        event(1, "turn-item.updated");
+        let mut bytes = event(2, "turn-item.updated");
+        store
+            .conn
+            .execute(
+                "INSERT INTO entities (thread_id, kind, id, first_seq, seq, body)
+                 VALUES ('t1', 'turnItems', 'i1', 1, 2, '{}')",
+                [],
+            )
+            .unwrap();
+        for seq in 3..=256 {
+            bytes += event(seq, "thread.visited");
+        }
+        let page = store.thread_changes_after("t1", 0, 256).unwrap();
+        assert_eq!(page.len(), 255);
+        let fit = |max_items, max_bytes| {
+            store
+                .thread_changes_if_fit("t1", 0, max_items, max_bytes)
+                .unwrap()
+        };
+        assert_eq!(fit(256, bytes), Some(page.clone()));
+        assert_eq!(fit(255, bytes), Some(page));
+        assert_eq!(fit(254, bytes), None, "one row past the budget");
+        assert_eq!(fit(256, bytes - 1), None, "one byte past the budget");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

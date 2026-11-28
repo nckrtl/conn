@@ -160,9 +160,12 @@ pub(crate) fn can_replay(after: u64, high: u64, imported: u64) -> bool {
     after <= high && (imported == 0 || after > imported)
 }
 
-/// A thread stream's first items, the cursor live reads go on from, and the sequence a
-/// `changesAfterSequence` opening pages changed rows from.
-type Opening = (Vec<Value>, u64, Option<u64>);
+/// One page of changed rows and the high water read with it.
+type ChangesPage = (Vec<(u64, Value)>, u64);
+
+/// A thread stream's first items, the cursor live reads go on from, and the first page of
+/// changed rows of a `changesAfterSequence` opening.
+type Opening = (Vec<Value>, u64, Option<ChangesPage>);
 
 pub(crate) async fn subscribe_thread(
     inner: Arc<Inner>,
@@ -198,18 +201,17 @@ pub(crate) async fn subscribe_thread(
             // (a rollback) or the thread was created again; then the snapshot below replaces them.
             // A long gap gets the newest window instead: changes grow with time away, a window
             // does not. A deleted thread keeps the changes, which end in `thread.deleted`.
+            // `CHANGES_MAX_ITEMS` is one page, so changes that fit are the whole first page.
             if let Some(after) = changes_after.filter(|after| can_replay(*after, high, imported))
                 && store.thread_known(&id)?
                 && !store.thread_changes_need_reset(&id, after)?
-                && (!store.thread_exists(&id)?
-                    || store.thread_changes_fit(
-                        &id,
-                        after,
-                        CHANGES_MAX_ITEMS,
-                        CHANGES_MAX_BYTES,
-                    )?)
+                && let Some(page) = if store.thread_exists(&id)? {
+                    store.thread_changes_if_fit(&id, after, CHANGES_MAX_ITEMS, CHANGES_MAX_BYTES)?
+                } else {
+                    Some(store.thread_changes_after(&id, after, LIVE_READ_BATCH)?)
+                }
             {
-                return Ok(Some((vec![], after, Some(after))));
+                return Ok(Some((vec![], after, Some((page, high)))));
             }
             let first = |items, high| Ok(Some((items, high, None)));
             // T3 replays a resumed stream before it looks for the thread (`ws.ts`), so a
@@ -258,22 +260,9 @@ pub(crate) async fn subscribe_thread(
         }
         // Pages of changed rows. A row a commit changes meanwhile comes again in a later page,
         // newer; the last page's read of the high water is where live events go on.
-        if changes.is_some() {
+        if let Some(mut next) = changes {
             loop {
-                let (id, after) = (thread_id.clone(), cursor);
-                let page = inner
-                    .db(move |store| {
-                        let page = store.thread_changes_after(&id, after, LIVE_READ_BATCH)?;
-                        Ok::<_, String>((page, store.high_water()))
-                    })
-                    .await;
-                let (page, high) = match page {
-                    Ok(page) => page,
-                    Err(e) => {
-                        fail(&tx, error(e)).await;
-                        return;
-                    }
-                };
+                let (page, high) = next;
                 let full = page.len() == LIVE_READ_BATCH;
                 for change in page {
                     cursor = change.0;
@@ -285,6 +274,20 @@ pub(crate) async fn subscribe_thread(
                     cursor = cursor.max(high);
                     break;
                 }
+                let (id, after) = (thread_id.clone(), cursor);
+                next = match inner
+                    .db(move |store| {
+                        let page = store.thread_changes_after(&id, after, LIVE_READ_BATCH)?;
+                        Ok::<_, String>((page, store.high_water()))
+                    })
+                    .await
+                {
+                    Ok(page) => page,
+                    Err(e) => {
+                        fail(&tx, error(e)).await;
+                        return;
+                    }
+                };
             }
         }
         if marker && !send(&tx, json!({"kind": "synchronized"}), error).await {

@@ -19,9 +19,14 @@ fail() {
 
 root="$(git rev-parse --show-toplevel)" || fail "not in a git checkout"
 cd "$root" || fail "cannot enter $root"
-if [ -n "$(git status --porcelain)" ]; then
-  fail "the checkout has uncommitted changes; commit them first (the receipt names HEAD)"
-fi
+# Clean only when git says so: untracked files count whatever the configuration hides, and a
+# status git cannot read is no clean checkout.
+clean() {
+  local status
+  status="$(git status --porcelain --untracked-files=all)" || return 1
+  [ -z "$status" ]
+}
+clean || fail "the checkout has uncommitted changes or git cannot read its status (the receipt names HEAD)"
 commit="$(git rev-parse HEAD)" || fail "cannot resolve HEAD"
 tree="$(git rev-parse 'HEAD^{tree}')" || fail "cannot resolve the tree of HEAD"
 receipt="$(git rev-parse --path-format=absolute --git-path orbit-handoff/delivery.json)" ||
@@ -52,11 +57,17 @@ run_part "cargo clippy" cargo clippy --locked --workspace --all-targets --all-fe
 run_part "cargo test conn-server" cargo test --locked -p conn-server
 
 # The parts must not have changed the checkout the receipt describes.
-[ -z "$(git status --porcelain)" ] || fail "the checkout changed while the check ran"
+clean || fail "the checkout changed while the check ran"
 mkdir -p "$(dirname "$receipt")" || fail "cannot create $(dirname "$receipt")"
 joined="$(IFS=,; echo "${parts[*]}")"
 printf '{"commit":"%s","tree":"%s","parts":[%s]}\n' "$commit" "$tree" "$joined" >"$receipt.tmp" ||
   fail "cannot write $receipt.tmp"
+# `mv` would move the file into a directory of that name: the receipt must land at the exact path.
+if [ -e "$receipt" ] && [ ! -f "$receipt" ]; then
+  rm -f "$receipt.tmp"
+  fail "$receipt exists and is not a file"
+fi
 mv -f "$receipt.tmp" "$receipt" || fail "cannot move the receipt into $receipt"
+[ -f "$receipt" ] && [ ! -e "$receipt.tmp" ] || fail "the receipt is not at $receipt"
 echo "orbit-task-check: receipt $receipt (commit $commit)" >&2
 exit "$failed"

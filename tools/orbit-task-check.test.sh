@@ -52,5 +52,30 @@ run
 code=$?
 check "an unwritable receipt destination exits non-zero" '[ "$code" -ne 0 ]'
 
+rm -f "$(dirname "$receipt")"
+
+echo hidden >untracked.txt
+git config status.showUntrackedFiles no
+run
+code=$?
+check "an untracked file hidden by status.showUntrackedFiles is refused" '[ "$code" -ne 0 ]'
+check "the hidden untracked file gets no receipt" '[ ! -e "$receipt" ]'
+git config --unset status.showUntrackedFiles
+rm -f untracked.txt
+
+chmod 000 .git/index
+run
+code=$?
+chmod 644 .git/index
+check "an unreadable index is refused" '[ "$code" -ne 0 ]'
+check "an unreadable index gets no receipt" '[ ! -e "$receipt" ]'
+
+mkdir -p "$receipt"
+run
+code=$?
+check "a directory at the receipt path exits non-zero" '[ "$code" -ne 0 ]'
+check "nothing lands inside that directory" '[ -z "$(ls -A "$receipt")" ]'
+rmdir "$receipt"
+
 [ "$failures" -eq 0 ] || { echo "$failures failed"; exit 1; }
 echo "all passed"

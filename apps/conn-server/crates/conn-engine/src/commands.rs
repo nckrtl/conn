@@ -1867,14 +1867,23 @@ fn start_next_queued_as(
         // A queued pull request wake whose watches all moved on is dropped, and one that
         // outlived some of them tells only the current ones (`startNextQueuedRun`).
         let message_id = run["userMessageId"].as_str().unwrap_or_default();
-        let Some(message) = tx
-            .entity(thread_id, "messages", message_id)?
-            .filter(|m| m["notification"]["source"]["kind"] == "monitor")
+        let message = tx.entity(thread_id, "messages", message_id)?;
+        let run_id = run["id"].as_str().unwrap_or_default().to_owned();
+        // So is a question wake whose question or task moved on (`cancelStaleQuestionWakes`).
+        if let Some(message) = &message
+            && crate::families::stale_question_wake(tx, thread_id, message)?
+        {
+            finish_run(tx, thread_id, &run_id, "cancelled", None)?;
+            if only.is_some() {
+                return Ok(None);
+            }
+            continue;
+        }
+        let Some(message) = message.filter(|m| m["notification"]["source"]["kind"] == "monitor")
         else {
             break run;
         };
         let messages = tx.entities(thread_id, "messages")?;
-        let run_id = run["id"].as_str().unwrap_or_default().to_owned();
         if crate::pull_requests::stale_wake(&thread, &messages, &message) {
             finish_run(tx, thread_id, &run_id, "cancelled", None)?;
             only = None;
@@ -3977,7 +3986,11 @@ pub(crate) fn finish_run_as(
         }
         request["status"] = json!("cancelled");
         request["resolvedAt"] = json!(now);
+        let id = request["id"].as_str().unwrap_or_default().to_owned();
         tx.append(draft("runtime-request.updated", request))?;
+        // Here, not at the run's end: a delete never reaches it, and a capture delays it.
+        let effects = crate::families::on_child_request(tx, thread_id, &id)?;
+        tx.enqueue(None, &effects)?;
     }
     if let Some(failure) = failure {
         tx.append(draft(

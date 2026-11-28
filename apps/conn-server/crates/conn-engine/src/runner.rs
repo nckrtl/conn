@@ -2290,10 +2290,14 @@ impl Inner {
                     {
                         settled.push(draft.thread_id.clone());
                     }
-                    let request = (draft.event_type == "runtime-request.updated").then(|| {
-                        let id = draft.payload["id"].as_str().unwrap_or_default().to_owned();
-                        (draft.thread_id.clone(), id)
-                    });
+                    let request = match draft.event_type {
+                        "runtime-request.updated" => draft.payload["id"].as_str(),
+                        "turn-item.updated" if draft.payload["type"] == "user_input_request" => {
+                            draft.payload["requestId"].as_str()
+                        }
+                        _ => None,
+                    }
+                    .map(|id| (draft.thread_id.clone(), id.to_owned()));
                     tx.append(draft)?;
                     if let Some((thread_id, id)) = request {
                         effects.extend(crate::families::on_child_request(tx, &thread_id, &id)?);

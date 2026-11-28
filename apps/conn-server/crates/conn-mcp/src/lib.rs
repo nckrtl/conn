@@ -227,6 +227,8 @@ pub struct ClientCaller {
     /// Narrower modes the client asked for on this request (`T3-Mode-Limit`): runtime,
     /// interaction.
     pub narrowed: Option<(&'static str, &'static str)>,
+    /// A linked client's thread there that this request is made for (`T3-Sender-Thread`).
+    pub sender_thread: Option<peers::PeerSender>,
     /// A native bearer session's scopes (`None` for an MCP OAuth client, whose access level
     /// decides). Tools that change settings or links check them, as the RPC methods do.
     pub scopes: Option<Vec<String>>,

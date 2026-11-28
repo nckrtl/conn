@@ -312,7 +312,7 @@ fn thread_stopped_after_run_start(tx: &Tx<'_>, thread: &str, run: &str) -> Store
         rusqlite::params![thread,run], |row|row.get(0)).map_err(|e|e.to_string())
 }
 
-/// Queued runs in delivery order: `queuePosition`, then ordinal.
+/// Queued runs in queue order: `queuePosition`, then ordinal. Position bookkeeping uses it.
 pub(crate) fn queued_runs(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Vec<Value>> {
     let mut runs: Vec<Value> = tx
         .entities_where(thread_id, "runs", "status", "queued")?
@@ -323,6 +323,31 @@ pub(crate) fn queued_runs(tx: &Tx<'_>, thread_id: &str) -> StoreResult<Vec<Value
         (run["queuePosition"].as_u64().unwrap_or(ordinal), ordinal)
     });
     Ok(runs)
+}
+
+/// Queued runs in the order they start (`crate::queued_in_delivery_order`), as `conn_queue`
+/// lists them.
+pub(crate) fn queued_runs_in_delivery_order(
+    tx: &Tx<'_>,
+    thread_id: &str,
+) -> StoreResult<Vec<Value>> {
+    let runs = queued_runs(tx, thread_id)?;
+    let mut completions = std::collections::HashSet::new();
+    for run in &runs {
+        if let Some(id) = run["userMessageId"].as_str()
+            && tx
+                .entity(thread_id, "messages", id)?
+                .is_some_and(|m| !is_null(&m, "delegatedCompletion"))
+        {
+            completions.insert(id.to_owned());
+        }
+    }
+    let ordered = crate::queued_in_delivery_order(runs.iter().collect(), |run| {
+        run["userMessageId"]
+            .as_str()
+            .is_some_and(|id| completions.contains(id))
+    });
+    Ok(ordered.into_iter().cloned().collect())
 }
 
 #[derive(Deserialize)]
@@ -423,6 +448,10 @@ struct MessageDispatch {
     text: String,
     attachments: Vec<Value>,
     sender_thread_id: Option<String>,
+    /// A linked environment's thread that sent this (`T3-Sender-Thread`).
+    linked_sender: Option<Value>,
+    /// The delegated tasks whose results this wake carries.
+    delegated_completion: Option<Value>,
     context: Option<Value>,
     model_selection: Option<Value>,
     created_by: String,
@@ -702,6 +731,16 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
         }
     }
     let mut c: MessageDispatch = decode(command)?;
+    // `Orchestrator.ts:7283` and `:7300`: only the server queues a notice or a delegated result.
+    let agent = c.created_by == "agent";
+    if c.notification.is_some()
+        && !(agent && matches!(c.creation_source.as_str(), "server" | "provider"))
+    {
+        return reject("Notifications must be server- or provider-created queued messages.");
+    }
+    if c.delegated_completion.is_some() && !(agent && c.creation_source == "server") {
+        return reject("Delegated completion delivery must be a server-created queued message.");
+    }
     let thread = live_thread(tx, &c.thread_id)?;
     // `sendToThread`'s archive guard for a schedule's or an agent's send, checked again in the
     // write that admits the message: an archive that landed after the caller read the thread
@@ -1106,9 +1145,7 @@ pub(crate) fn message_dispatch(tx: &mut Tx<'_>, command: Value) -> Outcome {
             message["followsThreadSelection"] = json!(true);
         }
     }
-    if let Some(sender) = &c.sender_thread_id {
-        message["senderThreadId"] = json!(sender);
-    }
+    sender_fields(&mut message, &c);
     if let Some(mode) = &c.idle_compaction {
         message["idleCompaction"] = json!(mode);
     }
@@ -1348,6 +1385,19 @@ fn end_preparation_item(
     Ok(())
 }
 
+/// Who sent a message: a thread here, a linked environment's thread, a delegated result.
+fn sender_fields(message: &mut Value, c: &MessageDispatch) {
+    if let Some(sender) = &c.sender_thread_id {
+        message["senderThreadId"] = json!(sender);
+    }
+    if let Some(sender) = &c.linked_sender {
+        message["linkedSender"] = sender.clone();
+    }
+    if let Some(completion) = &c.delegated_completion {
+        message["delegatedCompletion"] = completion.clone();
+    }
+}
+
 fn user_message_item(
     c: &MessageDispatch,
     run_id: &str,
@@ -1385,6 +1435,12 @@ fn user_message_item(
     }
     if let Some(task) = &c.scheduled_task_id {
         item["scheduledTaskId"] = json!(task);
+    }
+    if let Some(sender) = &c.sender_thread_id {
+        item["senderThreadId"] = json!(sender);
+    }
+    if let Some(sender) = &c.linked_sender {
+        item["linkedSender"] = sender.clone();
     }
     if c.fresh_context == Some(true) {
         item["freshContext"] = json!(true);
@@ -1497,9 +1553,7 @@ fn steer_into(tx: &mut Tx<'_>, c: &MessageDispatch, target: &Value) -> Outcome {
     if let Some(context) = &c.context {
         message["context"] = context.clone();
     }
-    if let Some(sender) = &c.sender_thread_id {
-        message["senderThreadId"] = json!(sender);
-    }
+    sender_fields(&mut message, c);
     tx.append(draft("message.updated", message))?;
     let ordinal = target["ordinal"].as_u64().unwrap_or(1);
     tx.append(draft(
@@ -1651,7 +1705,7 @@ pub(crate) fn next_runs_on_failed_provider(
         return Ok(false);
     };
     let next = loop {
-        let Some(next) = queued_runs(tx, thread_id)?
+        let Some(next) = queued_runs_in_delivery_order(tx, thread_id)?
             .into_iter()
             .find(|run| run["queueHeld"] != true)
         else {
@@ -1855,7 +1909,7 @@ fn start_next_queued_as(
     }
     let mut only = only;
     let mut run = loop {
-        let next = queued_runs(tx, thread_id)?
+        let next = queued_runs_in_delivery_order(tx, thread_id)?
             .into_iter()
             .find(|run| match only {
                 Some(id) => run["id"] == id,
@@ -1990,6 +2044,13 @@ fn start_next_queued_as(
         if let Some(task) = message["scheduledTaskId"].as_str() {
             item["scheduledTaskId"] = json!(task);
         }
+        // Clients name the sender from the turn item (`session-logic.ts`).
+        if let Some(sender) = message["senderThreadId"].as_str() {
+            item["senderThreadId"] = json!(sender);
+        }
+        if message["linkedSender"].is_object() {
+            item["linkedSender"] = message["linkedSender"].clone();
+        }
         if run["freshContext"] == true {
             item["freshContext"] = json!(true);
         }
@@ -2052,7 +2113,7 @@ fn queued_run_start(tx: &mut Tx<'_>, command: Value) -> Outcome {
 /// leaves every hold as it was.
 fn resumable(tx: &Tx<'_>, thread_id: &str, selected: Option<&str>) -> Result<(), CommandError> {
     let thread = live_thread(tx, thread_id)?;
-    let next = queued_runs(tx, thread_id)?
+    let next = queued_runs_in_delivery_order(tx, thread_id)?
         .into_iter()
         .find(|run| selected.is_none_or(|id| run["id"] == id));
     let instance = match &next {
@@ -2326,7 +2387,14 @@ fn queued_message_promote_to_steer(tx: &mut Tx<'_>, command: Value) -> Outcome {
             "creationSource": message["creationSource"],
             "dispatchMode": {"type": "steer_active", "targetRunId": c.target_run_id},
         });
-        for field in ["context", "notification", "scheduledTaskId"] {
+        for field in [
+            "context",
+            "notification",
+            "scheduledTaskId",
+            "senderThreadId",
+            "linkedSender",
+            "delegatedCompletion",
+        ] {
             if message[field].is_object() || message[field].is_string() {
                 command[field] = message[field].clone();
             }
@@ -2358,7 +2426,15 @@ fn queued_message_promote_to_steer(tx: &mut Tx<'_>, command: Value) -> Outcome {
         steer_follow_up_of_run_id: None,
         restart_continuation_of_run_id: None,
         usage_limit_continuation_of_run_id: None,
-        sender_thread_id: None,
+        sender_thread_id: message["senderThreadId"].as_str().map(str::to_owned),
+        linked_sender: message
+            .get("linkedSender")
+            .filter(|v| v.is_object())
+            .cloned(),
+        delegated_completion: message
+            .get("delegatedCompletion")
+            .filter(|v| v.is_object())
+            .cloned(),
         title_seed: None,
         target_capabilities: None,
         notification: message

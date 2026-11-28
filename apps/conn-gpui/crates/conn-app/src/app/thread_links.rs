@@ -93,15 +93,16 @@ impl ConnApp {
     /// server reports for itself (`ServerConfigState::environment_id`), while Orbit targets are
     /// looked up by their target id, so either one matches: a linked environment by its Orbit
     /// target id or by the id its server reports, and the primary server by any id it goes by.
+    /// The primary comes first: it is usually an Orbit target too.
     pub(super) fn link_environment(&self, id: &str) -> LinkEnvironment {
+        if self.primary_link_environments().iter().any(|own| own == id) {
+            return LinkEnvironment::Primary;
+        }
         let targets = self.linked_target_ids();
         if targets.iter().any(|target| target == id)
             || self.orbit.fleet.find_by_server_id(id).is_some()
         {
             return LinkEnvironment::Target(id.to_owned());
-        }
-        if self.primary_link_environments().iter().any(|own| own == id) {
-            return LinkEnvironment::Primary;
         }
         targets
             .into_iter()

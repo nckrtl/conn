@@ -256,6 +256,53 @@ fn a_link_environment_id_names_a_target_by_either_id(cx: &mut TestAppContext) {
     assert_eq!(name(cx, "env-gone"), LinkEnvironment::Unknown);
 }
 
+/// The primary server is usually an Orbit target too. Its ids still name the primary, so a
+/// message the primary's thread sent to another environment keeps `Open thread`, and opening it
+/// selects the primary's thread rather than connecting to the target.
+#[gpui_kit::test]
+fn the_primary_listed_in_orbit_still_names_the_primary(cx: &mut TestAppContext) {
+    use conn_desktop::orbit::{OrbitFleet, OrbitServerTarget, OrbitTargetKind, OrbitTargetStatus};
+
+    let (_, app) = mount_with_linked_mini(cx);
+    let target = |id: &str| OrbitServerTarget {
+        server_id: id.to_owned(),
+        label: id.to_owned(),
+        url: format!("https://{id}.example.test"),
+        server_version: None,
+        registered_by: None,
+        status: OrbitTargetStatus::Registered,
+        cleanup_pending: false,
+        kind: OrbitTargetKind::Node {
+            node_name: id.to_owned(),
+            roles: Vec::new(),
+            is_primary_agent: false,
+        },
+    };
+    cx.update(|cx| {
+        app.update(cx, |app, _| {
+            app.set_fleet_for_test(OrbitFleet::from_targets(
+                vec![target("env-main"), target("mini")],
+                None,
+            ));
+        });
+    });
+    assert_eq!(
+        cx.update(|cx| app.read(cx).link_environment("env-main")),
+        LinkEnvironment::Primary
+    );
+
+    let sender = conn_state::AgentMessageSender::Linked {
+        environment_id: "env-main".to_owned(),
+        thread_id: "thread-pinned".to_owned(),
+        title: "Delivered title".to_owned(),
+    };
+    let view = cx.update(|cx| app.read(cx).agent_sender_view(&sender, Some("thread-mini")));
+    assert!(view.can_open, "the primary's thread can open");
+    assert_eq!(view.title, "Pinned active thread");
+    cx.update(|cx| app.update(cx, |app, cx| app.open_agent_sender(&sender, cx)));
+    assert_eq!(selected(cx, &app).as_deref(), Some("thread-pinned"));
+}
+
 #[gpui_kit::test]
 fn a_link_opens_by_server_id_target_id_or_primary_and_unknown_fails_cleanly(
     cx: &mut TestAppContext,

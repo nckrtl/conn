@@ -195,7 +195,7 @@ fn agent_dot(state: AgentState, tokens: &Tokens) -> Hsla {
 }
 
 /// One child of the thread (`conn_state::thread_details::ThreadAgent`), its model named from
-/// the catalog.
+/// the catalog and its provider resolved with what this app knows of linked environments.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct AgentRow {
     /// Stable id for element ids: the child thread, else the timeline entry.
@@ -207,7 +207,7 @@ pub(crate) struct AgentRow {
     /// `on <label>` for a child on another environment.
     pub(crate) environment_label: Option<String>,
     pub(crate) title: String,
-    /// Provider driver or instance id, for the provider mark.
+    /// The key [`crate::icons::provider_mark`] draws (`crate::chat::subagent_provider`).
     pub(crate) provider: String,
     /// `<model> · <effort>`.
     pub(crate) model: Option<String>,
@@ -216,18 +216,33 @@ pub(crate) struct AgentRow {
 }
 
 impl AgentRow {
-    fn new(agent: conn_state::thread_details::ThreadAgent, catalog: &ModelCatalog) -> Self {
+    fn new(agent: conn_state::thread_details::ThreadAgent, sources: &AgentSources<'_>) -> Self {
+        // A child on another machine has the role `remote`: the driver its own environment
+        // lists, its own model there, or the core's model (its own, then the parent's record)
+        // names the provider.
+        let child = agent
+            .entry_id
+            .as_deref()
+            .and_then(|id| sources.children.get(id));
+        let (provider, _) = crate::chat::subagent_provider(
+            &agent.provider,
+            child.and_then(|child| child.driver.as_deref()),
+            child
+                .and_then(crate::chat::SubagentChild::selected_model)
+                .or(agent.model.as_ref()),
+            sources.catalog,
+        );
         Self {
             model: agent
                 .model
                 .as_ref()
-                .and_then(|model| crate::chat::subagent_model_text(catalog, model)),
+                .and_then(|model| crate::chat::subagent_model_text(sources.catalog, model)),
             key: agent.key,
             thread_id: agent.thread_id,
             environment_id: agent.environment_id,
             environment_label: agent.environment_label,
             title: agent.title,
-            provider: agent.provider,
+            provider,
             state: agent.state,
             elapsed: agent.elapsed,
         }
@@ -282,14 +297,14 @@ pub(crate) fn resolve_lineage<'a, 'b>(
     shell: &'a ShellState,
     thread: impl Into<ThreadRecord<'b>>,
     timeline: Option<&ThreadState>,
-    catalog: &ModelCatalog,
+    sources: &AgentSources<'_>,
     now_secs: i64,
 ) -> Lineage<'a> {
     let lineage = conn_state::thread_details::thread_lineage(shell, thread, timeline, now_secs);
     let rows = |agents: Vec<conn_state::thread_details::ThreadAgent>| {
         agents
             .into_iter()
-            .map(|agent| AgentRow::new(agent, catalog))
+            .map(|agent| AgentRow::new(agent, sources))
             .collect()
     };
     Lineage {
@@ -309,6 +324,13 @@ pub(crate) fn pull_request_lines(thread: ThreadRecord<'_>) -> Vec<String> {
         .collect()
 }
 
+/// What names a child agent's model and provider: the parent environment's catalog and each
+/// subagent entry's child thread (by entry id), whose driver comes from its own environment.
+pub(crate) struct AgentSources<'a> {
+    pub(crate) catalog: &'a ModelCatalog,
+    pub(crate) children: &'a std::collections::HashMap<String, crate::chat::SubagentChild>,
+}
+
 /// Props for [`render_thread_details_card`].
 pub(crate) struct DetailsCardProps<'a> {
     pub(crate) shell: &'a ShellState,
@@ -319,6 +341,8 @@ pub(crate) struct DetailsCardProps<'a> {
     pub(crate) timeline: Option<&'a ThreadState>,
     /// Names the models of child agents.
     pub(crate) catalog: &'a ModelCatalog,
+    /// Each subagent entry's child thread, by entry id, as its own environment knows it.
+    pub(crate) subagent_children: &'a std::collections::HashMap<String, crate::chat::SubagentChild>,
     pub(crate) state: &'a ThreadDetailsState,
     pub(crate) environment_label: &'a str,
     pub(crate) max_height: f32,
@@ -545,7 +569,10 @@ pub(crate) fn render_thread_details_card(
         props.shell,
         thread,
         props.timeline,
-        props.catalog,
+        &AgentSources {
+            catalog: props.catalog,
+            children: props.subagent_children,
+        },
         current_unix_secs(),
     );
     if !lineage.is_empty() {

@@ -1471,23 +1471,26 @@ impl ConnApp {
             .or_else(|| self.draft.as_ref().map(|draft| draft.project_id.clone()))
     }
 
-    /// The child thread's own model of each subagent card of `thread` (open as `selected`), from
-    /// the shell. A local child lives on the parent's environment; a remote child on its own.
-    fn subagent_child_models(
+    /// The child thread of each subagent card of `thread` (open as `selected`), from the shell,
+    /// with the catalog of the environment it runs on. A local child lives on the parent's
+    /// environment; a remote child on its own.
+    pub(crate) fn subagent_children(
         &self,
         thread: &conn_state::ThreadState,
         selected: Option<&str>,
-    ) -> std::collections::HashMap<String, conn_state::SubagentModel> {
+    ) -> std::collections::HashMap<String, crate::chat::SubagentChild> {
         let parent_environment = selected.and_then(|id| self.linked_environment_of_thread(id));
         let primary = self.primary_environment_id();
-        crate::chat::subagent_child_models(thread, |child, remote_environment| {
+        crate::chat::subagent_children(thread, |child, remote_environment| {
             let wanted = match remote_environment {
                 Some(environment) => (environment != primary).then_some(environment),
                 None => parent_environment,
             };
-            (self.linked_environment_of_thread(child) == wanted)
-                .then(|| self.shell.find_thread(child))
-                .flatten()
+            if self.linked_environment_of_thread(child) != wanted {
+                return None;
+            }
+            let shell = self.shell.find_thread(child)?;
+            Some((shell, self.environment_catalog(wanted)))
         })
     }
 
@@ -1540,8 +1543,8 @@ impl ConnApp {
         let timeline = selected.and_then(|id| self.threads.get(id));
         let fallback = selected.map(conn_state::ThreadState::new);
         let thread = timeline.or(fallback.as_ref());
-        let subagent_child_models = thread
-            .map(|thread| self.subagent_child_models(thread, selected))
+        let subagent_children = thread
+            .map(|thread| self.subagent_children(thread, selected))
             .unwrap_or_default();
         let project_id = shell_thread
             .map(|t| t.project_id.clone())
@@ -1682,7 +1685,7 @@ impl ConnApp {
                 chat.clear_offline_prompt_notice(cx);
             }
             chat.set_child_approvals(child_approvals, cx);
-            chat.set_subagent_child_models(subagent_child_models, cx);
+            chat.set_subagent_children(subagent_children, cx);
             chat.set_branch_context(branch_context, cx);
             chat.set_thread_context(branch, worktree_active, runtime_mode, interaction_mode, cx);
             if let Some(model) = model {
@@ -3159,6 +3162,12 @@ impl ConnApp {
             strategy,
         );
         payload["workspaceStrategy"] = draft_workspace_strategy(&draft);
+        if let Some(message_id) = payload["initialMessage"]["messageId"].as_str() {
+            let message_id = message_id.to_owned();
+            self.chat.update(cx, |chat, cx| {
+                chat.note_sent_message(&message_id, &attachments, cx);
+            });
+        }
 
         if let Some(active_draft) = &mut self.draft {
             active_draft.launching = true;
@@ -3351,7 +3360,11 @@ impl ConnApp {
                 return;
             }
         };
-        self.chat.update(cx, |chat, cx| chat.set_error(None, cx));
+        self.chat.update(cx, |chat, cx| {
+            chat.set_error(None, cx);
+            // Its pictures paint from what went up, not a download, once the server echoes it.
+            chat.note_sent_message(&ids.message_id, &attachments, cx);
+        });
         self.run_send(
             send_pending::Outgoing {
                 connection,
@@ -6441,6 +6454,12 @@ impl ConnApp {
             let environment_label = self
                 .hover_environment_label(self.layout.selected_thread_id.as_deref())
                 .unwrap_or_else(|| "Local".to_owned());
+            let subagent_children = self
+                .selected_timeline()
+                .map(|timeline| {
+                    self.subagent_children(timeline, self.layout.selected_thread_id.as_deref())
+                })
+                .unwrap_or_default();
             let card = render_thread_details_card(
                 &DetailsCardProps {
                     shell: &self.shell,
@@ -6449,6 +6468,7 @@ impl ConnApp {
                     task_links: self.selected_timeline().map(|t| &t.task_links),
                     timeline: self.selected_timeline(),
                     catalog: self.server_config.catalog(),
+                    subagent_children: &subagent_children,
                     environment_label: &environment_label,
                     max_height: (viewport_h
                         - self.geometry.header_height_px

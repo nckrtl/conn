@@ -9,7 +9,7 @@ mod background_work;
 mod cache;
 mod card_face;
 mod cards;
-pub(crate) use cards::{subagent_child_models, subagent_model_text};
+pub(crate) use cards::{SubagentChild, subagent_children, subagent_model_text, subagent_provider};
 mod child_approvals;
 pub(crate) use self::child_approvals::ChildApprovalCard;
 mod color;
@@ -46,6 +46,8 @@ mod link_menu;
 mod link_preview;
 #[cfg(test)]
 mod picker_settings_shots;
+#[cfg(all(test, target_os = "macos"))]
+mod steer_thinking_tests;
 pub(crate) use self::link_menu::LinkedPullRequest;
 pub(crate) mod markdown;
 mod provider_banner;
@@ -61,6 +63,7 @@ pub(crate) mod selection;
 mod selection_menu_tests;
 #[cfg(all(test, target_os = "macos"))]
 mod selection_shots;
+mod sent_images;
 mod spinner;
 pub(crate) mod thread_links;
 mod thumb_cache;
@@ -335,9 +338,10 @@ pub(crate) struct ChatView {
     entry_timings: HashMap<String, EntryTiming>,
     /// The model of each subagent card, by timeline entry id.
     subagent_models: HashMap<String, conn_state::SubagentModel>,
-    /// The child thread's own model of each subagent card, by timeline entry id, from the shell.
-    /// It wins over [`Self::subagent_models`], whose record can lack the child's options.
-    subagent_child_models: HashMap<String, conn_state::SubagentModel>,
+    /// The child thread of each subagent card, by timeline entry id, from the shell: its own model
+    /// (which wins over [`Self::subagent_models`], whose record can lack the child's options) and
+    /// the driver its environment lists for its instance.
+    subagent_children: HashMap<String, SubagentChild>,
     run_timings: HashMap<String, RunTiming>,
     turn_checkpoints: HashMap<String, TurnCheckpointSummary>,
     expanded_ids: HashSet<String>,
@@ -390,6 +394,8 @@ pub(crate) struct ChatView {
         std::cell::RefCell<thumb_cache::ByteLru<ThumbKey, attachment_thumb::SentImage>>,
     /// Where attachment bytes are kept on disk, so a picture downloads once.
     image_store: image_store::ImageStore,
+    /// Pictures this chat sent, until the server's copy of their message shows.
+    sent_images: std::cell::RefCell<sent_images::SentImages>,
     /// Attachments a hover is downloading to disk now, by environment and id.
     warming: HashSet<(String, String)>,
     /// Gallery tiles that painted a picture in the last render (tests read it).
@@ -519,7 +525,9 @@ impl ChatView {
                     attachments,
                     dispatch,
                     held_draft,
+                    uploaded,
                 } => {
+                    this.stage_uploaded(uploaded);
                     this.scroll_to_latest(cx);
                     cx.emit(ChatEvent::Send {
                         text: text.clone(),
@@ -612,7 +620,7 @@ impl ChatView {
             perf_open: None,
             entry_timings: HashMap::new(),
             subagent_models: HashMap::new(),
-            subagent_child_models: HashMap::new(),
+            subagent_children: HashMap::new(),
             run_timings: HashMap::new(),
             turn_checkpoints: HashMap::new(),
             expanded_ids: HashSet::new(),
@@ -649,6 +657,7 @@ impl ChatView {
                 thumb_cache::THUMB_BUDGET_BYTES,
             )),
             image_store: image_store::ImageStore::shared(),
+            sent_images: std::cell::RefCell::default(),
             warming: HashSet::new(),
             #[cfg(test)]
             ready_tiles: std::cell::Cell::new(0),
@@ -702,6 +711,12 @@ impl ChatView {
         for image in self.attachment_thumbs.get_mut().clear() {
             image.release(cx);
         }
+    }
+
+    /// Test helper: the environment the chat keys attachments by.
+    #[cfg(test)]
+    pub(crate) fn environment_key_for_test(&self) -> Option<String> {
+        self.environment_key.clone()
     }
 
     /// Test helper: gallery tiles that painted a picture in the last render.
@@ -1329,15 +1344,15 @@ impl ChatView {
             .update(cx, |c, cx| c.set_branch_context(context, cx));
     }
 
-    /// Sets the child thread's own model of each subagent card, by timeline entry id. A child
-    /// whose selection changes repaints its card.
-    pub(crate) fn set_subagent_child_models(
+    /// Sets the child thread of each subagent card, by timeline entry id. A child whose selection
+    /// or provider changes repaints its card.
+    pub(crate) fn set_subagent_children(
         &mut self,
-        models: HashMap<String, conn_state::SubagentModel>,
+        children: HashMap<String, SubagentChild>,
         cx: &mut Context<'_, Self>,
     ) {
-        if self.subagent_child_models != models {
-            self.subagent_child_models = models;
+        if self.subagent_children != children {
+            self.subagent_children = children;
             cx.notify();
         }
     }
@@ -2756,6 +2771,11 @@ impl ChatView {
                 }
                 bubble = bubble.child(self.render_review_comment(attachment_key, idx, comment));
             }
+            // A user message's turn item is `turn-item:<messageId>` (conn-engine `commands.rs`).
+            if let Some(item_id) = attachment_key.strip_prefix("user-") {
+                let message_id = item_id.strip_prefix("turn-item:").unwrap_or(item_id);
+                self.adopt_sent_images(message_id, attachments, cx);
+            }
             for block in self.render_message_attachments(attachment_key, attachments, cx) {
                 bubble = bubble.child(block);
             }
@@ -3020,7 +3040,7 @@ impl ChatView {
             };
             let mut list = div().flex().flex_col().w_full().min_w_0().pt(px(list_pad));
             for row in rows {
-                list = list.child(self.render_work_entry(row, cx));
+                list = list.child(self.render_work_entry(row, has_active, cx));
             }
             container = container.child(list);
         }
@@ -3215,35 +3235,36 @@ impl ChatView {
                         } else {
                             "Thought".into_any_element()
                         };
-                        col = col.child(
-                            div()
-                                .id(SharedString::from(format!("live-status-{id}")))
-                                .a11y_group(
-                                    format!("timeline.work.{id}.live"),
-                                    if shimmer { "Thinking" } else { "Thought" },
-                                )
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .gap(px(WORK_ICON_GAP_PX))
-                                .w_full()
-                                .min_w_0()
-                                .min_h(px(WORK_ROW_MIN_HEIGHT_PX))
-                                .px(px(TIMELINE_INSET_PX))
-                                .child(work_icon_box(
-                                    SharedString::from(format!("live-status-icon-{id}")),
-                                    icons::icon(icons::BRAIN, 16.0, icon_muted),
-                                ))
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .text_size(px(BODY_FONT_PX))
-                                        .line_height(px(BODY_LINE_HEIGHT_PX))
-                                        .text_color(muted)
-                                        .child(label_el),
-                                ),
-                        );
+                        let status_row = div()
+                            .id(SharedString::from(format!("live-status-{id}")))
+                            .a11y_group(
+                                format!("timeline.work.{id}.live"),
+                                if shimmer { "Thinking" } else { "Thought" },
+                            )
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(WORK_ICON_GAP_PX))
+                            .w_full()
+                            .min_w_0()
+                            .min_h(px(WORK_ROW_MIN_HEIGHT_PX))
+                            .px(px(TIMELINE_INSET_PX))
+                            .child(work_icon_box(
+                                SharedString::from(format!("live-status-icon-{id}")),
+                                icons::icon(icons::BRAIN, 16.0, icon_muted),
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .text_size(px(BODY_FONT_PX))
+                                    .line_height(px(BODY_LINE_HEIGHT_PX))
+                                    .text_color(muted)
+                                    .child(label_el),
+                            );
+                        #[cfg(test)]
+                        let status_row = gpui_kit::TestSupportExt::test_support(status_row);
+                        col = col.child(status_row);
                     }
                 }
                 _ => {}
@@ -3253,13 +3274,20 @@ impl ChatView {
         col.into_any_element()
     }
 
-    fn render_work_entry(&self, row: &CachedRow, cx: &mut Context<'_, Self>) -> AnyElement {
+    /// A work row. `live` is false in a settled group: its reasoning shows as settled even when
+    /// the server has not closed it yet (a steer or a new message came after it).
+    fn render_work_entry(
+        &self,
+        row: &CachedRow,
+        live: bool,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         match &row.entry {
             TimelineEntry::Thinking {
                 id,
                 text,
                 streaming,
-            } => self.render_thinking_row(id, text, *streaming, cx),
+            } => self.render_thinking_row(id, text, *streaming && live, cx),
             TimelineEntry::Tool {
                 id,
                 kind,

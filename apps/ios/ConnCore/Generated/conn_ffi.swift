@@ -11876,7 +11876,8 @@ public struct FfiThreadDetailsAgent: Equatable, Hashable {
     public var environmentId: String?
     public var title: String
     /**
-     * Provider driver or instance id, for the provider mark.
+     * The provider's driver where the catalog knows it (`ThreadAgent::provider_driver`), else
+     * the role or instance id, for the provider mark.
      */
     public var provider: String
     /**
@@ -11901,7 +11902,8 @@ public struct FfiThreadDetailsAgent: Equatable, Hashable {
          * The linked environment it runs on; `None` is the thread's own.
          */environmentId: String?, title: String, 
         /**
-         * Provider driver or instance id, for the provider mark.
+         * The provider's driver where the catalog knows it (`ThreadAgent::provider_driver`), else
+         * the role or instance id, for the provider mark.
          */provider: String, 
         /**
          * `Opus 5.5 · high` (`SubagentModel::label`).

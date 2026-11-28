@@ -36,7 +36,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use gpui_kit::TestSupportExt as _;
 
 use conn_client::Connection;
-use conn_client::uploads::{FileSource, LocalFile, UploadStatus, Uploads};
+use conn_client::uploads::{FileSource, LocalFile, ReadyUpload, UploadStatus, Uploads};
 use conn_contract::rpc::projects::search_entries;
 use conn_contract::{ChatAttachment, ProjectSearchEntriesInput};
 use conn_desktop::operator::{DictationStart, DictationWait, OperatorClient};
@@ -198,6 +198,8 @@ pub(crate) enum ComposerEvent {
         /// Set when the send answers pending approvals: the draft stays in the composer until
         /// the host settles it with [`Composer::settle_held_draft`].
         held_draft: Option<HeldDraft>,
+        /// The bytes that went up for each image attachment, by attachment id.
+        uploaded: Vec<(String, Arc<[u8]>)>,
     },
     /// Answer the active pending question with `text`; blank uses its selected option.
     AnswerQuestion {
@@ -333,6 +335,10 @@ pub(crate) struct Composer {
     /// Thumbnails of staged images, by `PendingAttachment::local_id`, decoded at chip size off
     /// the UI thread. Each is freed (pixels and window texture) once no draft holds its chip.
     attachment_previews: HashMap<u64, super::attachment_thumb::SentImage>,
+    /// The bytes each finished image upload sent, by the attachment id the server gave it. A
+    /// send hands them to the chat, so the sent picture never downloads again. They go once no
+    /// draft holds the attachment.
+    uploaded_images: HashMap<String, Arc<[u8]>>,
     /// Uploads start on attach (`attachmentUploads.ts`); one queue per server. A queue stays
     /// while the chat shows another server, so a parked draft's uploads finish on their own.
     upload_queues: Vec<UploadQueue>,
@@ -493,6 +499,7 @@ impl Composer {
             applied_placeholder: COMPOSER_PLACEHOLDER,
             next_attachment_id: 1,
             attachment_previews: HashMap::new(),
+            uploaded_images: HashMap::new(),
             upload_queues: Vec::new(),
             server: None,
             editing_queued: None,
@@ -617,7 +624,7 @@ impl Composer {
                     .then(|| queue.uploaded(&id))
                     .flatten();
                 let updated = this.update(cx, |composer, cx| {
-                    composer.apply_upload(&queue, &id, status, ready.map(|r| r.attachment), cx);
+                    composer.apply_upload(&queue, &id, status, ready, cx);
                 });
                 if updated.is_err() {
                     break;
@@ -646,7 +653,7 @@ impl Composer {
         queue: &Uploads,
         id: &str,
         status: Option<UploadStatus>,
-        ready: Option<ChatAttachment>,
+        ready: Option<ReadyUpload>,
         cx: &mut Context<'_, Self>,
     ) {
         let Ok(local_id) = id.parse::<u64>() else {
@@ -667,7 +674,13 @@ impl Composer {
             }
             Some(UploadStatus::Failed { reason }) => AttachmentUploadStatus::Error(reason),
             Some(UploadStatus::Ready) => match ready {
-                Some(attachment) => AttachmentUploadStatus::Ready(attachment),
+                Some(ReadyUpload { attachment, bytes }) => {
+                    if let ChatAttachment::Image(image) = &attachment {
+                        self.uploaded_images
+                            .insert(image.id.clone(), Arc::from(bytes.as_slice()));
+                    }
+                    AttachmentUploadStatus::Ready(attachment)
+                }
                 None => return,
             },
             None => return,
@@ -1845,6 +1858,32 @@ impl Composer {
     /// Frees the thumbnails no draft shows any more: sent, cleared, or discarded with their
     /// draft. A parked draft keeps its chips. Returns how many went.
     fn prune_attachment_previews(&mut self, cx: &mut Context<'_, Self>) -> usize {
+        if !self.uploaded_images.is_empty() {
+            let held: std::collections::HashSet<&str> = self
+                .attachments
+                .iter()
+                .chain(
+                    self.drafts
+                        .parked_drafts()
+                        .flat_map(|(_, d)| d.attachments.iter()),
+                )
+                .filter_map(|a| match &a.status {
+                    AttachmentUploadStatus::Ready(ChatAttachment::Image(image)) => {
+                        Some(image.id.as_str())
+                    }
+                    _ => None,
+                })
+                .collect();
+            let gone: Vec<String> = self
+                .uploaded_images
+                .keys()
+                .filter(|id| !held.contains(id.as_str()))
+                .cloned()
+                .collect();
+            for id in gone {
+                self.uploaded_images.remove(&id);
+            }
+        }
         let live: std::collections::HashSet<u64> = self
             .attachments
             .iter()
@@ -1891,6 +1930,21 @@ impl Composer {
             server: self.server.clone(),
         });
         cx.notify();
+        local_id
+    }
+
+    /// Test helper: stages an image and uploads it, as a paste does. Returns its id.
+    #[cfg(test)]
+    pub(crate) fn upload_image_for_test(
+        &mut self,
+        name: &str,
+        mime_type: &str,
+        bytes: Vec<u8>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> u64 {
+        let local_id = self.next_attachment_id;
+        self.stage_and_upload_bytes(name.to_owned(), mime_type.to_owned(), bytes, window, cx);
         local_id
     }
 
@@ -1988,6 +2042,17 @@ impl Composer {
                 _ => None,
             })
             .collect();
+        // A held draft may come back, so the bytes stay until no draft holds them.
+        let uploaded: Vec<(String, Arc<[u8]>)> = ready_attachments
+            .iter()
+            .filter_map(|att| match att {
+                ChatAttachment::Image(image) => self
+                    .uploaded_images
+                    .get(&image.id)
+                    .map(|bytes| (image.id.clone(), bytes.clone())),
+                _ => None,
+            })
+            .collect();
 
         if self.editing_queued.is_some() {
             // `conn-server`'s `queued-run.edit` requires non-empty text.
@@ -2059,6 +2124,7 @@ impl Composer {
             attachments: ready_attachments,
             dispatch,
             held_draft,
+            uploaded,
         });
         cx.emit(ComposerEvent::TypingGuard(TypingGuardInput::Send));
         cx.notify();

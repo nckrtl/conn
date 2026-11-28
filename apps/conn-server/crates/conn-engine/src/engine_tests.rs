@@ -8874,6 +8874,208 @@ async fn a_delegated_task_runs_as_a_child_thread_and_wakes_its_parent() {
     assert!(texts.iter().any(|t| t.contains("echo: look around")));
 }
 
+/// Waits until `thread` has a pending runtime request, and returns it.
+async fn until_pending_request(engine: &SqliteEngine, thread: &str) -> Value {
+    let mut stream = engine
+        .subscribe_thread(from_json(json!({"threadId": thread})).unwrap())
+        .await
+        .unwrap();
+    let snapshot = next(&mut stream).await;
+    let pending = |r: &Value| r["status"] == "pending";
+    if let Some(request) = snapshot["projection"]["runtimeRequests"]
+        .as_array()
+        .and_then(|rows| rows.iter().find(|r| pending(r)))
+    {
+        return request.clone();
+    }
+    loop {
+        let item = next(&mut stream).await;
+        if item["event"]["type"] == "runtime-request.updated" && pending(&item["event"]["payload"])
+        {
+            return item["event"]["payload"].clone();
+        }
+    }
+}
+
+fn question_wakes(parent: &Value) -> Vec<Value> {
+    parent["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["notification"]["source"]["kind"] == "delegated_task")
+        .cloned()
+        .collect()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_delegated_task_question_wakes_its_parent_once() {
+    let db = TempDb::new("delegate-question");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    dispatch(&engine, delegate("d1", "question", Some("always"))).await;
+    let child = "thread:delegated-task:d1";
+    let request = until_pending_request(&engine, child).await;
+    let request_id = request["id"].as_str().unwrap().to_owned();
+
+    let parent = projection(&engine, "t1").await;
+    let wakes = question_wakes(&parent);
+    assert_eq!(wakes.len(), 1);
+    let text = wakes[0]["text"].as_str().unwrap();
+    assert!(text.starts_with(
+        "Delegated task node:delegated-task:d1 is blocked on a question and cannot continue"
+    ));
+    assert!(text.contains(&format!(
+        "conn_pending_request action read, threadId {child}, and requestId {request_id}."
+    )));
+    assert_eq!(
+        wakes[0]["notification"],
+        json!({
+            "source": {"kind": "delegated_task", "taskIds": ["node:delegated-task:d1"],
+                       "childThreadId": child},
+            "outcome": "updated", "summary": "Delegated task \"Helper\" has a question",
+        })
+    );
+    let wake_run = parent["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["userMessageId"] == wakes[0]["id"])
+        .unwrap();
+    assert_eq!(wake_run["status"], "queued");
+
+    // The same question written again does not wake the parent again.
+    engine
+        .inner()
+        .db(move |store| {
+            let mut tx = store.tx()?;
+            tx.append(crate::store::Draft::new(
+                child,
+                "runtime-request.updated",
+                request,
+            ))?;
+            let effects = crate::families::on_child_request(&mut tx, child, &request_id)?;
+            assert!(effects.is_empty());
+            tx.commit(None)
+        })
+        .await
+        .unwrap();
+    assert_eq!(question_wakes(&projection(&engine, "t1").await).len(), 1);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn an_answered_delegated_task_question_cancels_its_queued_wake() {
+    let db = TempDb::new("delegate-question-answered");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    dispatch(&engine, delegate("d1", "question", Some("always"))).await;
+    let child = "thread:delegated-task:d1";
+    let request = until_pending_request(&engine, child).await;
+    let wake = question_wakes(&projection(&engine, "t1").await)[0]["id"].clone();
+
+    dispatch(
+        &engine,
+        json!({"type": "runtime-request.respond", "commandId": "c3", "threadId": child,
+               "requestId": request["id"], "answers": {"q": "yes"}}),
+    )
+    .await;
+    let parent = projection(&engine, "t1").await;
+    let wake_run = parent["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["userMessageId"] == wake)
+        .unwrap();
+    assert_eq!(wake_run["status"], "cancelled");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_blocking_wait_holds_a_question_wake_until_the_parent_run_ends() {
+    let db = TempDb::new("delegate-question-wait");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    // The parent's turn asks its own question, so answering it completes the turn.
+    dispatch(&engine, message("t1", "c2", "question")).await;
+    until_pending_request(&engine, "t1").await;
+    // `settled_only`: the parent's `delegate_task` wait returns the question itself.
+    dispatch(&engine, delegate("d1", "question", None)).await;
+    let child = "thread:delegated-task:d1";
+    let request = until_pending_request(&engine, child).await;
+    assert!(question_wakes(&projection(&engine, "t1").await).is_empty());
+
+    dispatch(
+        &engine,
+        json!({"type": "runtime-request.respond", "commandId": "c3", "threadId": "t1",
+               "requestId": "question:run:t1:1", "answers": {"q": "go on"}}),
+    )
+    .await;
+    let parent = run_to_end(&engine, "t1", "run:t1:1").await;
+    assert_eq!(parent["runs"][0]["status"], "completed");
+    let wakes = question_wakes(&parent);
+    assert_eq!(
+        wakes.len(),
+        1,
+        "the still-pending question wakes the parent"
+    );
+    assert!(
+        wakes[0]["text"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("requestId {}.", request["id"].as_str().unwrap()))
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_failed_delegated_task_wakes_its_parent() {
+    let db = TempDb::new("delegate-failed");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    dispatch(&engine, delegate("d1", "fail", Some("always"))).await;
+    run_to_end(
+        &engine,
+        "thread:delegated-task:d1",
+        "run:thread:delegated-task:d1:1",
+    )
+    .await;
+    let parent = projection(&engine, "t1").await;
+    assert_eq!(parent["subagents"][0]["status"], "failed");
+    let wake = parent["messages"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(wake["createdBy"], "agent");
+    assert!(
+        wake["text"]
+            .as_str()
+            .unwrap()
+            .starts_with("Delegated task node:delegated-task:d1 (Helper) [failed]:"),
+        "{}",
+        wake["text"]
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn stopping_a_parent_stops_its_children_without_a_wake() {
     let db = TempDb::new("delegate-stop");

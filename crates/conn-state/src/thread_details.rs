@@ -14,7 +14,8 @@ use conn_contract::{
 
 use crate::{
     ShellState, SubagentModel, ThreadShell, ThreadState, TimelineEntry, TurnItemStatus,
-    format_duration, parse_iso8601_epoch_ms, sidebar_rows::parks_at_idle, subagent_settled,
+    format_duration, parse_iso8601_epoch_ms, providers::ModelCatalog, sidebar_rows::parks_at_idle,
+    subagent_settled,
 };
 
 /// The `conn://thread/<environmentId>/<threadId>` link "Copy thread link" writes. The ids go in
@@ -238,14 +239,42 @@ pub struct ThreadAgent {
     pub environment_id: Option<String>,
     /// `on <label>` for a child on another environment.
     pub environment_label: Option<String>,
+    /// The parent's `subagent` timeline entry for this child, when its timeline has one.
+    pub entry_id: Option<String>,
     pub title: String,
-    /// Provider driver or instance id, for the provider mark.
+    /// The subagent's role (a driver, or `remote` for a child on another machine), else the
+    /// child thread's instance id.
     pub provider: String,
-    /// The model it runs; each client names it from its catalog.
+    /// The model it runs: the child's own selection first, then the parent's subagent record.
+    /// Each client names it from its catalog.
     pub model: Option<SubagentModel>,
     pub state: ThreadAgentState,
     /// `13s`, `2m 4s`: how long it ran, or has run so far.
     pub elapsed: Option<String>,
+}
+
+impl ThreadAgent {
+    /// The driver behind the agent's provider mark, as far as the parent's `catalog` knows:
+    /// the driver of [`Self::provider`] as an instance id, then of the instance or slug of
+    /// [`Self::model`]. Else [`Self::provider`] as it is: a role names a driver itself, and
+    /// `remote` or an unknown instance stays unbranded.
+    #[must_use]
+    pub fn provider_driver<'a>(&'a self, catalog: &'a ModelCatalog) -> &'a str {
+        let model = self.model.as_ref();
+        let instance = model.and_then(|model| model.instance_id.as_deref());
+        [
+            catalog.driver_for_instance(&self.provider),
+            instance.and_then(|instance| catalog.driver_for_instance(instance)),
+            model
+                .and_then(|model| model.model.as_deref())
+                .and_then(|slug| catalog.find_model(instance, slug))
+                .map(|found| found.driver.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|driver| !driver.is_empty())
+        .unwrap_or(&self.provider)
+    }
 }
 
 /// The thread's parent (or fork source) and its children, live ones first.
@@ -382,6 +411,7 @@ fn shell_agent(child: &ThreadShell, timeline: Option<&ThreadState>, now_secs: i6
         thread_id: child.id.clone(),
         environment_id: None,
         environment_label: None,
+        entry_id: entry.map(|(id, ..)| id.to_owned()),
         title: child.title.clone(),
         provider: child.provider_instance_id.clone(),
         model,
@@ -453,6 +483,7 @@ fn timeline_agents(
             thread_id,
             environment_id,
             environment_label,
+            entry_id: Some(id.clone()),
             title,
             provider: role.clone(),
             model: entry_model(timeline, id),
@@ -638,6 +669,53 @@ mod tests {
             },
             "stack": null,
         })
+    }
+
+    fn agent(provider: &str, model: Option<(&str, &str)>) -> ThreadAgent {
+        ThreadAgent {
+            key: "child".to_owned(),
+            thread_id: "child".to_owned(),
+            environment_id: None,
+            environment_label: None,
+            entry_id: None,
+            title: "Child".to_owned(),
+            provider: provider.to_owned(),
+            model: model.map(|(instance, slug)| SubagentModel {
+                model: Some(slug.to_owned()),
+                instance_id: Some(instance.to_owned()),
+                options: std::collections::HashMap::new(),
+            }),
+            state: ThreadAgentState::Running,
+            elapsed: None,
+        }
+    }
+
+    #[test]
+    fn the_catalog_names_a_custom_instance_or_a_remote_childs_driver() {
+        let provider = |instance: &str, driver: &str, slug: &str| {
+            serde_json::from_value(json!({
+                "instanceId": instance, "driver": driver, "enabled": true, "installed": true,
+                "status": "ready", "auth": {"status": "authenticated"},
+                "checkedAt": "2026-11-28T00:00:00Z",
+                "models": [{ "slug": slug, "name": slug, "isCustom": false }],
+            }))
+            .expect("provider decodes")
+        };
+        let catalog = ModelCatalog::from_providers(&[
+            Some(provider("work", "codex", "sol-1")),
+            Some(provider("box", "claudeAgent", "frontier-1")),
+        ]);
+        // A shell child on a custom instance.
+        assert_eq!(agent("work", None).provider_driver(&catalog), "codex");
+        // A child on another machine: the model's instance, else its slug.
+        let remote = agent("remote", Some(("box", "frontier-1")));
+        assert_eq!(remote.provider_driver(&catalog), "claudeAgent");
+        let remote = agent("remote", Some(("elsewhere", "sol-1")));
+        assert_eq!(remote.provider_driver(&catalog), "codex");
+        // Nothing the catalog knows: the role or instance as it is.
+        assert_eq!(agent("grok", None).provider_driver(&catalog), "grok");
+        let unknown = agent("remote", Some(("mystery", "mystery-1")));
+        assert_eq!(unknown.provider_driver(&catalog), "remote");
     }
 
     #[test]

@@ -2037,8 +2037,9 @@ impl ChatView {
 
         // Lab `SubagentCard`: `<model> · <effort>` (and the state while no time shows), the run
         // time at the right.
+        let child = self.subagent_children.get(id);
         let model = subagent_card_model(
-            self.subagent_child_models.get(id),
+            child.and_then(SubagentChild::selected_model),
             self.subagent_models.get(id),
         );
         let model_text =
@@ -2050,8 +2051,12 @@ impl ChatView {
         meta_parts.extend(model_text);
         // A task on another machine has the driver `remote` here, a label and not a provider, so the
         // mark comes from the instance and model it runs.
-        let (provider_key, provider_label) =
-            subagent_provider(role, model, self.server_config.catalog());
+        let (provider_key, provider_label) = subagent_provider(
+            role,
+            child.and_then(|child| child.driver.as_deref()),
+            model,
+            self.server_config.catalog(),
+        );
         let provider_mark = div()
             .id(SharedString::from(format!("subagent-provider-{id}")))
             .a11y(
@@ -2774,10 +2779,11 @@ pub(super) fn outline_button_surface(
 /// (`Agent` for a provider with no mark of its own).
 ///
 /// The subagent's driver names the provider, except for a task on another machine: its driver is
-/// `remote`. Then the provider comes from the model catalog, the instance id, or the model slug,
-/// in that order.
-fn subagent_provider(
+/// `remote`. Then the provider comes from `child_driver` (the driver the child's own environment
+/// lists for its instance), the model catalog, the instance id, or the model slug, in that order.
+pub(crate) fn subagent_provider(
     role: &str,
+    child_driver: Option<&str>,
     model: Option<&conn_state::SubagentModel>,
     catalog: &conn_state::providers::ModelCatalog,
 ) -> (String, &'static str) {
@@ -2787,8 +2793,13 @@ fn subagent_provider(
             .find_model(model.instance_id.as_deref(), slug)
             .map(|found| found.driver.as_str())
     });
+    let instance_driver = model
+        .and_then(|model| model.instance_id.as_deref())
+        .and_then(|instance| catalog.driver_for_instance(instance));
     let candidates = [
         Some(role),
+        child_driver,
+        instance_driver,
         catalog_driver,
         model.and_then(|model| model.instance_id.as_deref()),
         model.and_then(|model| model.model.as_deref()),
@@ -2803,6 +2814,23 @@ fn subagent_provider(
         .unwrap_or_else(|| (role.to_owned(), "Agent"))
 }
 
+/// A subagent's child thread as its own environment knows it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SubagentChild {
+    /// The child's own model selection (`model` is `None` when it has none).
+    pub(crate) model: conn_state::SubagentModel,
+    /// The driver of the child's provider instance, from the catalog of the child's environment.
+    pub(crate) driver: Option<String>,
+}
+
+impl SubagentChild {
+    /// The child's own model, when its selection names one.
+    #[must_use]
+    pub(crate) fn selected_model(&self) -> Option<&conn_state::SubagentModel> {
+        self.model.model.is_some().then_some(&self.model)
+    }
+}
+
 /// The model a subagent card shows: the child thread's own selection (`child`, from the shell)
 /// when known, else the parent's subagent record (the delegate call's `target`). The record can
 /// lack the options the child runs with, so the child wins.
@@ -2813,13 +2841,20 @@ pub(crate) fn subagent_card_model<'a>(
     child.filter(|model| model.model.is_some()).or(record)
 }
 
-/// The child thread's own model of each subagent entry of `thread`, by entry id. `child_shell`
-/// finds a child thread in the shell: its id and, for a child on another linked environment, that
-/// environment (`None`: the parent's own environment). Children the shell lacks are left out.
-pub(crate) fn subagent_child_models<'a>(
+/// The child thread of each subagent entry of `thread`, by entry id. `child_shell` finds a child
+/// thread in the shell, with the catalog of its environment when that one is known: its id and,
+/// for a child on another linked environment, that environment (`None`: the parent's own
+/// environment). Children the shell lacks are left out.
+pub(crate) fn subagent_children<'a>(
     thread: &conn_state::ThreadState,
-    child_shell: impl Fn(&str, Option<&str>) -> Option<&'a conn_state::ThreadShell>,
-) -> HashMap<String, conn_state::SubagentModel> {
+    child_shell: impl Fn(
+        &str,
+        Option<&str>,
+    ) -> Option<(
+        &'a conn_state::ThreadShell,
+        Option<&'a conn_state::providers::ModelCatalog>,
+    )>,
+) -> HashMap<String, SubagentChild> {
     thread
         .entries
         .iter()
@@ -2833,20 +2868,43 @@ pub(crate) fn subagent_child_models<'a>(
             else {
                 return None;
             };
-            let child = match (remote_child, child_thread_id) {
+            let (child, catalog) = match (remote_child, child_thread_id) {
                 (Some(remote), _) => {
                     child_shell(&remote.thread_id, Some(remote.environment_id.as_str()))
                 }
                 (None, Some(child)) => child_shell(child, None),
                 (None, None) => None,
             }?;
-            let model = conn_state::SubagentModel::from_selection(
-                &child.provider_instance_id,
-                &child.model_selection,
-            );
-            model.model.is_some().then(|| (id.clone(), model))
+            let child = subagent_child(child, catalog);
+            (child.model.model.is_some() || child.driver.is_some()).then(|| (id.clone(), child))
         })
         .collect()
+}
+
+/// The model and driver of `child`, a thread on the environment whose catalog is `catalog`
+/// (`None`: not known yet, so no driver).
+fn subagent_child(
+    child: &conn_state::ThreadShell,
+    catalog: Option<&conn_state::providers::ModelCatalog>,
+) -> SubagentChild {
+    let model = conn_state::SubagentModel::from_selection(
+        &child.provider_instance_id,
+        &child.model_selection,
+    );
+    let driver = catalog
+        .and_then(|catalog| {
+            catalog
+                .driver_for_instance(&child.provider_instance_id)
+                .or_else(|| {
+                    let slug = model.model.as_deref()?;
+                    catalog
+                        .find_model(Some(&child.provider_instance_id), slug)
+                        .map(|found| found.driver.as_str())
+                })
+        })
+        .filter(|driver| !driver.is_empty())
+        .map(str::to_owned);
+    SubagentChild { model, driver }
 }
 
 /// Option ids that carry a provider's effort: Codex and Grok `reasoningEffort`, Claude `effort`,
@@ -2902,7 +2960,8 @@ pub(crate) fn subagent_model_text(
 #[cfg(test)]
 mod subagent_model_tests {
     use super::{
-        subagent_card_model, subagent_child_models, subagent_model_text, subagent_provider,
+        SubagentChild, subagent_card_model, subagent_children, subagent_model_text,
+        subagent_provider,
     };
     use conn_state::providers::ModelCatalog;
     use conn_state::{SubagentModel, ThreadShell, ThreadState, TimelineEntry, TurnItemStatus};
@@ -3076,12 +3135,19 @@ mod subagent_model_tests {
             ),
             subagent_entry("card-unknown", Some("child-missing"), None),
         ];
-        let models = subagent_child_models(&thread, |id, environment| match (id, environment) {
-            ("child-local", None) => Some(&local),
-            ("child-remote", Some("mini")) => Some(&remote),
+        let catalog = catalog();
+        let children = subagent_children(&thread, |id, environment| match (id, environment) {
+            ("child-local", None) => Some((&local, None)),
+            ("child-remote", Some("mini")) => Some((&remote, Some(&catalog))),
             _ => None,
         });
-        let catalog = catalog();
+        let models: HashMap<String, SubagentModel> = children
+            .iter()
+            .map(|(id, child)| (id.clone(), child.model.clone()))
+            .collect();
+        // The remote child's environment lists its instance; the local one's is not known.
+        assert_eq!(children["card-remote"].driver.as_deref(), Some("codex"));
+        assert_eq!(children["card-local"].driver, None);
         assert_eq!(
             effort_of(subagent_model_text(&catalog, &models["card-local"])),
             "high"
@@ -3130,11 +3196,14 @@ mod subagent_model_tests {
     #[test]
     fn the_driver_names_the_provider_mark() {
         let catalog = ModelCatalog::default();
-        assert_eq!(subagent_provider("claudeAgent", None, &catalog).1, "Claude");
-        assert_eq!(subagent_provider("codex", None, &catalog).1, "OpenAI");
-        assert_eq!(subagent_provider("grok", None, &catalog).1, "Grok");
         assert_eq!(
-            subagent_provider("antigravity", None, &catalog).1,
+            subagent_provider("claudeAgent", None, None, &catalog).1,
+            "Claude"
+        );
+        assert_eq!(subagent_provider("codex", None, None, &catalog).1, "OpenAI");
+        assert_eq!(subagent_provider("grok", None, None, &catalog).1, "Grok");
+        assert_eq!(
+            subagent_provider("antigravity", None, None, &catalog).1,
             "Antigravity"
         );
     }
@@ -3144,14 +3213,38 @@ mod subagent_model_tests {
         let catalog = ModelCatalog::default();
         let claude = model("claudeAgent", "claude-opus-5-5");
         assert_eq!(
-            subagent_provider("remote", Some(&claude), &catalog),
+            subagent_provider("remote", None, Some(&claude), &catalog),
             ("claudeAgent".to_owned(), "Claude")
         );
         // A custom instance id says nothing; the model slug does.
         let codex = model("work-box", "gpt-5.5");
         assert_eq!(
-            subagent_provider("remote", Some(&codex), &catalog).1,
+            subagent_provider("remote", None, Some(&codex), &catalog).1,
             "OpenAI"
+        );
+    }
+
+    #[test]
+    fn the_childs_environment_driver_names_an_unbranded_remote_task() {
+        let catalog = ModelCatalog::default();
+        let custom = model("box-a", "frontier-1");
+        assert_eq!(
+            subagent_provider("remote", Some("codex"), Some(&custom), &catalog).1,
+            "OpenAI"
+        );
+        let child = SubagentChild {
+            model: custom,
+            driver: Some("claudeAgent".to_owned()),
+        };
+        assert_eq!(
+            subagent_provider(
+                "remote",
+                child.driver.as_deref(),
+                child.selected_model(),
+                &catalog
+            )
+            .1,
+            "Claude"
         );
     }
 
@@ -3160,11 +3253,11 @@ mod subagent_model_tests {
         let catalog = ModelCatalog::default();
         let unknown = model("mystery", "mystery-1");
         assert_eq!(
-            subagent_provider("remote", Some(&unknown), &catalog),
+            subagent_provider("remote", None, Some(&unknown), &catalog),
             ("remote".to_owned(), "Agent")
         );
         assert_eq!(
-            subagent_provider("remote", None, &catalog),
+            subagent_provider("remote", None, None, &catalog),
             ("remote".to_owned(), "Agent")
         );
     }

@@ -783,6 +783,24 @@ impl RowCache {
             entry_timings.get(id).and_then(|t| t.run_id.as_deref())
         };
 
+        // Only the newest work group can be live, and only with no user message after it (T3's
+        // live activity row follows the active turn's last user message). A steer or a new
+        // message settles an earlier group even while the server still streams its reasoning,
+        // so the thread never shows two "Thinking" rows.
+        let last_user = base_items
+            .iter()
+            .rposition(|item| matches!(item, VirtualItem::User { .. }));
+        let last_group = base_items
+            .iter()
+            .rposition(|item| matches!(item, VirtualItem::WorkGroup { .. }));
+        for (i, item) in base_items.iter_mut().enumerate() {
+            if let VirtualItem::WorkGroup { has_active, .. } = item
+                && (Some(i) != last_group || last_user.is_some_and(|user| user > i))
+            {
+                *has_active = false;
+            }
+        }
+
         // When the turn is actively working, the trailing WorkGroup belongs to the live
         // turn even between consecutive tool calls (preventing a settled "Worked" flash).
         if working && let Some(VirtualItem::WorkGroup { has_active, .. }) = base_items.last_mut() {

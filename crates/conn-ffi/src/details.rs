@@ -40,7 +40,8 @@ pub struct FfiThreadDetailsAgent {
     /// The linked environment it runs on; `None` is the thread's own.
     pub environment_id: Option<String>,
     pub title: String,
-    /// Provider driver or instance id, for the provider mark.
+    /// The provider's driver where the catalog knows it (`ThreadAgent::provider_driver`), else
+    /// the role or instance id, for the provider mark.
     pub provider: String,
     /// `Opus 5.5 · high` (`SubagentModel::label`).
     pub model: Option<String>,
@@ -53,6 +54,7 @@ pub struct FfiThreadDetailsAgent {
 
 impl FfiThreadDetailsAgent {
     fn new(agent: ThreadAgent, catalog: &ModelCatalog) -> Self {
+        let provider = agent.provider_driver(catalog).to_owned();
         let model = agent
             .model
             .as_ref()
@@ -77,7 +79,7 @@ impl FfiThreadDetailsAgent {
             thread_id: Some(agent.thread_id).filter(|id| !id.is_empty()),
             environment_id: agent.environment_id,
             title: agent.title,
-            provider: agent.provider,
+            provider,
             model,
             state: agent.state.into(),
             live,

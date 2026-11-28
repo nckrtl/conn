@@ -1090,13 +1090,21 @@ impl ShellState {
     }
 
     /// Whether `named`, an id from a task's `delegatedFrom`, is merged environment `env`: its
-    /// merge id or an alias of it.
+    /// merge id or an alias of it. An id that names no merged environment (a cache saved before
+    /// configured ids, its server offline) matches by thread id alone, as unmerged shells do.
     fn names_environment(&self, env: &str, named: &str) -> bool {
         env == named
             || self
                 .environment_aliases
                 .get(named)
-                .is_some_and(|id| id == env)
+                .map_or(!self.knows_environment(named), |id| id == env)
+    }
+
+    /// Whether `named` is a merged environment's id or an alias of one.
+    fn knows_environment(&self, named: &str) -> bool {
+        self.environment_id.as_deref() == Some(named)
+            || self.foreign.iter().any(|f| f.environment_id == named)
+            || self.environment_aliases.contains_key(named)
     }
 
     /// Sets the other ids the merged environments go by (see `environment_aliases`).

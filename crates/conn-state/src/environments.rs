@@ -1841,6 +1841,40 @@ mod tests {
     }
 
     #[test]
+    fn an_upgraded_cache_rolls_a_task_up_to_its_offline_parent_by_id() {
+        // A cache saved before configured ids, its machine offline: nothing knows
+        // `agent-config`, so the task matches its parent by thread id, as before.
+        let mut before = LinkedShells::default();
+        before.ensure("agent-target", "agent");
+        before.restore("agent-target", parent_shell());
+        let mut json: Value = serde_json::from_slice(
+            &before
+                .snapshot("agent-target")
+                .expect("a shell to save")
+                .to_json()
+                .expect("serializes"),
+        )
+        .expect("json");
+        json.as_object_mut()
+            .expect("object")
+            .remove("configuredEnvironmentId");
+        let mut linked = LinkedShells::default();
+        linked.restore_snapshot(
+            LinkedShellSnapshot::from_json(&serde_json::to_vec(&json).expect("json"))
+                .expect("an old cache reads"),
+        );
+        linked.ensure("nick-target", "nick");
+        linked.apply("nick-target", delegated_task("agent-config"));
+        let merged = linked.merged("primary", "primary", &ShellState::default());
+        assert_eq!(
+            merged.shell.subagent_request("parent"),
+            Some(crate::shell::PendingSubagentRequest::Approval)
+        );
+        assert_eq!(merged.shell.listed_ancestor("task"), Some("parent"));
+        assert_eq!(merged.shell.child_approval_threads("parent").len(), 1);
+    }
+
+    #[test]
     fn a_cache_without_a_configured_id_still_reads() {
         let mut linked = LinkedShells::default();
         linked.ensure("agent-target", "agent");

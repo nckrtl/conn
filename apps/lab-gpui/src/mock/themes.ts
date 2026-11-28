@@ -4,7 +4,7 @@ import {
   BUILT_IN_THEMES,
   T3_CODE_LIGHT_THEME_COLORS,
   T3_CODE_DARK_THEME_COLORS,
-} from "../../../../packages/shared/src/themePalettes";
+} from "../../../lab-shared/themePalettes";
 export const themes = [
   { id: "dark-mono", ...darkMono },
   { id: "dark-ocean", ...darkOcean },

@@ -147,7 +147,7 @@ For mobile verification, a missing or outdated native client is an install step,
 ## Build in nick-vm
 
 Build, run and test both iOS apps in the macOS VM `nick-vm`, never on Nick's Mac: the native
-SwiftUI app (`apps/ios`, steps in [docs/development.md](docs/development.md#iphone-app-native))
+SwiftUI app (`apps/ios`, steps in [apps/ios/README.md](apps/ios/README.md))
 and the legacy Expo app (`apps/mobile`).
 Checkouts live in `~/apps` there. Other agents build in the VM at the same time:
 

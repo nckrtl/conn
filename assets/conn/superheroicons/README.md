@@ -11,6 +11,7 @@ glyphs there, then copy `16/solid/`, `24/solid/` and `manifest.json` here again.
   each SF Symbol name the mobile app uses to a concept; `chips` maps the mobile composer chip
   images to concepts.
 
-After changing these files run `node scripts/generate-conn-icons.ts` (web),
-`node scripts/build-conn-symbols.ts` and `node apps/mobile/scripts/sync-context-chip-icons.mjs`
-(mobile), and commit their output. License: `LICENSE` (MIT; Heroicons MIT, Lucide ISC).
+After changing these files run `node scripts/generate-conn-icons.ts` (web) and
+`node apps/mobile/scripts/sync-context-chip-icons.mjs` (mobile), and commit their output. The iPhone
+app's symbols (`apps/ios/Conn/ConnSymbols.xcassets`, `ConnSymbolNames.swift`) are hand-owned: add a
+glyph there as a `.symbolset` and list its SF name. License: `LICENSE` (MIT; Heroicons MIT, Lucide ISC).

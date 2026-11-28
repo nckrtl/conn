@@ -8,7 +8,7 @@ import {
   type CSSProperties,
 } from "react";
 import { createRoot } from "react-dom/client";
-import { observeResize } from "../../../web/src/lib/observeResize";
+import { observeResize } from "../../../lab-shared/observeResize";
 import { Settings } from "./Settings";
 import { currentTheme } from "./themes";
 import {

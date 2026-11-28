@@ -463,7 +463,7 @@ function ProjectFilter(props: {
 }
 
 /**
- * Conn: the Orbit panel's Instances page (docs/conn-features.md, "Orbit"): every Instance this device can
+ * Conn: the Orbit panel's Instances page (apps/conn-gpui/docs/reference/conn-features.md, "Orbit"): every Instance this device can
  * reach, by Project, with its local threads.
  */
 export function OrbitInstancesPage() {

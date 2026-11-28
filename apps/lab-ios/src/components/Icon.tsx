@@ -2,7 +2,7 @@ import "./StatusRing.css";
 import type { CSSProperties } from "react";
 import { BRANDS, ICONS, type IconName } from "../icons.generated";
 
-/** A superheroicons 24px solid glyph (apps/mobile's icon set; add names in generate-icons.mts). */
+/** A superheroicons 24px solid glyph (add its path to icons.generated.ts). */
 export function Icon(props: {
   readonly name: IconName;
   readonly size?: number;

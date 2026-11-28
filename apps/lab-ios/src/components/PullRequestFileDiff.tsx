@@ -3,9 +3,9 @@ import { useMemo } from "react";
 import {
   DIFF_SURFACE_THEME_UNSAFE_CSS,
   getRenderablePatch,
+  PREFERRED_HIGHLIGHTER,
   resolveDiffThemeName,
-} from "../../../web/src/lib/diffRendering";
-import { PREFERRED_HIGHLIGHTER } from "../../../web/src/lib/syntaxHighlighting";
+} from "../../../lab-shared/diffRendering";
 import type { PrFileChange } from "../data/pullRequests";
 
 export default function PullRequestFileDiff({

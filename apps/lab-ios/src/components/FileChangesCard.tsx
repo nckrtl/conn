@@ -3,7 +3,7 @@ import {
   buildTurnDiffTree,
   type TurnDiffTreeNode,
   type TurnDiffStat,
-} from "../../../web/src/lib/turnDiffTree";
+} from "../../../lab-shared/turnDiffTree";
 import { Icon } from "./Icon";
 import type { LabEntry } from "../data/fixtures";
 import "./CardHeader.css";

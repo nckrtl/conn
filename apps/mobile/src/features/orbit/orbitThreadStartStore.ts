@@ -12,7 +12,7 @@ import {
 import { writeFileAtomically } from "../../lib/atomic-file";
 
 /**
- * Conn: the threads started in an Orbit Project on this phone (docs/conn-features.md, "Orbit"), kept in a file
+ * Conn: the threads started in an Orbit Project on this phone (apps/conn-gpui/docs/reference/conn-features.md, "Orbit"), kept in a file
  * until their first message is sent and the create's completion ended, so an app restart resumes
  * them. Every change is written in
  * order; the shared state machine saves after each step.

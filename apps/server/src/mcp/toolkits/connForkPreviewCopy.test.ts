@@ -6,7 +6,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 // Conn fork guard: agents on any server drive the user's desktop tabs through the
 // desktop tab relay. Upstream copy that says otherwise makes agents refuse. See
-// docs/conn-features.md, "Desktop tab automation".
+// apps/conn-gpui/docs/reference/conn-features.md, "Desktop tab automation".
 const read = (path: string) =>
   NodeFS.readFileSync(NodePath.join(import.meta.dirname, path), "utf8");
 const previewCopy = [read("preview/tools.ts"), read("previewControls/tools.ts")];

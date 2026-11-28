@@ -30,8 +30,7 @@
       "entry": [
         // These fixture scripts are injected into a browser page by path.
         "fixtures/*/*.js",
-        // Conn fork tools run by hand (symbols, vendored tarballs, local signing).
-        "build-conn-symbols.ts",
+        // Conn fork tools run by hand (icons, vendored tarballs, local signing).
         "generate-conn-icons.ts",
         "export-conn-android-icons.ts",
         "build-conn-vendored-tarball.ts",
@@ -154,15 +153,6 @@
       // UI component modules are copied and adapted as cohesive sets. Keep their
       // named subcomponents even before they have callers; the file audit still
       // reports an entire component module when nothing imports it.
-    },
-    "apps/lab-gpui": {
-      "entry": ["src/**/*.{ts,tsx,mjs}", "scripts/*.ts", "vite.reference.config.ts"],
-      // The web-reference Vite config resolves pre-bundled dependencies through @t3tools/web.
-      "ignoreDependencies": ["@t3tools/web"],
-    },
-    "apps/lab-ios": {
-      // index.html loads src/main.tsx; the generators run by hand.
-      "entry": ["src/main.tsx", "scripts/*.mts"],
     },
     "apps/marketing": {
       // `astro check` runs from the typecheck task in vite.config.ts, which knip does not read.

@@ -1,8 +1,12 @@
 # Conn Annotation Overlay (`inject.js`)
 
-- **Source:** `packages/annotation-overlay/dist/inject.js`, built with `vp build` in `packages/annotation-overlay`
-- **Source commit:** `52495101c64fac136e5f9afcfba0969b191fa10a`
-- **Package:** `@t3tools/annotation-overlay` (`vite.config.ts` self-contained IIFE)
+`inject.js` is frozen and hand-owned. Edit it here; nothing regenerates it.
+
+- **Last built from:** `packages/annotation-overlay/dist/inject.js` (`vp build`, a self-contained IIFE) at
+  `93dda184da382af9cd06062da11bbdcbe9e4ec5e` (#169). Its PR branch built it at `52495101c64f`.
+- **Source package:** `@t3tools/annotation-overlay`. It leaves the repo with the TypeScript stack and stays
+  readable at the `t3-final` tag (`git show t3-final:packages/annotation-overlay/src/inject.ts`).
+- **Larger changes:** rebuild in a `t3-final` worktree, then copy `dist/inject.js` here and record the commit.
 
 ## Bridge contract expected by `inject.js`
 

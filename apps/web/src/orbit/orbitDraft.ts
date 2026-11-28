@@ -16,7 +16,7 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 /**
- * Conn: where an Orbit draft starts (docs/conn-features.md, "Orbit"). An Orbit Project is no T3 project, so the
+ * Conn: where an Orbit draft starts (apps/conn-gpui/docs/reference/conn-features.md, "Orbit"). An Orbit Project is no T3 project, so the
  * draft is anchored on a real environment for its model list. Not the worktree env mode "orbit".
  */
 export const OrbitDraftExistingInstance = Schema.Struct({

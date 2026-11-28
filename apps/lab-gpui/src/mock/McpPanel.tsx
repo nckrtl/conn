@@ -3,11 +3,11 @@ import {
   argumentsFromFields,
   fieldsFromSchema,
   type McpField,
-} from "../../../web/src/mcp/mcpServers";
+} from "../../../lab-shared/mcpFields";
 import { copyFeedText } from "../../../lab-ios/src/components/copyFeedText";
 import HighlightedCode from "../../../lab-ios/src/components/HighlightedCode";
 import { MarkdownText } from "../../../lab-ios/src/components/Markdown";
-import { formatMs } from "../../../web/src/laravelToolbar/model";
+import { formatMs } from "../../../lab-shared/formatMs";
 import { Icon, Tool } from "./Icon";
 import { LabProjectContext } from "./LabProjectContext";
 import {

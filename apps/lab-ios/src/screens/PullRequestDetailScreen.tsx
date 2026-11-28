@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState } from "react";
-import { PierreEntryIcon } from "~/components/chat/PierreEntryIcon";
+import { PierreEntryIcon } from "../../../lab-shared/PierreEntryIcon";
 import { DetailField, RecordDetail } from "../components/RecordDetail";
 import { FilterMenu } from "../components/FilteredListHeader";
 import { GlassButton, GlassHeader } from "../components/GlassHeader";

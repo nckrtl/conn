@@ -1,5 +1,7 @@
 packages:
   - apps/*
+  # The design labs are a standalone npm package (apps/package.json).
+  - "!apps/lab-*"
   - evals
   - infra/*
   - oxlint-plugin-t3code

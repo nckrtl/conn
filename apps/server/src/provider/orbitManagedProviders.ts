@@ -3,7 +3,7 @@ import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderL
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
-// Conn fork: Orbit installs and updates provider CLIs (Nick, 2026-11-20). See docs/conn-features.md, "Provider CLIs".
+// Conn fork: Orbit installs and updates provider CLIs (Nick, 2026-11-20). See apps/conn-gpui/docs/reference/conn-features.md, "Provider CLIs".
 
 /** No driver looks up the newest release of a CLI; Orbit decides when to update. */
 export const layerNoLatestVersions = Layer.succeed(

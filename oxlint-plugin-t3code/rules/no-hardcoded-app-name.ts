@@ -1,10 +1,10 @@
 import { defineRule, type ESTree } from "@oxlint/plugins";
 
-// Conn: forks rename the app, so copy says `{appName}` and passes `appName()`. See docs/conn-features.md, "i18n and the app name".
+// Conn: forks rename the app, so copy says `{appName}` and passes `appName()`. See apps/conn-gpui/docs/reference/conn-features.md, "i18n and the app name".
 const APP_NAME = "T3 Code";
 
 const MESSAGE =
-  'Hard-coded "T3 Code" in copy. Write `{appName}` and pass `{ appName: appName() }` (desktop main: `appBrand.name`). See docs/conn-features.md, "i18n and the app name".';
+  'Hard-coded "T3 Code" in copy. Write `{appName}` and pass `{ appName: appName() }` (desktop main: `appBrand.name`). See apps/conn-gpui/docs/reference/conn-features.md, "i18n and the app name".';
 
 const isComparison = (node: ESTree.Node) => {
   const parent = (node as { parent?: ESTree.Node }).parent;

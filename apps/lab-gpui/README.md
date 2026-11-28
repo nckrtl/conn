@@ -1,6 +1,9 @@
 # Conn desktop design lab
 
-Run `vp run lab:gpui` from the repository root and open http://127.0.0.1:5800/.
+Run `npm ci` once in `apps/`, then `npm run lab:gpui` there, and open http://127.0.0.1:5800/.
+`npm run lab:ios` serves the iPhone lab on port 5801. Both read nothing from the TypeScript
+apps: what they borrowed from `apps/web`, `apps/marketing` and `packages/` is vendored in
+`apps/lab-shared`.
 The mock in `src/mock` renders the GPUI shell with local thread and task fixtures.
 Its dark palette and 16px icons come from the native client. Composer messages
 stay in the page and never start an agent run.
@@ -38,6 +41,3 @@ Rust code; each file names its GPUI source.
 - [New General thread](http://127.0.0.1:5800/?thread=agent-smoke&stage=general): the
   "What should we work on?" draft.
 - The Database connection menu has a search field: type to filter, arrows and Enter to pick.
-
-To compare a screen against the full Conn web app, run
-`PORT=5802 vp run --filter @t3tools/lab-gpui dev:web-reference` from the root.

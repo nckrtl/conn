@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "conn-contract"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -182,7 +182,7 @@ dependencies = [
 
 [[package]]
 name = "conn-devices"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "conn-support",
  "http-body-util",
@@ -199,7 +199,7 @@ dependencies = [
 
 [[package]]
 name = "conn-engine"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "conn-contract",
  "conn-provider",
@@ -224,7 +224,7 @@ dependencies = [
 
 [[package]]
 name = "conn-features"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "conn-contract",
  "conn-engine",
@@ -244,7 +244,7 @@ dependencies = [
 
 [[package]]
 name = "conn-files"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "conn-contract",
  "conn-support",
@@ -268,7 +268,7 @@ dependencies = [
 
 [[package]]
 name = "conn-gateway-api"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "prettyplease",
  "schemars",
@@ -281,7 +281,7 @@ dependencies = [
 
 [[package]]
 name = "conn-mcp"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "conn-contract",
  "conn-devices",
@@ -309,7 +309,7 @@ dependencies = [
 
 [[package]]
 name = "conn-preview"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "command-fds",
  "conn-files",
@@ -333,7 +333,7 @@ dependencies = [
 
 [[package]]
 name = "conn-provider"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "conn-contract",
  "serde",
@@ -344,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "conn-provider-acp"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "conn-contract",
  "conn-provider",
@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "conn-provider-claude"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "conn-contract",
  "conn-mcp",
@@ -378,7 +378,7 @@ dependencies = [
 
 [[package]]
 name = "conn-provider-codex"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "conn-contract",
  "conn-provider",
@@ -396,7 +396,7 @@ dependencies = [
 
 [[package]]
 name = "conn-provider-support"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "conn-provider",
  "conn-support",
@@ -408,7 +408,7 @@ dependencies = [
 
 [[package]]
 name = "conn-server"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "axum",
  "conn-contract",
@@ -452,7 +452,7 @@ dependencies = [
 
 [[package]]
 name = "conn-source-control"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "conn-contract",
  "conn-engine",
@@ -475,7 +475,7 @@ dependencies = [
 
 [[package]]
 name = "conn-source-control-core"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "conn-support",
  "serde_json",
@@ -484,7 +484,7 @@ dependencies = [
 
 [[package]]
 name = "conn-support"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "getrandom 0.3.4",
  "regex-automata",
@@ -498,7 +498,7 @@ dependencies = [
 
 [[package]]
 name = "conn-terminal"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "conn-contract",
  "conn-support",
@@ -510,7 +510,7 @@ dependencies = [
 
 [[package]]
 name = "conn-vcs"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "conn-contract",
  "conn-support",
@@ -524,7 +524,7 @@ dependencies = [
 
 [[package]]
 name = "conn-wire"
-version = "0.5.6"
+version = "0.5.7"
 dependencies = [
  "serde",
  "serde_json",

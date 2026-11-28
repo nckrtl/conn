@@ -35,6 +35,7 @@ use crate::sidebar::tree::SidebarTree;
 use crate::theme::{apply_kit_theme, hsla};
 use gpui_kit::prelude::FluentBuilder as _;
 
+mod agent_sender;
 mod child_approvals;
 pub(crate) mod details_schedules;
 pub(crate) mod details_tasks;
@@ -651,6 +652,9 @@ impl ConnApp {
                 }
                 crate::chat::ChatEvent::ForkFromRun { run_id } => {
                     app.fork_selected_from_run(run_id, cx);
+                }
+                crate::chat::ChatEvent::OpenAgentSender(sender) => {
+                    app.open_agent_sender(sender, cx);
                 }
                 crate::chat::ChatEvent::OpenThreadLink(link) => {
                     app.open_thread_link(link, cx);
@@ -1666,16 +1670,7 @@ impl ConnApp {
             chat.set_thread(
                 thread,
                 title,
-                |sender_id| {
-                    if self.linked_environment_of_thread(sender_id)
-                        != selected.and_then(|id| self.linked_environment_of_thread(id))
-                    {
-                        return None;
-                    }
-                    self.shell
-                        .find_thread(sender_id)
-                        .map(|shell| shell.title.as_str())
-                },
+                |sender| self.agent_sender_view(sender, selected),
                 cx,
             );
             chat.set_linked_pull_requests(linked_pull_requests, cx);

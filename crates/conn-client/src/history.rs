@@ -139,6 +139,18 @@ impl Connection {
             .await
     }
 
+    /// Whether the server still has `thread_id` and has not deleted it, from its outline. Asked
+    /// before opening a thread the shell does not list, such as an idle child.
+    ///
+    /// # Errors
+    /// Returns the transport, authentication or decoding error; a missing thread is `Ok(false)`.
+    pub async fn thread_is_live(&self, thread_id: &str) -> Result<bool, ClientError> {
+        let outline: Option<conn_contract::ThreadOutline> = self
+            .get_history_json_if_found(thread_url(&self.http_base_url, thread_id, "outline")?)
+            .await?;
+        Ok(outline.is_some())
+    }
+
     /// Fetches a bounded page containing a visible prompt and its neighbors.
     ///
     /// # Errors
@@ -157,6 +169,19 @@ impl Connection {
         &self,
         url: Url,
     ) -> Result<T, ClientError> {
+        self.get_history_json_if_found(url).await?.ok_or_else(|| {
+            ClientError::Connection(format!(
+                "thread history request failed ({})",
+                StatusCode::NOT_FOUND
+            ))
+        })
+    }
+
+    /// [`Self::get_history_json`], with `None` for a `404`.
+    async fn get_history_json_if_found<T: serde::de::DeserializeOwned + Send + 'static>(
+        &self,
+        url: Url,
+    ) -> Result<Option<T>, ClientError> {
         let http = self.http.clone();
         let bearer = self.bearer.read().ok().and_then(|g| g.clone());
 
@@ -189,6 +214,9 @@ impl Connection {
                     };
                     return Err(ClientError::Auth(detail));
                 }
+                if status == StatusCode::NOT_FOUND {
+                    return Ok(None);
+                }
                 if !status.is_success() {
                     let body = resp.text().await.unwrap_or_default();
                     let detail = if body.is_empty() {
@@ -207,7 +235,7 @@ impl Connection {
                     bytes.len(),
                     crate::perf::ms_since(started)
                 );
-                Ok(serde_json::from_slice(&bytes)?)
+                Ok(Some(serde_json::from_slice(&bytes)?))
             },
             "thread history",
         )
@@ -446,6 +474,50 @@ mod tests {
             first_lower.contains("x-t3-orchestration-protocol: 2"),
             "request must include orchestration protocol header, got:\n{first_req}"
         );
+        Ok(())
+    }
+
+    /// A thread the server has is live, a `404` is a missing thread, and any other failure
+    /// stays an error so a network problem never reads as a deleted thread.
+    #[tokio::test]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test uses assert! for diffs while propagating setup errors with ?"
+    )]
+    async fn thread_is_live_reads_the_outline_status() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?;
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let response = if req.starts_with("GET /api/orchestration/threads/live/outline ") {
+                    let body = r#"{"snapshotSequence":3,"markers":[]}"#;
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                } else if req.starts_with("GET /api/orchestration/threads/gone/outline ") {
+                    "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        .to_owned()
+                } else {
+                    "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        .to_owned()
+                };
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        let config = ServerConfig {
+            http_base_url: Url::parse(&format!("http://{addr}"))?,
+            credential: Credential::Bearer("secret-token".to_owned()),
+        };
+        let (conn, _events) = Connection::start(config, &tokio::runtime::Handle::current());
+
+        assert!(conn.thread_is_live("live").await?);
+        assert!(!conn.thread_is_live("gone").await?);
+        assert!(conn.thread_is_live("broken").await.is_err());
+        conn.close();
         Ok(())
     }
 }

@@ -111,36 +111,14 @@ impl ChatView {
         sender: Option<&conn_state::AgentMessageSender>,
         cx: &mut Context<'_, Self>,
     ) -> AnyElement {
-        let (sender, open) = match sender {
-            Some(conn_state::AgentMessageSender::Linked {
-                environment_id,
-                thread_id,
-                title,
-            }) => (
-                Some(title.as_str()),
-                Some(ChatEvent::OpenThreadLink(super::thread_links::ThreadLink {
-                    environment_id: Some(environment_id.clone()),
-                    thread_id: thread_id.clone(),
-                })),
-            ),
-            Some(conn_state::AgentMessageSender::LinkedTitle(title)) => {
-                (Some(title.as_str()), None)
-            }
-            Some(conn_state::AgentMessageSender::LocalThread(thread_id)) => {
-                let title = self.local_sender_titles.get(thread_id).map(String::as_str);
-                // An empty title means the shell does not know the thread, so it cannot open.
-                let open = title
-                    .is_some_and(|t| !t.is_empty())
-                    .then(|| ChatEvent::OpenThread {
-                        thread_id: thread_id.clone(),
-                        environment_id: None,
-                    });
-                (title, open)
-            }
-            None => (None, None),
-        };
-        let title_text = sender
-            .map(str::trim)
+        let view = sender
+            .and_then(|sender| self.sender_views.get(sender))
+            .cloned()
+            .unwrap_or_default();
+        let open = sender
+            .filter(|_| view.can_open)
+            .map(|sender| ChatEvent::OpenAgentSender(sender.clone()));
+        let title_text = Some(view.title.trim())
             .filter(|title| !title.is_empty() && *title != "Agent")
             .unwrap_or("Message");
         let key = format!("agent-msg-{id}");
@@ -176,9 +154,11 @@ impl ChatView {
                     .text_size(px(CARD_TEXT_PX))
                     .line_height(px(CARD_META_LINE_PX))
                     .text_color(muted)
+                    .tab_index(0)
                     .cursor_pointer()
                     .hover(move |s| s.bg(hover_bg).text_color(fg))
-                    // A tap here opens the sender, not the card.
+                    // A tap here opens the sender, not the card. Enter reaches only the focused
+                    // button, so it never toggles the card.
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                     .on_click(cx.listener(move |_, _, _, cx| cx.emit(event.clone())))
                     .child("Open thread");

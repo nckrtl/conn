@@ -199,6 +199,14 @@ struct UserBubble<'a> {
 
 pub(crate) const OFFLINE_PROMPT_NOTICE: &str = "Connect to load this message";
 
+/// What an agent message card shows for its sender: the title (empty when unknown) and whether
+/// `Open thread` can reach the sender's environment.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SenderView {
+    pub(crate) title: String,
+    pub(crate) can_open: bool,
+}
+
 /// Events emitted by [`ChatView`] to the host shell.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum ChatEvent {
@@ -244,6 +252,8 @@ pub(crate) enum ChatEvent {
         app_run_ordinal: Option<i64>,
         file_path: Option<String>,
     },
+    /// `Open thread` on an agent message card: open the thread that sent it.
+    OpenAgentSender(conn_state::AgentMessageSender),
     /// Open another thread (a subagent's child thread).
     OpenThread {
         thread_id: String,
@@ -347,7 +357,7 @@ pub(crate) struct ChatView {
     expanded_ids: HashSet<String>,
     wrapped_code_keys: HashSet<String>,
     copied_code_blocks: HashMap<String, gpui_kit::Task<()>>,
-    local_sender_titles: HashMap<String, String>,
+    sender_views: HashMap<conn_state::AgentMessageSender, SenderView>,
     model_label: String,
     /// Project root; tool row paths under it show relative, as in Conn.
     workspace_root: Option<String>,
@@ -626,7 +636,7 @@ impl ChatView {
             expanded_ids: HashSet::new(),
             wrapped_code_keys: HashSet::new(),
             copied_code_blocks: HashMap::new(),
-            local_sender_titles: HashMap::new(),
+            sender_views: HashMap::new(),
             model_label: "Default model".to_owned(),
             workspace_root: None,
             list_state,
@@ -981,11 +991,11 @@ impl ChatView {
     /// Fast even on huge threads: Markdown is parsed lazily when a row enters the
     /// virtualized viewport, and streaming updates splice only the changed tail of
     /// GPUI's `ListState` while preserving measured heights above.
-    pub(crate) fn set_thread<'a>(
+    pub(crate) fn set_thread(
         &mut self,
         thread: Option<&ThreadState>,
         title: Option<String>,
-        resolve_sender: impl Fn(&str) -> Option<&'a str>,
+        resolve_sender: impl Fn(&conn_state::AgentMessageSender) -> SenderView,
         cx: &mut Context<'_, Self>,
     ) {
         let title_changed = self.thread_title != title;
@@ -1011,7 +1021,7 @@ impl ChatView {
             self.expanded_ids.clear();
             self.wrapped_code_keys.clear();
             self.copied_code_blocks.clear();
-            self.local_sender_titles.clear();
+            self.sender_views.clear();
             self.toc_hovered_slot = None;
             self.toc_pinned_slot = None;
             self.editing_queued_run_id = None;
@@ -1037,7 +1047,7 @@ impl ChatView {
             self.expanded_ids.clear();
             self.wrapped_code_keys.clear();
             self.copied_code_blocks.clear();
-            self.local_sender_titles.clear();
+            self.sender_views.clear();
             self.toc_hovered_slot = None;
             self.toc_pinned_slot = None;
             self.editing_queued_run_id = None;
@@ -1050,10 +1060,10 @@ impl ChatView {
         {
             // A sender can be renamed or loaded independently of this thread's timeline.
             let mut sender_changed = false;
-            for (id, title) in &mut self.local_sender_titles {
-                let latest = resolve_sender(id).unwrap_or("");
-                if latest != title.as_str() {
-                    latest.clone_into(title);
+            for (sender, view) in &mut self.sender_views {
+                let latest = resolve_sender(sender);
+                if latest != *view {
+                    *view = latest;
                     sender_changed = true;
                 }
             }
@@ -1062,17 +1072,17 @@ impl ChatView {
             }
             return;
         }
-        self.local_sender_titles.clear();
+        self.sender_views.clear();
         for entry in &thread.entries {
             if let TimelineEntry::User {
                 created_by_agent: true,
-                sender: Some(conn_state::AgentMessageSender::LocalThread(id)),
+                sender: Some(sender),
                 ..
             } = entry
+                && !self.sender_views.contains_key(sender)
             {
-                self.local_sender_titles
-                    .entry(id.clone())
-                    .or_insert_with(|| resolve_sender(id).unwrap_or("").to_owned());
+                let view = resolve_sender(sender);
+                self.sender_views.insert(sender.clone(), view);
             }
         }
         self.synced_revision = Some(thread.revision);

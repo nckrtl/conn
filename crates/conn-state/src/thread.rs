@@ -97,7 +97,7 @@ pub enum ItemStatus {
 
 /// Attribution carried by a delivered agent message. A local sender's current title is in the
 /// owning environment's shell; a linked sender supplies its own title on the wire.
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum AgentMessageSender {
     LocalThread(String),
     Linked {

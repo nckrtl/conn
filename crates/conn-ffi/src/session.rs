@@ -227,6 +227,10 @@ struct Attempt<C> {
 }
 
 pub(crate) struct Machine<C> {
+    /// The app went to the background since the connection was last nudged, so its socket may
+    /// have died: the next foreground reconnects. A launch's first foreground leaves a healthy
+    /// connection alone.
+    backgrounded: bool,
     revision: u64,
     next_id: u64,
     attempt: Option<Attempt<C>>,
@@ -274,6 +278,7 @@ impl<C: SessionCore> Machine<C> {
             environment_id: None,
             open_thread: None,
             has_connected: false,
+            backgrounded: false,
             last_identity: None,
             identity_epoch: 0,
             grace: None,
@@ -585,9 +590,27 @@ impl<C: SessionCore> Machine<C> {
         fx
     }
 
-    /// The app came back to the foreground.
+    /// The app came back to the foreground. A connection that is up or coming up, and has not
+    /// been through the background since, is left alone: nudging it would tear down a working
+    /// socket and every stream on it (a cold launch's first `.active` did exactly that).
     pub(crate) fn foreground(&mut self) -> Effects<C> {
+        let live = self.attempt.as_ref().is_some_and(|a| {
+            matches!(
+                a.status,
+                FfiConnectionStatus::Connected | FfiConnectionStatus::Connecting
+            )
+        });
+        if live && !std::mem::take(&mut self.backgrounded) {
+            return Vec::new();
+        }
+        self.backgrounded = false;
         self.retry()
+    }
+
+    /// The app went to the background: the next foreground may find the socket dead.
+    pub(crate) fn background(&mut self) -> Effects<C> {
+        self.backgrounded = true;
+        Vec::new()
     }
 
     /// Where a link opens. Only a link for this session's already known identity stays here;
@@ -1542,6 +1565,7 @@ impl ConnSession {
 
     /// The app went to the background: save the thread list now, for the next launch.
     pub fn background(&self) {
+        self.step(Machine::background);
         if let Some(core) = self.core() {
             core.save_shell();
         }
@@ -2123,6 +2147,33 @@ mod tests {
         assert!(!m.state().shows_offline, "the new window holds");
         let _ = m.end_grace(second);
         assert!(m.state().shows_offline);
+    }
+
+    /// A launch's first foreground leaves a working connection alone; one after the background
+    /// reconnects, since the socket may have died meanwhile.
+    #[test]
+    fn foreground_reconnects_only_after_the_background() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(None);
+        let _ = m.attached(1, FakeCore::default(), "http://agent/".into(), None);
+        let _ = m.status(1, FfiConnectionStatus::Connected);
+        let reconnects = |fx: &Effects<FakeCore>| {
+            fx.iter()
+                .filter(|e| matches!(e, Effect::Reconnect(_)))
+                .count()
+        };
+        assert_eq!(
+            reconnects(&m.foreground()),
+            0,
+            "a cold launch keeps its connection"
+        );
+        let _ = m.background();
+        assert_eq!(
+            reconnects(&m.foreground()),
+            1,
+            "back from the background: reconnect"
+        );
+        assert_eq!(reconnects(&m.foreground()), 0, "once");
     }
 
     #[test]

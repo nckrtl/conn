@@ -274,7 +274,7 @@ patchedDependencies:
   "@muse-code/sdk@1.4.6": patches/@muse-code__sdk@1.4.6.patch
   app-builder-lib@26.16.1: patches/app-builder-lib@26.16.1.patch
   # react-native-enriched-markdown-conn.patch is applied when rebuilding
-  # the Conn tarball (pnpm cannot patch file: deps tarballs). See FORK.md.
+  # the Conn tarball (pnpm cannot patch file: deps tarballs). See docs/development.md.
   # The spawner takes an injected spawn function (and uses it for taskkill) so Windows launches
   # can run on worker threads: apps/server/src/process/SpawnWorker.ts.
   "@effect/platform-node-shared@4.1.2": patches/@effect__platform-node-shared@4.1.2.patch

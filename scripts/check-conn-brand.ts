@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off - A one-shot CI check; synchronous Node APIs keep it small.
 // Conn: fails when a GT catalog names the app literally instead of `{appName}`. The lint rule
-// t3code/no-hardcoded-app-name covers source strings. See FORK.md, "i18n and the app name".
+// t3code/no-hardcoded-app-name covers source strings. See docs/conn-features.md, "i18n and the app name".
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 

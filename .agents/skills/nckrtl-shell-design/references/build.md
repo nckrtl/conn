@@ -2,10 +2,7 @@
 
 Conn is the fork's one customizations branch: `main` of `nckrtl/conn` (renamed
 from `nckrtl/t3code` and its `nckrtl` branch on 2026-10-11). It is checked out
-on Nick's MacBook (`~/apps/conn`) and tracks `origin/main`. Merge
-`upstream/main` into it to take upstream changes (it carries merge commits,
-so a rebase replays them), then run the sync procedure in
-[SKILL.md](../SKILL.md).
+on Nick's MacBook (`~/apps/conn`) and tracks `origin/main`. Full upstream merges ended on 2026-11-19; see [FORK.md](../../../../FORK.md).
 
 `~/apps/conn` is shared. Never build, switch branches or stash there. Every
 build uses its own worktree.
@@ -33,8 +30,6 @@ git -C ~/apps/conn fetch origin
 git -C ~/apps/conn worktree add --detach ~/apps/conn-build-<task> <full sha>
 cd ~/apps/conn-build-<task>
 vp i
-node scripts/publish-sync-branch.ts        # pushes HEAD to origin sync/<full sha>
-node scripts/check-sync-provenance.ts --json
 node scripts/build-desktop-artifact.ts --platform mac --target dmg --arch arm64 \
   --build-version 0.1.8-nckrtl.<YYYYMMDD>.<n>
 ```
@@ -42,9 +37,6 @@ node scripts/build-desktop-artifact.ts --platform mac --target dmg --arch arm64 
 - Version: the upstream desktop version (now `0.1.8`), `-nckrtl.`, the build
   date, and a build number for that day (`0.1.8-nckrtl.20261110.4`).
 - Artifacts land in `release/`: `Conn-<version>-arm64.zip` and a `.dmg`.
-- `publish-sync-branch.ts` never force-pushes. Packaging and signing fail
-  unless the full 40-character HEAD SHA is the tip of an `origin`
-  `refs/heads/sync/*` branch.
 
 ### 2. Sign on the MacBook
 
@@ -70,7 +62,6 @@ Verify:
 codesign --verify --deep --strict "$tmp/Conn.app"
 codesign -dv --verbose=2 "$tmp/Conn.app" 2>&1 | grep -E 'Authority=Developer ID|TeamIdentifier'
 defaults read "$tmp/Conn.app/Contents/Info.plist" CFBundleShortVersionString
-node scripts/check-sync-provenance.ts --artifact "$tmp/Conn.app"
 shasum -a 256 "release/Conn-<version>-arm64-signed.zip"
 ```
 
@@ -130,7 +121,7 @@ Mac.
 6. On failure, put the backup back the same way and relaunch.
 
 User data in `~/.t3` is untouched. The first launch of a renamed app copies
-the old app's user data (see FORK.md, "Conn").
+the old app's user data (see `docs/conn-features.md`, "Conn (app rename)").
 
 ## iPhone (Polar)
 
@@ -266,11 +257,6 @@ merging.
 - Desktop typecheck: `scripts/build-desktop-artifact.ts` runs
   `vp run --no-cache --filter @t3tools/desktop typecheck` (the existing Vite
   task) before packing. A missing window or preview member fails the build.
-- Sync-source provenance: packaging records the full HEAD SHA and the origin
-  `sync/*` ref whose tip is that commit. `scripts/sign-macos-local.ts` refuses
-  to sign a short SHA, a local-only commit, or a stale/mismatched remote ref.
-  Publish first with `node scripts/publish-sync-branch.ts`. External nightly
-  install scripts that never call these entrypoints are not protected.
 - T3 Code has no in-page annotator of its own. The browser panel's
   "Annotate preview" feature (`apps/web/src/annotations/`) is product code: it
   loads the overlay into the previewed page from an annotation server the user

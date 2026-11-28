@@ -118,7 +118,7 @@ function saveOrbitInstances(next: Record<string, OrbitInstanceDescriptor>): void
 
 /**
  * Conn: the Orbit Instance a server runs in. The Gateway's record comes first, because clones run
- * the stock T3 server; a fork server's own descriptor is the fallback (see FORK.md, "Orbit").
+ * the stock T3 server; a fork server's own descriptor is the fallback (see docs/conn-features.md, "Orbit").
  */
 export function useOrbitInstance(
   environmentId: EnvironmentId | null,

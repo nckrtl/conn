@@ -39,7 +39,7 @@ import {
   type MobileOrbitThreadStartPorts,
 } from "./orbitThreadStarts";
 
-/** Conn: wires the phone's thread starts in Orbit Projects to the app (FORK.md, "Orbit"). */
+/** Conn: wires the phone's thread starts in Orbit Projects to the app (docs/conn-features.md, "Orbit"). */
 
 /** The clone's T3 project: Orbit's create flow adds the container's workspace. */
 const ORBIT_CLONE_WORKSPACE = "/srv/workspace";

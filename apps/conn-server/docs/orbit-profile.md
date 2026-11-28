@@ -331,8 +331,8 @@ in the `server` area.
 | Kiro, fx, Antigravity, ACP registry (offline part) | no | U | U | Section 8 |
 | Cursor, OpenCode, Muse (SDK) | no | X | U | Not used by Orbit |
 | GitHub | sign-in, lookup, clone, publish, discovery, PR links, panel reads and actions, checkout; some operations return typed errors | O (Swamp pushes and opens the PR) | N | `workflow-operation-task-publish.yaml:764-946` |
-| GitLab | removed; unknown git remote | X | X | GitHub only (Nick, 2026-11-16; `FORK.md`) |
-| Bitbucket, Azure DevOps, Forgejo, GitCafe, Cursor origin | removed; unknown git remote | X | X | GitHub only (Nick, 2026-11-16; `FORK.md`) |
+| GitLab | removed; unknown git remote | X | X | GitHub only (Nick, 2026-11-16; `docs/scope.md`) |
+| Bitbucket, Azure DevOps, Forgejo, GitCafe, Cursor origin | removed; unknown git remote | X | X | GitHub only (Nick, 2026-11-16; `docs/scope.md`) |
 
 ### Totals for the three targets
 
@@ -377,7 +377,7 @@ is **17,397,232 bytes** [measured, `ls -l`, read only].
 | Scheduled tasks (`conn-features::scheduled`, `jiff`) | 64 K + 39 K | One timer and a JSON file of at most 500 tasks (`R/crates/conn-features/src/scheduled/mod.rs:12,73`). Not measured apart. | Starts agent turns on a timer or through the webhook route (`GET`, `POST`, `PUT`, `PATCH` and `HEAD`); webhook methods and delivery inspection are served. | 35 commits / 3.2 k lines in `ScheduledTaskService.ts`; 153 / 11.5 k for all of `conn-features` | The engine for recurring work inside one Instance, such as a nightly dependency check or a test run that reports to the thread. Orbit's Swamp has its own schedules (`project-schedule-definition-*`), so this is per-Instance only. | Keep on |
 | Annotations (`conn-features::annotations`) | 39 K | None at idle; files under `userdata/annotations` | RPC only | 1 commit in `annotations.ts` | Review of a preview: a person marks the app in the client, and the agent works through the notes with `annotations_*`. It fits Orbit's preview through the app Route only if the client's overlay runs on that Route. | Keep on |
 | Text generators and titles (`conn-server::text_generation`) | 29 K + 3 K | None | Outbound HTTP to the user's endpoint with the saved key | in `settings.rs`'s churn | Thread titles and commit messages through the AI router, with no key in the container: point the generator at the bridge forwarder. | Keep on, routed to the AI router |
-| Hosts beyond GitHub | Removed | None | No host-specific API or CLI | No longer followed | None in Orbit | Removed (Nick, 2026-11-16; `FORK.md`) |
+| Hosts beyond GitHub | Removed | None | No host-specific API or CLI | No longer followed | None in Orbit | Removed (Nick, 2026-11-16; `docs/scope.md`) |
 | Repository lookup, clone, publish | about 52 K (`repository`, `repositories`) | None | `git` child processes; outbound calls | in source control's 238 commits | Orbit clones and publishes. On the mini: "new project from a GitHub repository" from a phone. | Keep, off in the container profile |
 | TLS stack (rustls, ring, webpki) | about 330 K, plus about 0.2 MB of roots [estimate] | None | Every outbound HTTPS call | n/a | Needed only for GitHub's API and a text generator over HTTPS. In a container the router is plain HTTP on the bridge. `ring` also verifies Ed25519, which section 4b needs. | Keep |
 | Grok and the ACP runtime (`conn-provider-acp`) | 157 K (Grok's own part 31 K) | 310 KiB per idle Grok session, 11 KiB after close (`R/docs/status.md`, ACP part 3) | A child process when enabled; CLI probes every 5 minutes when enabled; off by default | 187 commits / 20.8 k lines | ACP agents in containers once the router serves them (section 8) | Keep on, off by setting as T3 has it |
@@ -732,6 +732,9 @@ Scheduled tasks, peer links and sessions are not converted.
 ---
 
 ## 10. The upstream question: a loose fork
+
+> Outcome: the nightly merges ended after 2026-11-19. Conn now ports only upstream provider
+> fixes (`FORK.md`, "Relationship to T3 Code"). The analysis below is kept as written.
 
 **The choice (Nick's lean):** a loose fork. Conn stays very close to T3 Code, keeps its
 client stack, uses only the Conn Server in the end, and changes what Orbit needs. **The

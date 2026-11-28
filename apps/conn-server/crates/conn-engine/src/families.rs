@@ -413,8 +413,6 @@ pub(crate) fn on_run_end(
     let mut effects = deliver(tx, thread_id, true)?;
     effects.extend(catch_up_questions(tx, thread_id, run_id)?);
     effects.extend(finalize_tasks(tx, thread_id)?);
-    // The run's own pending questions ended with it.
-    effects.extend(cancel_question_wakes(tx, thread_id)?);
     Ok(effects)
 }
 
@@ -660,7 +658,7 @@ fn publish(
         tx.append(draft("turn-item.updated", item))?;
     }
     // A settled task no longer needs an answer to its questions.
-    let mut effects = cancel_question_wakes(tx, child_id)?;
+    let mut effects = cancel_settled_question_wakes(tx, parent_id, child_id)?;
     if state == "pending" {
         effects.extend(deliver(tx, parent_id, false)?);
     }
@@ -1053,9 +1051,61 @@ fn wakes_parent(request: &Value) -> bool {
 
 const QUESTION_WAKE: &str = "delegated-task-question";
 
-/// Called after a delegated child's runtime request is written: a pending question wakes the
-/// parent once, unless a blocking `delegate_task` wait returns it; one that no longer waits
-/// cancels its queued wake.
+/// The parent and the open task that a delegated child's question should reach, or `None`:
+/// it is not a pending question, the parent cannot read it yet, or its task settled. Both the
+/// wake and the start of its queued run check it (`isStaleQuestionWake`).
+fn question_task(
+    tx: &Tx<'_>,
+    child_id: &str,
+    request: &Value,
+) -> StoreResult<Option<(String, Value)>> {
+    if !wakes_parent(request) || request["status"] != "pending" {
+        return Ok(None);
+    }
+    // Claude and ACP write the request before the item that holds its questions, and
+    // `conn_pending_request` reads the item.
+    let request_id = request["id"].as_str().unwrap_or_default();
+    if !tx
+        .entities_where(child_id, "turnItems", "requestId", request_id)?
+        .iter()
+        .any(|item| item["type"] == "user_input_request")
+    {
+        return Ok(None);
+    }
+    let Some((parent_id, original)) = tx.thread(child_id)?.as_ref().and_then(delegated_parent)
+    else {
+        return Ok(None);
+    };
+    // The task of the run that asked; the original owns runs without one.
+    let asked_in = match request["nodeId"].as_str() {
+        Some(node) => tx.entity(child_id, "nodes", node)?,
+        None => None,
+    };
+    let run = match asked_in.as_ref().and_then(|node| node["runId"].as_str()) {
+        Some(run_id) => tx.entity(child_id, "runs", run_id)?,
+        None => tx
+            .entities(child_id, "runs")?
+            .into_iter()
+            .max_by_key(|run| run["ordinal"].as_u64().unwrap_or(0)),
+    };
+    let task_id = run
+        .as_ref()
+        .and_then(|run| run["delegatedTaskId"].as_str())
+        .unwrap_or(&original);
+    let task = tx.entity(&parent_id, "subagents", task_id)?.filter(|row| {
+        row["origin"] == "app_owned"
+            && row["childThreadId"] == child_id
+            && row["completedAt"].is_null()
+            && !TERMINAL.contains(&row["status"].as_str().unwrap_or_default())
+            // Cancelled, though its child may not have confirmed the Stop yet.
+            && row["cancelledRunId"].is_null()
+    });
+    Ok(task.map(|task| (parent_id, task)))
+}
+
+/// Called after a delegated child's runtime request or its question item is written: a
+/// pending question wakes the parent once, unless a blocking `delegate_task` wait returns it;
+/// one that no longer waits cancels its queued wake.
 pub(crate) fn on_child_request(
     tx: &mut Tx<'_>,
     child_id: &str,
@@ -1067,39 +1117,15 @@ pub(crate) fn on_child_request(
     else {
         return Ok(vec![]);
     };
-    let Some((parent_id, original)) = tx.thread(child_id)?.as_ref().and_then(delegated_parent)
-    else {
-        return Ok(vec![]);
-    };
     if request["status"] != "pending" {
-        return cancel_question_wakes(tx, child_id);
+        return cancel_question_wake(tx, child_id, request_id);
     }
-    // The task of the run that asked; the original owns runs without one.
-    let asked_in = match request["nodeId"].as_str() {
-        Some(node) => tx
-            .entity(child_id, "nodes", node)?
-            .map(|n| n["runId"].clone()),
-        None => None,
-    };
-    let runs = tx.entities(child_id, "runs")?;
-    let run = runs
-        .iter()
-        .find(|run| asked_in.as_ref().is_some_and(|id| run["id"] == *id))
-        .or_else(|| {
-            runs.iter()
-                .max_by_key(|run| run["ordinal"].as_u64().unwrap_or(0))
-        });
-    let task_id = run
-        .and_then(|run| run["delegatedTaskId"].as_str())
-        .unwrap_or(&original);
-    let Some(task) = tx
-        .entity(&parent_id, "subagents", task_id)?
-        .filter(|row| row["origin"] == "app_owned")
-    else {
+    let Some((parent_id, task)) = question_task(tx, child_id, &request)? else {
         return Ok(vec![]);
     };
-    // `settled_only`, the default, is the mode of a blocking wait.
-    if task["completionWake"] != "always"
+    // Only an explicit `settled_only` is a blocking wait: a lost question costs more than a
+    // second wake.
+    if task["completionWake"] == "settled_only"
         && request["responseCapability"]["type"] == "live"
         && let Some(waiting) = task["runId"].as_str()
         && tx.entity(&parent_id, "runs", waiting)?.is_some_and(|run| {
@@ -1114,6 +1140,33 @@ pub(crate) fn on_child_request(
     wake_for_question(tx, &parent_id, child_id, &task, &request)
 }
 
+/// A task's pending questions wake the parent: its blocking wait ended (`settled_only` became
+/// `always`), or the parent run it held back ended. A question the wait returned wakes too, as
+/// a queued message: answered before that run ends, the answer cancels it; unanswered, it
+/// reminds the parent once.
+fn wake_for_task_questions(
+    tx: &mut Tx<'_>,
+    parent_id: &str,
+    task: &Value,
+) -> StoreResult<Vec<Effect>> {
+    let mut effects = vec![];
+    let Some(child_id) = task["childThreadId"].as_str() else {
+        return Ok(effects);
+    };
+    if task["completionDelivery"]["state"] == "disposed" {
+        return Ok(effects);
+    }
+    for request in tx.entities_where(child_id, "runtimeRequests", "status", "pending")? {
+        if request["responseCapability"]["type"] == "live"
+            && question_task(tx, child_id, &request)?
+                .is_some_and(|(parent, owner)| parent == parent_id && owner["id"] == task["id"])
+        {
+            effects.extend(wake_for_question(tx, parent_id, child_id, task, &request)?);
+        }
+    }
+    Ok(effects)
+}
+
 /// A parent run that waited on its tasks ended: their questions that a blocking wait held
 /// back and that still wait for an answer wake it now.
 fn catch_up_questions(tx: &mut Tx<'_>, thread_id: &str, run_id: &str) -> StoreResult<Vec<Effect>> {
@@ -1124,22 +1177,9 @@ fn catch_up_questions(tx: &mut Tx<'_>, thread_id: &str, run_id: &str) -> StoreRe
     if !ended {
         return Ok(effects);
     }
-    for task in tx.entities(thread_id, "subagents")? {
-        let Some(child_id) = task["childThreadId"].as_str() else {
-            continue;
-        };
-        if task["origin"] != "app_owned"
-            || task["runId"] != run_id
-            || task["completionWake"] == "always"
-            || task["completionDelivery"]["state"] == "disposed"
-            || TERMINAL.contains(&task["status"].as_str().unwrap_or_default())
-        {
-            continue;
-        }
-        for request in tx.entities_where(child_id, "runtimeRequests", "status", "pending")? {
-            if wakes_parent(&request) && request["responseCapability"]["type"] == "live" {
-                effects.extend(wake_for_question(tx, thread_id, child_id, &task, &request)?);
-            }
+    for task in tx.entities_where(thread_id, "subagents", "runId", run_id)? {
+        if task["completionWake"] == "settled_only" {
+            effects.extend(wake_for_task_questions(tx, thread_id, &task)?);
         }
     }
     Ok(effects)
@@ -1207,57 +1247,94 @@ fn wake_for_question(
     }
 }
 
-/// Cancels the parent's queued wakes for `child_id`'s questions that need no answer any more:
-/// the question is no longer pending, or its task settled.
-fn cancel_question_wakes(tx: &mut Tx<'_>, child_id: &str) -> StoreResult<Vec<Effect>> {
-    let mut effects = vec![];
-    let Some((parent_id, _)) = tx.thread(child_id)?.as_ref().and_then(delegated_parent) else {
-        return Ok(effects);
-    };
+/// Whether `message` in `parent_id` is a question wake that should no longer run: its
+/// question was answered, dismissed or expired, or its task settled.
+pub(crate) fn stale_question_wake(
+    tx: &Tx<'_>,
+    parent_id: &str,
+    message: &Value,
+) -> StoreResult<bool> {
     let prefix = format!("message:{QUESTION_WAKE}:{parent_id}:");
-    for run in tx.entities_where(&parent_id, "runs", "status", "queued")? {
-        let Some(message_id) = run["userMessageId"].as_str() else {
-            continue;
-        };
-        let Some(request_id) = message_id.strip_prefix(&prefix) else {
-            continue;
-        };
-        let Some(message) = tx.entity(&parent_id, "messages", message_id)? else {
-            continue;
-        };
-        let source = &message["notification"]["source"];
-        if source["childThreadId"] != child_id {
-            continue;
-        }
-        let pending = tx
-            .entity(child_id, "runtimeRequests", request_id)?
-            .is_some_and(|request| request["status"] == "pending");
-        let settled = match source["taskIds"][0].as_str() {
-            Some(task) => tx
-                .entity(&parent_id, "subagents", task)?
-                .is_none_or(|row| !row["completedAt"].is_null()),
-            None => true,
-        };
-        if pending && !settled {
-            continue;
-        }
-        let cancel = commands::handler("queued-run.cancel").expect("queued-run.cancel");
-        match cancel(
-            tx,
-            json!({
-                "type": "queued-run.cancel",
-                "commandId": format!("server:{QUESTION_WAKE}-cancel:{parent_id}:{request_id}"),
-                "threadId": parent_id, "runId": run["id"],
-            }),
-        ) {
-            Ok(more) => effects.extend(more),
-            Err(CommandError::Store(e)) => return Err(e),
-            Err(CommandError::Rejected(e) | CommandError::ThreadArchived(e)) => {
-                eprintln!("conn-engine: could not cancel a question wake in {parent_id}: {e}");
-            }
+    let Some(request_id) = message["id"]
+        .as_str()
+        .and_then(|id| id.strip_prefix(&prefix))
+    else {
+        return Ok(false);
+    };
+    let source = &message["notification"]["source"];
+    let Some(child_id) = source["childThreadId"].as_str() else {
+        return Ok(true);
+    };
+    let Some(request) = tx.entity(child_id, "runtimeRequests", request_id)? else {
+        return Ok(true);
+    };
+    Ok(question_task(tx, child_id, &request)?
+        .is_none_or(|(parent, task)| parent != parent_id || source["taskIds"][0] != task["id"]))
+}
+
+/// Cancels the parent's queued wake for one question of `child_id`.
+fn cancel_question_wake(
+    tx: &mut Tx<'_>,
+    child_id: &str,
+    request_id: &str,
+) -> StoreResult<Vec<Effect>> {
+    let Some((parent_id, _)) = tx.thread(child_id)?.as_ref().and_then(delegated_parent) else {
+        return Ok(vec![]);
+    };
+    let message_id = format!("message:{QUESTION_WAKE}:{parent_id}:{request_id}");
+    let mut effects = vec![];
+    for run in tx.entities_where(&parent_id, "runs", "userMessageId", &message_id)? {
+        if run["status"] == "queued" {
+            effects.extend(cancel_wake_run(tx, &parent_id, &run)?);
         }
     }
     Ok(effects)
+}
+
+/// A task of `child_id` settled: cancels the parent's queued wakes for that child's questions
+/// that are stale now. A follow-up task's wake in the same child stays.
+fn cancel_settled_question_wakes(
+    tx: &mut Tx<'_>,
+    parent_id: &str,
+    child_id: &str,
+) -> StoreResult<Vec<Effect>> {
+    let mut effects = vec![];
+    for run in tx.entities_where(parent_id, "runs", "status", "queued")? {
+        let Some(message) = run["userMessageId"]
+            .as_str()
+            .map(|id| tx.entity(parent_id, "messages", id))
+            .transpose()?
+            .flatten()
+        else {
+            continue;
+        };
+        if message["notification"]["source"]["childThreadId"] == child_id
+            && stale_question_wake(tx, parent_id, &message)?
+        {
+            effects.extend(cancel_wake_run(tx, parent_id, &run)?);
+        }
+    }
+    Ok(effects)
+}
+
+fn cancel_wake_run(tx: &mut Tx<'_>, parent_id: &str, run: &Value) -> StoreResult<Vec<Effect>> {
+    let run_id = run["id"].as_str().unwrap_or_default();
+    let cancel = commands::handler("queued-run.cancel").expect("queued-run.cancel");
+    match cancel(
+        tx,
+        json!({
+            "type": "queued-run.cancel",
+            "commandId": format!("server:{QUESTION_WAKE}-cancel:{run_id}"),
+            "threadId": parent_id, "runId": run_id,
+        }),
+    ) {
+        Ok(effects) => Ok(effects),
+        Err(CommandError::Store(e)) => Err(e),
+        Err(CommandError::Rejected(e) | CommandError::ThreadArchived(e)) => {
+            eprintln!("conn-engine: could not cancel a question wake in {parent_id}: {e}");
+            Ok(vec![])
+        }
+    }
 }
 
 /// Stop reaches every open task of the thread and the threads under it, whether or not a
@@ -1448,11 +1525,16 @@ pub(crate) fn wake_policy(tx: &mut Tx<'_>, c: Value) -> Outcome {
     row["completionWake"] = c["completionWake"].clone();
     let run = row["runId"].as_str().map(str::to_owned);
     tx.append(
-        Draft::new(&parent, "subagent.updated", row)
+        Draft::new(&parent, "subagent.updated", row.clone())
             .run(run.as_deref())
             .payload_instance(),
     )?;
-    Ok(deliver(tx, &parent, false)?)
+    let mut effects = deliver(tx, &parent, false)?;
+    // A question asked while the wait held its wake back (`settled_only`) still reaches it.
+    if row["completionWake"] == "always" {
+        effects.extend(wake_for_task_questions(tx, &parent, &row)?);
+    }
+    Ok(effects)
 }
 
 /// `completion-delivery.acknowledge` and `.dispose`: the parent read the result itself, or

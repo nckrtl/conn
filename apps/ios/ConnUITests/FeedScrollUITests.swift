@@ -73,6 +73,11 @@ final class FeedScrollUITests: XCTestCase {
                      frames: Int(fields["fr"] ?? 0), hitches: Int(fields["hitch"] ?? 0))
     }
 
+    /// How many times the jump circle came in since launch.
+    private func jumpShows() throws -> Int? {
+        try XCTUnwrap(probeElement.value as? String).components(separatedBy: " js=").last.flatMap { Int($0) }
+    }
+
     private func openThread(_ id: String) {
         app.launch()
         let row = app.descendants(matching: .any)["inbox.thread.\(id)"]
@@ -149,6 +154,46 @@ final class FeedScrollUITests: XCTestCase {
         XCTAssertLessThanOrEqual((positions.max() ?? 0) - (positions.min() ?? 0), 1, "reopen: the last reply never moved: \(positions)")
     }
 
+    /// A thread that opens at its end never shows the jump circle, not even for a moment while its
+    /// rows and images settle to their measured heights. The probe counts every time the circle
+    /// comes in, so a flash between samples still fails.
+    func test1bOpenNeverFlashesJump() throws {
+        continueAfterFailure = true
+        for id in ["feed", "tall"] {
+            openThread(id)
+            XCTAssertTrue(probeElement.waitForExistence(timeout: 10), "feed probe")
+            var seen: [Double] = []
+            let start = Date()
+            while Date().timeIntervalSince(start) < 2 {
+                if jump.exists { seen.append(Date().timeIntervalSince(start)) }
+                wait(0.05)
+            }
+            let state = try probe()
+            let shows = try jumpShows()
+            print("FEEDPROOF flash \(id) seen=\(seen) shows=\(shows ?? -1) dist=\(state.distance) n=\(state.rows) images=\(app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'tall-'")).count)")
+            XCTAssertLessThanOrEqual(state.distance, 1, "\(id): at the end")
+            XCTAssertTrue(seen.isEmpty, "\(id): the jump circle showed while opening at \(seen)")
+            XCTAssertEqual(shows, 0, "\(id): the jump circle came in \(shows ?? -1) times while opening")
+            shot("feed-1b-open-\(id)")
+
+            // Back, then open again from the cached feed.
+            app.buttons["Back"].firstMatch.tap()
+            wait(1)
+            app.descendants(matching: .any)["inbox.thread.\(id)"].tap()
+            seen = []
+            let again = Date()
+            while Date().timeIntervalSince(again) < 1.5 {
+                if jump.exists { seen.append(Date().timeIntervalSince(again)) }
+                wait(0.05)
+            }
+            let reopened = try jumpShows()
+            print("FEEDPROOF flash \(id) reopen seen=\(seen) shows=\(reopened ?? -1)")
+            XCTAssertTrue(seen.isEmpty, "\(id): the jump circle showed on reopen at \(seen)")
+            XCTAssertEqual(reopened, shows, "\(id): the jump circle came in on reopen")
+            app.terminate()
+        }
+    }
+
     // MARK: - 2. Pinned growth
 
     /// At the end, a streaming reply grows upward and the end stays in view.
@@ -174,6 +219,7 @@ final class FeedScrollUITests: XCTestCase {
         let extra = text("Extra reply 1:")
         XCTAssertTrue(extra.waitForExistence(timeout: 3))
         XCTAssertLessThanOrEqual(extra.frame.maxY, composer.frame.minY + 1, "the new row is in view")
+        XCTAssertEqual(try jumpShows(), 0, "streaming at the end never showed the jump circle")
         shot("feed-2-pinned-growth")
     }
 

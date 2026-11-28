@@ -11,7 +11,7 @@ Read `README.md`, `docs/scope.md`, `docs/architecture.md`, and `docs/design-spec
 `conn-gpui` lives in the `nckrtl/conn` monorepo at `apps/conn-gpui`. Paths below are relative to the monorepo root unless they start with `crates/`, `docs/` or `scripts/`. Third-party references sit under `apps/conn-gpui/.refs/` (gitignored; synced by `scripts/sync-refs.sh` from `references.pin`); never edit anything inside `.refs/`:
 
 1. **Conn itself (this monorepo)**: The **sole** visual, behavioral, and wire-contract specification.
-   - Every pixel, color role, token formula, layout metric, icon choice, keyboard shortcut, and right-panel surface comes from `apps/web`, `apps/desktop`, and `FORK.md` at your checkout's commit.
+   - Every pixel, color role, token formula, layout metric, icon choice, keyboard shortcut, and right-panel surface comes from `apps/web`, `apps/desktop`, and `docs/conn-features.md` at your checkout's commit.
    - `conn-gpui` imports `apps/conn-server/crates/conn-wire` and `apps/conn-server/crates/conn-contract` as Cargo path dependencies (`../conn-server/...` from `apps/conn-gpui`). Never duplicate or hand-roll Effect RPC frame types or contract schemas.
    - Branch from a fresh `origin/main` before auditing or porting UI, so a stale branch can never be the source. Never port from another checkout (such as `~/apps/conn`) that may sit on an old branch.
 2. **`.refs/threadbear`** (`mikecann/threadbear`, gitignored; run `scripts/sync-refs.sh` if missing): Primary GPUI engineering reference. Prefer its proven patterns over inventing from scratch:

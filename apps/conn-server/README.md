@@ -155,8 +155,8 @@ See [`fixtures/README.md`](fixtures/README.md) for every scenario and which need
 
 ## Upkeep
 
-The Conn Server follows the Conn commit it is part of. When Conn moves (an upstream sync, a
-contract change), `tools/follow-conn.sh` regenerates every generated file, runs
+The Conn Server follows the Conn commit it is part of. When Conn moves (a contract
+change), `tools/follow-conn.sh` regenerates every generated file, runs
 `tools/check.sh` and prints what changed since the Conn Server last followed. It does not
 commit. See [`docs/upkeep.md`](docs/upkeep.md).
 

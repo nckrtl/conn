@@ -570,7 +570,7 @@ export default defineConfig({
         ],
         rules: { "t3code/no-em-dash-copy": "error" },
       },
-      // Conn: copy names the app through the `{appName}` placeholder (FORK.md, "i18n and the
+      // Conn: copy names the app through the `{appName}` placeholder (docs/conn-features.md, "i18n and the
       // app name"); `node scripts/check-conn-brand.ts` checks the catalogs.
       {
         files: [

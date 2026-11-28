@@ -2900,13 +2900,14 @@ fn runtime_request_respond(tx: &mut Tx<'_>, command: Value) -> Outcome {
             .provider_instance(instance.as_deref()),
     )?;
     settle_request_rows(tx, &c, node.as_deref(), instance.as_deref())?;
+    let mut effects = crate::families::on_child_request(tx, &c.thread_id, &c.request_id)?;
     if is_message {
-        return match message_reply {
-            Some(text) => async_answer(tx, &c, text),
-            None => Ok(vec![]),
-        };
+        if let Some(text) = message_reply {
+            effects.extend(async_answer(tx, &c, text)?);
+        }
+        return Ok(effects);
     }
-    Ok(vec![Effect::Respond {
+    effects.push(Effect::Respond {
         thread_id: c.thread_id,
         request: json!({
             "requestId": c.request_id,
@@ -2914,7 +2915,8 @@ fn runtime_request_respond(tx: &mut Tx<'_>, command: Value) -> Outcome {
             "feedback": c.feedback,
             "answers": c.answers,
         }),
-    }])
+    });
+    Ok(effects)
 }
 
 /// The request's approval or question item on its node.
@@ -4815,10 +4817,12 @@ fn thread_user_input_dismiss(tx: &mut Tx<'_>, command: Value) -> Outcome {
             .node(node.as_deref())
             .provider_instance(instance.as_deref()),
     )?;
-    Ok(vec![Effect::Respond {
+    let mut effects = crate::families::on_child_request(tx, &thread_id, &request_id)?;
+    effects.push(Effect::Respond {
         thread_id,
         request: json!({"requestId": request_id, "decision": "cancel"}),
-    }])
+    });
+    Ok(effects)
 }
 
 /// Ends the thread's provider session. The next turn opens a new one.

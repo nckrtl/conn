@@ -33,15 +33,18 @@ The specification is `packages/source-control-core`, `packages/source-control-gi
 | `settings.rs` | GitHub's saved fields (`hosts`, `tokens`, `signIns`), secret references |
 | `discovery.rs` | The generic CLI probe (`probeSourceControlProvider`), the auth text helpers, a stub executable for tests |
 | `cli.rs` | A host CLI call outside discovery, as `VcsProcess.run` runs it (30 s, 1,000,000 bytes) |
-| `remote.rs` | Clone URL and remote text: `cloneUrl.ts`, `parseGitRemoteRepository`, `repositoryKeyFromRemote`, the redaction helpers |
 | `repository.rs` | `SourceControlRepositoryService`: lookup, clone (its own `git clone` child), publish (`ensureRemote`, push, upstream) |
 | `hosts/github.rs` | GitHub discovery, credentials and REST requests |
 | `hosts/repositories.rs` | GitHub's `getRepositoryCloneUrls` and `createRepository` (`Hosts`) |
 | `hosts/github_graphql/` | GitHub's GraphQL operations: `generated.rs` (by `tools/gen-graphql.mjs`) and the batch renderer |
-| `registry/` | The host definition registry (`mod.rs`), its URL routes (`paths.rs`), thread link keys (`thread_keys.rs`) |
 | `detect.rs` | Provider detection: the checkout's remotes, the recognised context, unknown hosts refined |
 | `cache.rs` | `TtlCache`: bounded, one shared lookup per key, a time to live per answer (Effect's `Cache`) |
 | `pull_requests/watch.rs` | A watch's evaluation and wake texts (`pullRequestWatch.ts`); `tools/pr-watch-diff.mjs` runs T3's functions and ours on the same cases |
+
+The host definition registry (`registry`), the clone URL and remote text (`remote`:
+`cloneUrl.ts`, `parseGitRemoteRepository`, `repositoryKeyFromRemote`, the redaction helpers)
+and a watch's `Wake` with `combine` are in `conn-source-control-core`. The engine needs them
+too, and must not depend on this crate. This crate shows `registry` as its own module.
 
 ## Sign-in and stars
 
@@ -146,7 +149,8 @@ Deviations:
 
 ## Registry
 
-`registry/` follows T3's `makeSourceControlDefinitionRegistry` with only the GitHub
+The registry (`conn-source-control-core/src/registry/`) follows T3's
+`makeSourceControlDefinitionRegistry` with only the GitHub
 definition registered. It handles GitHub recognition, pull request URLs, canonical keys,
 selectors, project predicates and thread link keys. URLs use the WHATWG parser (`url`).
 Unclaimed remotes use T3's `unknownRemoteProvider` fallback. Local paths have no host.

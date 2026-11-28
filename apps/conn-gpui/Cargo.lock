@@ -1712,6 +1712,7 @@ dependencies = [
  "conn-client",
  "conn-contract",
  "conn-desktop",
+ "conn-image-cache",
  "conn-preview-driver",
  "conn-state",
  "conn-theme",
@@ -1816,6 +1817,13 @@ dependencies = [
  "url",
  "uuid",
  "zeroize",
+]
+
+[[package]]
+name = "conn-image-cache"
+version = "0.1.0"
+dependencies = [
+ "image",
 ]
 
 [[package]]

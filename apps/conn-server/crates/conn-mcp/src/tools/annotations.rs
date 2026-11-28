@@ -10,6 +10,7 @@ use super::{Args, Cx, ToolError, ToolResult, bool_arg, str_arg};
 
 fn store<'a>(cx: &'a Cx<'_>) -> Result<&'a Annotations, ToolError> {
     cx.config()
+        .features
         .annotations
         .as_ref()
         .ok_or_else(|| ToolError::Message("Annotations are not available here.".into()))

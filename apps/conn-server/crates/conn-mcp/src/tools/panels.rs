@@ -13,6 +13,7 @@ pub(super) async fn open(cx: &Cx<'_>, args: &Args) -> ToolResult {
     cx.writing_caller().await?;
     let broker = cx
         .config()
+        .features
         .panels
         .as_ref()
         .ok_or_else(|| fail("capability_denied", "Panel requests are not supported."))?;
@@ -85,7 +86,7 @@ async fn browser_tab(
     args: &Args,
 ) -> ToolResult {
     use conn_preview::relay::{RelayCall, RelayFailure};
-    let preview = cx.config().preview.as_ref().ok_or_else(|| {
+    let preview = cx.config().features.preview.as_ref().ok_or_else(|| {
         fail(
             "capability_denied",
             "This server has no browser relay, so it cannot reach desktop browser tabs. Open the browser panel without url or tabId.",
@@ -164,6 +165,7 @@ pub(super) async fn database_query(cx: &Cx<'_>, args: &Args) -> ToolResult {
     cx.writing_caller().await?;
     let broker = cx
         .config()
+        .features
         .panels
         .as_ref()
         .ok_or_else(|| fail("capability_denied", "Panel requests are not supported."))?;
@@ -230,6 +232,7 @@ pub(super) async fn invoke(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
     };
     let broker = cx
         .config()
+        .features
         .panels
         .as_ref()
         .ok_or_else(|| fail("capability_denied", "Panel requests are not supported."))?;
@@ -255,6 +258,7 @@ pub(super) async fn files(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
     cx.writing_caller().await?;
     let broker = cx
         .config()
+        .features
         .panels
         .as_ref()
         .ok_or_else(|| fail("capability_denied", "No desktop panel service."))?;

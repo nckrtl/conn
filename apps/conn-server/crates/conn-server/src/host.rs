@@ -29,18 +29,16 @@ pub struct Host {
     pub vcs: VcsShared,
     pub terminals: TerminalManager,
     pub environment: Arc<Environment>,
-    /// Set once the service exists; it needs the engine, which needs this host.
-    pub scheduled_tasks: OnceLock<conn_features::scheduled::ScheduledTasks>,
-    /// Device sessions a closed thread held (`ResourceCleanupService.cleanupDevices`).
-    pub devices: OnceLock<conn_devices::Devices>,
+    /// The feature services, set once they exist: some need the engine, which needs this
+    /// host. A closed thread's device sessions and a deleted thread's scheduled tasks and
+    /// preview tabs go through them (`ResourceCleanupService`).
+    pub features: OnceLock<conn_mcp::Features>,
     /// Wakes the automatic settlement sweep: a settlement can free a parent's delegates.
     pub settlement_wake: Arc<tokio::sync::Notify>,
     /// Compacts idle Claude threads before their prompt cache expires.
     pub idle_compaction: OnceLock<Arc<crate::idle_compaction::IdleCompaction>>,
     /// Set once the engine exists; a deleted thread or a stopped session may free a worktree.
     pub worktree_cleanup: OnceLock<crate::worktree_cleanup::WorktreeCleanup>,
-    /// Preview tabs a deleted thread held (`ResourceCleanupService.cleanupPreviews`).
-    pub previews: OnceLock<conn_preview::tabs::Preview>,
     /// Settled-thread cleanups run one at a time, as T3's single event consumer runs them.
     pub settle_cleanups: Arc<tokio::sync::Mutex<()>>,
 }
@@ -622,7 +620,7 @@ impl EngineHost for Host {
         }
         let deleted = reason == ThreadClose::Deleted;
         // `ThreadDeletion`'s `preview.cleanup`: a deleted thread's tabs free their slots.
-        if deleted && let Some(previews) = self.previews.get().cloned() {
+        if deleted && let Some(previews) = self.features.get().and_then(|f| f.preview.clone()) {
             let thread_id = thread_id.to_owned();
             tokio::spawn(async move {
                 if let Err(error) = previews.close(&thread_id, None).await {
@@ -637,10 +635,11 @@ impl EngineHost for Host {
         }
         let terminals = self.terminals.clone();
         // The thread's device sessions end; the devices stay on for other threads.
-        let devices = self.devices.get().cloned();
+        let features = self.features.get();
+        let devices = features.and_then(|f| f.devices.clone());
         // `ResourceCleanupService`: a deleted thread takes the tasks bound to it.
         let tasks = deleted
-            .then(|| self.scheduled_tasks.get().cloned())
+            .then(|| features.and_then(|f| f.scheduled_tasks.clone()))
             .flatten();
         let thread_id = thread_id.to_owned();
         Box::pin(async move {
@@ -798,9 +797,7 @@ mod tests {
             vcs: VcsShared::default(),
             terminals: crate::methods::terminal::manager(Some(&environment)),
             environment: environment.clone(),
-            scheduled_tasks: OnceLock::new(),
-            devices: OnceLock::new(),
-            previews: OnceLock::new(),
+            features: OnceLock::new(),
             settle_cleanups: Arc::default(),
             settlement_wake: Arc::default(),
             idle_compaction: OnceLock::new(),
@@ -933,9 +930,7 @@ mod tests {
             vcs: VcsShared::default(),
             terminals,
             environment,
-            scheduled_tasks: OnceLock::new(),
-            devices: OnceLock::new(),
-            previews: OnceLock::new(),
+            features: OnceLock::new(),
             settle_cleanups: Arc::default(),
             settlement_wake: Arc::default(),
             idle_compaction: OnceLock::new(),
@@ -1107,7 +1102,12 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let host = cleanup_host(&dir);
         let previews = conn_preview::tabs::Preview::new(dir.clone());
-        host.previews.set(previews.clone()).unwrap();
+        host.features
+            .set(conn_mcp::Features {
+                preview: Some(previews.clone()),
+                ..Default::default()
+            })
+            .unwrap();
         let kept = previews.open_desktop("kept", &json!({})).unwrap();
         while previews.open_desktop("deleted", &json!({})).is_ok() {}
         previews
@@ -1231,9 +1231,7 @@ mod tests {
             vcs: VcsShared::default(),
             terminals: terminals.clone(),
             environment: environment.clone(),
-            scheduled_tasks: OnceLock::new(),
-            devices: OnceLock::new(),
-            previews: OnceLock::new(),
+            features: OnceLock::new(),
             settle_cleanups: Arc::default(),
             settlement_wake: Arc::default(),
             idle_compaction: OnceLock::new(),
@@ -1461,9 +1459,7 @@ mod tests {
             vcs: VcsShared::default(),
             terminals: terminals.clone(),
             environment: environment.clone(),
-            scheduled_tasks: OnceLock::new(),
-            devices: OnceLock::new(),
-            previews: OnceLock::new(),
+            features: OnceLock::new(),
             settle_cleanups: Arc::default(),
             worktree_cleanup: OnceLock::new(),
             settlement_wake: Arc::default(),
@@ -1690,10 +1686,8 @@ mod tests {
             vcs: VcsShared::default(),
             terminals: crate::methods::terminal::manager(Some(&environment)),
             environment: environment.clone(),
-            scheduled_tasks: OnceLock::new(),
-            devices: OnceLock::new(),
+            features: OnceLock::new(),
             worktree_cleanup: OnceLock::new(),
-            previews: OnceLock::new(),
             settle_cleanups: Arc::default(),
             settlement_wake: Arc::default(),
             idle_compaction: OnceLock::new(),
@@ -1813,9 +1807,7 @@ mod tests {
             vcs: VcsShared::default(),
             terminals: crate::methods::terminal::manager(Some(&environment)),
             environment: environment.clone(),
-            scheduled_tasks: OnceLock::new(),
-            previews: OnceLock::new(),
-            devices: OnceLock::new(),
+            features: OnceLock::new(),
             settle_cleanups: Arc::default(),
             settlement_wake: Arc::default(),
             idle_compaction: OnceLock::new(),

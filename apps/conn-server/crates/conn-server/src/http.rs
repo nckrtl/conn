@@ -2215,7 +2215,10 @@ mod tests {
         let (addr, auth) = serve_with_deps(
             None,
             crate::methods::Deps {
-                preview: Some(preview.clone()),
+                features: conn_mcp::Features {
+                    preview: Some(preview.clone()),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         )
@@ -2294,7 +2297,10 @@ mod tests {
         let (addr, auth) = serve_with_deps(
             None,
             crate::methods::Deps {
-                preview: Some(preview.clone()),
+                features: conn_mcp::Features {
+                    preview: Some(preview.clone()),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         )

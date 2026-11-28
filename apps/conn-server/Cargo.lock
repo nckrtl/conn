@@ -206,7 +206,8 @@ dependencies = [
  "conn-provider-acp",
  "conn-provider-claude",
  "conn-provider-codex",
- "conn-source-control",
+ "conn-provider-support",
+ "conn-source-control-core",
  "conn-support",
  "conn-vcs",
  "jiff",
@@ -454,6 +455,8 @@ name = "conn-source-control"
 version = "0.5.6"
 dependencies = [
  "conn-contract",
+ "conn-engine",
+ "conn-source-control-core",
  "conn-support",
  "conn-vcs",
  "futures-util",
@@ -467,6 +470,15 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-rustls",
+ "url",
+]
+
+[[package]]
+name = "conn-source-control-core"
+version = "0.5.6"
+dependencies = [
+ "conn-support",
+ "serde_json",
  "url",
 ]
 

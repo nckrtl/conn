@@ -140,9 +140,9 @@ async fn resolve_inner(
         for state in ["open", "all"] {
             let path = format!(
                 "repos/{}/{}/pulls?head={}&state={state}&sort=created&direction=desc&per_page=100",
-                github::encode_uri_component(&location.owner),
-                github::encode_uri_component(&location.name),
-                github::encode_uri_component(reference)
+                conn_support::url::encode_uri_component(&location.owner),
+                conn_support::url::encode_uri_component(&location.name),
+                conn_support::url::encode_uri_component(reference)
             );
             let response = github::api_json(
                 ctx,

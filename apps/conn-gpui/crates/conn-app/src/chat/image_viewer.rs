@@ -87,6 +87,10 @@ pub(crate) struct ViewerOpen {
     pub(crate) index: usize,
     /// Where pictures download from; `None` while the app has no connection.
     pub(crate) connection: Option<conn_client::Connection>,
+    /// The server URL the pictures live on, which keys them on disk.
+    pub(crate) environment: Option<String>,
+    /// Where downloaded pictures are kept, so a picture downloads once.
+    pub(crate) store: super::image_store::ImageStore,
     /// The thread the images belong to; the viewer closes when another thread shows.
     pub(crate) thread_id: Option<String>,
     /// What had the keyboard when the viewer opened; it gets it back on close.
@@ -264,6 +268,10 @@ pub(crate) struct ImageViewer {
     clock: u64,
     /// Where pictures download from; `None` while the app has no connection.
     connection: Option<conn_client::Connection>,
+    /// The server URL the pictures live on, which keys them on disk.
+    environment: Option<String>,
+    /// Where downloaded pictures are kept.
+    store: super::image_store::ImageStore,
     /// Set when the viewer closes: running decodes stop early.
     cancel: Arc<AtomicBool>,
     tokens: Tokens,
@@ -314,6 +322,8 @@ impl ImageViewer {
             items,
             index,
             connection,
+            environment,
+            store,
             thread_id,
             return_focus,
         } = open;
@@ -331,6 +341,8 @@ impl ImageViewer {
                 .collect(),
             clock: 0,
             connection,
+            environment,
+            store,
             cancel: Arc::new(AtomicBool::new(false)),
             items,
             tokens,
@@ -375,12 +387,21 @@ impl ImageViewer {
         let (id, mime_type) = (item.id.clone(), item.mime_type.clone());
         let cancel = self.cancel.clone();
         let svg_renderer = cx.svg_renderer();
+        let store = self.store.clone();
+        let environment = self.environment.clone();
         cx.spawn(async move |this, cx| {
             let bytes = if cancel.load(Ordering::Relaxed) {
                 None
             } else {
-                connection
-                    .fetch_attachment_bytes_within(&id, VIEWER_DEADLINES)
+                store
+                    .attachment_bytes(
+                        cx.background_executor(),
+                        &connection,
+                        environment.as_deref(),
+                        &id,
+                        VIEWER_DEADLINES,
+                        None,
+                    )
                     .await
                     .ok()
             };

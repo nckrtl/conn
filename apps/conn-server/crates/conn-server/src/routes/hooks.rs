@@ -69,7 +69,7 @@ async fn hook(
     let Ok(Path((hook_id, token))) = path else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some(tasks) = state.deps.scheduled_tasks.clone() else {
+    let Some(tasks) = state.deps.features.scheduled_tasks.clone() else {
         return StatusCode::NOT_FOUND.into_response();
     };
     // A rehearsal copy holds the original's hooks: a delivery there must start nothing.

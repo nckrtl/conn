@@ -134,6 +134,9 @@ function ProjectDatabase({ project }: { project: string }) {
   const [editing, setEditing] = useState<DatabaseConnection | null>(null);
   const [tables, setTables] = useState(() => tableNames(envDatabase));
   const menu = useRef<HTMLDivElement>(null);
+  // The menu filters by name and target, and the arrows move a highlight.
+  const [query, setQuery] = useState("");
+  const [highlight, setHighlight] = useState(0);
   const connection =
     [envDatabase, ...state.saved, vaultDatabase].find((c) => c.id === state.selected) ??
     envDatabase;
@@ -167,12 +170,20 @@ function ProjectDatabase({ project }: { project: string }) {
         : connection,
     );
   }
+  const q = query.trim().toLowerCase();
+  const matches = (item: DatabaseConnection) =>
+    !q || (item.name + " " + connectionTarget(item)).toLowerCase().includes(q);
+  const shownConnections = [envDatabase, ...state.saved].filter(matches);
+  const shownVault = [vaultDatabase].filter(matches);
+  const shown = [...shownConnections, ...shownVault];
   function connectionOption(item: DatabaseConnection) {
     return (
       <button
         key={item.id}
         type="button"
         aria-pressed={connection.id === item.id}
+        data-highlighted={shown[highlight]?.id === item.id || undefined}
+        data-tip={item.name + " · " + connectionTarget(item)}
         onClick={() => select(item.id)}
       >
         {item.source === "vault" && <img src={vaultIcon} alt="" />}
@@ -199,34 +210,76 @@ function ProjectDatabase({ project }: { project: string }) {
         {connection.source !== "vault" && <span>{connectionTarget(connection)}</span>}
         <Icon name="chevron-down" />
       </button>
-      <div popover="auto" ref={menu} id="lab-db-connections" className="lab-db-menu">
-        {[envDatabase, ...state.saved].map(connectionOption)}
-        <div className="lab-db-menu-label">Vault</div>
-        {connectionOption(vaultDatabase)}
-        <hr />
-        <button onClick={() => edit(true)}>Add connection…</button>
-        {connection.source !== "vault" && (
-          <button onClick={() => edit(connection.source === "env")}>
-            {connection.source === "env" ? "Copy to a new connection…" : "Edit connection…"}
-          </button>
-        )}
-        {connection.source === "manual" && (
-          <button
-            onClick={() => {
-              menu.current?.hidePopover();
-              setEditing(null);
-              const drafts = { ...state.drafts };
-              delete drafts[connection.id];
-              update({
-                saved: state.saved.filter((c) => c.id !== connection.id),
-                drafts,
-                selected: envDatabase.id,
-              });
+      <div
+        popover="auto"
+        ref={menu}
+        id="lab-db-connections"
+        className="lab-db-menu"
+        onToggle={(event) => {
+          if (!event.currentTarget.matches(":popover-open")) return;
+          setQuery("");
+          setHighlight(0);
+          event.currentTarget.querySelector("input")?.focus();
+        }}
+      >
+        <label className="lab-db-menu-search">
+          <Icon name="search" />
+          <input
+            aria-label="Search connections"
+            placeholder="Search connections…"
+            value={query}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setHighlight(0);
             }}
-          >
-            Delete connection
-          </button>
-        )}
+            onKeyDown={(event) => {
+              if (event.key === "Escape" && query) {
+                event.preventDefault();
+                event.stopPropagation();
+                setQuery("");
+              } else if ((event.key === "ArrowDown" || event.key === "ArrowUp") && shown.length) {
+                event.preventDefault();
+                setHighlight(
+                  (highlight + (event.key === "ArrowDown" ? 1 : -1) + shown.length) % shown.length,
+                );
+              } else if (event.key === "Enter" && shown[highlight]) {
+                select(shown[highlight].id);
+              }
+            }}
+          />
+        </label>
+        <div className="lab-db-menu-list">
+          {shownConnections.length > 0 && <div className="lab-db-menu-label">Connections</div>}
+          {shownConnections.map(connectionOption)}
+          {shownVault.length > 0 && <div className="lab-db-menu-label">Vault</div>}
+          {shownVault.map(connectionOption)}
+          {!shown.length && <p className="lab-db-menu-empty">No matches</p>}
+        </div>
+        <div className="lab-db-menu-actions">
+          <button onClick={() => edit(true)}>Add connection…</button>
+          {connection.source !== "vault" && (
+            <button onClick={() => edit(connection.source === "env")}>
+              {connection.source === "env" ? "Copy to a new connection…" : "Edit connection…"}
+            </button>
+          )}
+          {connection.source === "manual" && (
+            <button
+              onClick={() => {
+                menu.current?.hidePopover();
+                setEditing(null);
+                const drafts = { ...state.drafts };
+                delete drafts[connection.id];
+                update({
+                  saved: state.saved.filter((c) => c.id !== connection.id),
+                  drafts,
+                  selected: envDatabase.id,
+                });
+              }}
+            >
+              Delete connection
+            </button>
+          )}
+        </div>
       </div>
       <Tool icon="refresh" label="Refresh" onClick={() => setTables(tableNames(connection))} />
     </>

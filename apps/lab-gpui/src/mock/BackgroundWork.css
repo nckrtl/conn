@@ -1,0 +1,179 @@
+/* GPUI `background_command.rs`, `background_work.rs` and the notice rows in `chat/mod.rs`. */
+.desktop {
+  /* `shell_divider`: the sidebar 89% (dark) / 90% (light) toward the foreground, in oklab. */
+  --shell-divider: color-mix(in oklab, var(--native-sidebar) 89%, var(--ink));
+  /* `muted_icon`: the muted foreground at 70%. */
+  --muted-icon: color-mix(in srgb, var(--native-mutedForeground) 70%, transparent);
+  /* `info_foreground`: Tailwind blue-400 in dark, blue-700 in light. */
+  --info-foreground: oklch(0.707 0.165 254.624);
+}
+.desktop[data-theme="light"] {
+  --shell-divider: color-mix(in oklab, var(--native-sidebar) 90%, var(--ink));
+  --info-foreground: oklch(0.488 0.243 264.376);
+}
+/* Each card is one 24px work row: its ink starts 6px down and, for one command, ends 4px up. */
+.messages > .bg-card {
+  --lead: var(--work-row-ink);
+  --tail: 4px;
+}
+.messages > .bg-work {
+  --tail: var(--work-row-ink);
+}
+.bg-card {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.bg-line,
+.bg-item,
+.warning-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  min-height: 24px;
+  padding: 0;
+  border-radius: 6px;
+  font-size: 14px;
+  line-height: 22.75px;
+  text-align: left;
+  color: var(--native-mutedForeground);
+}
+.bg-line > .icon,
+.bg-item > .icon,
+.warning-row > .icon {
+  margin-top: 4px;
+  color: var(--muted-icon);
+}
+.bg-card[data-failed] > .bg-line,
+.bg-card[data-failed] > .bg-line > .icon {
+  color: var(--native-error);
+}
+.bg-card[data-failed] > .bg-line > .bg-count {
+  color: var(--native-mutedForeground);
+}
+.bg-line:hover {
+  color: var(--ink);
+}
+/* The text line centres in the 24px icon box. */
+.bg-label {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0.625px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.bg-label[data-mono] {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 13px;
+}
+.bg-status {
+  flex: none;
+  margin-top: 0.625px;
+  font-size: 12px;
+}
+.bg-status[data-bad] {
+  color: var(--native-error);
+}
+.bg-caret,
+.warning-row .bg-caret {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  margin-top: 4px;
+}
+.bg-caret .icon {
+  width: 12px;
+  height: 12px;
+  color: var(--muted-icon);
+}
+/* One row per command, indented to the header's label (16px icon + 10px gap). */
+.bg-item {
+  padding-left: 26px;
+}
+.bg-detail {
+  margin: 2px 0 6px 26px;
+  padding: 8px 10px;
+  border: 1px solid var(--shell-divider);
+  border-radius: 8px;
+  background: var(--native-codeBackground);
+  font:
+    400 11.5px/18px "JetBrains Mono",
+    monospace;
+  color: var(--native-mutedForeground);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+/* Info notice: a centred bordered pill between 1px hairlines that run up to it. */
+.notice-pill {
+  display: flex;
+  align-items: center;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--native-mutedForeground);
+}
+.notice-pill::before,
+.notice-pill::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--shell-divider);
+}
+.notice-pill > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 4px 10px;
+  border: 1px solid var(--shell-divider);
+  border-radius: 999px;
+}
+.notice-pill .icon {
+  width: 12px;
+  height: 12px;
+}
+/* Warnings: 24px work rows, amber icon and medium one-line label; 10px between stacked rows. */
+.messages > .warning-notice {
+  --lead: 5px;
+  --tail: 5px;
+}
+.messages > .warning-notice + .warning-notice {
+  margin-block-start: calc(10px - var(--timeline-block-gap) - 5px);
+}
+.warning-row {
+  align-items: center;
+}
+.warning-row > .icon {
+  margin-top: 0;
+  color: var(--native-warning);
+}
+.warning-row > span:not(.icon, .bg-caret) {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 500;
+  color: var(--native-warning);
+}
+.warning-row .bg-caret {
+  margin-top: 0;
+}
+.messages .warning-detail {
+  margin: 0 0 0 26px;
+  padding: 4px 0;
+}
+/* A thread link chip: sans at 0.92em in the info colour on 14% of it, as inline code pads. */
+.thread-chip {
+  padding: 0.1em 0.35em;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--info-foreground) 14%, transparent);
+  color: var(--info-foreground);
+  font-size: 0.92em;
+  text-decoration: none;
+}

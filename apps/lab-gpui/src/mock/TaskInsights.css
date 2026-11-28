@@ -14,7 +14,8 @@
 .board-insights-grid {
   display: grid;
   min-width: min-content;
-  min-height: 168px;
+  /* GPUI #384: the cards are 25% taller (103 → 128.75px); a lone row is 168 × 1.25. */
+  min-height: 210px;
 }
 .board-insights-grid > button,
 .board-insight-expanded {
@@ -28,7 +29,7 @@
   background: transparent;
   text-align: left;
   min-width: 0;
-  min-height: 103px;
+  min-height: 128.75px;
   border-radius: 0;
 }
 .board-insights-grid > button::before {
@@ -80,11 +81,17 @@
 .board-metric-summary [data-tone="bad"] {
   color: var(--native-errorForeground);
 }
+/* The sparkline keeps its top edge and takes all of the card's added height
+   (`sparkline_height`): 28px plus what the card gained over its old height. */
 .board-insight-spark {
   width: 100%;
-  height: 28px;
+  height: var(--spark-height, 53.75px);
   margin-top: auto;
-  color: var(--muted);
+  color: var(--native-mutedForeground);
+}
+/* `SeriesColors::sparkline`: the muted line at 70%. */
+.board-insight-spark polyline {
+  opacity: 0.7;
 }
 .board-insight-spark svg,
 .board-insight-chart svg {
@@ -115,6 +122,10 @@
   flex: 1;
   flex-direction: column;
   min-height: 0;
+  /* The number row is the card's top padding plus 8px above the first y label
+     (`CHART_TOP_GAP_PX` = 10 − 4 + 1 + 8). */
+  margin-top: 15px;
+  /* `SeriesColors::expanded`: the line in the full foreground. */
   color: var(--ink);
 }
 .board-insight-chart svg {

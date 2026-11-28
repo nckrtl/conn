@@ -18,6 +18,7 @@ rust-version = "1.95"
 [workspace.dependencies]
 conn-client = { path = "crates/conn-client" }
 conn-ffi = { path = "crates/conn-ffi" }
+conn-image-cache = { path = "crates/conn-image-cache" }
 conn-orbit = { path = "crates/conn-orbit" }
 conn-state = { path = "crates/conn-state" }
 conn-theme = { path = "crates/conn-theme" }

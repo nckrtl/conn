@@ -438,3 +438,88 @@
     gap: 8px;
   }
 }
+/* GPUI #403 (`panels/database/views.rs`): a 340px menu, at most 420px tall, with a 41px search row
+   on top, a scrolling list under "Connections" and "Vault", and the actions fixed at the bottom. */
+.lab-db-menu {
+  display: none;
+  width: 340px;
+  max-width: calc(100vw - 16px);
+  max-height: min(420px, calc(100vh - 16px));
+  padding: 0;
+  overflow: hidden;
+  background: var(--native-surfaceOverlay);
+  border-color: color-mix(in srgb, var(--ink) 8%, transparent);
+}
+.lab-db-menu:popover-open {
+  display: flex;
+  flex-direction: column;
+}
+.lab-db-menu-search {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  height: 41px;
+  padding: 0 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--ink) 8%, transparent);
+  color: var(--native-mutedForeground);
+}
+.lab-db-menu-search .icon {
+  width: 14px;
+  height: 14px;
+}
+.lab-db-menu-search input {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: none;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 20px;
+}
+.lab-db-menu-list {
+  flex: 1;
+  min-height: 0;
+  padding: 4px;
+  overflow-y: auto;
+}
+.lab-db-menu .lab-db-menu-list button {
+  min-height: 28px;
+  padding: 4px 8px;
+  font-size: 14px;
+  line-height: 20px;
+}
+.lab-db-menu .lab-db-menu-list button[aria-pressed="true"] {
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+}
+.lab-db-menu .lab-db-menu-list button:is(:hover, [data-highlighted]) {
+  /* `shell_highlight`: 8% of the foreground in dark, 6% in light. */
+  background: color-mix(in srgb, var(--ink) 8%, transparent);
+}
+.desktop[data-theme="light"] .lab-db-menu .lab-db-menu-list button:is(:hover, [data-highlighted]) {
+  background: color-mix(in srgb, var(--ink) 6%, transparent);
+}
+.lab-db-menu .lab-db-menu-label {
+  padding: 4px 8px;
+}
+.lab-db-menu-empty {
+  margin: 0;
+  padding: 8px;
+  font-size: 14px;
+  line-height: 20px;
+  color: var(--native-mutedForeground);
+}
+.lab-db-menu-actions {
+  flex: none;
+  padding: 4px;
+  border-top: 1px solid var(--shell-divider, var(--line));
+}
+.lab-db-menu .lab-db-menu-actions button {
+  min-height: 28px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  font-size: 14px;
+  line-height: 20px;
+}

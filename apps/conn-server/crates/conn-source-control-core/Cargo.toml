@@ -1,0 +1,20 @@
+[package]
+name = "conn-source-control-core"
+description = "Source control rules the engine needs too: the host definition registry, remote text, a watch's wake."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# `encodeURIComponent` (remote.rs).
+conn-support.workspace = true
+# A wake's notification (wake.rs).
+serde_json.workspace = true
+# The WHATWG URL parser, as `new URL` reads the URLs the host definitions take apart
+# (registry/mod.rs). conn-source-control's README, "Dependencies", has its measured cost.
+url = { version = "2.5", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

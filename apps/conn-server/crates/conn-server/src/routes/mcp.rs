@@ -44,7 +44,6 @@ pub fn service(deps: &Deps, listen_address: SocketAddr) -> Option<Arc<McpService
     let refresh_deps = deps.clone();
     Some(McpService::new(McpConfig {
         listen_address,
-        preview: deps.preview.clone(),
         refresh_provider: Some(Arc::new(move |id| {
             let deps = refresh_deps.clone();
             Box::pin(async move {
@@ -52,6 +51,7 @@ pub fn service(deps: &Deps, listen_address: SocketAddr) -> Option<Arc<McpService
             })
         })),
         files: deps.files.clone(),
+        features: deps.features.clone(),
         worktrees: Some(conn_mcp::WorktreeConfig {
             directory: Arc::new(move || crate::host::worktrees_dir(&directory)),
             settings: Arc::new(move || serde_json::Value::Object(defaults.settings.raw())),
@@ -80,17 +80,11 @@ pub fn service(deps: &Deps, listen_address: SocketAddr) -> Option<Arc<McpService
             )
         }),
         hosted_app_url: conn_mcp::DEFAULT_HOSTED_APP_URL.to_owned(),
-        scheduled_tasks: deps.scheduled_tasks.clone(),
-        annotations: deps.annotations.clone(),
-        secrets: deps.secrets.clone(),
-        test_logins: deps.test_logins.clone(),
-        panels: deps.panels.clone(),
         peers: deps
             .peers
             .clone()
             .map(|p| Arc::new(crate::peers::McpPeers(p)) as Arc<dyn conn_mcp::Peers>),
         settings: Some(settings_port(environment.clone())),
-        devices: deps.devices.clone(),
         pull_requests: crate::methods::pull_requests::mcp_host(deps),
         clone_repository: Some(crate::methods::source_control::clone_host(deps)),
     }))

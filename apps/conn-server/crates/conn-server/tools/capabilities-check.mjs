@@ -15,11 +15,12 @@
 //   undecided           nobody has looked: what the flag promises. Not advertised.
 //
 // The gate reads the flags from the contract, what the T3 server declares from
-// apps/server/src/environment/ServerEnvironment.ts, the registered methods and the engine's
-// commands from the sources, and the advertised flags from the binary's own descriptor. It
-// fails when a flag has no row, when a row names a method or a command that does not exist,
-// and when a row and the descriptor disagree. So a new upstream flag needs a decision, and a
-// newly registered method turns its flag on or fails here.
+// apps/server/src/environment/ServerEnvironment.ts, the registered methods and the commands
+// the engine handles (the arms of its `fn handler`, not the ones it refuses) from the
+// sources, and the advertised flags from the binary's own descriptor. It fails when a flag
+// has no row, when a row names a method or a command that does not exist, and when a row and
+// the descriptor disagree. So a new upstream flag needs a decision, and a newly registered
+// method turns its flag on or fails here.
 //
 // Its strength is the row: a `behaviour` row is a decision, and an `undecided` row proves
 // nothing. The summary prints both counts.

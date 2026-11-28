@@ -437,6 +437,9 @@ pub(crate) struct Store {
     /// The latest committed sequence, sent by the commit itself (T3's `EventSink` publishes
     /// after its transaction), so a caller that goes away cannot keep clients from seeing it.
     pub(crate) published: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+    /// The sequence of the last commit that wrote a shell change, for shell streams: most
+    /// commits (a streamed item, a node update) change no shell row.
+    pub(crate) shell_published: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
     /// One wake per subscribed thread, raised by a commit that appended to that thread.
     pub(crate) thread_wakes: std::sync::Arc<ThreadWakes>,
     pub(crate) limit_recovery_wake: std::sync::Arc<tokio::sync::Notify>,
@@ -592,6 +595,7 @@ impl Store {
             thread_push: None,
             effects_wake: std::sync::Arc::default(),
             published: std::sync::Arc::new(tokio::sync::watch::Sender::new(high)),
+            shell_published: std::sync::Arc::new(tokio::sync::watch::Sender::new(high)),
             thread_wakes: std::sync::Arc::default(),
             limit_recovery_wake: Default::default(),
             owner: None,
@@ -770,6 +774,8 @@ impl Store {
             effects_wake: self.effects_wake.clone(),
             effects_written: false,
             published: self.published.clone(),
+            shell_published: self.shell_published.clone(),
+            shell_written: false,
             thread_wakes: self.thread_wakes.clone(),
             appended: Vec::new(),
             limit_recovery_wake: self.limit_recovery_wake.clone(),
@@ -2187,6 +2193,8 @@ pub(crate) struct Tx<'a> {
     effects_wake: std::sync::Arc<tokio::sync::Notify>,
     effects_written: bool,
     published: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+    shell_published: std::sync::Arc<tokio::sync::watch::Sender<u64>>,
+    shell_written: bool,
     thread_wakes: std::sync::Arc<ThreadWakes>,
     /// Threads this write appended an event to, for their wakes.
     appended: Vec<String>,
@@ -3014,6 +3022,7 @@ impl Tx<'_> {
                 params![seq as i64, item.to_string()],
             )
             .map_err(err)?;
+        self.shell_written = true;
         Ok(seq)
     }
 
@@ -3210,6 +3219,7 @@ impl Tx<'_> {
                     params![seq as i64, item.to_string()],
                 )
                 .map_err(err)?;
+            self.shell_written = true;
         }
         let high = self.next_seq - 1;
         // A command that wrote nothing answers its own thread's latest sequence, as T3's
@@ -3264,6 +3274,15 @@ impl Tx<'_> {
             }
             newer
         });
+        if self.shell_written {
+            self.shell_published.send_if_modified(|published| {
+                let newer = high > *published;
+                if newer {
+                    *published = high;
+                }
+                newer
+            });
+        }
         self.thread_wakes.raise(&self.appended, high);
         if self.attention_written
             && let Some(attention) = &self.attention
@@ -4071,6 +4090,47 @@ mod tests {
                 has_create: false,
             }
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Shell streams wake only for commits that write a shell change; every commit still
+    /// publishes its sequence.
+    #[test]
+    fn only_a_shell_change_wakes_shell_streams() {
+        let dir =
+            std::env::temp_dir().join(format!("conn-engine-{}-shell-wake", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut store = Store::open(&dir.join("engine.sqlite")).unwrap();
+        let mut shell = store.shell_published.subscribe();
+        let mut any = store.published.subscribe();
+        // An event of a thread with no row changes no shell row.
+        let mut tx = store.tx().unwrap();
+        tx.append(Draft::new(
+            "ghost",
+            "message.updated",
+            json!({"id": "m1", "role": "assistant", "text": "x", "streaming": true}),
+        ))
+        .unwrap();
+        tx.commit(None).unwrap();
+        assert!(any.has_changed().unwrap());
+        assert!(!shell.has_changed().unwrap(), "no shell change, no wake");
+        any.mark_unchanged();
+        let mut tx = store.tx().unwrap();
+        let created = tx
+            .append(Draft::new(
+                "t1",
+                "thread.created",
+                json!({"id": "t1", "projectId": "p", "title": "T"}),
+            ))
+            .unwrap();
+        tx.commit(None).unwrap();
+        assert!(any.has_changed().unwrap());
+        assert!(
+            shell.has_changed().unwrap(),
+            "a new thread row wakes shells"
+        );
+        assert_eq!(*shell.borrow_and_update(), created);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

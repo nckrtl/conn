@@ -82,7 +82,7 @@ pub(crate) async fn subscribe_shell(
     let omit_idle = input["omitIdleSubagents"] == true;
     let omit_older = input["omitOlderSettled"] == true;
     // Subscribe before reading, so a commit between the read and the first wait still wakes us.
-    let mut wake = inner.notify.subscribe();
+    let mut wake = inner.shell_notify.subscribe();
     let (first, mut cursor) = inner
         .db(move |store| -> Result<(Vec<Value>, u64), String> {
             let high = store.high_water();

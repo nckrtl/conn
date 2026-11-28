@@ -309,6 +309,8 @@ pub(crate) struct Inner {
     /// The latest committed sequence. Stream tasks wake on it and read from the store. Each
     /// commit sends it (`Tx::commit`).
     pub(crate) notify: Arc<watch::Sender<u64>>,
+    /// The sequence of the last commit that wrote a shell change. Shell streams wake on it.
+    pub(crate) shell_notify: Arc<watch::Sender<u64>>,
     /// Per-thread wakes: a thread stream wakes only when its own thread commits.
     pub(crate) thread_wakes: Arc<crate::store::ThreadWakes>,
     pub(crate) providers: conn_provider::ProviderSet,
@@ -537,6 +539,7 @@ impl SqliteEngine {
         tx.enqueue(None, &effects)?;
         tx.commit(None)?;
         let notify = store.published.clone();
+        let shell_notify = store.shell_published.clone();
         let thread_wakes = store.thread_wakes.clone();
         let limit_recovery_wake = store.limit_recovery_wake.clone();
         let engine = Self {
@@ -545,6 +548,7 @@ impl SqliteEngine {
                 attention,
                 thread_push,
                 notify,
+                shell_notify,
                 thread_wakes,
                 providers,
                 live: Mutex::new(HashMap::new()),

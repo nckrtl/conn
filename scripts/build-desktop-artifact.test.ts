@@ -1,7 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off - Tests use Node's glob matcher to verify electron-builder exclusions.
 import * as NodeCrypto from "node:crypto";
-import * as NodeFS from "node:fs";
-import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -30,8 +28,7 @@ import {
   BundleNotSelfContainedError,
   BuildCommandFailedError,
   typecheckDesktopPackage,
-  requireDesktopBuildSourceProvenance,
-  DesktopSyncSourceProvenanceError,
+  gitSubprocessEnv,
   parseWslRuntimeArchiveMembers,
   readWorkspaceConfig,
   createBuildConfig,
@@ -299,14 +296,17 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }).pipe(Effect.provide(spawner), Effect.scoped);
   });
 
-  it.effect("fails closed when the build source is not a published origin sync tip", () => {
-    const repo = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "conn-sync-unpublished-"));
-    return Effect.gen(function* () {
-      const error = yield* requireDesktopBuildSourceProvenance(repo).pipe(Effect.flip);
-      assert.instanceOf(error, DesktopSyncSourceProvenanceError);
-      assert.match(error.message, /could not resolve HEAD|not a git repository|not published/i);
-    }).pipe(
-      Effect.ensuring(Effect.sync(() => NodeFS.rmSync(repo, { recursive: true, force: true }))),
+  it("resolves the build commit without inherited GIT_ variables", () => {
+    assert.deepStrictEqual(
+      gitSubprocessEnv({
+        PATH: "/usr/bin",
+        GIT_DIR: "/other/.git",
+        GIT_WORK_TREE: "/other",
+        GIT_INDEX_FILE: "/other/.git/index",
+        GIT_COMMON_DIR: "/other/.git",
+        UNSET: undefined,
+      }),
+      { PATH: "/usr/bin" },
     );
   });
 

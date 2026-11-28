@@ -2,10 +2,8 @@
 
 Conn is the fork's one customizations branch: `main` of `nckrtl/conn` (renamed
 from `nckrtl/t3code` and its `nckrtl` branch on 2026-10-11). It is checked out
-on this MacBook (`~/apps/conn`) and tracks `origin/main`. Merge
-`upstream/main` into it to take upstream changes (it carries merge commits,
-so a rebase replays them), then run the sync procedure in
-[SKILL.md](../SKILL.md).
+on this MacBook (`~/apps/conn`) and tracks `origin/main`. Full upstream merges ended on
+2026-11-19; see [FORK.md](../../../../../../FORK.md).
 
 ## What the fork's build already does
 
@@ -67,4 +65,4 @@ Unregister temporary and obsolete backup paths with `lsregister -u`, register
 `/Applications/Conn.app` with `lsregister -f`, and check its name and path in
 `lsregister -dump`. Do not reset the whole LaunchServices database. Launch only
 when the user requests it. The first launch copies the old app's user data
-(see FORK.md, "Conn"). User data in `~/.t3` is untouched.
+(see `docs/conn-features.md`, "Conn (app rename)"). User data in `~/.t3` is untouched.

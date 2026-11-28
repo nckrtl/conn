@@ -87,7 +87,7 @@ lowercase. Names come from `mapSecretFieldGroups` (`S/settingsSecrets.ts`) and
 
 ## Finding that changes the plan
 
-At this pin the T3 server mounts only `annotations.subscribe`, `annotations.create` and `annotations.remove` from the Conn-only RPC group (`S/wsFork.ts:9-13`; `M/FORK.md:1126-1139`). `credentials.*`, `testLogins.*` and `panels.*` are declared in `ForkWsRpcGroup` (`C/rpc.ts:2329-2342`) but have **no handler**. FORK.md:1138: "`credentials*`, `testLogins*` and `panels.*` remain unmounted. Do not broaden this allowlist". `S/wsMountedRpc.test.ts:8-10` enforces a three-method allowlist. What a client sees for an unmounted tag is unconfirmed. The logic behind them exists as services (`TestLoginStore`, `CredentialAutofill`, `AgentPanelBroker`) and the MCP tools use it, so the table cites those lines.
+At this pin the T3 server mounts only `annotations.subscribe`, `annotations.create` and `annotations.remove` from the Conn-only RPC group (`S/wsFork.ts:9-13`; `M/docs/conn-features.md`, "Fork RPC group"). `credentials.*`, `testLogins.*` and `panels.*` are declared in `ForkWsRpcGroup` (`C/rpc.ts:2329-2342`) but have **no handler**. `docs/conn-features.md`, "Fork RPC group": "`credentials*`, `testLogins*` and `panels.*` remain unmounted. Do not broaden this allowlist". `S/wsMountedRpc.test.ts:8-10` enforces a three-method allowlist. What a client sees for an unmounted tag is unconfirmed. The logic behind them exists as services (`TestLoginStore`, `CredentialAutofill`, `AgentPanelBroker`) and the MCP tools use it, so the table cites those lines.
 
 Consequence: with no mounted `panels.requests` stream, `AgentPanelBroker.show` always fails with reason `no_desktop` on the T3 server at this pin (`S/panels/AgentPanelBroker.ts:92-97`) unless a client reaches the broker some other way (unconfirmed). So `panel_open`, `database_query`, `mcp_connect`, `mcp_call` cannot succeed against the T3 server as mounted.
 
@@ -179,7 +179,7 @@ Other tools in these areas: none found for guest share, agent sessions or secret
 - Errors (`AgentPanelUnavailableError`, reasons seen): `no_desktop` "No Conn desktop app is connected to this server, so nothing can show the panel. Ask the user to open Conn on their Mac."; `timeout` "No Conn desktop showed the {panel} panel within {n} s."; `rejected` (desktop's own error, or "Conn could not show the {panel} panel."; "The Conn desktop showed the {panel} panel but sent no result. It may run an older Conn."); `invalid` (e.g. "Pass url or command, not both."); `tab_not_hosted`.
 - Wire: stream item is `AgentPanelRequest` (`requestId, threadId, panel, tabId?, sql?, connection?, run?, mcpServer?, mcpCall?, focusWindow`). `panels.respond` carries `{requestId, ok, deviceName?, error?, database?, mcp?, mcpCall?}` and returns no payload.
 - MCP headers and env for `mcp_connect` travel through the request and are "saved in the panel" on the desktop (C/agentPanels.ts:39-44). The server keeps nothing.
-- FORK.md:~795 says panel actions fail with `NOT_ON_THREAD` when the user is on another thread; that code is desktop-side (unconfirmed in server code).
+- `docs/conn-features.md`, "Agent-opened panels", says panel actions fail with `NOT_ON_THREAD` when the user is on another thread; that code is desktop-side (unconfirmed in server code).
 
 ### Test logins, credentials, autofill
 

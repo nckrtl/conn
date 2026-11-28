@@ -170,7 +170,7 @@ describe("a theme the environment pushed (t3 theme set)", () => {
     stop();
   });
 
-  it("is how startDefaultThemeAdoption applies it (guards the upstream merge)", () => {
+  it("is how startDefaultThemeAdoption applies it (guards the adoption wiring)", () => {
     expect(useDefaultThemeSource).toContain("asDefaultThemeAdoption(() => setTheme(defaultTheme))");
     expect(useDefaultThemeSource).toContain(
       "asDefaultThemeAdoption(() => setAppearanceMode(half))",

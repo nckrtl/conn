@@ -1116,7 +1116,7 @@ export default function ChatView(props: ChatViewProps) {
   );
   const activePreviewState = useThreadPreviewState(activeThreadRef);
   // Conn: tab identity is the thread and tab only, so a server restart keeps the desktop
-  // relay's registration (FORK.md, Web relay: stable tab identity).
+  // relay's registration (docs/conn-features.md, "Desktop tab automation").
   const resolvePreviewRuntimeTabId = activeThreadRef
     ? (tabId: string) => previewRuntimeTabId(activeThreadRef, tabId)
     : undefined;

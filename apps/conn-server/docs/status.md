@@ -349,7 +349,7 @@ thread's provider, and a switch made another way started the new provider with n
 
 ## Unserved methods: triage (2026-11-21)
 
-Of 251 contract methods, 198 were served and 21 are skipped by decision (FORK.md, "Not
+Of 251 contract methods, 198 were served and 21 are skipped by decision (`docs/scope.md`, "Not
 served, by decision"). This triage covers the other 32. **Build** means the UI needs it;
 **trivial** means match T3's answer; **ask Nick** means it looks unneeded for this fork.
 Nothing here was skipped without asking. RPC **203 of 251** after this step; `/mcp` 104 tools.
@@ -369,7 +369,7 @@ Nothing here was skipped without asking. RPC **203 of 251** after this step; `/m
 | `server.prepareTriage` | ask Nick | Clones `pingdotgg/t3code` and writes a bug-report context for T3 itself. |
 | `cloud.getRelayClientStatus`, `cloud.installRelayClient` (stream) | ask Nick | T3's cloud relay client (download and install a binary); Conn links through the Orbit Gateway. |
 | `guestShare.create` | ask Nick | Needs T3 cloud's managed endpoint (connector hostname); a beta, off by default. |
-| `provider.chatgpt.handoff.subscribe` (stream), `provider.chatgpt.import-profile`, `provider.chatgpt.reconnect-profile` | ask Nick | T3's own ChatGPT OAuth with tokens in its store; Nick's 2026-11-20 decision: no ChatGPT token here, providers sign in through Orbit's AI router. Proposal: add to FORK.md's skips. |
+| `provider.chatgpt.handoff.subscribe` (stream), `provider.chatgpt.import-profile`, `provider.chatgpt.reconnect-profile` | ask Nick | T3's own ChatGPT OAuth with tokens in its store; Nick's 2026-11-20 decision: no ChatGPT token here, providers sign in through Orbit's AI router. Proposal: add to the skips in `docs/scope.md`. |
 | `provider.consumeResetCredit` | ask Nick | Spends an account's rate-limit reset credit. Codex goes through the app-server, Claude calls Anthropic's API with the login (forbidden here); with Orbit's AI router there is no account credit. |
 | `server.searchAcpRegistry`, `server.prepareAcpRegistryAgent`, `server.uninstallAcpRegistryManagedBinary`, `server.acceptAcpRegistryUrlAuth`, `server.listAcpRegistrySessions`, `server.importAcpRegistrySession`, `server.deleteAcpRegistrySession`, `server.listAcpRegistryProviders`, `server.setAcpRegistryProvider`, `server.disableAcpRegistryProvider`, `server.logoutAcpRegistry` | ask Nick | The ACP registry provider is not built. Nick decided on 2026-11-14: no index download and no install; Orbit installs CLIs. Search and prepare need the index; the other nine act on a registry provider instance that does not exist here. |
 
@@ -1316,7 +1316,7 @@ change; the contract keeps their definitions.
 
 - **Not served:** `provider.install.start`, `cancel`, `remove`, `subscribe` and
   `server.updateProvider`. They stay unregistered and answer "not supported", as the other
-  methods not served by decision (FORK.md, "Conn Server"). The managed-Codex path that
+  methods not served by decision (`docs/scope.md`, "Not served, by decision"). The managed-Codex path that
   answered "succeeded, local" for Orbit's bundled `codex` (`conn-provider-codex`
   `install.rs`) is removed.
 - **Every provider entry says `setup.canInstall: false`**, Antigravity included (T3 says
@@ -1617,7 +1617,7 @@ read the monorepo two levels up, and `tools/follow-conn.sh` regenerates and repo
   thread list and read (#36961), and scheduled tasks that return `webhookUrl` only on
   creation and take a `scheduledTaskId` filter (#27716). See
   `crates/conn-provider-claude/README.md`, "Known differences".
-- The nightly sync follows the Conn Server (Nick, 2026-11-16; `docs/upkeep.md`, "In the nightly sync").
+- The nightly sync followed the Conn Server from 2026-11-16 until upstream merges ended after 2026-11-19 (`FORK.md`).
 - **CI on Linux** (PR #95): `methods.json` names a digest of the contract inputs
   (`contractDigest`, sha256 over the tracked files) instead of a commit id, which a shallow
   checkout cannot give and a squash merge rewrites. `parity.mjs` seals the T3 server's `PATH`.
@@ -1677,8 +1677,8 @@ quarters of that change, and those parts cannot be generated. That upkeep is the
 this server, and it is the reason for the stop.
 
 The Conn Server still wins on two points: no wake delay, and about 250 MiB less while a thread
-is active. If those start to matter, or if Conn needs server features that collide with the
-nightly upstream merge, this work is the starting point.
+is active. If those start to matter, or if Conn needs server features that the T3 server
+does not have, this work is the starting point.
 
 Not measured: a T3 server's start time with many stored threads; the `claude` process and its
 MCP helpers inside a container (on a Mac: 145 MiB with minimal settings, 294 MiB with a user's
@@ -3334,8 +3334,8 @@ T3 Code.
 8. **Proofs.** Live Codex; the Linux pass; Orbit in a scratch container on Beast; desktop and
    mobile in a VM; the recorder scenarios on Linux. The recorder with the real web client and
    a live model is done (2026-11-14, see "What exists").
-9. **Upkeep.** Wire the bump into the nightly sync (its script is outside the Conn
-   repository; `FORK.md` there says the Grok bot runs it). The first real bump
+9. **Upkeep.** The nightly sync that this step meant has stopped; upstream provider fixes are
+   now ported by hand (`FORK.md`, "Relationship to T3 Code"). The first real bump
    (2026-11-14, `docs/upkeep.md` "Bumps") took about four hours. The provider gaps it left:
    reaping a recorded Claude CLI after a restart and `workState: "waiting_for_children"` in
    `/mcp` (Claude Monitor wakes are built since 2026-11-14).

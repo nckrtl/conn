@@ -81,7 +81,7 @@ updates them and owns PATH; the server only resolves each CLI on PATH (or the in
 check. The server mounts no install or update RPC, looks up no latest versions, and publishes no
 `versionAdvisory` ([seam](../../apps/server/src/provider/orbitManagedProviders.ts)). A
 compatibility advisory is data for one quiet line; it never blocks a session or hides models.
-See [Provider CLIs](../conn-features.md#provider-clis).
+See [Provider CLIs](../../apps/conn-gpui/docs/reference/conn-features.md#provider-clis).
 
 ## Protocol traps
 

@@ -293,7 +293,7 @@ export function NewTaskRouteScreen({ route }: StaticScreenProps<NewTaskRoutePara
         })
       : null;
   const canStartScratch = scratchOption?.ready === true;
-  // Conn: in Orbit mode a thread can also start in a clone of an Orbit Project (docs/conn-features.md, "Orbit").
+  // Conn: in Orbit mode a thread can also start in a clone of an Orbit Project (apps/conn-gpui/docs/reference/conn-features.md, "Orbit").
   const orbitMode = useOrbitGateway().provider === "orbit" && reservedDestinationProject === null;
   const pendingScratchRef = useRef<AbortController | null>(null);
   const cancelPendingScratch = useCallback(() => {

@@ -14,7 +14,7 @@ and SDKs.
 | `apps/ios`                                                            | The iPhone app: native SwiftUI on the shared Rust core through UniFFI (`conn-ffi`).                                                                 | [features](apps/ios/docs/features.md)                                                                                 |
 | `crates/`                                                             | The GPUI-free Rust core both native clients share: `conn-client`, `conn-state`, `conn-theme`, `conn-orbit`, `conn-ffi` and others.                  | [AGENTS](AGENTS.md), "Where code lives"                                                                               |
 | `apps/lab-gpui`, `apps/lab-ios`                                       | Design labs: browser mocks of the desktop and iPhone shells with local fixtures.                                                                    | [lab-gpui README](apps/lab-gpui/README.md)                                                                            |
-| `apps/web`, `apps/desktop`, `apps/mobile`, `apps/server`, `packages/` | Legacy TypeScript apps from T3 Code. They stay as the design reference until the native clients reach parity, then go.                              | [FORK.md](FORK.md), [Conn features](docs/conn-features.md)                                                            |
+| `apps/web`, `apps/desktop`, `apps/mobile`, `apps/server`, `packages/` | Legacy TypeScript apps from T3 Code. They stay as the design reference until the native clients reach parity, then go.                              | [FORK.md](FORK.md), [Conn features](apps/conn-gpui/docs/reference/conn-features.md)                                   |
 
 ## Build and run
 
@@ -23,10 +23,11 @@ and SDKs.
 - **Desktop client:** see [Prerequisites & commands](apps/conn-gpui/README.md#prerequisites--commands)
   and the [dev loop](apps/conn-gpui/docs/dev-loop.md).
 - **iPhone app:** builds only in the nick-vm macOS VM. See
-  [iPhone app (native)](docs/development.md#iphone-app-native).
+  [iPhone app (native)](apps/ios/README.md).
 - **Shared core:** `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`
   and `cargo test --workspace` at the repo root.
-- **Design labs:** `vp i`, then `vp run lab:gpui` or `vp run lab:ios` at the repo root.
+- **Design labs:** `npm ci --prefix apps`, then `npm --prefix apps run lab:gpui` or `lab:ios`.
+  They are a standalone npm package (`apps/package.json`), outside the pnpm workspace.
 
 ## Origin
 

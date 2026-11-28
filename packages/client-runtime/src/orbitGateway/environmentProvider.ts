@@ -443,7 +443,7 @@ export function planEnvironmentProvider(input: {
         renew.push(id);
         return true;
       }
-      // Conn: pair again so the session can manage linked environments (see docs/conn-features.md, "Orbit").
+      // Conn: pair again so the session can manage linked environments (see apps/conn-gpui/docs/reference/conn-features.md, "Orbit").
       const lastTry = state.accessPairedAt?.[id];
       return (
         lacksAccess.has(id) && (lastTry === undefined || now - lastTry >= ACCESS_PAIRING_RETRY_MS)

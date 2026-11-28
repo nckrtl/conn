@@ -86,7 +86,7 @@ function CloseOrbitPanel() {
 }
 
 /**
- * Conn: the Orbit panel, Orbit's configuration in the same shell as Settings (docs/conn-features.md, "Orbit
+ * Conn: the Orbit panel, Orbit's configuration in the same shell as Settings (apps/conn-gpui/docs/reference/conn-features.md, "Orbit
  * panel"). It exists only in the desktop app with "Environments from" set to Orbit.
  */
 export function OrbitPanelLayout({ children }: { children: ReactNode }) {

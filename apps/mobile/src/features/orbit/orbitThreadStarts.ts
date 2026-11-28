@@ -20,7 +20,7 @@ import {
 import { isDraftThreadRoute } from "../threads/thread-route-state";
 import type { OrbitThreadStartStore } from "./orbitThreadStartStore";
 
-/** Conn: runs the threads started in an Orbit Project on this phone (docs/conn-features.md, "Orbit"). */
+/** Conn: runs the threads started in an Orbit Project on this phone (apps/conn-gpui/docs/reference/conn-features.md, "Orbit"). */
 
 export interface MobileOrbitThreadStartPorts {
   readonly store: OrbitThreadStartStore;

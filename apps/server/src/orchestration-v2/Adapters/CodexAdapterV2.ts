@@ -1810,7 +1810,7 @@ export const layerAppServerClientFactory: Layer.Layer<
           ...codexAppServerEnvironment(input.environment),
           ...(input.settings.homePath ? { CODEX_HOME: input.settings.homePath } : {}),
         };
-        // Conn: hold the first spawn until Orbit MCP hosts answer (docs/conn-features.md › Codex MCP network wait).
+        // Conn: hold the first spawn until Orbit MCP hosts answer (apps/conn-gpui/docs/reference/conn-features.md › Codex MCP network wait).
         const mcpNetwork = yield* waitForMcpNetwork({ ...process.env, ...environment });
         if (!mcpNetwork.ready || mcpNetwork.waitedMs >= 1_000) {
           yield* (mcpNetwork.ready ? Effect.logInfo : Effect.logWarning)(

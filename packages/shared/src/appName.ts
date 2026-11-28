@@ -1,5 +1,5 @@
 // Conn: UI copy names the product as `{appName}` filled from `appName()`, never as a literal
-// (lint rule t3code/no-hardcoded-app-name). See docs/conn-features.md, "i18n and the app name".
+// (lint rule t3code/no-hardcoded-app-name). See apps/conn-gpui/docs/reference/conn-features.md, "i18n and the app name".
 const DEFAULT_APP_NAME = "Conn";
 
 let current: string | null = null;

@@ -4,7 +4,7 @@ The Conn-specific features of the legacy TypeScript apps (`apps/web`, `apps/desk
 `apps/mobile`, `apps/server`). They moved here unchanged from `FORK.md`, so the headings
 that code and docs cite still match. These apps are legacy and will be removed once the
 native clients reach parity; until then this file is part of their design reference. See
-[FORK.md](../FORK.md).
+[FORK.md](../../../../FORK.md).
 
 ## What the fork changes
 
@@ -114,15 +114,16 @@ Mobile draws the Superheroicons **24px** solid set (`assets/conn/superheroicons/
 web and desktop stay on 16px). The manifest's `sf` map names a glyph for each SF Symbol name
 the app uses.
 
-- iOS: `node scripts/build-conn-symbols.ts` builds a custom symbol per mapped name
-  (`ConnSymbols.xcassets`, `ConnSymbolNames.swift`). `ConnSymbols.swift` swaps
+- iOS: a custom symbol per mapped name (`ConnSymbols.xcassets`, `ConnSymbolNames.swift`). These
+  are hand-owned: `scripts/build-conn-symbols.ts` built them and is gone; add a `.symbolset` and
+  its name by hand, in `apps/ios/Conn` too. `ConnSymbols.swift` swaps
   `UIImage`'s `systemImageNamed` methods so every caller gets them: `AppSymbol.tsx`
   (expo-symbols), tab bars and menus. Unmapped names stay SF Symbols.
 - Native header buttons take template images instead (`assets/header-icons/`,
   `src/native/connHeaderIcons.generated.ts`), so they draw the glyph at 24pt; build header
   icons with `connHeaderIcon(name)` (react-navigation items) or `connScreensHeaderIcon(name)`
   (react-native-screens items). `V5StackHeader` converts SF names itself.
-- Android: the same script writes `src/components/ui/connGlyphs.generated.ts`;
+- Android: `src/components/ui/connGlyphs.generated.ts` (from the same, now removed script);
   `AppSymbol.android.tsx` draws it with react-native-svg (`ConnGlyph.tsx`).
 - Composer chips: `apps/mobile/scripts/sync-context-chip-icons.mjs` renders the
   manifest's `chips` from the 24px set.
@@ -131,7 +132,7 @@ Run the scripts after changing the set and commit their output.
 
 Sources:
 
-- `assets/conn/superheroicons/`, `scripts/build-conn-symbols.ts`.
+- `assets/conn/superheroicons/`, `apps/ios/Conn/ConnSymbols.xcassets`.
 - `apps/mobile/modules/conn-symbols/ios/`, `apps/mobile/src/components/ui/`
   (`AppSymbol.tsx`, `AppSymbol.android.tsx`, `ConnGlyph.tsx`), `apps/mobile/src/native/connHeaderIcon.ts`.
 
@@ -964,7 +965,7 @@ Cancelling or leaving it empty restores the group. On Threads, the workspace,
 environment and project filter sits inside the field, like Mail, replacing
 upstream's filter pills. Pull requests keeps its own filter row. The field uses
 the composer's text size. This needs the `react-native-screens` patch in
-[Vendored dependency patches](development.md#vendored-dependency-patches).
+[Vendored dependency patches](../../../../docs/development.md#vendored-dependency-patches).
 
 Sources:
 
@@ -986,7 +987,7 @@ Markdown uses the system font with weights and JetBrains Mono for code. Blocks
 and headings have 12pt above/between them; list items have 6pt between them.
 List markers start at the list's edge, with an 8pt gap to the text for both
 numbers and bullets. This needs the enriched-markdown patch in
-[Vendored dependency patches](development.md#vendored-dependency-patches).
+[Vendored dependency patches](../../../../docs/development.md#vendored-dependency-patches).
 
 On iOS 26 and later, a native `EdgeBlur` replaces upstream's color fade under
 the composer and header, and the composer is realigned. `T3EdgeBlurView` lives
@@ -1056,12 +1057,12 @@ Sources:
 
 ### Orbit registration
 
-`scripts/orbit/t3-orbit-register URL` registers the host's T3 server with the
-Orbit Gateway. It issues a fresh admin session labeled "Orbit Gateway" and
+`apps/conn-server/orbit/t3-orbit-register URL` registers the host's server with the
+Orbit Gateway. Conn Server's thread push needs the session it issues. It issues a fresh admin session labeled "Orbit Gateway" and
 sends it to `POST /api/v1/conn/environments`. A scheduled job runs it daily,
 because the Gateway's admin session expires.
 
-The script needs the T3 CLI of the server that is running now. On macOS, give
+The script needs the CLI of the server that is running now (default `conn-server`). On macOS, give
 it the server's launchd job with `--service-label LABEL`. At every run it reads
 the first argument of the loaded job (`launchctl print gui/<uid>/LABEL`). Only
 when launchd does not know the job does it read `ProgramArguments` of
@@ -1072,13 +1073,13 @@ when launchd does not know the job does it read `ProgramArguments` of
 - nick and nick-vm: `com.nckrtl.conn-server`.
 
 Install the script in `~/.local/bin`. Fill in the placeholders of
-`scripts/orbit/com.nckrtl.t3-orbit-register.plist` and put it in
+`apps/conn-server/orbit/com.nckrtl.t3-orbit-register.plist` and put it in
 `~/Library/LaunchAgents`. It logs to `~/Library/Logs/t3-orbit-register.log`.
 `RunAtLoad` registers as soon as the job loads, so load it only when you mean
-to register. On Linux, install `scripts/orbit/t3-orbit-register.service` and
+to register. On Linux, install `apps/conn-server/orbit/t3-orbit-register.service` and
 `.timer` in `~/.config/systemd/user`. Put `T3_ORBIT_REGISTER_URL=<url>` in
 `~/.config/t3-orbit-register.env`, then enable the timer and lingering. The
-unit runs the `~/.local/bin/t3` launcher symlink, which updates repoint.
+unit runs `~/.local/bin/conn-server`; give it a stable path.
 
 > [!WARNING]
 > Never put a versioned runtime path (`…/runtime/versions/<version>/t3`) in a
@@ -1087,7 +1088,7 @@ unit runs the `~/.local/bin/t3` launcher symlink, which updates repoint.
 > still pointed at the pruned 0.0.46 runtime and failed with "No such file or
 > directory". It had not registered since 2026-10-27. The script warns when
 > it gets a versioned path. `--print-cli` shows the binary it resolves
-> without contacting anything. `sh scripts/orbit/t3-orbit-register.test.sh`
+> without contacting anything. `sh apps/conn-server/orbit/t3-orbit-register.test.sh`
 > checks the lookup offline.
 
 > [!WARNING]
@@ -1098,11 +1099,11 @@ unit runs the `~/.local/bin/t3` launcher symlink, which updates repoint.
 
 Sources:
 
-- `scripts/orbit/t3-orbit-register`,
-  `scripts/orbit/com.nckrtl.t3-orbit-register.plist`,
-  `scripts/orbit/t3-orbit-register.service`,
-  `scripts/orbit/t3-orbit-register.timer`,
-  `scripts/orbit/t3-orbit-register.test.sh`.
+- `apps/conn-server/orbit/t3-orbit-register`,
+  `apps/conn-server/orbit/com.nckrtl.t3-orbit-register.plist`,
+  `apps/conn-server/orbit/t3-orbit-register.service`,
+  `apps/conn-server/orbit/t3-orbit-register.timer`,
+  `apps/conn-server/orbit/t3-orbit-register.test.sh`.
 
 ### Linked environment renewal
 

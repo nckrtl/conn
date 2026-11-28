@@ -121,7 +121,7 @@ Mac.
 6. On failure, put the backup back the same way and relaunch.
 
 User data in `~/.t3` is untouched. The first launch of a renamed app copies
-the old app's user data (see `docs/conn-features.md`, "Conn (app rename)").
+the old app's user data (see `apps/conn-gpui/docs/reference/conn-features.md`, "Conn (app rename)").
 
 ## iPhone (Polar)
 

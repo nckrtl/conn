@@ -153,7 +153,7 @@ const failStorage = (cause: unknown) =>
  * code and then the link's token travel to it, so plain http is accepted only
  * where the network already encrypts: this machine, or a Tailscale address.
  */
-// Conn: the Orbit WireGuard network (see docs/conn-features.md, "Linked environments (peer links)"). WireGuard encrypts
+// Conn: the Orbit WireGuard network (see apps/conn-gpui/docs/reference/conn-features.md, "Linked environments (peer links)"). WireGuard encrypts
 // every packet between peers, so plain http there is as safe as on a tailnet.
 const ORBIT_WIREGUARD_PREFIX = "10.44.";
 export const isOrbitWireGuardHost = (host: string) =>

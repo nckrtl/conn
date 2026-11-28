@@ -35,7 +35,7 @@ it. Conn's `release.yml` takes only `v*.*.*` tags, so neither starts the other.
 
 Orbit installs and updates every provider CLI and owns PATH. The Conn Server never installs,
 updates or removes one (Nick, 2026-11-20). Providers sign in through Orbit's AI router; the
-server never holds provider account tokens. See [Provider CLIs](../../../docs/conn-features.md#provider-clis).
+server never holds provider account tokens. See [Provider CLIs](../../conn-gpui/docs/reference/conn-features.md#provider-clis).
 
 ## Not served, by decision
 

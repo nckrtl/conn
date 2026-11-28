@@ -128,7 +128,7 @@ function resolveAppVariant(value: string | undefined): AppVariant {
 const HOSTED_APP_HOST = "app.t3.codes";
 
 // nckrtl fork: every build shows the Conn logo instead of the T3 mark. The Icon Composer projects
-// and exports live in assets/conn (see docs/conn-features.md, "Mobile icons"). Preview uses the production icon.
+// and exports live in assets/conn (see apps/conn-gpui/docs/reference/conn-features.md, "Mobile icons"). Preview uses the production icon.
 const CONN_ICON_ASSETS = {
   development: {
     appIcon: fromRepoRoot("assets/conn/dev/conn-dev-ios-1024.png"),

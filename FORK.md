@@ -7,13 +7,13 @@ says what Conn is, how it still relates to T3 Code, and where the old fork notes
 
 ## What Conn is
 
-| Part             | Where                           | What it is                                                                                                                                  |
-| ---------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| Conn Server      | `apps/conn-server`              | Rust server for Conn clients. It serves the T3 client contract, `/mcp` and the provider protocols. One server runs in each Orbit container. |
-| Desktop client   | `apps/conn-gpui`                | Native Rust + GPUI macOS app. It talks to the Conn Server through its Rust contract crates.                                                 |
-| iPhone app       | `apps/ios`                      | Native SwiftUI app on the shared Rust core (`conn-ffi`). It builds only in nick-vm.                                                         |
-| Shared Rust core | `crates/`                       | GPUI-free crates both native clients use: `conn-client`, `conn-state`, `conn-theme`, `conn-orbit`, `conn-ffi` and others.                   |
-| Design labs      | `apps/lab-gpui`, `apps/lab-ios` | Vite mocks of the desktop and iPhone shells with local fixtures (`vp run lab:gpui`, `vp run lab:ios`). They never start an agent run.       |
+| Part             | Where                           | What it is                                                                                                                                    |
+| ---------------- | ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Conn Server      | `apps/conn-server`              | Rust server for Conn clients. It serves the T3 client contract, `/mcp` and the provider protocols. One server runs in each Orbit container.   |
+| Desktop client   | `apps/conn-gpui`                | Native Rust + GPUI macOS app. It talks to the Conn Server through its Rust contract crates.                                                   |
+| iPhone app       | `apps/ios`                      | Native SwiftUI app on the shared Rust core (`conn-ffi`). It builds only in nick-vm.                                                           |
+| Shared Rust core | `crates/`                       | GPUI-free crates both native clients use: `conn-client`, `conn-state`, `conn-theme`, `conn-orbit`, `conn-ffi` and others.                     |
+| Design labs      | `apps/lab-gpui`, `apps/lab-ios` | Vite mocks of the desktop and iPhone shells with local fixtures (`npm --prefix apps run lab:gpui`, `lab:ios`). They never start an agent run. |
 
 Builds:
 
@@ -21,7 +21,7 @@ Builds:
   See [apps/conn-server/docs/scope.md](apps/conn-server/docs/scope.md), "Release".
 - **Desktop client.** Built and bundled on the Mac with the scripts in
   `apps/conn-gpui/scripts`. See [apps/conn-gpui/README.md](apps/conn-gpui/README.md).
-- **iPhone app.** Built in nick-vm; see [iPhone app (native)](docs/development.md#iphone-app-native).
+- **iPhone app.** Built in nick-vm; see [iPhone app (native)](apps/ios/README.md).
 - **Legacy apps.** The Electron desktop app and the T3 server still build from `main` with the
   [build guide](.agents/skills/nckrtl-shell-design/references/build.md). See
   [docs/development.md](docs/development.md).
@@ -66,7 +66,7 @@ work goes there.
 
 Until then they stay the design reference for the native clients: `apps/conn-gpui/AGENTS.md`
 takes every pixel, token and behaviour from `apps/web`, `apps/desktop` and
-[docs/conn-features.md](docs/conn-features.md). The Conn Server's tools also read the
+[apps/conn-gpui/docs/reference/conn-features.md](apps/conn-gpui/docs/reference/conn-features.md). The Conn Server's tools also read the
 contract, the web client and `apps/server` from this tree.
 
 The upstream-only workflows keep their `github.repository == 'pingdotgg/t3code'` guards. They
@@ -74,9 +74,9 @@ go with the legacy apps.
 
 ## Where the old fork notes went
 
-| Content                                                                                                                                                                                              | Now in                                                           |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------- |
-| Conn features of the legacy apps ("What the fork changes": Shell design, Icons, Workspaces, Orbit, the panels, Linked environments, i18n and the app name, Provider CLIs, Codex MCP network wait, …) | [docs/conn-features.md](docs/conn-features.md), same headings    |
-| Conn Server scope, "Not served, by decision", platform and host scope                                                                                                                                | [apps/conn-server/docs/scope.md](apps/conn-server/docs/scope.md) |
-| Legacy build and signing, Vendored dependency patches, Pull request runners                                                                                                                          | [docs/development.md](docs/development.md)                       |
-| Upstream sync procedure, sync audits and sync notes                                                                                                                                                  | Removed. They are in this file's git history up to `70560d579a`. |
+| Content                                                                                                                                                                                              | Now in                                                                                                          |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Conn features of the legacy apps ("What the fork changes": Shell design, Icons, Workspaces, Orbit, the panels, Linked environments, i18n and the app name, Provider CLIs, Codex MCP network wait, …) | [apps/conn-gpui/docs/reference/conn-features.md](apps/conn-gpui/docs/reference/conn-features.md), same headings |
+| Conn Server scope, "Not served, by decision", platform and host scope                                                                                                                                | [apps/conn-server/docs/scope.md](apps/conn-server/docs/scope.md)                                                |
+| Legacy build and signing, Vendored dependency patches, Pull request runners                                                                                                                          | [docs/development.md](docs/development.md)                                                                      |
+| Upstream sync procedure, sync audits and sync notes                                                                                                                                                  | Removed. They are in this file's git history up to `70560d579a`.                                                |

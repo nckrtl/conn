@@ -623,7 +623,7 @@ describe("DesktopWindow", () => {
       }),
   );
 
-  // Conn fork guard: the frosted outer shell. See docs/conn-features.md, "Shell design".
+  // Conn fork guard: the frosted outer shell. See apps/conn-gpui/docs/reference/conn-features.md, "Shell design".
   it.effect("frosts the macOS window with native vibrancy under a clear backing", () =>
     Effect.gen(function* () {
       const fakeWindow = makeFakeBrowserWindow();

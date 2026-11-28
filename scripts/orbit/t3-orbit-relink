@@ -9,7 +9,7 @@
 # links again with the same addresses and access. Linking again replaces the old link.
 # The T3 CLI command defaults to `t3`. With --service-label, the CLI is the binary that launchd job runs
 # now, found by t3-orbit-register --print-cli (installed next to this script). Run it daily, like
-# t3-orbit-register (see docs/conn-features.md, "Orbit registration").
+# t3-orbit-register (see apps/conn-gpui/docs/reference/conn-features.md, "Orbit registration").
 set -eu
 
 if [ "${1:-}" = --service-label ]; then

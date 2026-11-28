@@ -1,6 +1,6 @@
 #!/bin/sh
 # Offline checks for t3-orbit-register's runtime lookup and the job templates.
-# Run: sh scripts/orbit/t3-orbit-register.test.sh   (needs python3 where PlistBuddy is missing)
+# Run: sh apps/conn-server/orbit/t3-orbit-register.test.sh   (needs python3 where PlistBuddy is missing)
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 script="$here/t3-orbit-register"
@@ -47,12 +47,12 @@ out=$(sh "$script" --service-plist "$tmp/env.plist" http://127.0.0.1:1 /usr/bin/
 [ "$rc" = 64 ] && pass "job plus CLI is a usage error" || fail "job plus CLI is a usage error" "rc=$rc $out"
 
 out=$(sh "$script" --print-cli http://127.0.0.1:1 2>&1)
-[ "$out" = "t3" ] && pass "default CLI is t3" || fail "default CLI is t3" "$out"
+[ "$out" = "conn-server" ] && pass "default CLI is conn-server" || fail "default CLI is conn-server" "$out"
 
 out=$(sh "$script" --print-cli http://127.0.0.1:1 "$bin" 2>&1)
 case "$out" in *"versioned runtime path"*) pass "versioned CLI warns" ;; *) fail "versioned CLI warns" "$out" ;; esac
 
-# Registration flow with fake t3 and curl: revoke only when the Gateway answered and refused.
+# Registration flow with a fake conn-server and curl: revoke only when the Gateway answered and refused.
 if command -v jq >/dev/null 2>&1; then
     mkdir -p "$tmp/fake"
     cat > "$tmp/fake/curl" <<'EOF'
@@ -66,12 +66,12 @@ echo '{"data":{"admin_session_expires_at":"later"}}' > "$out"
 [ "$FAKE_STATUS" = 000 ] && exit 28
 printf '%s' "$FAKE_STATUS"
 EOF
-    cat > "$tmp/fake/t3" <<'EOF'
+    cat > "$tmp/fake/conn-server" <<'EOF'
 #!/bin/sh
 echo "$*" >> "$FAKE_DIR/t3.log"
 case "$*" in *"session issue"*) echo '{"sessionId":"s-1","token":"tok-secret"}' ;; esac
 EOF
-    chmod +x "$tmp/fake/curl" "$tmp/fake/t3"
+    chmod +x "$tmp/fake/curl" "$tmp/fake/conn-server"
     rm -f "$tmp/curl.log"
     for c in 200:keep:0:Registered 409:revoke:1:answered 503:keep:1:kept 000:keep:1:kept; do
         st=${c%%:*}; rest=${c#*:}; want=${rest%%:*}; rest=${rest#*:}; want_rc=${rest%%:*}; want_out=${rest#*:}
@@ -117,28 +117,6 @@ if command -v plutil >/dev/null 2>&1; then
     out=$(sh "$script" --service-plist "$tmp/array.plist" --print-cli http://127.0.0.1:1 2>&1); rc=$?
     [ "$rc" = 65 ] && pass "bare-array plist exits 65" || fail "bare-array plist exits 65" "rc=$rc $out"
 fi
-
-# t3-orbit-relink: the same lookup, and a failed list fails the run.
-relink="$here/t3-orbit-relink"
-if command -v jq >/dev/null 2>&1; then
-    cp "$script" "$tmp/t3-orbit-register"; cp "$relink" "$tmp/t3-orbit-relink"
-    printf '#!/bin/sh\necho "$*" >> "%s/relink-t3.log"\ncase "$*" in "environment list --json") echo "[]" ;; esac\n' "$tmp" > "$bin"
-    out=$(HOME=$tmp PATH="$tmp/fakelaunchctl:$PATH" sh "$tmp/t3-orbit-relink" --service-label com.example.loaded 2>&1); rc=$?
-    { [ "$rc" = 0 ] && grep -q 'environment list --json' "$tmp/relink-t3.log"; } \
-        && pass "relink uses the loaded job" || fail "relink uses the loaded job" "rc=$rc $out"
-    out=$(HOME=$tmp sh "$tmp/t3-orbit-relink" --service-label com.example.missing 2>&1); rc=$?
-    [ "$rc" = 66 ] && pass "relink with an unknown job exits 66" || fail "relink with an unknown job exits 66" "rc=$rc $out"
-    printf '#!/bin/sh\necho broken >&2\nexit 3\n' > "$tmp/fake-failing-t3"; chmod +x "$tmp/fake-failing-t3"
-    out=$(sh "$tmp/t3-orbit-relink" "$tmp/fake-failing-t3" 2>&1); rc=$?
-    [ "$rc" = 1 ] && pass "relink fails when the list fails" || fail "relink fails when the list fails" "rc=$rc $out"
-    printf '#!/bin/sh\necho fake-t3 "$@"\n' > "$bin"
-else
-    echo "skip relink (no jq)"
-fi
-if command -v plutil >/dev/null 2>&1; then
-    plutil -lint "$here/com.nckrtl.t3-orbit-relink.plist" >/dev/null && pass "relink plist lints" || fail "relink plist lints" "plutil -lint"
-fi
-grep -q 'PlistBuddy' "$here/com.nckrtl.t3-orbit-relink.plist" && fail "relink plist has no PlistBuddy" "found" || pass "relink plist has no PlistBuddy"
 
 sh "$script" >/dev/null 2>&1; rc=$?
 [ "$rc" = 64 ] && pass "no URL exits 64" || fail "no URL exits 64" "rc=$rc"

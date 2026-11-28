@@ -3,8 +3,8 @@
 //! (`StructureList`), and the connection error alert.
 
 use crate::a11y::ConnA11yExt as _;
-use conn_desktop::database::DatabaseColumn;
-use conn_desktop::database::api::{
+use conn_database::DatabaseColumn;
+use conn_database::api::{
     ConnectionSource, DatabaseQueryResult, PanelConnection, connection_target,
 };
 use conn_desktop::vault::VaultErrorKind;

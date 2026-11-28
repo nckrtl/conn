@@ -9,6 +9,19 @@ use serde_json::{Map, Value};
 /// The rows of the result: column name to cell. Cells are strings, numbers, booleans or null.
 pub type DatabaseRow = Map<String, Value>;
 
+/// TLS requirement for a resolved external/Vault database connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum DatabaseTls {
+    #[serde(rename = "disabled")]
+    Disabled,
+    #[serde(rename = "required")]
+    Required,
+    #[serde(rename = "verify-ca")]
+    VerifyCa,
+    #[serde(rename = "verify-full")]
+    VerifyFull,
+}
+
 /// The database engine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

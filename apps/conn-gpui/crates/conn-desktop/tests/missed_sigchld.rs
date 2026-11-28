@@ -22,8 +22,8 @@ mod unix {
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
-    use conn_desktop::child_reaper;
     use conn_desktop::vault::VaultClient;
+    use conn_process as child_reaper;
     use nix::sys::signal::{SigSet, SigmaskHow, Signal, sigprocmask};
     use tokio::process::Command;
 

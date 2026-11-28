@@ -181,6 +181,7 @@ pub(crate) fn panel_menu_items(
 ) -> Vec<PanelMenuItem> {
     RightPanelTab::MENU_ORDER
         .into_iter()
+        .filter(|tab| super::is_tab_enabled(*tab))
         // A thread without a project leaves Files, MCP and API out of the list.
         .filter(|tab| has_project || !tab.needs_project())
         .map(|tab| PanelMenuItem {

@@ -14,7 +14,6 @@ use super::types::{
     DatabaseColumn, DatabaseConnection, DatabaseDriver, DatabaseRequest, DatabaseResponse,
     DatabaseRow,
 };
-use crate::vault::VaultDatabase;
 
 /// Where a panel connection comes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -338,28 +337,6 @@ pub fn new_connection(from: Option<&PanelConnection>) -> PanelConnection {
 }
 
 // ─── Calls ───────────────────────────────────────────────────────────────────
-
-/// Converts a [`VaultDatabase`] listing entry into a [`PanelConnection`] (never holds a password).
-#[must_use]
-pub fn panel_connection_from_vault(db: &VaultDatabase) -> PanelConnection {
-    PanelConnection {
-        id: format!("vault:{}", db.id),
-        name: db.name.clone(),
-        source: ConnectionSource::Vault,
-        connection: DatabaseConnection {
-            driver: db.driver,
-            host: db.host.clone(),
-            port: Some(db.port),
-            database: db.database.clone(),
-            username: db.username.clone(),
-            password: String::new(),
-            vault_item_id: Some(db.id.clone()),
-            ssh: None,
-        },
-        ssh_host: db.ssh_host.clone(),
-        organization: db.organization.clone(),
-    }
-}
 
 /// Options for one call.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

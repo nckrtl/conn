@@ -52,6 +52,7 @@ use super::browser_passkeys::{self as passkeys, PasskeyGate, PasskeyMessage, Pas
 use super::chrome::{self, ConnTooltipExt as _, FloatingSurfaceExt as _};
 use super::color::to_hsla;
 use super::header::superhero_icon;
+#[cfg(feature = "panel-laravel-toolbar")]
 use super::laravel_toolbar::{LaravelToolbar, host_script};
 use crate::preview_host::{BrowserHandle, PageFacts};
 
@@ -268,6 +269,7 @@ pub(crate) struct BrowserPanel {
     #[cfg(test)]
     passkey_replies: RefCell<Vec<String>>,
     /// The Laravel debug bar under the page (`x-toolbar` headers and `__LARAVEL_TOOLBAR_DATA__`).
+    #[cfg(feature = "panel-laravel-toolbar")]
     laravel_toolbar: Entity<LaravelToolbar>,
     /// The toolbar's overflow menu (`PreviewMoreMenu`) is open.
     more_menu_open: bool,
@@ -377,6 +379,7 @@ impl BrowserPanel {
         let annotations = AnnotationUiState::new(AnnotationSubject::Page, window, cx, |_, _, _| {});
         let view = Rc::new(RefCell::new(None));
         let last_bounds = Rc::new(Cell::new(None));
+        #[cfg(feature = "panel-laravel-toolbar")]
         let laravel_toolbar =
             cx.new(|cx| LaravelToolbar::new(tokens.clone(), view.clone(), last_bounds.clone(), cx));
 
@@ -432,6 +435,7 @@ impl BrowserPanel {
             window_handle: None,
             #[cfg(test)]
             passkey_replies: RefCell::new(Vec::new()),
+            #[cfg(feature = "panel-laravel-toolbar")]
             laravel_toolbar,
             more_menu_open: false,
             polling_runtime: false,
@@ -709,21 +713,28 @@ impl BrowserPanel {
     }
 
     /// The Laravel debug bar entity, for the host to follow its events.
+    #[cfg(feature = "panel-laravel-toolbar")]
     pub(crate) fn laravel_toolbar(&self) -> Entity<LaravelToolbar> {
         self.laravel_toolbar.clone()
     }
 
     /// The Conn server the thread runs on: the debug bar changes only its Orbit Instance.
     pub(crate) fn set_environment(&mut self, environment_id: String, cx: &mut Context<'_, Self>) {
+        #[cfg(feature = "panel-laravel-toolbar")]
         self.laravel_toolbar
             .update(cx, |bar, cx| bar.set_environment(environment_id, cx));
+        #[cfg(not(feature = "panel-laravel-toolbar"))]
+        let _ = (environment_id, cx);
     }
 
     /// The workspace root: the debug bar opens source files only inside it.
     pub(crate) fn set_workspace_root(&mut self, root: Option<String>, cx: &mut Context<'_, Self>) {
+        #[cfg(feature = "panel-laravel-toolbar")]
         self.laravel_toolbar.update(cx, |bar, cx| {
             bar.set_project_root(root.map(std::path::PathBuf::from), cx);
         });
+        #[cfg(not(feature = "panel-laravel-toolbar"))]
+        let _ = (root, cx);
     }
 
     pub(crate) fn set_project(&mut self, project_id: Option<String>, cx: &mut Context<'_, Self>) {
@@ -858,6 +869,7 @@ impl BrowserPanel {
         } else {
             self.host_script_pending = true;
         }
+        #[cfg(feature = "panel-laravel-toolbar")]
         self.laravel_toolbar
             .update(cx, |bar, cx| bar.on_load_start(cx));
     }
@@ -1039,6 +1051,7 @@ impl BrowserPanel {
         self.host_script_pending = false;
         #[cfg(test)]
         self.host_scripts.set(self.host_scripts.get() + 1);
+        #[cfg(feature = "panel-laravel-toolbar")]
         if let Some(view) = self.view.borrow().as_ref() {
             view.execute_javascript(&host_script());
         }
@@ -1847,6 +1860,7 @@ impl BrowserPanel {
     }
 
     pub(crate) fn set_tokens(&mut self, tokens: Tokens, cx: &mut Context<'_, Self>) {
+        #[cfg(feature = "panel-laravel-toolbar")]
         self.laravel_toolbar
             .update(cx, |bar, cx| bar.set_tokens(tokens.clone(), cx));
         self.tokens = tokens;
@@ -2275,9 +2289,13 @@ impl BrowserPanel {
                                             }
                                         }
                                         BrowserOverlayEvent::LaravelToolbar { kind, data, url } => {
-                                            let map = data.as_object().cloned();
-                                            panel.laravel_toolbar.update(cx, |bar, cx| {
-                                                match (kind.as_str(), map) {
+                                            #[cfg(feature = "panel-laravel-toolbar")]
+                                            {
+                                                let map = data.as_object().cloned();
+                                                panel.laravel_toolbar.update(cx, |bar, cx| match (
+                                                    kind.as_str(),
+                                                    map,
+                                                ) {
                                                     ("page", Some(map)) => {
                                                         bar.on_page_data(Some(map), &url, cx)
                                                     }
@@ -2288,21 +2306,29 @@ impl BrowserPanel {
                                                         bar.on_page_update(map, cx)
                                                     }
                                                     _ => {}
-                                                }
-                                            });
-                                            cx.notify();
+                                                });
+                                                cx.notify();
+                                            }
+                                            #[cfg(not(feature = "panel-laravel-toolbar"))]
+                                            let _ = (kind, data, url);
                                         }
                                         BrowserOverlayEvent::LaravelToolbarDetails { id, raw } => {
+                                            #[cfg(feature = "panel-laravel-toolbar")]
                                             if let Some(map) = raw.as_object().cloned() {
                                                 panel.laravel_toolbar.update(cx, |bar, cx| {
                                                     bar.on_details(&id, map, cx)
                                                 });
                                             }
+                                            #[cfg(not(feature = "panel-laravel-toolbar"))]
+                                            let _ = (id, raw);
                                         }
                                         BrowserOverlayEvent::ToolbarResponse(response) => {
+                                            #[cfg(feature = "panel-laravel-toolbar")]
                                             panel.laravel_toolbar.update(cx, |bar, cx| {
                                                 bar.on_response(response, cx)
                                             });
+                                            #[cfg(not(feature = "panel-laravel-toolbar"))]
+                                            let _ = response;
                                         }
                                         BrowserOverlayEvent::LoadStart => {
                                             panel.on_load_start(cx);
@@ -3602,11 +3628,14 @@ impl Render for BrowserPanel {
 
         let vault_popover = self.render_vault_logins_popover(cx);
         let inline_picker = self.render_inline_logins_picker(cx);
+        #[cfg(feature = "panel-laravel-toolbar")]
         let laravel_bar = self
             .laravel_toolbar
             .read(cx)
             .is_visible()
             .then(|| self.laravel_toolbar.clone());
+        #[cfg(not(feature = "panel-laravel-toolbar"))]
+        let laravel_bar: Option<gpui_kit::AnyElement> = None;
         let context_menu = self.context_menu.as_ref().and_then(|menu| {
             let bounds = self.last_bounds.get()?;
             let (x, y) = menu.position();

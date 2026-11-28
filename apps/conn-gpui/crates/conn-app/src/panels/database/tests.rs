@@ -3,8 +3,8 @@
 
 use std::path::Path;
 
-use conn_desktop::database::api::{ConnectionSource, PanelConnection, new_connection};
-use conn_desktop::database::{DatabaseConnection, DatabaseDriver};
+use conn_database::api::{ConnectionSource, PanelConnection, new_connection};
+use conn_database::{DatabaseConnection, DatabaseDriver};
 use conn_theme::Tokens;
 use gpui_kit::AppContext as _;
 use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};

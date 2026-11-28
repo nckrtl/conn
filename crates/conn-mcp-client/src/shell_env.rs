@@ -10,7 +10,7 @@ use tokio::io::AsyncReadExt as _;
 use tokio::process::Command;
 use tokio::sync::OnceCell;
 
-use crate::child_reaper::OwnedChild;
+use conn_process::OwnedChild;
 
 /// The variables taken from the login shell (Conn's `LOGIN_SHELL_ENV_NAMES`).
 const LOGIN_SHELL_ENV_NAMES: &[&str] = &[

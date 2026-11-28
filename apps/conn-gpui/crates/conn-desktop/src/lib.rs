@@ -1,17 +1,11 @@
-//! Native backends for conn-gpui's right-panel surfaces.
+//! macOS desktop host services for `conn-gpui`.
 //!
-//! Conn's desktop app runs these in its Electron main process
-//! (`apps/desktop/src/ipc/methods/*.ts`). Here each is a GPUI-free async module that the app
-//! drives on its Tokio runtime. Request and response types mirror Conn's IPC schemas field for
-//! field, so the panels can port Conn's renderer logic directly.
+//! Feature-specific backends (`conn-api-client`, `conn-database`, `conn-mcp-client`,
+//! `conn-laravel-toolbar`, `conn-process`) live in their own crates so they can be reused across
+//! apps or moved into standalone programs without pulling in desktop-only host services.
 #![forbid(unsafe_code)]
 
-pub mod api_request;
-pub mod child_reaper;
 pub mod control;
-pub mod database;
-pub mod laravel_toolbar;
-pub mod mcp;
 pub mod operator;
 pub mod orbit;
 pub mod server_store;

@@ -1,6 +1,6 @@
 //! The Database surface (Conn `apps/web/src/database/DatabasePanel.tsx`): the project's
 //! database from `.env` and saved manual connections, their tables, a table's columns, and
-//! read-only SQL executed natively via [`conn_desktop::database::DatabaseRunner`].
+//! read-only SQL executed natively via [`conn_database::DatabaseRunner`].
 
 mod empty;
 mod form;
@@ -9,18 +9,20 @@ mod picker;
 mod store;
 #[cfg(test)]
 mod tests;
+mod vault_bridge;
 mod views;
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 
-use conn_desktop::database::api::{
+use conn_database::api::{
     CallOptions, ConnectionSource, DatabaseQueryResult, PanelConnection, browse_table_sql,
     connection_key, connection_target, describe_database_table, list_database_tables,
-    new_connection, panel_connection_from_vault, run_read_only_query,
+    new_connection, run_read_only_query,
 };
-use conn_desktop::database::{DatabaseColumn, DatabaseRunner};
-use conn_desktop::vault::VaultErrorKind;
+use conn_database::{DatabaseColumn, DatabaseRunner};
+use conn_desktop::vault::{VaultClient, VaultErrorKind};
 use conn_theme::Tokens;
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::input::{Editor, EditorState, Input, InputEvent, InputState};
@@ -41,6 +43,7 @@ use self::store::{
     DatabaseStore, active_connection, filter_tables, finalize_draft, format_result_summary,
     load_env_connection, load_store, project_connections, save_store,
 };
+use self::vault_bridge::{VaultCredentialResolver, panel_connection_from_vault};
 use self::views::{
     ConnectionMenuView, menu_wanted_height, render_connection_alert, render_connection_menu,
     render_rows_grid, render_structure_list,
@@ -110,6 +113,7 @@ pub(crate) struct DatabasePanel {
     pending: PendingQueries,
     store: DatabaseStore,
     runner: DatabaseRunner,
+    vault: VaultClient,
     env_connection: Option<PanelConnection>,
     vault_connections: Vec<PanelConnection>,
     vault_status: Option<VaultErrorKind>,
@@ -203,6 +207,11 @@ impl DatabasePanel {
             }
         });
 
+        let vault = VaultClient::new();
+        let runner = DatabaseRunner::with_resolver(
+            conn_database::ssh_tunnel::SSH_BINARY,
+            Arc::new(VaultCredentialResolver::new(vault.clone())),
+        );
         Self {
             tokens,
             project_key: None,
@@ -211,7 +220,8 @@ impl DatabasePanel {
             owner: None,
             pending: PendingQueries::default(),
             store: load_store(),
-            runner: DatabaseRunner::new(),
+            runner,
+            vault,
             env_connection: None,
             vault_connections: Vec::new(),
             vault_status: None,
@@ -380,7 +390,7 @@ impl DatabasePanel {
         if cfg!(test) {
             return;
         }
-        let vault = self.runner.vault().clone();
+        let vault = self.vault.clone();
         if !vault.is_installed() {
             self.pending.end_vault_loads();
             self.vault_connections.clear();
@@ -727,8 +737,7 @@ impl DatabasePanel {
             let outcome = task.await;
             let reply = match &outcome {
                 Ok(Ok(result)) => {
-                    let agent_res =
-                        conn_desktop::database::api::agent_query_result(&connection, result);
+                    let agent_res = conn_database::api::agent_query_result(&connection, result);
                     Ok(conn_contract::AgentPanelDatabaseResult {
                         connection: agent_res.connection,
                         columns: agent_res.columns,

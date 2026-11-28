@@ -247,6 +247,15 @@ async fn sqlite_reports_a_missing_file_and_bad_sql() -> TestResult {
 
 #[tokio::test]
 async fn vault_connections_report_missing_or_locked_vault() {
+    #[derive(Debug)]
+    struct MissingVaultResolver;
+
+    impl DatabaseCredentialResolver for MissingVaultResolver {
+        fn resolve<'a>(&'a self, _item_id: &'a str, _allow_unlock: bool) -> CredentialFuture<'a> {
+            Box::pin(async { Err("Vault is not installed on this Mac.".to_owned()) })
+        }
+    }
+
     let connection = DatabaseConnection {
         driver: DatabaseDriver::Mysql,
         host: "db.test".into(),
@@ -257,11 +266,19 @@ async fn vault_connections_report_missing_or_locked_vault() {
         vault_item_id: Some("entry-1".into()),
         ssh: None,
     };
-    let result = DatabaseRunner::with_vault_binary("/nonexistent/Vault")
-        .run(&DatabaseRequest::tables(connection))
+    let without_resolver = DatabaseRunner::new()
+        .run(&DatabaseRequest::tables(connection.clone()))
         .await;
+    assert_eq!(without_resolver.error.as_deref(), Some(VAULT_UNSUPPORTED));
+
+    let with_resolver = DatabaseRunner::with_resolver(
+        ssh_tunnel::SSH_BINARY,
+        std::sync::Arc::new(MissingVaultResolver),
+    )
+    .run(&DatabaseRequest::tables(connection))
+    .await;
     assert_eq!(
-        result.error.as_deref(),
+        with_resolver.error.as_deref(),
         Some("Vault is not installed on this Mac.")
     );
 }

@@ -5118,10 +5118,10 @@ fn panel_request(value: serde_json::Value) -> conn_contract::AgentPanelRequest {
 }
 
 /// A database the test never reaches: a SQLite file that does not exist.
-fn unreachable_database() -> conn_desktop::database::api::PanelConnection {
-    let mut connection = conn_desktop::database::api::new_connection(None);
+fn unreachable_database() -> conn_database::api::PanelConnection {
+    let mut connection = conn_database::api::new_connection(None);
     connection.name = "test".to_owned();
-    connection.connection.driver = conn_desktop::database::DatabaseDriver::Sqlite;
+    connection.connection.driver = conn_database::DatabaseDriver::Sqlite;
     connection.connection.database = "/nonexistent/conn-thread-panel-test.sqlite".to_owned();
     connection
 }

@@ -16,9 +16,7 @@ use serde_json::Value;
 
 use super::model::{ToolbarData, ToolbarHistoryRow};
 use super::store::ToolbarStore;
-use crate::api_request::toolbar::{
-    ToolbarHeaderPayload, decode_toolbar_headers, minimal_toolbar_row,
-};
+use crate::headers::{ToolbarHeaderPayload, decode_toolbar_headers, minimal_toolbar_row};
 
 /// Hides the page's own toolbar while the client draws it under the page
 /// (`HIDE_PAGE_TOOLBAR_CSS`).

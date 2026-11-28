@@ -270,15 +270,47 @@ pub(crate) const CONTROL_HEIGHT_PX: f32 = 32.0;
 pub(crate) const ICON_BUTTON_PX: f32 = 24.0;
 pub(crate) const ICON_BUTTON_GLYPH_PX: f32 = 14.0;
 /// `ApiTabs`: `h-9`, `gap-4`, `ps-4`.
+#[cfg_attr(
+    not(any(
+        feature = "panel-api",
+        feature = "panel-database",
+        feature = "panel-mcp"
+    )),
+    expect(dead_code, reason = "used by optional panel features")
+)]
 pub(crate) const SECTION_TABS_HEIGHT_PX: f32 = 36.0;
 /// Row inset used by panel lists (`ps-4`, `px-4`).
 pub(crate) const ROW_PAD_START_PX: f32 = 16.0;
 /// Sidebar geometry shared by search controls and their selectable list rows.
+#[cfg_attr(
+    not(any(feature = "panel-database", feature = "panel-mcp")),
+    expect(dead_code, reason = "used by optional database and MCP panels")
+)]
 pub(crate) const LIST_INLINE_INSET_PX: f32 = 8.0;
+#[cfg_attr(
+    not(any(feature = "panel-database", feature = "panel-mcp")),
+    expect(dead_code, reason = "used by optional database and MCP panels")
+)]
 pub(crate) const SEARCH_LIST_GAP_PX: f32 = 6.0;
+#[cfg_attr(
+    not(any(feature = "panel-database", feature = "panel-mcp")),
+    expect(dead_code, reason = "used by optional database and MCP panels")
+)]
 pub(crate) const LIST_ROW_HEIGHT_PX: f32 = 32.0;
+#[cfg_attr(
+    not(any(feature = "panel-database", feature = "panel-mcp")),
+    expect(dead_code, reason = "used by optional database and MCP panels")
+)]
 pub(crate) const LIST_ROW_GAP_PX: f32 = 2.0;
+#[cfg_attr(
+    not(any(feature = "panel-database", feature = "panel-mcp")),
+    expect(dead_code, reason = "used by optional database and MCP panels")
+)]
 pub(crate) const LIST_ROW_INSET_PX: f32 = 14.0;
+#[cfg_attr(
+    not(any(feature = "panel-database", feature = "panel-mcp")),
+    expect(dead_code, reason = "used by optional database and MCP panels")
+)]
 pub(crate) const LIST_ROW_RADIUS_PX: f32 = 8.0;
 /// Conn `StatusDotBadge` (`apps/web/src/components/StatusDotBadge.tsx`) geometry:
 /// `6px` solid status dot (`size-1.5`) with a `2px` opaque cutout ring (`10px` outer disc)
@@ -503,6 +535,14 @@ pub(crate) fn soft_input_group(tokens: &Tokens) -> Div {
 
 /// One underlined section tab (`ApiTabs` button) with an optional muted count.
 #[derive(Clone, Debug)]
+#[cfg_attr(
+    not(any(
+        feature = "panel-api",
+        feature = "panel-database",
+        feature = "panel-mcp"
+    )),
+    expect(dead_code, reason = "used by optional panel features")
+)]
 pub(crate) struct SectionTab {
     pub(crate) id: &'static str,
     pub(crate) label: &'static str,
@@ -511,6 +551,14 @@ pub(crate) struct SectionTab {
 
 /// `ApiTabs`: underlined section tabs, `h-9 gap-4 ps-4 pe-toolbar-end`, divider below, the
 /// active tab marked with a 2px primary bar on the divider. `trailing` sits at the far end.
+#[cfg_attr(
+    not(any(
+        feature = "panel-api",
+        feature = "panel-database",
+        feature = "panel-mcp"
+    )),
+    expect(dead_code, reason = "used by optional panel features")
+)]
 pub(crate) fn section_tabs(
     id: impl Into<SharedString>,
     tokens: &Tokens,
@@ -645,6 +693,10 @@ pub(crate) struct MenuRow {
 /// A row list entry: a menu row or a `MenuSeparator`.
 pub(crate) enum MenuEntry {
     Row(MenuRow),
+    #[cfg_attr(
+        not(feature = "panel-api"),
+        expect(dead_code, reason = "used by optional panel-api feature")
+    )]
     Separator,
 }
 

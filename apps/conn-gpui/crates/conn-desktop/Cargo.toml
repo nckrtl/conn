@@ -1,6 +1,6 @@
 [package]
 name = "conn-desktop"
-description = "Native backends for conn-gpui's right-panel surfaces (API, Database, MCP, Orbit Tasks): the Rust equivalents of Conn's Electron main-process IPC methods."
+description = "macOS desktop host services for conn-gpui (control socket, Operator dictation, Vault/Vaultwarden, server store, desktop Orbit storage)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -10,16 +10,11 @@ rust-version.workspace = true
 [dependencies]
 base64 = "=0.22.1"
 conn-orbit.workspace = true
-# Database panel: one async driver stack for MySQL/MariaDB, PostgreSQL and SQLite.
-sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "mysql", "postgres", "sqlite-bundled", "json", "chrono", "uuid", "bigdecimal"] }
-chrono = { version = "=0.4.45", default-features = false, features = ["clock", "std"] }
-futures.workspace = true
+conn-process.workspace = true
 # Also trust the macOS system keychain: Orbit's root CA (the Gateway, `*.test` app hosts and
-# HTTP MCP servers) lives there, as in Conn, which uses Chromium's network stack.
+# local HTTPS services) lives there, as in Conn, which uses Chromium's network stack.
 reqwest = { workspace = true, features = ["rustls-tls-native-roots"] }
 serde.workspace = true
-# Keep JSON object order: pretty bodies as JSON.stringify writes them, tool input schemas list
-# form fields, `.mcp.json` lists servers.
 serde_json = { workspace = true, features = ["preserve_order"] }
 sha2.workspace = true
 tempfile.workspace = true
@@ -29,15 +24,15 @@ url.workspace = true
 uuid = { version = "=1.18.1", features = ["v4"] }
 zeroize = { version = "=1.8.2", features = ["derive"] }
 
-[target.'cfg(unix)'.dependencies]
-# Safe `killpg` for stopping a stdio MCP server's whole process group.
-nix = { version = "=0.31.3", default-features = false, features = ["signal"] }
-
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "=3.5.1"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["process", "io-util", "rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["fs", "process", "io-util", "rt-multi-thread", "macros"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+# Used by `tests/missed_sigchld.rs` to block SIGCHLD before starting Tokio.
+nix = { version = "=0.31.3", default-features = false, features = ["signal"] }
 
 [lints]
 workspace = true

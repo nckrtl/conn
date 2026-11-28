@@ -13,6 +13,7 @@
 //!   the exit status (a CLI's success flag) or a graceful shutdown.
 //! - [`retire`] kills a child and hands it to the reaper: one owned background thread that polls
 //!   `try_wait()` with a short backoff until each child is collected.
+#![forbid(unsafe_code)]
 
 use std::io;
 use std::process::ExitStatus;

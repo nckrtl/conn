@@ -9,11 +9,11 @@
 //! - [`send`] / [`ApiClient::send`]: one request, with Conn's exact semantics and error strings.
 //! - [`store`]: saved requests per project, drafts, labels and persistence.
 //! - [`response_view`]: body formatting and status badges for the response pane.
-//! - [`toolbar`]: the Laravel Toolbar payload carried in response headers.
+#![forbid(unsafe_code)]
 
+pub mod format;
 pub mod response_view;
 pub mod store;
-pub mod toolbar;
 
 #[cfg(test)]
 mod send_tests;

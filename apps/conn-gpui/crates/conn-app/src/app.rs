@@ -6359,6 +6359,7 @@ impl ConnApp {
         let has_project = self.shown_thread_has_project();
         RightPanelTab::MENU_ORDER
             .into_iter()
+            .filter(|tab| crate::panels::is_tab_enabled(*tab))
             .filter(|tab| has_project || !tab.needs_project())
             .filter(|tab| match tab {
                 RightPanelTab::Browser | RightPanelTab::Tasks => true,

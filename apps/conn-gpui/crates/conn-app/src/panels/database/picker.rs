@@ -1,7 +1,7 @@
 //! The pure parts of the Database panel's connection picker: which connections a search keeps,
 //! which row a key lands on, and how tall the menu may be so it stays inside the window.
 
-use conn_desktop::database::api::{ConnectionSource, PanelConnection, connection_target};
+use conn_database::api::{ConnectionSource, PanelConnection, connection_target};
 use gpui_kit::{Bounds, Pixels};
 
 /// The tallest the menu grows: about 17 rows of 28px and the search field.

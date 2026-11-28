@@ -3,6 +3,7 @@
 
 mod address;
 pub(crate) mod annotations;
+#[cfg(feature = "panel-api")]
 mod api;
 mod browser;
 mod browser_context_menu;
@@ -10,6 +11,7 @@ mod browser_inline_logins;
 mod browser_passkeys;
 pub(crate) mod chrome;
 mod color;
+#[cfg(feature = "panel-database")]
 mod database;
 mod device;
 mod diff;
@@ -21,8 +23,10 @@ mod files;
 mod files_definition;
 pub(crate) mod header;
 use conn_theme::highlight;
+#[cfg(feature = "panel-laravel-toolbar")]
 mod laravel_toolbar;
 pub(crate) mod linked_items;
+#[cfg(feature = "panel-mcp")]
 mod mcp;
 mod pull_request;
 mod tasks;
@@ -48,25 +52,40 @@ use gpui_kit::{
     AnyElement, App, Context, Entity, IntoElement, ParentElement, Render, Styled, Window, div, px,
 };
 
+#[cfg(feature = "panel-api")]
 use self::api::ApiPanel;
 use self::browser::{BrowserPanel, BrowserTabEvent, Navigation};
 use self::color::to_hsla;
+#[cfg(feature = "panel-database")]
 use self::database::DatabasePanel;
-#[cfg(test)]
+#[cfg(all(test, feature = "panel-database"))]
 pub(crate) use self::database::NO_LINKED_CONNECTION;
-#[cfg(test)]
+#[cfg(all(test, feature = "panel-database"))]
 pub(crate) use self::database::TOO_MANY_PENDING_QUERIES;
 use self::device::DevicePanel;
 use self::diff::DiffPanel;
 use self::files::FilesPanel;
 use self::header::{PanelHeaderCallbacks, PanelHeaderProps, render_panel_header};
+#[cfg(feature = "panel-laravel-toolbar")]
 use self::laravel_toolbar::LaravelToolbarEvent;
 use self::linked_items::LinkedItemsPanel;
+#[cfg(feature = "panel-mcp")]
 use self::mcp::McpPanel;
 use self::pull_request::PullRequestPanel;
 use self::tasks::TasksPanel;
 use self::terminal::TerminalPanel;
 use crate::a11y::ConnA11yExt as _;
+
+/// Whether a right-panel surface is compiled into this build.
+#[must_use]
+pub(crate) const fn is_tab_enabled(tab: RightPanelTab) -> bool {
+    match tab {
+        RightPanelTab::Api => cfg!(feature = "panel-api"),
+        RightPanelTab::Database => cfg!(feature = "panel-database"),
+        RightPanelTab::Mcp => cfg!(feature = "panel-mcp"),
+        _ => true,
+    }
+}
 
 /// What the right panel asks of the shell.
 #[derive(Clone, Debug)]
@@ -150,8 +169,11 @@ pub struct RightPanel {
     history_project: Option<String>,
     history_hostname: Option<String>,
     annotations: Option<(Vec<AnnotationRecord>, bool, bool)>,
+    #[cfg(feature = "panel-api")]
     api: Entity<ApiPanel>,
+    #[cfg(feature = "panel-database")]
     database: Entity<DatabasePanel>,
+    #[cfg(feature = "panel-mcp")]
     mcp: Entity<McpPanel>,
     tasks: Entity<TasksPanel>,
     pull_request: Entity<PullRequestPanel>,
@@ -223,20 +245,24 @@ impl RightPanel {
         .detach();
         let diff = cx.new(|_| DiffPanel::new(tokens.clone(), connection.clone()));
         let terminal = cx.new(|cx| TerminalPanel::new(tokens.clone(), cx));
+        #[cfg(feature = "panel-api")]
         let api = cx.new(|cx| ApiPanel::new(tokens.clone(), window, cx));
-        let api_toolbar = api.read(cx).laravel_toolbar();
-        cx.subscribe(
-            &api_toolbar,
-            |this, _, event: &LaravelToolbarEvent, cx| match event {
-                LaravelToolbarEvent::OpenQuery(sql) => {
-                    this.database
-                        .update(cx, |panel, cx| panel.set_agent_sql(sql.clone(), cx));
-                    cx.emit(RightPanelEvent::OpenTab(RightPanelTab::Database));
-                }
-            },
-        )
-        .detach();
+        #[cfg(all(feature = "panel-api", feature = "panel-laravel-toolbar"))]
+        {
+            let api_toolbar = api.read(cx).laravel_toolbar();
+            cx.subscribe(
+                &api_toolbar,
+                |this, _, event: &LaravelToolbarEvent, cx| match event {
+                    LaravelToolbarEvent::OpenQuery(sql) => {
+                        this.open_database_query(sql.clone(), cx);
+                    }
+                },
+            )
+            .detach();
+        }
+        #[cfg(feature = "panel-database")]
         let database = cx.new(|cx| DatabasePanel::new(tokens.clone(), window, cx));
+        #[cfg(feature = "panel-mcp")]
         let mcp = cx.new(|cx| McpPanel::new(tokens.clone(), window, cx));
         let tasks = cx.new(|cx| TasksPanel::new(tokens.clone(), window, cx));
         let pull_request =
@@ -322,8 +348,11 @@ impl RightPanel {
             history_project: None,
             history_hostname: None,
             annotations: None,
+            #[cfg(feature = "panel-api")]
             api,
+            #[cfg(feature = "panel-database")]
             database,
+            #[cfg(feature = "panel-mcp")]
             mcp,
             tasks,
             pull_request,
@@ -447,18 +476,19 @@ impl RightPanel {
         })
         .detach();
         // "Open in Database" on a query of the debug bar.
-        let toolbar = browser.read(cx).laravel_toolbar();
-        cx.subscribe(
-            &toolbar,
-            |this, _, event: &LaravelToolbarEvent, cx| match event {
-                LaravelToolbarEvent::OpenQuery(sql) => {
-                    this.database
-                        .update(cx, |panel, cx| panel.set_agent_sql(sql.clone(), cx));
-                    cx.emit(RightPanelEvent::OpenTab(RightPanelTab::Database));
-                }
-            },
-        )
-        .detach();
+        #[cfg(feature = "panel-laravel-toolbar")]
+        {
+            let toolbar = browser.read(cx).laravel_toolbar();
+            cx.subscribe(
+                &toolbar,
+                |this, _, event: &LaravelToolbarEvent, cx| match event {
+                    LaravelToolbarEvent::OpenQuery(sql) => {
+                        this.open_database_query(sql.clone(), cx);
+                    }
+                },
+            )
+            .detach();
+        }
         let (project, root) = (self.project_id.clone(), self.workspace_root.clone());
         let environment = self.environment_id.clone();
         let history = (self.history_project.clone(), self.history_hostname.clone());
@@ -712,6 +742,20 @@ impl RightPanel {
         self.sync_surface_visibility(cx);
     }
 
+    /// Opens a SQL query handed over from another surface (e.g. the Laravel toolbar) in the
+    /// Database panel when that feature is enabled.
+    #[cfg(feature = "panel-laravel-toolbar")]
+    fn open_database_query(&mut self, sql: String, cx: &mut Context<'_, Self>) {
+        #[cfg(feature = "panel-database")]
+        {
+            self.database
+                .update(cx, |panel, cx| panel.set_agent_sql(sql, cx));
+            cx.emit(RightPanelEvent::OpenTab(RightPanelTab::Database));
+        }
+        #[cfg(not(feature = "panel-database"))]
+        let _ = (sql, cx);
+    }
+
     /// Hands `sql` to `owner`'s Database editor. It waits there until that thread shows with
     /// its project's connections loaded (`openDatabaseQuery`). `Err` says why it was refused.
     pub fn set_database_sql(
@@ -720,8 +764,16 @@ impl RightPanel {
         sql: String,
         cx: &mut Context<'_, Self>,
     ) -> Result<(), String> {
-        self.database
-            .update(cx, |panel, cx| panel.queue_sql(owner, sql, cx))
+        #[cfg(feature = "panel-database")]
+        {
+            self.database
+                .update(cx, |panel, cx| panel.queue_sql(owner, sql, cx))
+        }
+        #[cfg(not(feature = "panel-database"))]
+        {
+            let _ = (owner, sql, cx);
+            Err("The Database panel is not enabled in this build.".to_owned())
+        }
     }
 
     /// Points the Terminal at the shown thread: its machine, folder and the connection of its
@@ -744,7 +796,10 @@ impl RightPanel {
     /// The shown thread's panel owner, for what waits per thread (the Database query). Set it
     /// before [`Self::set_context`], so a waiting query never lands in another project.
     pub fn set_owner(&mut self, owner: Option<conn_state::PanelOwner>, cx: &mut Context<'_, Self>) {
+        #[cfg(feature = "panel-database")]
         self.database.update(cx, |p, _| p.set_owner(owner));
+        #[cfg(not(feature = "panel-database"))]
+        let _ = (owner, cx);
     }
 
     /// The shown thread's linked environment (`None`: the primary), before its project is set,
@@ -754,14 +809,20 @@ impl RightPanel {
         environment: Option<String>,
         cx: &mut Context<'_, Self>,
     ) {
+        #[cfg(feature = "panel-database")]
         self.database
             .update(cx, |p, _| p.set_linked_environment(environment));
+        #[cfg(not(feature = "panel-database"))]
+        let _ = (environment, cx);
     }
 
     /// A deleted thread's waiting Database query goes with it.
     pub fn forget_owner(&mut self, owner: &conn_state::PanelOwner, cx: &mut Context<'_, Self>) {
+        #[cfg(feature = "panel-database")]
         self.database
             .update(cx, |panel, _| panel.forget_owner(owner));
+        #[cfg(not(feature = "panel-database"))]
+        let _ = (owner, cx);
     }
 
     /// The address browser tab `id` shows or will load, for saving the thread's layout.
@@ -782,7 +843,7 @@ impl RightPanel {
         self.files.clone()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "panel-database"))]
     pub(crate) fn database_for_test(&self) -> Entity<DatabasePanel> {
         self.database.clone()
     }
@@ -795,8 +856,20 @@ impl RightPanel {
         cx: &mut Context<'_, Self>,
     ) -> tokio::sync::oneshot::Receiver<Result<conn_contract::AgentPanelDatabaseResult, String>>
     {
-        self.database
-            .update(cx, |panel, cx| panel.run_agent_query(sql, connection, cx))
+        #[cfg(feature = "panel-database")]
+        {
+            self.database
+                .update(cx, |panel, cx| panel.run_agent_query(sql, connection, cx))
+        }
+        #[cfg(not(feature = "panel-database"))]
+        {
+            let _ = (sql, connection, cx);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let _ = tx.send(Err(
+                "The Database panel is not enabled in this build.".to_owned()
+            ));
+            rx
+        }
     }
 
     /// Connects an MCP server in the MCP panel for an agent and resolves with its tools list.
@@ -805,8 +878,18 @@ impl RightPanel {
         spec: conn_contract::AgentPanelMcpServer,
         cx: &mut Context<'_, Self>,
     ) -> tokio::sync::oneshot::Receiver<Result<conn_contract::AgentPanelMcpResult, String>> {
-        self.mcp
-            .update(cx, |panel, cx| panel.run_agent_connect(spec, cx))
+        #[cfg(feature = "panel-mcp")]
+        {
+            self.mcp
+                .update(cx, |panel, cx| panel.run_agent_connect(spec, cx))
+        }
+        #[cfg(not(feature = "panel-mcp"))]
+        {
+            let _ = (spec, cx);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let _ = tx.send(Err("The MCP panel is not enabled in this build.".to_owned()));
+            rx
+        }
     }
 
     /// Calls an MCP tool in the MCP panel for an agent and resolves with its output.
@@ -816,8 +899,18 @@ impl RightPanel {
         cx: &mut Context<'_, Self>,
     ) -> tokio::sync::oneshot::Receiver<Result<conn_contract::AgentPanelMcpCallResult, String>>
     {
-        self.mcp
-            .update(cx, |panel, cx| panel.run_agent_call(call, cx))
+        #[cfg(feature = "panel-mcp")]
+        {
+            self.mcp
+                .update(cx, |panel, cx| panel.run_agent_call(call, cx))
+        }
+        #[cfg(not(feature = "panel-mcp"))]
+        {
+            let _ = (call, cx);
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let _ = tx.send(Err("The MCP panel is not enabled in this build.".to_owned()));
+            rx
+        }
     }
 
     /// Subscribes to app-wide Orbit Gateway Reverb events from the shared Tasks WebSocket.
@@ -888,10 +981,13 @@ impl RightPanel {
             .update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
         self.terminal
             .update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
+        #[cfg(feature = "panel-api")]
         self.api
             .update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
+        #[cfg(feature = "panel-database")]
         self.database
             .update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
+        #[cfg(feature = "panel-mcp")]
         self.mcp
             .update(cx, |p, cx| p.set_tokens(tokens.clone(), cx));
         self.tasks
@@ -912,6 +1008,7 @@ impl RightPanel {
 
     /// The Conn server (Orbit environment) the thread runs on.
     pub fn set_environment(&mut self, environment_id: String, cx: &mut Context<'_, Self>) {
+        #[cfg(feature = "panel-api")]
         self.api.update(cx, |api, cx| {
             api.set_environment(environment_id.clone(), cx)
         });
@@ -957,6 +1054,7 @@ impl RightPanel {
     ) {
         if self.project_id != project_id || self.workspace_root != workspace_root {
             let key = project_id.clone();
+            #[cfg(feature = "panel-api")]
             self.api.update(cx, |p, cx| p.set_project(key.clone(), cx));
             for_each_project_panel(self, key, workspace_root.clone(), cx);
         }
@@ -979,6 +1077,7 @@ impl RightPanel {
         }
         let root = self.workspace_root.clone();
         for_each_thread_panel(self, root, thread_id, thread_shell, cx);
+        #[cfg(feature = "panel-database")]
         self.database.update(cx, |p, cx| p.deliver_pending(cx));
         cx.notify();
     }
@@ -1394,9 +1493,28 @@ impl Render for RightPanel {
                 Some(id) => self.ensure_browser(id, window, cx).into_any_element(),
                 None => div().into_any_element(),
             },
+            #[cfg(feature = "panel-api")]
             RightPanelTab::Api => self.api.clone().into_any_element(),
+            #[cfg(not(feature = "panel-api"))]
+            RightPanelTab::Api => {
+                chrome::empty_state(&self.tokens, "The API panel is not enabled in this build.")
+                    .into_any_element()
+            }
+            #[cfg(feature = "panel-database")]
             RightPanelTab::Database => self.database.clone().into_any_element(),
+            #[cfg(not(feature = "panel-database"))]
+            RightPanelTab::Database => chrome::empty_state(
+                &self.tokens,
+                "The Database panel is not enabled in this build.",
+            )
+            .into_any_element(),
+            #[cfg(feature = "panel-mcp")]
             RightPanelTab::Mcp => self.mcp.clone().into_any_element(),
+            #[cfg(not(feature = "panel-mcp"))]
+            RightPanelTab::Mcp => {
+                chrome::empty_state(&self.tokens, "The MCP panel is not enabled in this build.")
+                    .into_any_element()
+            }
             RightPanelTab::Tasks => self.tasks.clone().into_any_element(),
             RightPanelTab::PullRequests => self.pull_requests.clone().into_any_element(),
             RightPanelTab::PullRequest => self.pull_request.clone().into_any_element(),
@@ -1500,12 +1618,15 @@ fn for_each_project_panel(
     workspace_root: Option<String>,
     cx: &mut Context<'_, RightPanel>,
 ) {
+    #[cfg(feature = "panel-database")]
     panel.database.update(cx, |p, cx| {
         p.set_project(project_key.clone(), workspace_root.clone(), cx);
     });
+    #[cfg(feature = "panel-mcp")]
     panel.mcp.update(cx, |p, cx| {
         p.set_project(project_key.clone(), workspace_root.clone(), cx);
     });
+    #[cfg(feature = "panel-api")]
     panel
         .api
         .update(cx, |p, cx| p.set_workspace_root(workspace_root.clone(), cx));

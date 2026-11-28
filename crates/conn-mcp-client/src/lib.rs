@@ -9,6 +9,7 @@
 //! - [`results`]: how a result's blocks and text are read for display.
 //!
 //! The JSON-RPC client is hand-rolled, so every message in and out can be logged as sent.
+#![forbid(unsafe_code)]
 
 mod events;
 mod manager;

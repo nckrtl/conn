@@ -3,11 +3,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use conn_desktop::mcp::McpCapabilities;
-use conn_desktop::mcp::servers::{
+use conn_mcp_client::McpCapabilities;
+use conn_mcp_client::servers::{
     McpField, McpFieldType, McpRow, McpServerDraft, McpTransport, new_row_id, servers_from_mcp_json,
 };
-use conn_desktop::mcp::store::{
+use conn_mcp_client::store::{
     McpLogEntry, McpPrompt, McpResource, McpResourceTemplate, McpSession, McpStatus, RpcId,
 };
 
@@ -447,12 +447,12 @@ pub(super) fn capitalize(word: &str) -> String {
 mod tests {
     use std::path::PathBuf;
 
-    use conn_desktop::mcp::servers::{
+    use conn_mcp_client::servers::{
         arguments_from_fields, expand_template, fields_from_schema, new_mcp_server,
         template_variables, to_desktop_mcp_server,
     };
-    use conn_desktop::mcp::store::McpListKind;
-    use conn_desktop::mcp::{
+    use conn_mcp_client::store::McpListKind;
+    use conn_mcp_client::{
         McpConnectRequest, McpMethod, McpOptions, McpRequest, McpServerInfo, McpSessions,
     };
     use serde_json::{Value, json};
@@ -606,12 +606,12 @@ mod tests {
             title: None,
             description: None,
             arguments: Some(vec![
-                conn_desktop::mcp::store::McpPromptArgument {
+                conn_mcp_client::store::McpPromptArgument {
                     name: "who".into(),
                     description: None,
                     required: Some(true),
                 },
-                conn_desktop::mcp::store::McpPromptArgument {
+                conn_mcp_client::store::McpPromptArgument {
                     name: "tone".into(),
                     description: None,
                     required: Some(false),
@@ -672,7 +672,7 @@ mod tests {
     #[test]
     fn fake_mcp_server_end_to_end_session_flow() {
         let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../conn-desktop/tests/fixtures/fake_mcp_server.py");
+            .join("../../../../crates/conn-mcp-client/tests/fixtures/fake_mcp_server.py");
         if !fixture.exists() {
             return;
         }
@@ -736,7 +736,7 @@ mod tests {
                 .await;
             assert!(call_res.error.is_none(), "echo call succeeds");
             assert_eq!(
-                conn_desktop::mcp::results::raw_result_text(&call_res.result),
+                conn_mcp_client::results::raw_result_text(&call_res.result),
                 "hello mcp",
                 "echo returns message"
             );

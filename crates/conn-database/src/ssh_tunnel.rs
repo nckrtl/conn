@@ -14,7 +14,7 @@ use tokio::process::{Child, Command};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
-use crate::child_reaper::OwnedChild;
+use conn_process::OwnedChild;
 
 /// The system `ssh`.
 pub const SSH_BINARY: &str = "/usr/bin/ssh";

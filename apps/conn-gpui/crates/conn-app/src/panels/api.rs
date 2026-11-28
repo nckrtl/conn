@@ -1,19 +1,21 @@
 //! The API surface (Conn `apps/web/src/api/ApiPanel.tsx`, `ApiRequestEditor.tsx`,
-//! `ApiResponseView.tsx`): build a request, send it natively (`conn_desktop::api_request`),
+//! `ApiResponseView.tsx`): build a request, send it natively (`conn_api_client`),
 //! read the response. Requests persist per project, as Conn's `t3code:api-requests:v1`.
 
 use crate::a11y::ConnA11yExt as _;
+#[cfg(feature = "panel-laravel-toolbar")]
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
+#[cfg(feature = "panel-laravel-toolbar")]
 use std::rc::Rc;
 
-use conn_desktop::api_request::ApiResponse;
-use conn_desktop::api_request::response_view::{
+use conn_api_client::ApiResponse;
+use conn_api_client::response_view::{
     BadgeVariant, IDLE_TEXT, SENDING_TEXT, format_response_body, response_notices,
     response_summary, status_variant,
 };
-use conn_desktop::api_request::store::{
+use conn_api_client::store::{
     API_METHODS, ApiHeaderRow, ApiRequestDraft, ApiRequestPatch, ApiRequestStore, BODY_PLACEHOLDER,
     URL_PLACEHOLDER,
 };
@@ -32,6 +34,7 @@ use super::chrome::{
 };
 use super::color::to_hsla;
 use super::header::superhero_icon;
+#[cfg(feature = "panel-laravel-toolbar")]
 use super::laravel_toolbar::LaravelToolbar;
 use crate::theme::MONO_FONT;
 
@@ -56,8 +59,10 @@ pub(crate) struct ApiPanel {
     response_tab: &'static str,
     menu: Option<OpenMenu>,
     /// The Laravel debug bar under the response (`BrowserLaravelToolbar` of `ApiPanel.tsx`).
+    #[cfg(feature = "panel-laravel-toolbar")]
     laravel_toolbar: Entity<LaravelToolbar>,
     /// The panel's area above the bar, for the bar's flyout.
+    #[cfg(feature = "panel-laravel-toolbar")]
     area: Rc<Cell<Option<conn_web::Rect>>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -115,7 +120,9 @@ impl ApiPanel {
                 );
             }
         });
+        #[cfg(feature = "panel-laravel-toolbar")]
         let area = Rc::new(Cell::new(None));
+        #[cfg(feature = "panel-laravel-toolbar")]
         let laravel_toolbar = cx.new(|cx| {
             LaravelToolbar::new(
                 tokens.clone(),
@@ -135,31 +142,41 @@ impl ApiPanel {
             editor_tab: "headers",
             response_tab: "body",
             menu: None,
+            #[cfg(feature = "panel-laravel-toolbar")]
             laravel_toolbar,
+            #[cfg(feature = "panel-laravel-toolbar")]
             area,
             _subscriptions: vec![url_sub, body_sub],
         }
     }
 
     /// The debug bar entity, for the host to follow its events.
+    #[cfg(feature = "panel-laravel-toolbar")]
     pub(crate) fn laravel_toolbar(&self) -> Entity<LaravelToolbar> {
         self.laravel_toolbar.clone()
     }
 
     /// The workspace root: the debug bar opens source files only inside it.
     pub(crate) fn set_workspace_root(&mut self, root: Option<String>, cx: &mut Context<'_, Self>) {
+        #[cfg(feature = "panel-laravel-toolbar")]
         self.laravel_toolbar.update(cx, |bar, cx| {
             bar.set_project_root(root.map(PathBuf::from), cx)
         });
+        #[cfg(not(feature = "panel-laravel-toolbar"))]
+        let _ = (root, cx);
     }
 
     /// The Conn server the thread runs on: the debug bar changes only its Orbit Instance.
     pub(crate) fn set_environment(&mut self, environment_id: String, cx: &mut Context<'_, Self>) {
+        #[cfg(feature = "panel-laravel-toolbar")]
         self.laravel_toolbar
             .update(cx, |bar, cx| bar.set_environment(environment_id, cx));
+        #[cfg(not(feature = "panel-laravel-toolbar"))]
+        let _ = (environment_id, cx);
     }
 
     pub(crate) fn set_tokens(&mut self, tokens: Tokens, cx: &mut Context<'_, Self>) {
+        #[cfg(feature = "panel-laravel-toolbar")]
         self.laravel_toolbar
             .update(cx, |bar, cx| bar.set_tokens(tokens.clone(), cx));
         self.tokens = tokens;
@@ -175,9 +192,12 @@ impl ApiPanel {
         if let Some(key) = &self.project_key {
             self.store.ensure_request(key, None);
             // One history per project, as `api:{projectKey}` tabs of the web store.
-            let tab = format!("api:{key}");
-            self.laravel_toolbar
-                .update(cx, |bar, cx| bar.set_tab_key(&tab, cx));
+            #[cfg(feature = "panel-laravel-toolbar")]
+            {
+                let tab = format!("api:{key}");
+                self.laravel_toolbar
+                    .update(cx, |bar, cx| bar.set_tab_key(&tab, cx));
+            }
         }
         self.synced_request = None;
         self.menu = None;
@@ -297,20 +317,21 @@ impl ApiPanel {
         let Some(key) = self.project_key.clone() else {
             return;
         };
+        #[cfg(feature = "panel-laravel-toolbar")]
         let draft = self.selected().cloned();
         let Some((id, request)) = self.store.begin_send(&key) else {
             return;
         };
         cx.notify();
         let url = request.url.clone();
-        let task =
-            crate::live::RT.spawn(async move { conn_desktop::api_request::send(&request).await });
+        let task = crate::live::RT.spawn(async move { conn_api_client::send(&request).await });
         cx.spawn(async move |this, cx| {
             let response = match task.await {
                 Ok(response) => response,
                 Err(error) => ApiResponse::failure(url, error.to_string(), 0.0),
             };
             let _ = this.update(cx, |panel, cx| {
+                #[cfg(feature = "panel-laravel-toolbar")]
                 if let Some(draft) = &draft {
                     panel
                         .laravel_toolbar
@@ -933,13 +954,15 @@ impl Render for ApiPanel {
         let toolbar = self.render_toolbar(&request, cx);
         let editor = self.render_editor(&request, window, cx);
         let response = self.render_response(&request, cx);
+        #[cfg(feature = "panel-laravel-toolbar")]
         let bar = self
             .laravel_toolbar
             .read(cx)
             .is_visible()
             .then(|| self.laravel_toolbar.clone());
+        #[cfg(feature = "panel-laravel-toolbar")]
         let area = self.area.clone();
-        v_flex()
+        let panel = v_flex()
             .id("api-panel")
             .relative()
             .a11y_group("panel.api", "API")
@@ -964,10 +987,17 @@ impl Render for ApiPanel {
                     }
                 }),
             )
-            .when(self.menu.is_some(), |el| el.on_mouse_down_out(cx.listener(|panel, _, _, cx| { panel.menu = None; cx.notify(); })))
+            .when(self.menu.is_some(), |el| {
+                el.on_mouse_down_out(cx.listener(|panel, _, _, cx| {
+                    panel.menu = None;
+                    cx.notify();
+                }))
+            })
             .child(toolbar)
             .child(editor)
-            .child(response)
+            .child(response);
+        #[cfg(feature = "panel-laravel-toolbar")]
+        let panel = panel
             .children(bar)
             // The flyout may use the panel's height above the bar.
             .child(
@@ -984,7 +1014,7 @@ impl Render for ApiPanel {
                 )
                 .absolute()
                 .size_full(),
-            )
-            .into_any_element()
+            );
+        panel.into_any_element()
     }
 }

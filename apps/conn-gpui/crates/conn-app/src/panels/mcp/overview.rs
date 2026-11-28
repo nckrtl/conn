@@ -1,6 +1,6 @@
 //! Tool annotations and declared JSON Schema examples in the catalog Overview.
 
-use conn_desktop::mcp::{servers::McpField, store::McpTool};
+use conn_mcp_client::{servers::McpField, store::McpTool};
 use conn_theme::{Appearance, Tokens, color_mix_srgb};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
@@ -343,7 +343,7 @@ mod tests {
 
 #[cfg(test)]
 mod native_tests {
-    use conn_desktop::mcp::{
+    use conn_mcp_client::{
         McpCapabilities, McpServerInfo,
         servers::new_mcp_server,
         store::{McpStatus, McpTool},

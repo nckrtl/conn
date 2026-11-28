@@ -16,10 +16,14 @@ publish = false
 rust-version = "1.95"
 
 [workspace.dependencies]
+conn-api-client = { path = "crates/conn-api-client" }
 conn-client = { path = "crates/conn-client" }
+conn-database = { path = "crates/conn-database" }
 conn-ffi = { path = "crates/conn-ffi" }
 conn-image-cache = { path = "crates/conn-image-cache" }
+conn-mcp-client = { path = "crates/conn-mcp-client" }
 conn-orbit = { path = "crates/conn-orbit" }
+conn-process = { path = "crates/conn-process" }
 conn-state = { path = "crates/conn-state" }
 conn-theme = { path = "crates/conn-theme" }
 

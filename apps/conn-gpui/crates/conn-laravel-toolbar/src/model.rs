@@ -4,7 +4,7 @@
 
 use serde_json::{Map, Value};
 
-pub use crate::api_request::toolbar::{
+pub use crate::headers::{
     ToolbarData, ToolbarHistoryRow, format_bytes, format_count, format_ms, row_from_data,
 };
 

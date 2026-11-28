@@ -2,8 +2,8 @@
 //! capabilities, instructions, server name, stdio working folder, and environment/header rows.
 
 use crate::a11y::ConnA11yExt as _;
-use conn_desktop::mcp::servers::{McpRow, McpServerDraft, McpTransport};
-use conn_desktop::mcp::store::McpSession;
+use conn_mcp_client::servers::{McpRow, McpServerDraft, McpTransport};
+use conn_mcp_client::store::McpSession;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;

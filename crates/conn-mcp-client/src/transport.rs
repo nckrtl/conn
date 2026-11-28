@@ -20,7 +20,6 @@ use url::Url;
 use super::events::Emitter;
 use super::sse::SseParser;
 use super::types::{McpEventKind, McpHeader};
-use crate::child_reaper;
 
 /// How much stderr is kept to explain a failed connect.
 const STDERR_TAIL_CHARS: usize = 2_000;
@@ -234,23 +233,23 @@ impl StdioTransport {
     /// Closes stdin, then SIGTERM and SIGKILL to the process group if the server lingers, and
     /// SIGTERM to whatever it left in its group.
     ///
-    /// Exits are polled ([`child_reaper::wait_polled`]), never awaited on SIGCHLD, which the
+    /// Exits are polled ([`conn_process::wait_polled`]), never awaited on SIGCHLD, which the
     /// embedded Chromium can disable. A server still alive after SIGKILL goes to the reaper.
     async fn close(&self) {
         drop(self.stdin.lock().await.take());
         let child = self.child.lock().await.take();
         if let Some(mut child) = child
-            && tokio::time::timeout(EXIT_GRACE, child_reaper::wait_polled(&mut child))
+            && tokio::time::timeout(EXIT_GRACE, conn_process::wait_polled(&mut child))
                 .await
                 .is_err()
         {
             signal_group(self.pgid, GroupSignal::Terminate);
-            if tokio::time::timeout(EXIT_GRACE, child_reaper::wait_polled(&mut child))
+            if tokio::time::timeout(EXIT_GRACE, conn_process::wait_polled(&mut child))
                 .await
                 .is_err()
             {
                 signal_group(self.pgid, GroupSignal::Kill);
-                child_reaper::retire(child);
+                conn_process::retire(child);
             }
         }
         signal_group(self.pgid, GroupSignal::Terminate);
@@ -269,7 +268,7 @@ impl Drop for StdioTransport {
         }
         // `kill_on_drop` alone leaves the exit to Tokio, which needs SIGCHLD.
         if let Some(child) = self.child.get_mut().take() {
-            child_reaper::retire(child);
+            conn_process::retire(child);
         }
         self.stdout_reader.abort();
         if let Some(handle) = lock(&self.stderr_reader).take() {

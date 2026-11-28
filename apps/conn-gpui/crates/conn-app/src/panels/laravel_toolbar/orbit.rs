@@ -1,6 +1,6 @@
 //! The Orbit tool of the bar (`apps/web/src/laravelToolbar/ui/orbit.tsx`, `dependencies.tsx`,
 //! `useOrbit.ts`): the Instance behind the page, seen through the Orbit Gateway. The calls and
-//! their rules (allowlist, own-Instance write guard) live in `conn_desktop::laravel_toolbar::orbit`.
+//! their rules (allowlist, own-Instance write guard) live in `conn_laravel_toolbar::orbit`.
 //!
 //! The application log is a tail read every few seconds: Orbit's log stream is a Pusher channel
 //! the Gateway leases per call, and `conn-orbit`'s realtime follower covers the Tasks channel
@@ -9,9 +9,9 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
-use conn_desktop::laravel_toolbar::layout::{SortValue, next_table_sort, sort_table_rows};
-use conn_desktop::laravel_toolbar::model::format_bytes;
-use conn_desktop::laravel_toolbar::orbit::{
+use conn_laravel_toolbar::layout::{SortValue, next_table_sort, sort_table_rows};
+use conn_laravel_toolbar::model::format_bytes;
+use conn_laravel_toolbar::orbit::{
     LogLine, OrbitDependencies, OrbitPage, OrbitProcess, OrbitToolClient, ProcessAction,
     ProcessStatus, has_process_warning, parse_log_lines, split_log_levels,
 };
@@ -107,7 +107,7 @@ pub(crate) struct OrbitTool {
     reading_process_log: bool,
     reading_app_log: bool,
     polling: bool,
-    pub(crate) deps_sort: Option<conn_desktop::laravel_toolbar::layout::TableSort>,
+    pub(crate) deps_sort: Option<conn_laravel_toolbar::layout::TableSort>,
 }
 
 impl OrbitTool {
@@ -257,7 +257,7 @@ impl LaravelToolbar {
                 match page {
                     Some(page) => {
                         let processes = client.processes(page.instance_id).await?;
-                        Ok::<_, conn_desktop::laravel_toolbar::orbit::OrbitToolError>(Some((
+                        Ok::<_, conn_laravel_toolbar::orbit::OrbitToolError>(Some((
                             page, processes,
                         )))
                     }

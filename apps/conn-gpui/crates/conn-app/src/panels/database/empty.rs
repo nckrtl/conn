@@ -5,7 +5,7 @@
 
 use std::rc::Rc;
 
-use conn_desktop::database::api::{ConnectionSource, PanelConnection, connection_target};
+use conn_database::api::{ConnectionSource, PanelConnection, connection_target};
 use conn_desktop::vault::VaultErrorKind;
 use conn_theme::Tokens;
 use gpui_kit::TestSupportExt as _;

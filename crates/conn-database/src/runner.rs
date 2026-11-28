@@ -6,7 +6,9 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
@@ -28,9 +30,34 @@ use super::sql::{assert_reading, first_statement};
 use super::ssh_tunnel::{SSH_BINARY, SshTunnel, SshTunnelTarget, open_ssh_tunnel};
 use super::types::{
     DatabaseColumn, DatabaseConnection, DatabaseDriver, DatabaseOperation, DatabaseRequest,
-    DatabaseResponse, DatabaseRow, DatabaseSsh,
+    DatabaseResponse, DatabaseRow, DatabaseTls,
 };
-use crate::vault::{VaultClient, VaultTls};
+
+/// Future returned by [`DatabaseCredentialResolver::resolve`].
+pub type CredentialFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ResolvedDatabaseCredential, String>> + Send + 'a>>;
+
+/// Resolved connection and TLS requirement returned by a [`DatabaseCredentialResolver`].
+#[derive(Clone)]
+pub struct ResolvedDatabaseCredential {
+    pub connection: DatabaseConnection,
+    pub tls: Option<DatabaseTls>,
+}
+
+impl fmt::Debug for ResolvedDatabaseCredential {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ResolvedDatabaseCredential")
+            .field("connection", &self.connection)
+            .field("tls", &self.tls)
+            .finish()
+    }
+}
+
+/// Resolves external/Vault database references (`vault_item_id`) on demand.
+pub trait DatabaseCredentialResolver: fmt::Debug + Send + Sync {
+    /// Resolves `item_id` into concrete connection parameters.
+    fn resolve<'a>(&'a self, item_id: &'a str, allow_unlock: bool) -> CredentialFuture<'a>;
+}
 
 /// The panel keeps the first rows of a result.
 pub const ROW_LIMIT: usize = 500;
@@ -219,13 +246,13 @@ async fn open_mysql(
     host: &str,
     port: u16,
     connection: &DatabaseConnection,
-    tls: Option<VaultTls>,
+    tls: Option<DatabaseTls>,
 ) -> CallResult<MySqlConnection> {
     let ssl_mode = match tls {
-        None | Some(VaultTls::Disabled) => MySqlSslMode::Disabled,
-        Some(VaultTls::Required) => MySqlSslMode::Required,
-        Some(VaultTls::VerifyCa) => MySqlSslMode::VerifyCa,
-        Some(VaultTls::VerifyFull) => MySqlSslMode::VerifyIdentity,
+        None | Some(DatabaseTls::Disabled) => MySqlSslMode::Disabled,
+        Some(DatabaseTls::Required) => MySqlSslMode::Required,
+        Some(DatabaseTls::VerifyCa) => MySqlSslMode::VerifyCa,
+        Some(DatabaseTls::VerifyFull) => MySqlSslMode::VerifyIdentity,
     };
     let mut options = MySqlConnectOptions::new()
         .host(host)
@@ -342,13 +369,13 @@ async fn open_postgres(
     host: &str,
     port: u16,
     connection: &DatabaseConnection,
-    tls: Option<VaultTls>,
+    tls: Option<DatabaseTls>,
 ) -> CallResult<PgConnection> {
     let ssl_mode = match tls {
-        None | Some(VaultTls::Disabled) => PgSslMode::Disable,
-        Some(VaultTls::Required) => PgSslMode::Require,
-        Some(VaultTls::VerifyCa) => PgSslMode::VerifyCa,
-        Some(VaultTls::VerifyFull) => PgSslMode::VerifyFull,
+        None | Some(DatabaseTls::Disabled) => PgSslMode::Disable,
+        Some(DatabaseTls::Required) => PgSslMode::Require,
+        Some(DatabaseTls::VerifyCa) => PgSslMode::VerifyCa,
+        Some(DatabaseTls::VerifyFull) => PgSslMode::VerifyFull,
     };
     let mut options = PgConnectOptions::new_without_pgpass()
         .host(host)
@@ -592,7 +619,7 @@ impl Session {
 /// Opens the driver connection, through an SSH tunnel when the connection names an SSH host.
 async fn open_session(
     connection: &DatabaseConnection,
-    tls: Option<VaultTls>,
+    tls: Option<DatabaseTls>,
     ssh_binary: &Path,
 ) -> CallResult<Session> {
     let mut host = if connection.host.is_empty() {
@@ -666,7 +693,7 @@ impl Entry {
 struct Inner {
     sessions: Mutex<HashMap<String, Arc<Entry>>>,
     ssh_binary: PathBuf,
-    vault: VaultClient,
+    resolver: Option<Arc<dyn DatabaseCredentialResolver>>,
 }
 
 /// The Database panel's runner. Cheap to clone; clones share open connections.
@@ -723,31 +750,29 @@ impl DatabaseRunner {
         Self::with_ssh_binary(SSH_BINARY)
     }
 
-    /// A runner that tunnels with `ssh_binary`.
+    /// A runner that tunnels with `ssh_binary` and has no external credential resolver.
     pub fn with_ssh_binary(ssh_binary: impl Into<PathBuf>) -> Self {
-        Self::with_binaries(ssh_binary, VaultClient::new())
-    }
-
-    /// A runner using a custom Vault bridge binary (used by tests).
-    pub fn with_vault_binary(vault_binary: impl Into<PathBuf>) -> Self {
-        Self::with_binaries(SSH_BINARY, VaultClient::with_binary(vault_binary))
-    }
-
-    /// A runner with explicit `ssh` and Vault clients.
-    pub fn with_binaries(ssh_binary: impl Into<PathBuf>, vault: VaultClient) -> Self {
         Self {
             inner: Arc::new(Inner {
                 sessions: Mutex::new(HashMap::new()),
                 ssh_binary: ssh_binary.into(),
-                vault,
+                resolver: None,
             }),
         }
     }
 
-    /// Reference to the runner's Vault Mac bridge client.
-    #[must_use]
-    pub fn vault(&self) -> &VaultClient {
-        &self.inner.vault
+    /// A runner with an explicit `ssh` binary and external/Vault credential resolver.
+    pub fn with_resolver(
+        ssh_binary: impl Into<PathBuf>,
+        resolver: Arc<dyn DatabaseCredentialResolver>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                sessions: Mutex::new(HashMap::new()),
+                ssh_binary: ssh_binary.into(),
+                resolver: Some(resolver),
+            }),
+        }
     }
 
     /// Runs one call. Failures come back in `error`, never as a panic or `Err`.
@@ -870,33 +895,18 @@ impl DatabaseRunner {
     async fn resolve_connection(
         &self,
         request: &DatabaseRequest,
-    ) -> CallResult<(DatabaseConnection, Option<VaultTls>)> {
+    ) -> CallResult<(DatabaseConnection, Option<DatabaseTls>)> {
         let Some(item_id) = request.connection.vault_item_id.as_deref() else {
             return Ok((request.connection.clone(), None));
         };
-        let cred = self
-            .inner
-            .vault
-            .database_credential(item_id, request.allow_unlock)
-            .await
-            .map_err(|err| CallError::plain(err.message))?;
-        let ssh = cred.database.ssh_host.map(|host| DatabaseSsh {
-            host,
-            port: cred.database.ssh_port,
-            user: cred.database.ssh_user,
-            agent: cred.ssh_agent,
-        });
-        let resolved = DatabaseConnection {
-            driver: cred.database.driver,
-            host: cred.database.host,
-            port: Some(cred.database.port),
-            database: cred.database.database,
-            username: cred.database.username,
-            password: cred.password,
-            vault_item_id: None,
-            ssh,
+        let Some(resolver) = &self.inner.resolver else {
+            return Err(CallError::plain(VAULT_UNSUPPORTED));
         };
-        Ok((resolved, Some(cred.database.tls)))
+        let resolved = resolver
+            .resolve(item_id, request.allow_unlock)
+            .await
+            .map_err(CallError::plain)?;
+        Ok((resolved.connection, resolved.tls))
     }
 
     async fn call(&self, entry: &Entry, request: &DatabaseRequest) -> CallResult<DatabaseResponse> {

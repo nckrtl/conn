@@ -1,7 +1,7 @@
 //! The Log tab of the MCP panel (Conn `McpPanel.tsx` `LogTab` / `LogRow`).
 
 use crate::a11y::ConnA11yExt as _;
-use conn_desktop::mcp::store::McpLogEntry;
+use conn_mcp_client::store::McpLogEntry;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{AnyElement, Context, IntoElement, ParentElement, SharedString, Styled, div, px};

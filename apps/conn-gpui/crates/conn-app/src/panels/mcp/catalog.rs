@@ -8,14 +8,15 @@ use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash as _, Hasher as _};
 use std::sync::Arc;
 
-use conn_desktop::api_request::toolbar::{format_bytes, format_ms};
-use conn_desktop::mcp::results::{has_markdown, pretty_json, raw_result_text};
-use conn_desktop::mcp::servers::{
+use conn_mcp_client::results::{
+    format_bytes, format_ms, has_markdown, pretty_json, raw_result_text,
+};
+use conn_mcp_client::servers::{
     McpField, McpFieldType, arguments_from_fields, expand_template, fields_from_schema,
     template_variables,
 };
-use conn_desktop::mcp::store::{McpCall, McpDetailTab, McpSession, McpTool};
-use conn_desktop::mcp::{McpMethod, McpResponse};
+use conn_mcp_client::store::{McpCall, McpDetailTab, McpSession, McpTool};
+use conn_mcp_client::{McpMethod, McpResponse};
 use conn_theme::{Appearance, Tokens};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -241,7 +242,7 @@ impl McpPanel {
         let loading = session.tools.is_none();
         let list_error = session
             .list_errors
-            .get(&conn_desktop::mcp::store::McpListKind::Tools)
+            .get(&conn_mcp_client::store::McpListKind::Tools)
             .cloned();
         let filter_input = self.tools_filter_input.clone();
         let filter_query = filter_input.read(cx).value().to_string();
@@ -341,7 +342,7 @@ impl McpPanel {
         let loading = session.resources.is_none();
         let list_error = session
             .list_errors
-            .get(&conn_desktop::mcp::store::McpListKind::Resources)
+            .get(&conn_mcp_client::store::McpListKind::Resources)
             .cloned();
         let filter_input = self.resources_filter_input.clone();
         let filter_query = filter_input.read(cx).value().to_string();
@@ -472,7 +473,7 @@ impl McpPanel {
         let loading = session.prompts.is_none();
         let list_error = session
             .list_errors
-            .get(&conn_desktop::mcp::store::McpListKind::Prompts)
+            .get(&conn_mcp_client::store::McpListKind::Prompts)
             .cloned();
         let filter_input = self.prompts_filter_input.clone();
         let filter_query = filter_input.read(cx).value().to_string();

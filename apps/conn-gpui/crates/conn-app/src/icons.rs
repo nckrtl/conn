@@ -34,6 +34,7 @@ static ANTIGRAVITY_BRAND_IMAGE: LazyLock<Option<Arc<RenderImage>>> = LazyLock::n
 });
 
 /// Pre-decoded Vault app icon (`assets/icons/brand/vault.png`), shown beside Vault databases.
+#[cfg(feature = "panel-database")]
 static VAULT_BRAND_IMAGE: LazyLock<Option<Arc<RenderImage>>> = LazyLock::new(|| {
     let bytes = include_bytes!("../assets/icons/brand/vault.png");
     let mut rgba = image::load_from_memory(bytes).ok()?.to_rgba8();
@@ -44,6 +45,7 @@ static VAULT_BRAND_IMAGE: LazyLock<Option<Arc<RenderImage>>> = LazyLock::new(|| 
 });
 
 /// The Vault app icon at `size_px`, or `None` if the bundled image cannot be decoded.
+#[cfg(feature = "panel-database")]
 #[must_use]
 pub(crate) fn vault_mark(size_px: f32) -> Option<AnyElement> {
     let logo = VAULT_BRAND_IMAGE.as_ref()?;

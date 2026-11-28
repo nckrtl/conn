@@ -4,8 +4,8 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use conn_desktop::mcp::store::{McpListKind, McpSession, McpTool};
-use conn_desktop::mcp::{
+use conn_mcp_client::store::{McpListKind, McpSession, McpTool};
+use conn_mcp_client::{
     McpConnectRequest, McpEvent, McpEventKind, McpMethod, McpOptions, McpRequest, McpServer,
     McpSessions,
 };
@@ -181,7 +181,7 @@ async fn talks_to_a_stdio_server() {
     );
     session.apply_list(
         McpListKind::Tools,
-        &conn_desktop::mcp::McpResponse {
+        &conn_mcp_client::McpResponse {
             error: None,
             result: tools,
             duration_ms: 0.0,
@@ -417,7 +417,7 @@ impl Drop for HttpEverything {
 async fn connect_when_up(
     sessions: &McpSessions,
     server: McpServer,
-) -> conn_desktop::mcp::McpConnectResponse {
+) -> conn_mcp_client::McpConnectResponse {
     let mut attempts = 0;
     loop {
         let response = sessions

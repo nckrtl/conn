@@ -54,6 +54,10 @@ pub(crate) fn plain(text: &str) -> Vec<Word> {
         .collect()
 }
 
+#[cfg_attr(
+    not(feature = "panel-database"),
+    expect(dead_code, reason = "used by optional panel-database feature")
+)]
 pub(crate) fn word(text: &str) -> Word {
     Word {
         text: SharedString::from(text.to_owned()),
@@ -63,6 +67,10 @@ pub(crate) fn word(text: &str) -> Word {
 }
 
 /// A `<code>` word, with the plain text that touches it.
+#[cfg_attr(
+    not(feature = "panel-database"),
+    expect(dead_code, reason = "used by optional panel-database feature")
+)]
 pub(crate) fn code(text: &str, suffix: &str) -> Word {
     Word {
         text: SharedString::from(text.to_owned()),

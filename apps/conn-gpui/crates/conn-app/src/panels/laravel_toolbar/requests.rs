@@ -1,11 +1,11 @@
 //! The Requests and Request panels (`apps/web/src/laravelToolbar/ui/requests.tsx`).
 
-use conn_desktop::laravel_toolbar::layout::{SortValue, next_table_sort, sort_table_rows};
-use conn_desktop::laravel_toolbar::model::{
+use conn_laravel_toolbar::layout::{SortValue, next_table_sort, sort_table_rows};
+use conn_laravel_toolbar::model::{
     self, PropBadge, PropRow, RequestKind, RequestSummary, clock_time, header_rows, prop_rows,
     route_uri, short_location, summarize,
 };
-use conn_desktop::laravel_toolbar::store::HistoryEntry;
+use conn_laravel_toolbar::store::HistoryEntry;
 use gpui_kit::component::h_flex;
 use gpui_kit::component::input::Input;
 use gpui_kit::prelude::*;

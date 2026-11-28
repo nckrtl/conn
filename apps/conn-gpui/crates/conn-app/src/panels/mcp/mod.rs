@@ -1,6 +1,6 @@
 //! The MCP surface (Conn `apps/web/src/mcp/McpPanel.tsx`, `McpCatalogViews.tsx`):
 //! connect to stdio, Streamable HTTP, or legacy SSE MCP servers natively via
-//! `conn_desktop::mcp::McpSessions`, browse and call tools, read resources/templates,
+//! `conn_mcp_client::McpSessions`, browse and call tools, read resources/templates,
 //! get prompts, inspect JSON-RPC traffic, and edit per-project saved servers.
 
 mod catalog;
@@ -16,13 +16,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use conn_desktop::mcp::servers::{
+use conn_mcp_client::servers::{
     McpServerDraft, McpTransport, mcp_server_label, new_mcp_server, to_desktop_mcp_server,
 };
-use conn_desktop::mcp::store::{
-    McpListKind, McpServerStore, McpSession, McpStatus, mcp_session_key,
-};
-use conn_desktop::mcp::{
+use conn_mcp_client::store::{McpListKind, McpServerStore, McpSession, McpStatus, mcp_session_key};
+use conn_mcp_client::{
     McpConnectRequest, McpConnectResponse, McpEvent, McpMethod, McpRequest, McpResponse,
     McpSessions,
 };
@@ -671,24 +669,24 @@ impl McpPanel {
             .project_key
             .clone()
             .unwrap_or_else(|| "default".to_owned());
-        let agent_spec = conn_desktop::mcp::servers::AgentMcpServer {
+        let agent_spec = conn_mcp_client::servers::AgentMcpServer {
             name: spec.name,
             url: spec.url,
             transport: spec.transport.map(|t| match t {
                 conn_contract::AgentPanelMcpServerTransport::Http => {
-                    conn_desktop::mcp::servers::McpTransport::Http
+                    conn_mcp_client::servers::McpTransport::Http
                 }
                 conn_contract::AgentPanelMcpServerTransport::Sse => {
-                    conn_desktop::mcp::servers::McpTransport::Sse
+                    conn_mcp_client::servers::McpTransport::Sse
                 }
             }),
             command: spec.command,
             headers: spec
                 .headers
-                .map(|m| conn_desktop::mcp::servers::McpPairs(m.into_iter().collect())),
+                .map(|m| conn_mcp_client::servers::McpPairs(m.into_iter().collect())),
             env: spec
                 .env
-                .map(|m| conn_desktop::mcp::servers::McpPairs(m.into_iter().collect())),
+                .map(|m| conn_mcp_client::servers::McpPairs(m.into_iter().collect())),
         };
 
         let existing = self
@@ -696,8 +694,7 @@ impl McpPanel {
             .project(&project_key)
             .map(|p| p.servers.as_slice())
             .unwrap_or(&[]);
-        let (draft, _is_new) =
-            conn_desktop::mcp::servers::agent_server_draft(existing, &agent_spec);
+        let (draft, _is_new) = conn_mcp_client::servers::agent_server_draft(existing, &agent_spec);
         let project = self.store.project_mut(&project_key);
         project.add(draft.clone());
         project.select(&draft.id);
@@ -788,7 +785,7 @@ impl McpPanel {
                                 session.apply_list(McpListKind::Prompts, &p);
                             }
                             let summary =
-                                conn_desktop::mcp::store::agent_connect_result(&draft, session);
+                                conn_mcp_client::store::agent_connect_result(&draft, session);
                             result = Ok(conn_contract::AgentPanelMcpResult {
                                 server: summary.server,
                                 server_info: summary.server_info,
@@ -835,7 +832,7 @@ impl McpPanel {
             .project_key
             .clone()
             .unwrap_or_else(|| "default".to_owned());
-        let draft = match conn_desktop::mcp::store::agent_call_server(
+        let draft = match conn_mcp_client::store::agent_call_server(
             self.store.project(&project_key),
             call.server.as_deref(),
         ) {
@@ -939,7 +936,7 @@ impl McpPanel {
             let args_map: serde_json::Map<String, Value> = arguments.into_iter().collect();
             let prepared = this.update(cx, |panel, cx| {
                 let session = panel.sessions.entry(sk.clone()).or_default();
-                let prep = conn_desktop::mcp::store::prepare_agent_tool_call(
+                let prep = conn_mcp_client::store::prepare_agent_tool_call(
                     &draft, session, &tool_name, &args_map,
                 );
                 if let Ok((ref call_key, _)) = prep {
@@ -974,17 +971,18 @@ impl McpPanel {
                 Err(join_err) => McpResponse::failed(join_err.to_string(), 0.0),
             };
             let duration_ms = response.duration_ms;
-            let outcome =
-                conn_desktop::mcp::store::agent_tool_call_outcome(&draft, &tool_name, &response)
-                    .map(|res| conn_contract::AgentPanelMcpCallResult {
-                        server: res.server,
-                        tool: res.tool,
-                        is_error: res.is_error,
-                        content: res.content,
-                        structured_content: res.structured_content.map(Some),
-                        truncated: res.truncated,
-                        duration_ms: conn_contract::support::JsNumber(duration_ms),
-                    });
+            let outcome = conn_mcp_client::store::agent_tool_call_outcome(
+                &draft, &tool_name, &response,
+            )
+            .map(|res| conn_contract::AgentPanelMcpCallResult {
+                server: res.server,
+                tool: res.tool,
+                is_error: res.is_error,
+                content: res.content,
+                structured_content: res.structured_content.map(Some),
+                truncated: res.truncated,
+                duration_ms: conn_contract::support::JsNumber(duration_ms),
+            });
             let _ = this.update(cx, |panel, cx| {
                 panel
                     .sessions

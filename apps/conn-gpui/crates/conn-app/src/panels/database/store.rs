@@ -6,11 +6,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use conn_desktop::database::api::{
+use conn_database::api::{
     ConnectionSource, DatabaseProjectState, DatabaseQueryResult, PanelConnection,
     connection_from_env, connection_target,
 };
-use conn_desktop::database::{DatabaseColumn, DatabaseDriver};
+use conn_database::{DatabaseColumn, DatabaseDriver};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -300,8 +300,8 @@ pub(crate) fn measure_column_widths(result: &DatabaseQueryResult) -> Vec<f32> {
     reason = "tests assert and use ? for setup"
 )]
 mod tests {
-    use conn_desktop::database::DatabaseRunner;
-    use conn_desktop::database::api::{
+    use conn_database::DatabaseRunner;
+    use conn_database::api::{
         CallOptions, ConnectionSource, browse_table_sql, describe_database_table,
         list_database_tables, new_connection, run_read_only_query,
     };
@@ -515,7 +515,7 @@ mod tests {
             let result =
                 run_read_only_query(&runner, &env_conn.connection, &sql, CallOptions::default())
                     .await?;
-            Ok::<_, conn_desktop::database::api::DatabaseCallError>((tables, columns, result))
+            Ok::<_, conn_database::api::DatabaseCallError>((tables, columns, result))
         })?;
 
         assert_eq!(tables, vec!["users".to_owned()], "lists users table");

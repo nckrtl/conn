@@ -3,8 +3,10 @@
 //! panel's pure connection logic (`apps/web/src/database/databaseApi.ts`).
 //!
 //! The panel keeps one [`DatabaseRunner`] and calls [`DatabaseRunner::run`], or the typed
-//! wrappers in [`api`]. Vault entries are not supported: Vault's relay only accepts Conn's code
-//! signature, so a request with `vault_item_id` fails with [`VAULT_UNSUPPORTED`].
+//! wrappers in [`api`]. External/Vault credential references (`vault_item_id`) are resolved
+//! through an optional [`DatabaseCredentialResolver`]; without one, they fail with
+//! [`VAULT_UNSUPPORTED`].
+#![forbid(unsafe_code)]
 
 pub mod api;
 mod cells;
@@ -16,10 +18,13 @@ mod types;
 #[cfg(test)]
 mod tests;
 
-pub use runner::{DatabaseRunner, IDLE, MAX_SQL_LENGTH, ROW_LIMIT, TIMEOUT, VAULT_UNSUPPORTED};
+pub use runner::{
+    CredentialFuture, DatabaseCredentialResolver, DatabaseRunner, IDLE, MAX_SQL_LENGTH, ROW_LIMIT,
+    ResolvedDatabaseCredential, TIMEOUT, VAULT_UNSUPPORTED,
+};
 pub use types::{
     DatabaseColumn, DatabaseConnection, DatabaseDriver, DatabaseOperation, DatabaseRequest,
-    DatabaseResponse, DatabaseRow, DatabaseSsh,
+    DatabaseResponse, DatabaseRow, DatabaseSsh, DatabaseTls,
 };
 
 /// Whether `sql` starts with a statement the panel runs (`select`, `with`, `show`, `describe`,

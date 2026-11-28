@@ -2,8 +2,8 @@
 //! `outline` / `ghost` `size="sm"` buttons shared with the Database empty state.
 
 use crate::a11y::ConnA11yExt as _;
-use conn_desktop::database::DatabaseDriver;
-use conn_desktop::database::api::PanelConnection;
+use conn_database::DatabaseDriver;
+use conn_database::api::PanelConnection;
 use conn_theme::{Appearance, Tokens};
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::component::input::{Input, InputEvent, InputState};

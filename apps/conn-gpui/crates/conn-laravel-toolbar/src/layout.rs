@@ -219,7 +219,7 @@ pub fn save_panel_height(path: &Path, height: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::laravel_toolbar::model::parse_duration;
+    use crate::model::parse_duration;
 
     fn sort(direction: SortDirection) -> TableSort {
         TableSort {

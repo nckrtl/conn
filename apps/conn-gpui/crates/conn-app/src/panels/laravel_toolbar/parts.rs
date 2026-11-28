@@ -2,7 +2,7 @@
 //! Rules from the design notes (`laravelToolbarPreview/DESIGN.md`): 12px text, 18px stat values,
 //! medium weight, mono only for code, flush grid with thin dividers, no cards.
 
-use conn_desktop::laravel_toolbar::layout::{SortDirection, TableSort};
+use conn_laravel_toolbar::layout::{SortDirection, TableSort};
 use conn_theme::{Rgba, Tokens};
 use gpui_kit::{
     AnyElement, ClickEvent, Context, Div, FontWeight, InteractiveElement as _, IntoElement,

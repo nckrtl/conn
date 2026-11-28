@@ -1,6 +1,6 @@
 //! The Laravel debug bar under the browser page (`apps/web/src/laravelToolbar/ui/ToolbarBar.tsx`):
 //! a bar of counters with eight flyout panels. The data logic lives in
-//! `conn_desktop::laravel_toolbar` (model, store, feed, layout); this module draws it.
+//! `conn_laravel_toolbar` (model, store, feed, layout); this module draws it.
 //!
 //! Hover opens a panel, click pins it, and a pinned panel stays until it is clicked again.
 
@@ -17,17 +17,17 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
-use conn_desktop::laravel_toolbar::feed::{
+use conn_laravel_toolbar::feed::{
     self, HIDE_PAGE_TOOLBAR_CSS, ResponseKind, TOOLBAR_HOST_NAME, ToolbarFeed, ToolbarMessage,
 };
-use conn_desktop::laravel_toolbar::layout::{
+use conn_laravel_toolbar::layout::{
     PanelResize, TOOLBAR_SHEET_INSET, TableSort, panel_height_path, read_panel_height,
     save_panel_height,
 };
-use conn_desktop::laravel_toolbar::model::{
+use conn_laravel_toolbar::model::{
     self, ToolbarData, format_count, format_ms, has_query_issues, model_count, summarize,
 };
-use conn_desktop::laravel_toolbar::store::ToolbarStore;
+use conn_laravel_toolbar::store::ToolbarStore;
 use conn_theme::Tokens;
 use conn_web::{BrowserView, Rect as WebRect, ToolbarResponse};
 use gpui_kit::component::h_flex;
@@ -198,6 +198,10 @@ impl LaravelToolbar {
     }
 
     /// Shows another tab of the store (the API panel keeps one per project).
+    #[cfg_attr(
+        not(any(feature = "panel-api", test)),
+        expect(dead_code, reason = "called when panel-api embeds the toolbar")
+    )]
     pub(crate) fn set_tab_key(&mut self, key: &str, cx: &mut Context<'_, Self>) {
         if self.tab_key != key {
             key.clone_into(&mut self.tab_key);
@@ -208,13 +212,17 @@ impl LaravelToolbar {
 
     /// The response of an API-panel request: its toolbar data goes to the bar under the response
     /// (`receiveToolbarData` of `ApiPanel.tsx`). A response without toolbar data changes nothing.
+    #[cfg_attr(
+        not(any(feature = "panel-api", test)),
+        expect(dead_code, reason = "called when panel-api embeds the toolbar")
+    )]
     pub(crate) fn receive_api_response(
         &mut self,
-        request: &conn_desktop::api_request::store::ApiRequestDraft,
-        response: &conn_desktop::api_request::ApiResponse,
+        request: &conn_api_client::store::ApiRequestDraft,
+        response: &conn_api_client::ApiResponse,
         cx: &mut Context<'_, Self>,
     ) {
-        let Some(receipt) = conn_desktop::api_request::toolbar::toolbar_receipt(request, response)
+        let Some(receipt) = conn_laravel_toolbar::headers::toolbar_receipt(request, response)
         else {
             return;
         };
@@ -327,12 +335,11 @@ impl LaravelToolbar {
         // A request an API response reported loads from the app that served it; a page's loads
         // in the page, with its cookies.
         if let Some(origin) = self.origins.get(&id).cloned() {
-            let request = conn_desktop::api_request::toolbar::toolbar_details_request(&origin, &id);
-            let task = crate::live::RT
-                .spawn(async move { conn_desktop::api_request::send(&request).await });
+            let request = conn_laravel_toolbar::headers::toolbar_details_request(&origin, &id);
+            let task = crate::live::RT.spawn(async move { conn_api_client::send(&request).await });
             cx.spawn(async move |this, cx| {
                 if let Some(raw) = task.await.ok().and_then(|response| {
-                    conn_desktop::api_request::toolbar::parse_toolbar_details(&response)
+                    conn_laravel_toolbar::headers::parse_toolbar_details(&response)
                 }) {
                     let _ = this.update(cx, |this, cx| this.on_details(&id, raw, cx));
                 }

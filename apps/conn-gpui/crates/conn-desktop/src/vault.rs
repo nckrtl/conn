@@ -16,8 +16,16 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command;
 
-use crate::child_reaper::OwnedChild;
-use crate::database::DatabaseDriver;
+use conn_process::OwnedChild;
+
+/// Database engine reported by a Vault Database entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VaultDatabaseDriver {
+    Mysql,
+    Pgsql,
+    Sqlite,
+}
 
 /// Default Vault Mac app binary path.
 pub const VAULT_BINARY: &str = "/Applications/Vault.app/Contents/MacOS/Vault";
@@ -92,7 +100,7 @@ impl VaultError {
 pub struct VaultDatabase {
     pub id: String,
     pub name: String,
-    pub driver: DatabaseDriver,
+    pub driver: VaultDatabaseDriver,
     pub host: String,
     pub port: u16,
     pub database: String,
@@ -447,8 +455,8 @@ fn parse_passkey_reply(payload: &[u8]) -> Result<String, PasskeyError> {
 
 fn parse_wire_database(wire: WireDatabase) -> Option<(VaultDatabase, Option<String>)> {
     let driver = match wire.driver.as_str() {
-        "postgresql" | "pgsql" => DatabaseDriver::Pgsql,
-        "mysql" => DatabaseDriver::Mysql,
+        "postgresql" | "pgsql" => VaultDatabaseDriver::Pgsql,
+        "mysql" => VaultDatabaseDriver::Mysql,
         _ => return None,
     };
     let tls = match wire.tls.as_str() {
@@ -1175,7 +1183,7 @@ sys.stdout.buffer.flush()
 
         let dbs = client.list_databases(false).await?;
         assert_eq!(dbs.len(), 1);
-        assert_eq!(dbs[0].driver, DatabaseDriver::Pgsql);
+        assert_eq!(dbs[0].driver, VaultDatabaseDriver::Pgsql);
         assert_eq!(dbs[0].tls, VaultTls::VerifyFull);
         assert_eq!(dbs[0].organization.as_deref(), Some("Acme"));
 

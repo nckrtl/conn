@@ -4,7 +4,7 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
-use conn_desktop::laravel_toolbar::model::ToolbarData;
+use conn_laravel_toolbar::model::ToolbarData;
 use conn_theme::Tokens;
 use gpui_kit::test::{TestQueryExt as _, TestWindowExt as _};
 use gpui_kit::{
@@ -240,7 +240,7 @@ fn open_in_database_emits_the_query_with_its_bindings(cx: &mut TestAppContext) {
 
 #[gpui_kit::test]
 fn the_orbit_panel_renders_every_tab_for_a_known_instance(cx: &mut TestAppContext) {
-    use conn_desktop::laravel_toolbar::orbit::{
+    use conn_laravel_toolbar::orbit::{
         Dependency, OrbitDependencies, OrbitPage, OrbitProcess, ProcessStatus,
     };
 
@@ -335,8 +335,8 @@ fn base64_json(value: &Value) -> String {
 
 #[gpui_kit::test]
 fn an_api_response_with_toolbar_headers_shows_the_bar_under_the_response(cx: &mut TestAppContext) {
-    use conn_desktop::api_request::store::ApiRequestDraft;
-    use conn_desktop::api_request::{ApiHeader, ApiResponse, BodyEncoding};
+    use conn_api_client::store::ApiRequestDraft;
+    use conn_api_client::{ApiHeader, ApiResponse, BodyEncoding};
     let (window, bar) = mount(cx);
     let draft = ApiRequestDraft {
         method: "GET".to_owned(),

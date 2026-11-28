@@ -8,7 +8,7 @@ use std::io;
 use serde::Serialize;
 use serde_json::ser::{Formatter, PrettyFormatter};
 
-use super::toolbar::{format_bytes, format_ms};
+use super::format::{format_bytes, format_ms};
 use super::{ApiResponse, BodyEncoding};
 
 /// The pane before the first send.
@@ -185,7 +185,7 @@ impl Formatter for JsFormatter<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api_request::ApiHeader;
+    use crate::ApiHeader;
 
     fn response(body: &str, content_type: Option<&str>) -> ApiResponse {
         ApiResponse {

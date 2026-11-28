@@ -24,8 +24,12 @@ tree-sitter-php = { version = "0.24", optional = true }
 lsp-types = "0.97"
 conn-cache = { path = "../../../../crates/conn-cache" }
 conn-image-cache = { path = "../../../../crates/conn-image-cache" }
+conn-api-client = { workspace = true, optional = true }
 conn-client.workspace = true
+conn-database = { workspace = true, optional = true }
 conn-desktop.workspace = true
+conn-laravel-toolbar = { workspace = true, optional = true }
+conn-mcp-client = { workspace = true, optional = true }
 conn-preview-driver.workspace = true
 conn-contract.workspace = true
 conn-state.workspace = true
@@ -82,8 +86,18 @@ tokio-tungstenite.workspace = true
 gpui-pre-apple = "0.3.11"
 
 [features]
-default = ["zed-files"]
+default = [
+    "zed-files",
+    "panel-api",
+    "panel-database",
+    "panel-mcp",
+    "panel-laravel-toolbar",
+]
 zed-files = ["dep:zed_util", "dep:zed_editor", "dep:zed_language", "dep:zed_settings", "dep:zed_theme", "dep:zed_theme_settings", "dep:zed_text", "dep:tree-sitter-php"]
+panel-api = ["dep:conn-api-client"]
+panel-database = ["dep:conn-database"]
+panel-mcp = ["dep:conn-mcp-client"]
+panel-laravel-toolbar = ["dep:conn-laravel-toolbar", "dep:conn-api-client"]
 # Scripted UI automation and screenshot capture hook for visual verification in nick-vm
 # (modeled on .refs/threadbear/desktop/gpui/src/automation.rs). Never enabled in release builds.
 automation = ["gpui-kit/test-support"]

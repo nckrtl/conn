@@ -1,13 +1,13 @@
 //! The Timings, Memory, Database, Models and Environment panels
 //! (`apps/web/src/laravelToolbar/ui/panels.tsx`).
 
-use conn_desktop::laravel_toolbar::layout::{SortValue, next_table_sort, sort_table_rows};
-use conn_desktop::laravel_toolbar::model::{
+use conn_laravel_toolbar::layout::{SortValue, next_table_sort, sort_table_rows};
+use conn_laravel_toolbar::model::{
     self, ToolbarData, error_reporting_label, format_bytes, format_count, format_ms, format_uptime,
     ini_switch, inline_bindings, php_limit, queries, short_location, stages, toolbar_models,
     wall_time_ms,
 };
-use conn_desktop::laravel_toolbar::sql::{SqlKind, sql_fragments};
+use conn_laravel_toolbar::sql::{SqlKind, sql_fragments};
 use gpui_kit::component::h_flex;
 use gpui_kit::prelude::*;
 use gpui_kit::{

@@ -108,6 +108,8 @@ struct LinkedShell {
 pub struct LinkedShells {
     order: Vec<String>,
     shells: HashMap<String, LinkedShell>,
+    /// Other ids the environments go by, to the id a merge names them by.
+    aliases: HashMap<String, String>,
 }
 
 impl LinkedShells {
@@ -125,6 +127,22 @@ impl LinkedShells {
                 shell: ShellState::default(),
             },
         );
+    }
+
+    /// Sets the other ids the environments go by, each to the id merges name it by: the
+    /// environment id a server's config reports, when the app knows that server by an Orbit
+    /// target id or URL. A task's `delegatedFrom` carries the configured id. Returns whether the
+    /// aliases changed; the merged shell takes them at the next [`Self::merge_into`].
+    pub fn set_environment_aliases(&mut self, aliases: HashMap<String, String>) -> bool {
+        let aliases: HashMap<String, String> = aliases
+            .into_iter()
+            .filter(|(alias, id)| alias != id)
+            .collect();
+        if self.aliases == aliases {
+            return false;
+        }
+        self.aliases = aliases;
+        true
     }
 
     /// Forgets an environment and everything it listed.
@@ -327,6 +345,7 @@ impl LinkedShells {
             .filter_map(|id| self.shells.get(id).map(|linked| (id, linked)))
             .collect();
         shell.set_environment_id(primary_id);
+        shell.set_environment_aliases(&self.aliases);
         let added = shell
             .extend_with_environments(held.iter().map(|(id, linked)| (id.as_str(), &linked.shell)));
         for ((id, linked), added) in held.into_iter().zip(added) {
@@ -1701,6 +1720,36 @@ mod tests {
         let merged = from_b.merged("b", "b", &shell_of(vec![shared()]));
         assert_eq!(
             merged.shell.subagent_request("shared"),
+            Some(crate::shell::PendingSubagentRequest::Approval)
+        );
+    }
+    #[test]
+    fn a_delegated_tasks_approval_reaches_a_parent_merged_under_another_id() {
+        // The app knows both servers by Orbit target ids; the task names its parent's server by
+        // the id that server's config reports.
+        let mut primary = ShellState::default();
+        primary.apply(snapshot(
+            vec![],
+            vec![thread_json("parent", "p", |_| {})],
+            vec![],
+        ));
+        let task = thread_json("task", "p", |t| {
+            t["delegatedFrom"] =
+                json!({"environmentId": "agent-config", "threadId": "parent", "title": "P"});
+            t["status"] = json!("running");
+            t["pendingRuntimeRequest"] =
+                json!({"id": "r", "kind": "command", "createdAt": "2026-11-13T09:00:00.000Z"});
+        });
+        let mut linked = LinkedShells::default();
+        linked.ensure("nick-target", "nick");
+        linked.apply("nick-target", snapshot(vec![], vec![task], vec![]));
+        assert!(linked.set_environment_aliases(HashMap::from([
+            ("agent-config".to_owned(), "agent-target".to_owned()),
+            ("nick-config".to_owned(), "nick-target".to_owned()),
+        ])));
+        let merged = linked.merged("agent-target", "agent", &primary);
+        assert_eq!(
+            merged.shell.subagent_request("parent"),
             Some(crate::shell::PendingSubagentRequest::Approval)
         );
     }

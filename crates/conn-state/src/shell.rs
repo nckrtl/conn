@@ -267,10 +267,12 @@ fn flag_up<'a>(
 
 /// `pendingSubagentRequestsByThread`: the threads to flag for a subagent's live request, up its
 /// subagent chain and through a side chat to its parent.
-/// `environment_of` names the environment a listed thread came from, when the shell knows it.
+/// `environment_of` names the environment a listed thread came from, when the shell knows it;
+/// `names` tells whether an id a task's `delegatedFrom` carries names that environment.
 fn rolled_up_requests<'a>(
     threads: &'a [ThreadShell],
     environment_of: impl Fn(&str) -> Option<&'a str>,
+    names: impl Fn(&str, &str) -> bool,
 ) -> HashMap<String, PendingSubagentRequest> {
     let mut requests: HashMap<String, Rolled> = HashMap::new();
     let by_id: HashMap<&str, &ThreadShell> = threads.iter().map(|t| (t.id.as_str(), t)).collect();
@@ -317,7 +319,7 @@ fn rolled_up_requests<'a>(
             let from = t.delegated_from.as_ref()?;
             let parent = from.thread_id.as_str();
             environment_of(parent)
-                .is_none_or(|env| env == from.environment_id)
+                .is_none_or(|env| names(env, &from.environment_id))
                 .then_some((t, parent))
         })
         .collect();
@@ -453,6 +455,10 @@ pub struct ShellState {
     requests: HashMap<String, PendingSubagentRequest>,
     /// The environment this shell's own threads came from, once a merge names it.
     environment_id: Option<String>,
+    /// Other ids a merged environment goes by, to the id the merge names it by. A task's
+    /// `delegatedFrom` carries its server's configured id, while a merge may name that
+    /// environment by an Orbit target id or a URL.
+    environment_aliases: HashMap<String, String>,
     /// The Settled paging of the other environments merged in (`extend_with_environment`).
     foreign: Vec<ForeignOlder>,
     /// Which of `foreign` a merged-in thread belongs to, by thread id.
@@ -998,11 +1004,32 @@ impl ShellState {
 
     /// Recomputes the requests rolled up to each parent.
     pub(crate) fn refresh_derived(&mut self) {
-        let requests = rolled_up_requests(&self.threads, |id| match self.foreign_of.get(id) {
-            Some(&index) => self.foreign.get(index).map(|f| f.environment_id.as_str()),
-            None => self.environment_id.as_deref(),
-        });
+        let requests = rolled_up_requests(
+            &self.threads,
+            |id| match self.foreign_of.get(id) {
+                Some(&index) => self.foreign.get(index).map(|f| f.environment_id.as_str()),
+                None => self.environment_id.as_deref(),
+            },
+            |env, named| self.names_environment(env, named),
+        );
         self.requests = requests;
+    }
+
+    /// Whether `named`, an id from a task's `delegatedFrom`, is merged environment `env`: its
+    /// merge id or an alias of it.
+    fn names_environment(&self, env: &str, named: &str) -> bool {
+        env == named
+            || self
+                .environment_aliases
+                .get(named)
+                .is_some_and(|id| id == env)
+    }
+
+    /// Sets the other ids the merged environments go by (see `environment_aliases`).
+    pub(crate) fn set_environment_aliases(&mut self, aliases: &HashMap<String, String>) {
+        if &self.environment_aliases != aliases {
+            self.environment_aliases.clone_from(aliases);
+        }
     }
 
     /// Names the environment this shell's own threads came from.

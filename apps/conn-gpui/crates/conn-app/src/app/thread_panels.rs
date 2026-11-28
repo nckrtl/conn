@@ -232,6 +232,7 @@ impl ConnApp {
             return;
         }
         self.primary_environment = Some(id);
+        self.sync_environment_aliases();
         // The shown thread's owner is now this environment's; its panel, if any, shows.
         self.sync_chat(cx);
         self.save_thread_panels(cx);

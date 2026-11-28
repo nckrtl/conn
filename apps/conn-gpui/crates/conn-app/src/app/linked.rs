@@ -655,6 +655,9 @@ impl ConnApp {
         if self.linked.is_empty() {
             return;
         }
+        self.linked
+            .shells
+            .set_environment_aliases(self.environment_aliases());
         let primary_id = self.primary_environment_id();
         let primary_label = self.primary_environment_label();
         self.linked.origins = self.linked.shells.merge_into(
@@ -664,6 +667,36 @@ impl ConnApp {
             &self.linked.origins,
         );
         self.linked.merges.full += 1;
+    }
+
+    /// The id each environment's own server reports for itself, to the id merges name it by,
+    /// where they differ: a delegated task names its parent's environment by the reported id.
+    fn environment_aliases(&self) -> HashMap<String, String> {
+        let mut aliases: HashMap<String, String> = self
+            .linked_target_ids()
+            .into_iter()
+            .filter_map(|target| {
+                let reported = self.linked_server_environment_id(&target)?.to_owned();
+                Some((reported, target))
+            })
+            .collect();
+        if let Some(reported) = self.primary_environment.clone() {
+            aliases.insert(reported, self.primary_environment_id());
+        }
+        aliases
+    }
+
+    /// Merges again when a server reported an environment id the merged shell does not know
+    /// yet, so tasks delegated from its threads roll up to them.
+    pub(super) fn sync_environment_aliases(&mut self) {
+        if !self.linked.is_empty()
+            && self
+                .linked
+                .shells
+                .set_environment_aliases(self.environment_aliases())
+        {
+            self.remerge_linked_shells();
+        }
     }
 
     /// Catches the merged shell up with primary shell items it already applied in place. Only a
@@ -1758,6 +1791,7 @@ impl ConnApp {
                             .insert(environment_id.clone(), root.to_owned()),
                         None => self.linked.scratch_roots.remove(&environment_id),
                     };
+                    self.sync_environment_aliases();
                 }
                 // The composer and the right panel read the catalog of the open thread's
                 // environment, so a change to that one reaches them now.

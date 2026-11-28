@@ -47,29 +47,38 @@ export function contractCommands() {
 }
 
 const COMMANDS_RS = "crates/conn-engine/src/commands.rs";
-const HANDLER =
-  /\bfn handler\(command_type: &str\) -> Option<Handler> \{\s*Some\(match command_type \{([\s\S]*?)\s_ => return None,\s*\}\)\s*\}/;
-const ARM = /\s*("[^"\n]+"(?:\s*\|\s*"[^"\n]+")*)\s*=>\s*[\w:]+,/g;
+const HANDLER = "fn handler(command_type: &str)";
+const FALLBACK = "_ => return None";
 
 /**
  * The command types that head an arm of `fn handler` in crates/conn-engine/src/commands.rs,
- * before any contract filter. `fn refusal` names commands too, and the engine refuses those.
- * This reads one shape: the whole function is one `match` of string patterns onto function
- * paths that ends in `_ => return None`. Line comments are left out. Anything else in the
- * function throws, so a reshaped handler (an arm moved to a helper, the match moved to another
- * function) fails the caller instead of changing the set. Not seen from here: a command that
- * `dispatch_claimed` in crates/conn-engine/src/engine.rs serves before it asks `handler`.
+ * before any contract filter: each string literal before `=>` or `|` between the function's
+ * signature and its fallback arm, comments left out. `fn refusal` names commands too, and the
+ * engine refuses those, so the span must be the body of `fn handler` and nothing else. This
+ * throws when the signature or the fallback arm is missing, when another `fn` starts in
+ * between, when an arm is under `#[cfg]`, and when there is no arm.
+ *
+ * One limit, on the safe side: a command the engine serves another way (an arm moved to a
+ * helper, an arm with a guard, a type `dispatch_claimed` in engine.rs serves first) is missing
+ * here without an error. A short set can only make the capability check refuse a row, never
+ * accept a flag without proof.
  */
 export function handlerArms() {
   const unread = (why) => new Error(`tools/served.mjs cannot read \`fn handler\` in ${COMMANDS_RS}: ${why}`);
   const text = NodeFS.readFileSync(NodePath.join(repoRoot, COMMANDS_RS), "utf8");
-  const body = HANDLER.exec(text)?.[1].replace(/\/\/.*$/gm, "");
-  if (body === undefined) throw unread("it is not one match that ends in `_ => return None`");
-  const rest = body.replace(ARM, "").trim();
-  if (rest) throw unread(`this is no string arm onto a function: ${rest.split("\n")[0]}`);
-  return Array.from(body.matchAll(ARM)).flatMap((arm) =>
-    Array.from(arm[1].matchAll(/"([^"]+)"/g), (m) => m[1]),
-  );
+  const start = text.indexOf(HANDLER);
+  if (start === -1) throw unread(`no \`${HANDLER}\``);
+  const rest = text.slice(start + HANDLER.length).replace(/\/\/.*|\/\*[\s\S]*?\*\//g, "");
+  const end = rest.indexOf(FALLBACK);
+  if (end === -1) throw unread(`no \`${FALLBACK}\` arm after the signature`);
+  const body = rest.slice(0, end);
+  if (/^[ \t]*(?:[\w()]+[ \t]+)*fn[ \t]+\w/m.test(body)) {
+    throw unread(`another \`fn\` starts before the \`${FALLBACK}\` arm`);
+  }
+  if (body.includes("#[cfg(")) throw unread("an arm under `#[cfg]` is handled in some builds only");
+  const arms = Array.from(body.matchAll(/"([^"]+)"(?=\s*(?:=>|\|))/g), (m) => m[1]);
+  if (arms.length === 0) throw unread("no string arm");
+  return arms;
 }
 
 /** The command types the engine handles: every one of `types` among [`handlerArms`]. */

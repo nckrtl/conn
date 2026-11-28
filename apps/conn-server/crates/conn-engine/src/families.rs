@@ -903,6 +903,11 @@ fn deliver(tx: &mut Tx<'_>, thread_id: &str, settled: bool) -> StoreResult<Vec<E
     {
         return Ok(vec![]);
     }
+    // `Orchestrator.ts:15627`: the queue starts first, so a wake waits behind older work; a
+    // thread still idle (its queue held or empty) takes the wake at once.
+    let mut effects: Vec<Effect> = commands::start_next_queued(tx, thread_id, None)?
+        .into_iter()
+        .collect();
     // One wake per spawning run, as T3 keeps one cohort per run (`Orchestrator.ts:14386`).
     let mut groups: Vec<(Option<String>, Vec<Value>)> = vec![];
     for row in due {
@@ -912,7 +917,6 @@ fn deliver(tx: &mut Tx<'_>, thread_id: &str, settled: bool) -> StoreResult<Vec<E
             None => groups.push((owner, vec![row])),
         }
     }
-    let mut effects = vec![];
     for (owner, rows) in groups {
         effects.extend(wake(tx, thread_id, busy, owner.as_deref(), rows)?);
     }

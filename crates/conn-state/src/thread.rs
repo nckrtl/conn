@@ -546,9 +546,18 @@ pub fn child_approvals(
     children: &[crate::shell::ChildApprovalThread],
     threads: &HashMap<String, ThreadState>,
 ) -> Vec<ChildApproval> {
+    child_approvals_with(children, |id| threads.get(id))
+}
+
+/// [`child_approvals`] for a client that keeps thread states elsewhere than one map.
+#[must_use]
+pub fn child_approvals_with<'a>(
+    children: &[crate::shell::ChildApprovalThread],
+    thread: impl Fn(&str) -> Option<&'a ThreadState>,
+) -> Vec<ChildApproval> {
     let mut approvals = Vec::new();
     for child in children {
-        let Some(thread) = threads.get(&child.id) else {
+        let Some(thread) = thread(&child.id) else {
             continue;
         };
         for approval in thread.pending_approvals() {
@@ -793,7 +802,6 @@ pub struct ThreadState {
     pub revision: u64,
     /// Opaque server cursor for fetching older history pages before `entries`.
     pub history_cursor: Option<String>,
-    history_prefix_len: usize,
     /// True when older history pages exist on the server before `entries`.
     pub has_more_history: bool,
     /// True while an on-demand earlier-history page request is in flight.
@@ -810,6 +818,9 @@ pub struct ThreadState {
     messages: HashMap<String, TrackedMessage>,
     /// Where each assistant message and question sits in its run, by item id.
     places: HashMap<String, ItemPlace>,
+    /// The server's timeline place of each of the thread's own rows, by entry id: a row that
+    /// arrives late (a catch-up sends rows by when they last changed) still lands in order.
+    ordinals: HashMap<String, i64>,
 }
 
 impl ThreadState {
@@ -1321,6 +1332,8 @@ impl ThreadState {
             .map(|s| (s.id.clone(), SubagentRecord::from_subagent(s)))
             .collect();
         self.subagent_of_entry.clear();
+        self.ordinals.clear();
+        let own_thread = self.thread_id.clone();
         let mut entries = Vec::with_capacity(capacity);
         let mut entry_index: HashMap<String, usize> = HashMap::with_capacity(capacity);
         let mut ingest = |mut item: ProjectionTurnItem, source: Option<(String, String)>| {
@@ -1352,7 +1365,14 @@ impl ThreadState {
             if let Some((id, place)) = place_of_projection_item(&item) {
                 self.places.insert(id, place);
             }
+            let own = source
+                .as_ref()
+                .is_none_or(|(thread, _)| *thread == own_thread);
+            let ordinal = own.then(|| projection_item_ordinal(&item)).flatten();
             if let Some(entry) = map_projection_turn_item(item, source) {
+                if let Some(ordinal) = ordinal {
+                    self.ordinals.insert(entry.id().to_owned(), ordinal);
+                }
                 if let Some(&idx) = entry_index.get(entry.id()) {
                     entries[idx] = entry;
                 } else {
@@ -1378,7 +1398,6 @@ impl ThreadState {
             self.task_links.observe_entry(entry);
         }
         self.entries = entries;
-        self.history_prefix_len = 0;
         self.history_cursor = cursor;
         self.has_more_history = false;
         self.loading_earlier = false;
@@ -1424,6 +1443,15 @@ impl ThreadState {
             .map(|entry| entry.id().to_owned())
             .collect();
 
+        // The page's subagent records: a card far up the thread needs its model and status.
+        for sub in page.subagents.iter().flatten() {
+            self.subagent_models
+                .entry(sub.id.clone())
+                .or_insert_with(|| SubagentModel::from_subagent(sub));
+            self.subagents
+                .entry(sub.id.clone())
+                .or_insert_with(|| SubagentRecord::from_subagent(sub));
+        }
         let mut rows = page.items;
         rows.sort_by_key(|row| row.position);
 
@@ -1455,12 +1483,20 @@ impl ThreadState {
             };
             let timing = extract_projection_timing(&item);
             let place = place_of_projection_item(&item);
+            let ordinal = (row.source_thread_id == self.thread_id)
+                .then(|| projection_item_ordinal(&item))
+                .flatten();
 
             let Some(entry) =
                 map_projection_turn_item(item, Some((row.source_thread_id, row.source_item_id)))
             else {
                 continue;
             };
+            if let Some(ordinal) = ordinal {
+                self.ordinals
+                    .entry(entry.id().to_owned())
+                    .or_insert(ordinal);
+            }
             self.task_links.observe_entry(&entry);
             if existing_ids.contains(entry.id()) {
                 continue;
@@ -1493,7 +1529,6 @@ impl ThreadState {
         self.schedule_calls.observe_older(older_calls);
         let prepended_count = prepended.len();
         if prepended_count > 0 {
-            self.history_prefix_len += prepended_count;
             prepended.append(&mut self.entries);
             self.entries = prepended;
         }
@@ -1504,39 +1539,6 @@ impl ThreadState {
         self.prune_schedule_calls();
         self.revision = next_revision();
         prepended_count
-    }
-
-    /// Attaches chronological cached messages before the current timeline. An overlap
-    /// marks the end of the prefix, so live entries keep their current contents.
-    pub fn prepend_cached_messages(&mut self, mut entries: Vec<TimelineEntry>) {
-        let current: HashSet<_> = self.entries.iter().map(TimelineEntry::id).collect();
-        if let Some(overlap) = entries
-            .iter()
-            .position(|entry| current.contains(entry.id()))
-        {
-            entries.truncate(overlap);
-        }
-        if !entries.is_empty() {
-            self.history_prefix_len += entries.len();
-            entries.append(&mut self.entries);
-            self.entries = entries;
-            self.revision = next_revision();
-        }
-    }
-
-    /// Number of timeline rows loaded before the live projection.
-    pub fn history_prefix_len(&self) -> usize {
-        self.history_prefix_len.min(self.entries.len())
-    }
-
-    /// Reconciles the preview after backfill without treating its rows as live updates.
-    pub fn replace_cached_prefix(&mut self, rows: Vec<TimelineEntry>) {
-        let count = self.history_prefix_len();
-        if self.entries[..count] != rows {
-            self.history_prefix_len = rows.len();
-            self.entries.splice(..count, rows);
-            self.revision = next_revision();
-        }
     }
 
     /// Applies one `subscribeThread` stream item.
@@ -1888,7 +1890,9 @@ impl ThreadState {
                 if let Some((id, place)) = place_of_turn_item(&ev.payload) {
                     self.places.insert(id, place);
                 }
+                let ordinal = turn_item_ordinal(&ev.payload);
                 if let Some(entry) = map_turn_item(ev.payload) {
+                    self.ordinals.insert(entry.id().to_owned(), ordinal);
                     self.task_links.observe_entry(&entry);
                     let mut changed = compaction_changed || detail_changed;
                     if matches!(entry, TimelineEntry::User { .. }) {
@@ -1912,7 +1916,7 @@ impl ThreadState {
                         });
                         changed |= self.entries.len() != before;
                     }
-                    changed |= upsert_entry(&mut self.entries, entry);
+                    changed |= upsert_entry(&mut self.entries, entry, Some(ordinal), &self.ordinals);
                     changed
                 } else {
                     self.schedule_calls.forget(&item_id);
@@ -2147,7 +2151,12 @@ fn map_item_status(status: TurnItemStatus) -> ItemStatus {
     }
 }
 
-fn upsert_entry(entries: &mut Vec<TimelineEntry>, entry: TimelineEntry) -> bool {
+fn upsert_entry(
+    entries: &mut Vec<TimelineEntry>,
+    entry: TimelineEntry,
+    ordinal: Option<i64>,
+    ordinals: &HashMap<String, i64>,
+) -> bool {
     if let Some(existing) = entries.iter_mut().find(|e| e.id() == entry.id()) {
         if *existing == entry {
             return false;
@@ -2179,13 +2188,92 @@ fn upsert_entry(entries: &mut Vec<TimelineEntry>, entry: TimelineEntry) -> bool 
         }
         entries.push(entry);
     } else {
+        // Before the queued rows, and before the first row the server places after it.
+        let later = |e: &TimelineEntry| {
+            ordinal.is_some_and(|ordinal| ordinals.get(e.id()).is_some_and(|o| *o > ordinal))
+        };
         let insert_pos = entries
             .iter()
-            .position(|e| matches!(e, TimelineEntry::QueuedUser { .. }))
+            .position(|e| matches!(e, TimelineEntry::QueuedUser { .. }) || later(e))
             .unwrap_or(entries.len());
         entries.insert(insert_pos, entry);
     }
     true
+}
+
+/// The server's timeline place of a streamed item.
+fn turn_item_ordinal(item: &TurnItem) -> i64 {
+    macro_rules! ordinal_of {
+        ($($v:ident),*) => {
+            match item { $(TurnItem::$v(i) => i.ordinal,)* }
+        };
+    }
+    ordinal_of!(
+        Notification,
+        UserMessage,
+        AssistantMessage,
+        Reasoning,
+        ProposedPlan,
+        TodoList,
+        UserInputRequest,
+        FileChange,
+        CommandExecution,
+        FileSearch,
+        WebSearch,
+        ApprovalRequest,
+        Checkpoint,
+        RunInterruptRequest,
+        RunInterruptResult,
+        SystemNotice,
+        Error,
+        Compaction,
+        Handoff,
+        Fork,
+        ThreadCreated,
+        SecretRequest,
+        LinkRequest,
+        Subagent,
+        DynamicTool
+    )
+}
+
+/// [`turn_item_ordinal`] for a projection row; `None` for an unknown item type.
+fn projection_item_ordinal(item: &ProjectionTurnItem) -> Option<i64> {
+    macro_rules! ordinal_of {
+        ($($v:ident),*) => {
+            match item {
+                $(ProjectionTurnItem::$v(i) => Some(i.ordinal),)*
+                ProjectionTurnItem::Unknown(_) => None,
+            }
+        };
+    }
+    ordinal_of!(
+        Notification,
+        UserMessage,
+        AssistantMessage,
+        Reasoning,
+        ProposedPlan,
+        TodoList,
+        UserInputRequest,
+        FileChange,
+        CommandExecution,
+        FileSearch,
+        WebSearch,
+        ApprovalRequest,
+        Checkpoint,
+        RunInterruptRequest,
+        RunInterruptResult,
+        SystemNotice,
+        Error,
+        Compaction,
+        Handoff,
+        Fork,
+        ThreadCreated,
+        SecretRequest,
+        LinkRequest,
+        Subagent,
+        DynamicTool
+    )
 }
 
 fn remove_entry(entries: &mut Vec<TimelineEntry>, id: &str) -> bool {

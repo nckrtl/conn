@@ -251,7 +251,7 @@ fn open_app(cx: &mut TestAppContext, server: &FakeServer) -> (AnyWindowHandle, E
         "the thread loads",
         |app, _, _| {
             matches!(app.status, Some(ConnectionStatus::Connected))
-                && app.threads.get(OPEN).is_some_and(|t| !t.entries.is_empty())
+                && app.thread(OPEN).is_some_and(|t| !t.entries.is_empty())
         },
         server,
     );

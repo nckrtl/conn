@@ -345,6 +345,8 @@ pub(crate) struct ChatView {
     synced_revision: Option<u64>,
     /// Thread opened at this instant and not painted yet (`CONN_GPUI_PERF_LOG`).
     perf_open: Option<(String, std::time::Instant)>,
+    /// Where the open thread's rows came from (`device` or `server`), for `sync.open_drawn`.
+    perf_source: &'static str,
     entry_timings: HashMap<String, EntryTiming>,
     /// The model of each subagent card, by timeline entry id.
     subagent_models: HashMap<String, conn_state::SubagentModel>,
@@ -628,6 +630,7 @@ impl ChatView {
             cache: RowCache::default(),
             synced_revision: None,
             perf_open: None,
+            perf_source: "server",
             entry_timings: HashMap::new(),
             subagent_models: HashMap::new(),
             subagent_children: HashMap::new(),
@@ -817,6 +820,12 @@ impl ChatView {
     #[cfg(test)]
     pub(crate) fn composer_for_test(&self) -> Entity<Composer> {
         self.composer.clone()
+    }
+
+    /// The timeline rows drawn: with any, the view draws them, never the loader.
+    #[cfg(test)]
+    pub(crate) fn timeline_rows_for_test(&self) -> usize {
+        self.cache.items().len()
     }
 
     /// Returns the composer's currently resolved `(instance_id, model_slug, options)` selection.
@@ -1265,6 +1274,10 @@ impl ChatView {
         }
     }
 
+    pub(crate) fn set_perf_source(&mut self, source: &'static str) {
+        self.perf_source = source;
+    }
+
     /// Logs the first paint of a thread opened with [`Self::set_perf_open`] once it has rows
     /// (or is synchronized and empty).
     fn log_first_paint(&mut self) {
@@ -1282,6 +1295,9 @@ impl ChatView {
             "app.first_paint thread={perf_thread} items={items} +{:.1}ms",
             conn_client::perf::ms_since(*opened_at)
         );
+        if items > 0 {
+            conn_client::perf::open_drawn(perf_thread, self.perf_source);
+        }
         self.perf_open = None;
     }
 

@@ -193,6 +193,11 @@ fn main() {
     }
 
     stderr_log::install();
+    if conn_client::perf::enabled()
+        && let Some(started) = process_start_epoch_ms()
+    {
+        conn_client::perf::set_process_start(started);
+    }
     let (url_tx, url_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
     for arg in std::env::args().skip(1) {
         if conn_desktop::control::parse_deep_link(&arg).is_some() {
@@ -345,6 +350,35 @@ fn start_desktop_control_socket(
 fn nix_uid() -> Option<u32> {
     // SAFETY: `libc::getuid` is an always-safe POSIX syscall returning the process's real UID.
     Some(unsafe { libc::getuid() })
+}
+
+/// When this process started (Unix ms), for the `sync.*` perf lines.
+#[cfg(target_os = "macos")]
+fn process_start_epoch_ms() -> Option<f64> {
+    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+    let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).ok()?;
+    // SAFETY: `proc_pidinfo` writes at most `size` bytes into `info`, a buffer of that size.
+    let written = unsafe {
+        libc::proc_pidinfo(
+            i32::try_from(std::process::id()).ok()?,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            info.as_mut_ptr().cast(),
+            size,
+        )
+    };
+    if written != size {
+        return None;
+    }
+    // SAFETY: `proc_pidinfo` filled the whole struct (checked above).
+    let info = unsafe { info.assume_init() };
+    #[expect(clippy::cast_precision_loss, reason = "epoch milliseconds fit an f64")]
+    Some(info.pbi_start_tvsec as f64 * 1000.0 + info.pbi_start_tvusec as f64 / 1000.0)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn process_start_epoch_ms() -> Option<f64> {
+    None
 }
 
 #[cfg(not(unix))]

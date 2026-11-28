@@ -99,10 +99,7 @@ private struct AttachmentTile: View {
 
     private var thumbnail: UIImage? {
         if file.id.hasPrefix("pending:") { return loaded }
-        if store.offlineReader?.retainsThread(thread: thread) == true {
-            return loaded ?? store.imageThumbnails.image(thumbnailKey)
-        }
-        return store.status == .connected ? loaded : nil
+        return loaded ?? store.imageThumbnails.image(thumbnailKey)
     }
 
     private static let singleImageMaxHeight: CGFloat = 320
@@ -176,8 +173,7 @@ private struct AttachmentTile: View {
                         try Task.checkCancellation()
                         guard store.offlineReader === reader else { return }
                         if let thumbnail {
-                            if reader.retainsThread(thread: thread) { store.imageThumbnails.insert(thumbnail, key: thumbnailKey) }
-                            else if store.status != .connected { return }
+                            store.imageThumbnails.insert(thumbnail, key: thumbnailKey)
                             loaded = UIImage(cgImage: thumbnail)
                             failure = nil
                             return
@@ -245,8 +241,7 @@ private struct AttachmentTile: View {
             if file.isImage {
                 guard let reader = store.offlineReader else { throw URLError(.notConnectedToInternet) }
                 let bytes = try await reader.imageBytes(thread: thread, file: file, online: store.status == .connected)
-                guard store.identityEpoch == epoch, store.offlineReader === reader,
-                      reader.retainsThread(thread: thread) || store.status == .connected else { throw URLError(.cancelled) }
+                guard store.identityEpoch == epoch, store.offlineReader === reader else { throw URLError(.cancelled) }
                 try bytes.write(to: local, options: .atomic)
             } else {
                 let url = try await store.assetURL(id: file.id, name: file.name, mime: file.mimeType)

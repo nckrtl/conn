@@ -21,6 +21,7 @@ tokio.workspace = true
 tokio-tungstenite.workspace = true
 tracing.workspace = true
 url.workspace = true
+yawc.workspace = true
 
 [dev-dependencies]
 # Paused test clock for the attachment download deadlines.

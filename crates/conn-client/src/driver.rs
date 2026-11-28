@@ -15,11 +15,8 @@ use serde_json::Value;
 use serde_json::value::RawValue;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
-use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::HeaderValue;
-use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tracing::{debug, warn};
+use yawc::{Frame, OpCode, WebSocketError};
 
 use crate::auth::{TokenExchangeError, exchange_pairing_code};
 use crate::wire::{
@@ -36,6 +33,10 @@ const TAG_ANNOTATIONS_SUBSCRIBE: &str = "annotations.subscribe";
 const TAG_SUBSCRIBE_SERVER_CONFIG: &str = "subscribeServerConfig";
 const TAG_DISPATCH_COMMAND: &str = "orchestration.dispatchCommand";
 const PING_INTERVAL: Duration = Duration::from_secs(5);
+/// Store-owned background threads that may open (catch up) at once. The open thread (rank 0)
+/// never waits; the others queue by rank, so the visible state comes first and twenty threads
+/// do not compete for one socket and one server store at the same time.
+const BACKGROUND_OPENINGS: usize = 2;
 const MAX_MISSED_PONGS: u8 = 2;
 /// How long the TCP connect plus WebSocket upgrade may take before the attempt counts as failed.
 /// Without it, a server that accepts the socket but never answers the upgrade (a restarting
@@ -50,6 +51,17 @@ pub(crate) enum Command {
     },
     SubscribeServerConfig,
     SubscribeThread(String),
+    /// A thread whose rows a local store keeps: it owns the resume cursor (`wire.md`).
+    SubscribeThreadFrom {
+        thread_id: String,
+        after: Option<i64>,
+        priority: u32,
+    },
+    /// The store committed this thread's rows through `after`: resume from there.
+    SetThreadCursor {
+        thread_id: String,
+        after: i64,
+    },
     RefreshThread(String),
     UnsubscribeThread(String),
     /// Ends the thread subscription and also drops its kept sequence.
@@ -83,6 +95,17 @@ struct ThreadSubState {
     /// the most recent first, so the thread the user just opened does not wait behind hundreds of
     /// background cache streams.
     touched: u64,
+    /// A local store owns `after_sequence` (it moves only after the store commits) and the
+    /// stream opens with `changesAfterSequence`.
+    store_owned: bool,
+    /// Lower goes first when a new session subscribes again; ties go most recent first.
+    priority: u32,
+    /// A store-owned background thread whose subscribe went out and whose `synchronized` has
+    /// not come yet: it holds one of the [`BACKGROUND_OPENINGS`] slots.
+    opening: bool,
+    /// Its subscribe should go out but has not: new, re-requested, or the session restarted.
+    /// A stream the server ended stays out until something asks for it again.
+    waiting: bool,
 }
 
 impl ThreadSubState {
@@ -92,6 +115,10 @@ impl ThreadSubState {
             request_id: None,
             subscribed_at: None,
             touched,
+            store_owned: false,
+            priority: u32::MAX,
+            opening: false,
+            waiting: true,
         }
     }
 }
@@ -150,6 +177,8 @@ struct DriverState {
     server_config_subscribed: bool,
     server_config_request_id: Option<RequestId>,
     thread_subs: HashMap<String, ThreadSubState>,
+    /// An opening slot freed: send the subscribes that wait for one.
+    admit_due: bool,
     /// Last observed stream sequence per thread, preserved across `UnsubscribeThread` ->
     /// `SubscribeThread` so switching back replays deltas instead of re-downloading a snapshot.
     thread_last_sequences: HashMap<String, i64>,
@@ -185,6 +214,7 @@ impl DriverState {
             server_config_subscribed: false,
             server_config_request_id: None,
             thread_subs: HashMap::new(),
+            admit_due: false,
             thread_last_sequences: HashMap::new(),
             panel_subscription: None,
             panel_request_id: None,
@@ -221,12 +251,15 @@ impl DriverState {
     /// Thread subscriptions in the order a new session sends them: the most recently asked for
     /// first.
     fn thread_ids_by_recency(&self) -> Vec<String> {
-        let mut ids: Vec<(&String, u64)> = self
+        let mut ids: Vec<(&String, (u32, u64))> = self
             .thread_subs
             .iter()
-            .map(|(id, sub)| (id, sub.touched))
+            .map(|(id, sub)| (id, (sub.priority, sub.touched)))
             .collect();
-        ids.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        // A store's rank first (the open thread is 0), then the most recently asked for.
+        ids.sort_by(|a, b| {
+            (a.1.0, std::cmp::Reverse(a.1.1), a.0).cmp(&(b.1.0, std::cmp::Reverse(b.1.1), b.0))
+        });
         ids.into_iter().map(|(id, _)| id.clone()).collect()
     }
 
@@ -278,6 +311,8 @@ impl DriverState {
         self.panel_request_id = None;
         for sub in self.thread_subs.values_mut() {
             sub.request_id = None;
+            sub.opening = false;
+            sub.waiting = true;
         }
         for req_id in self.annotation_subs.values_mut() {
             *req_id = None;
@@ -300,6 +335,65 @@ impl DriverState {
             .and_then(|sub| sub.request_id)
     }
 
+    /// Adds or re-ranks a store-owned subscription. True when it needs a request on the wire.
+    fn subscribe_from(&mut self, thread_id: String, after: Option<i64>, priority: u32) -> bool {
+        let touched = self.next_touch();
+        match self.thread_subs.get_mut(&thread_id) {
+            Some(sub) if sub.store_owned => {
+                sub.priority = priority;
+                sub.touched = touched;
+                sub.waiting |= sub.request_id.is_none();
+                sub.waiting
+            }
+            _ => {
+                // The store's cursor is the only one: never a sequence remembered from before.
+                self.thread_last_sequences.remove(&thread_id);
+                let mut sub = ThreadSubState::new(after, touched);
+                sub.store_owned = true;
+                sub.priority = priority;
+                self.thread_subs.insert(thread_id, sub);
+                true
+            }
+        }
+    }
+
+    /// Whether `thread_id`'s subscribe may go out now: always, except a store-owned background
+    /// thread while [`BACKGROUND_OPENINGS`] others are still opening.
+    fn may_open(&self, thread_id: &str) -> bool {
+        let background = |sub: &ThreadSubState| sub.store_owned && sub.priority > 0;
+        match self.thread_subs.get(thread_id) {
+            Some(sub) if background(sub) => {
+                self.thread_subs
+                    .values()
+                    .filter(|sub| background(sub) && sub.opening)
+                    .count()
+                    < BACKGROUND_OPENINGS
+            }
+            _ => true,
+        }
+    }
+
+    /// Frees `thread_id`'s opening slot: its `synchronized` came, or its stream ended.
+    fn opened(&mut self, thread_id: &str) {
+        if let Some(sub) = self.thread_subs.get_mut(thread_id)
+            && std::mem::take(&mut sub.opening)
+        {
+            self.admit_due = true;
+        }
+    }
+
+    fn set_cursor(&mut self, thread_id: &str, after: i64) {
+        if let Some(sub) = self
+            .thread_subs
+            .get_mut(thread_id)
+            .filter(|s| s.store_owned)
+        {
+            // Exactly what the store committed, in commit order: a replacement window (say after
+            // a server restore) can move it down, and a reconnect must resume from there.
+            sub.after_sequence = Some(after);
+        }
+    }
+
     fn handle_offline_command(&mut self, cmd: Command) {
         match cmd {
             Command::SubscribeShell {
@@ -317,8 +411,19 @@ impl DriverState {
             Command::SubscribeThread(thread_id) => {
                 self.touch_thread(&thread_id);
             }
+            Command::SubscribeThreadFrom {
+                thread_id,
+                after,
+                priority,
+            } => {
+                self.subscribe_from(thread_id, after, priority);
+            }
+            Command::SetThreadCursor { thread_id, after } => {
+                self.set_cursor(&thread_id, after);
+            }
             Command::UnsubscribeThread(thread_id) => {
                 if let Some(sub) = self.thread_subs.remove(&thread_id)
+                    && !sub.store_owned
                     && let Some(seq) = sub.after_sequence
                 {
                     self.thread_last_sequences.insert(thread_id, seq);
@@ -417,12 +522,8 @@ async fn fetch_environment(base: &url::Url) -> Option<String> {
     body.get("environmentId")?.as_str().map(str::to_owned)
 }
 
-fn is_auth_rejection(err: &tokio_tungstenite::tungstenite::Error) -> bool {
-    matches!(
-        err,
-        tokio_tungstenite::tungstenite::Error::Http(response)
-            if matches!(response.status().as_u16(), 401 | 403)
-    )
+fn is_auth_rejection(err: &WebSocketError) -> bool {
+    matches!(err, WebSocketError::InvalidStatusCode(401 | 403))
 }
 
 pub(crate) async fn run(
@@ -501,7 +602,7 @@ pub(crate) async fn run(
             }
         };
 
-        let ws_request = match build_ws_request(&state.config.http_base_url, &token) {
+        let (ws_url, ws_request) = match build_ws_request(&state.config.http_base_url, &token) {
             Ok(req) => req,
             Err(err) => {
                 let msg = err.to_string();
@@ -513,16 +614,21 @@ pub(crate) async fn run(
             }
         };
 
-        let ws_config = WebSocketConfig::default()
-            .max_message_size(Some(MAX_JOINED_MESSAGE_BYTES))
-            .max_frame_size(Some(MAX_JOINED_MESSAGE_BYTES));
-
-        // `disable_nagle = true` (TCP_NODELAY): every client frame is a small Ack or Request. With
+        // Offers permessage-deflate; the server chooses the context settings.
+        // `with_no_delay` (TCP_NODELAY): every client frame is a small Ack or Request. With
         // Nagle on, a `subscribeThread` sent right after an Ack waits for the server's delayed
         // TCP ACK (up to ~200 ms on macOS) before it leaves the socket.
+        let ws_options = yawc::Options::default()
+            .with_max_payload_read(MAX_JOINED_MESSAGE_BYTES)
+            .with_utf8()
+            .with_no_delay()
+            .with_compression_level(yawc::CompressionLevel::fast())
+            .with_compression_threshold(256);
         let handshake = tokio::time::timeout(
             HANDSHAKE_TIMEOUT,
-            tokio_tungstenite::connect_async_with_config(ws_request, Some(ws_config), true),
+            yawc::WebSocket::connect(ws_url)
+                .with_options(ws_options)
+                .with_request(ws_request),
         );
         let connected = match handshake.await {
             Ok(result) => result,
@@ -535,7 +641,7 @@ pub(crate) async fn run(
             }
         };
         match connected {
-            Ok((ws_stream, _response)) => {
+            Ok(ws_stream) => {
                 state.backoff.reset();
                 if events_tx
                     .send(ClientEvent::Status(ConnectionStatus::Connected))
@@ -631,19 +737,13 @@ async fn resolve_bearer(
 fn build_ws_request(
     http_base_url: &url::Url,
     bearer_token: &str,
-) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, ClientError> {
+) -> Result<(url::Url, yawc::HttpRequestBuilder), ClientError> {
     let ws_url = build_ws_url(http_base_url)?;
-    let mut request = ws_url
-        .as_str()
-        .into_client_request()
-        .map_err(|err| ClientError::Connection(format!("invalid websocket request: {err}")))?;
-    let auth_header = HeaderValue::from_str(&format!("Bearer {bearer_token}"))
+    let auth_header = reqwest::header::HeaderValue::from_str(&format!("Bearer {bearer_token}"))
         .map_err(|err| ClientError::Auth(format!("invalid bearer token header: {err}")))?;
-    request.headers_mut().insert(
-        tokio_tungstenite::tungstenite::http::header::AUTHORIZATION,
-        auth_header,
-    );
-    Ok(request)
+    let request =
+        yawc::HttpRequestBuilder::new().header(reqwest::header::AUTHORIZATION, auth_header);
+    Ok((ws_url, request))
 }
 
 fn drain_pending_commands(state: &mut DriverState, cmd_rx: &mut mpsc::UnboundedReceiver<Command>) {
@@ -701,8 +801,7 @@ enum SessionOutcome {
     Disconnected(String),
 }
 
-type WsStream =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+type WsStream = yawc::TcpWebSocket;
 
 async fn run_session(
     state: &mut DriverState,
@@ -728,14 +827,17 @@ async fn run_session(
         tokio::select! {
             maybe_msg = ws_read.next() => {
                 match maybe_msg {
-                    Some(Ok(Message::Text(text))) => {
+                    Some(frame) if frame.opcode() == OpCode::Text => {
+                        let Ok(text) = std::str::from_utf8(frame.payload()) else {
+                            return SessionOutcome::Disconnected("ws text is not UTF-8".to_owned());
+                        };
                         // Receiving any text frame (including multi-part snapshot chunks) proves
                         // the server connection is live; don't let keepalive drop a huge snapshot
                         // mid-transfer while the server is busy streaming frame parts.
                         missed_pongs = 0;
                         let part_at = std::time::Instant::now();
                         let started_at = *message_started_at.get_or_insert(part_at);
-                        let whole = match joiner.push(&text) {
+                        let whole = match joiner.push(text) {
                             Ok(Some(whole)) => {
                                 message_started_at = None;
                                 whole
@@ -775,18 +877,14 @@ async fn run_session(
                             }
                         }
                     }
-                    Some(Ok(Message::Ping(payload))) => {
-                        if let Err(err) = ws_write.send(Message::Pong(payload)).await {
-                            return SessionOutcome::Disconnected(format!("ws pong send failed: {err}"));
-                        }
-                    }
-                    Some(Ok(Message::Close(_))) | None => {
+                    // yawc answers pings itself and ends the stream on a read error.
+                    Some(frame) if frame.opcode() == OpCode::Close => {
                         return SessionOutcome::Disconnected("server closed websocket".to_owned());
                     }
-                    Some(Ok(Message::Binary(_) | Message::Pong(_) | Message::Frame(_))) => {}
-                    Some(Err(err)) => {
-                        return SessionOutcome::Disconnected(format!("ws read error: {err}"));
+                    None => {
+                        return SessionOutcome::Disconnected("websocket closed or failed".to_owned());
                     }
+                    Some(_) => {}
                 }
             }
             _ = ping_interval.tick() => {
@@ -803,11 +901,11 @@ async fn run_session(
                     Some(Command::Close) | None => {
                         state.closed = true;
                         let _ = send_client_frame(&mut ws_write, &FromClient::Eof).await;
-                        let _ = ws_write.send(Message::Close(None)).await;
+                        let _ = ws_write.send(Frame::close(yawc::close::CloseCode::Normal, "")).await;
                         return SessionOutcome::Closed;
                     }
                     Some(Command::Reconnect) => {
-                        let _ = ws_write.send(Message::Close(None)).await;
+                        let _ = ws_write.send(Frame::close(yawc::close::CloseCode::Normal, "")).await;
                         return SessionOutcome::ReconnectNow;
                     }
                     Some(cmd) => {
@@ -826,7 +924,7 @@ async fn restore_subscriptions_and_pending<S>(
     ws_write: &mut S,
 ) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     // Calls first: the server reads its store one request at a time, so a send queued while the
     // server was away must not wait behind every resubscribed stream's replay.
@@ -844,9 +942,7 @@ where
     }
 
     // Each kept cursor asks only for what changed while the session was down.
-    for thread_id in state.thread_ids_by_recency() {
-        send_thread_subscribe(state, &thread_id, ws_write).await?;
-    }
+    admit_threads(state, ws_write).await?;
 
     if state.panel_subscription.is_some() && state.panel_request_id.is_none() {
         send_panel_requests_subscribe(state, ws_write).await?;
@@ -879,7 +975,7 @@ async fn handle_online_command<S>(
     ws_write: &mut S,
 ) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     match cmd {
         Command::SubscribeShell {
@@ -915,9 +1011,25 @@ where
                 send_thread_subscribe(state, &thread_id, ws_write).await?;
             }
         }
+        Command::SubscribeThreadFrom {
+            thread_id,
+            after,
+            priority,
+        } => {
+            if state.subscribe_from(thread_id.clone(), after, priority)
+                && state.may_open(&thread_id)
+            {
+                send_thread_subscribe(state, &thread_id, ws_write).await?;
+            }
+        }
+        Command::SetThreadCursor { thread_id, after } => {
+            state.set_cursor(&thread_id, after);
+        }
         Command::UnsubscribeThread(thread_id) => {
             if let Some(sub) = state.thread_subs.remove(&thread_id) {
-                if let Some(seq) = sub.after_sequence {
+                if !sub.store_owned
+                    && let Some(seq) = sub.after_sequence
+                {
                     state.thread_last_sequences.insert(thread_id, seq);
                 }
                 if let Some(request_id) = sub.request_id {
@@ -925,6 +1037,7 @@ where
                     send_client_frame(ws_write, &FromClient::Interrupt { request_id }).await?;
                 }
             }
+            admit_threads(state, ws_write).await?;
         }
         Command::ForgetThread(thread_id) => {
             if let Some(request_id) = state.forget_thread(&thread_id) {
@@ -1007,7 +1120,7 @@ where
 
 async fn send_shell_subscribe<S>(state: &mut DriverState, ws_write: &mut S) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     let input = OrchestrationV2SubscribeShellInput {
         after_sequence: state.shell_after_sequence,
@@ -1035,7 +1148,7 @@ async fn send_server_config_subscribe<S>(
     ws_write: &mut S,
 ) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     let input = SubscribeServerConfigPayload {
         environment_themes: None,
@@ -1056,22 +1169,54 @@ where
     send_request(ws_write, request_id, TAG_SUBSCRIBE_SERVER_CONFIG, payload).await
 }
 
+/// Sends the subscribes that wait and may go now ([`DriverState::may_open`]), by rank and then
+/// recency: the open thread at once, background threads as opening slots free.
+async fn admit_threads<S>(state: &mut DriverState, ws_write: &mut S) -> Result<(), String>
+where
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
+{
+    for thread_id in state.thread_ids_by_recency() {
+        let waiting = state
+            .thread_subs
+            .get(&thread_id)
+            .is_some_and(|sub| sub.waiting && sub.request_id.is_none());
+        if waiting && state.may_open(&thread_id) {
+            send_thread_subscribe(state, &thread_id, ws_write).await?;
+        }
+    }
+    Ok(())
+}
+
 async fn send_thread_subscribe<S>(
     state: &mut DriverState,
     thread_id: &str,
     ws_write: &mut S,
 ) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
+    let store_owned = state
+        .thread_subs
+        .get(thread_id)
+        .is_some_and(|s| s.store_owned);
     let after_sequence = state
         .thread_subs
         .get(thread_id)
         .and_then(|s| s.after_sequence)
-        .or_else(|| state.thread_last_sequences.get(thread_id).copied());
+        .or_else(|| {
+            (!store_owned)
+                .then(|| state.thread_last_sequences.get(thread_id).copied())
+                .flatten()
+        });
+    let (after_sequence, changes_after_sequence) = if store_owned {
+        (None, after_sequence)
+    } else {
+        (after_sequence, None)
+    };
     let input = OrchestrationV2SubscribeThreadInput {
         thread_id: thread_id.to_owned(),
         after_sequence,
+        changes_after_sequence,
         // T3 always asks for `synchronized`: it ends "Loading thread…" for threads whose
         // snapshot has no rows, and marks the end of an `afterSequence` replay.
         request_completion_marker: Some(true),
@@ -1082,7 +1227,8 @@ where
         accept_bounded_snapshot: Some(true),
         accept_deferred_work: None,
         accept_compact_turn_items: Some(true),
-        accept_deduped_bodies: Some(true),
+        // A store keeps rows as the server sends them, so it takes whole bodies.
+        accept_deduped_bodies: (!store_owned).then_some(true),
         accept_compact_ids: None,
     };
     let payload = serde_json::to_value(&input)
@@ -1091,6 +1237,8 @@ where
     if let Some(sub) = state.thread_subs.get_mut(thread_id) {
         sub.request_id = Some(request_id.clone());
         sub.subscribed_at = Some(std::time::Instant::now());
+        sub.opening = sub.store_owned && sub.priority > 0;
+        sub.waiting = false;
     }
     state.in_flight_streams.insert(
         request_id.clone(),
@@ -1106,7 +1254,7 @@ async fn send_panel_requests_subscribe<S>(
     ws_write: &mut S,
 ) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     let Some(input) = &state.panel_subscription else {
         return Ok(());
@@ -1127,7 +1275,7 @@ async fn send_annotations_subscribe<S>(
     ws_write: &mut S,
 ) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     let input = AnnotationProjectInput {
         project_id: project_id.to_owned(),
@@ -1151,7 +1299,7 @@ async fn send_unary_call<S>(
     ws_write: &mut S,
 ) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     // The caller stopped waiting: nothing would read the answer.
     if call.reply.is_closed() {
@@ -1178,7 +1326,7 @@ async fn send_generic_stream<S>(
     ws_write: &mut S,
 ) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     let request_id = state.alloc_request_id();
     state
@@ -1197,7 +1345,7 @@ async fn send_request<S>(
     payload: Value,
 ) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     let frame = FromClient::Request(Request {
         id,
@@ -1215,12 +1363,12 @@ where
 
 async fn send_client_frame<S>(ws_write: &mut S, frame: &FromClient) -> Result<(), String>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     let text = encode_client_frame(frame)
         .map_err(|err| format!("failed to serialize client frame: {err}"))?;
     ws_write
-        .send(Message::Text(text.into()))
+        .send(Frame::text(text))
         .await
         .map_err(|err| format!("ws send failed: {err}"))
 }
@@ -1241,7 +1389,7 @@ async fn handle_incoming_frame<S>(
     timing: MessageTiming,
 ) -> Result<(), SessionOutcome>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     match frame {
         IncomingServerFrame::Chunk { request_id, values } => {
@@ -1287,6 +1435,13 @@ where
         }
         IncomingServerFrame::Other(FromServer::Request(_)) => {}
     }
+    // An opening slot freed (a thread's `synchronized`, or its stream ended): send the
+    // subscribes waiting for one. Once here, so no frame path can miss it.
+    if std::mem::take(&mut state.admit_due) {
+        admit_threads(state, ws_write)
+            .await
+            .map_err(SessionOutcome::Disconnected)?;
+    }
     Ok(())
 }
 
@@ -1299,7 +1454,7 @@ async fn handle_chunk_raw<S>(
     timing: MessageTiming,
 ) -> Result<(), SessionOutcome>
 where
-    S: futures::Sink<Message, Error = tokio_tungstenite::tungstenite::Error> + Unpin,
+    S: futures::Sink<Frame, Error = WebSocketError> + Unpin,
 {
     // Always acknowledge chunks immediately so server streams never stall.
     send_client_frame(
@@ -1361,7 +1516,16 @@ where
                         if crate::perf::enabled() {
                             log_thread_item_decoded(state, &thread_id, &item, timing, decode_start);
                         }
-                        if let Some(seq) = extract_thread_sequence(&item) {
+                        let store_owned = state
+                            .thread_subs
+                            .get(&thread_id)
+                            .is_some_and(|s| s.store_owned);
+                        if store_owned
+                            && matches!(item, OrchestrationV2ThreadStreamItem::Synchronized(_))
+                        {
+                            state.opened(&thread_id);
+                        }
+                        if !store_owned && let Some(seq) = extract_thread_sequence(&item) {
                             state.thread_last_sequences.insert(thread_id.clone(), seq);
                             if let Some(sub) = state.thread_subs.get_mut(&thread_id) {
                                 sub.after_sequence = Some(seq);
@@ -1383,6 +1547,20 @@ where
                             "conn-client failed to decode thread stream item ({thread_id}): {err}"
                         );
                         warn!("conn-client failed to decode thread stream item: {err}");
+                        // A store must not move its cursor past a change it never saw.
+                        if state
+                            .thread_subs
+                            .get(&thread_id)
+                            .is_some_and(|s| s.store_owned)
+                            && events_tx
+                                .send(ClientEvent::ThreadStale {
+                                    thread_id: thread_id.clone(),
+                                })
+                                .await
+                                .is_err()
+                        {
+                            return Err(SessionOutcome::Closed);
+                        }
                     }
                 }
             }
@@ -1544,6 +1722,9 @@ async fn handle_exit(
                     && sub.request_id.as_ref() == Some(&request_id)
                 {
                     sub.request_id = None;
+                    if std::mem::take(&mut sub.opening) {
+                        state.admit_due = true;
+                    }
                 }
                 if events_tx
                     .send(ClientEvent::StreamEnded {
@@ -1598,4 +1779,165 @@ async fn handle_exit(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn state() -> DriverState {
+        let base = url::Url::parse("http://127.0.0.1:9").unwrap_or_else(|e| panic!("{e}"));
+        DriverState::new(
+            ServerConfig {
+                http_base_url: base,
+                credential: Credential::Bearer("test".into()),
+            },
+            Arc::new(RwLock::new(None)),
+            reqwest::Client::new(),
+        )
+    }
+
+    /// A store's cursor is the only one for its thread: a thread it forgot and keeps again
+    /// starts cold, never from a sequence remembered from an earlier subscription.
+    #[test]
+    fn a_store_owned_thread_never_resumes_from_a_remembered_cursor() {
+        let mut state = state();
+        state.thread_last_sequences.insert("t".into(), 7);
+        state.subscribe_from("t".into(), Some(5), 1);
+        state.set_cursor("t", 9);
+        state.handle_offline_command(Command::UnsubscribeThread("t".into()));
+        assert!(
+            !state.thread_last_sequences.contains_key("t"),
+            "no cursor kept"
+        );
+        state.subscribe_from("t".into(), None, 1);
+        assert_eq!(
+            state.thread_subs.get("t").and_then(|s| s.after_sequence),
+            None
+        );
+    }
+
+    /// What `send_thread_subscribe` records when a subscribe goes out.
+    fn sent(state: &mut DriverState, id: &str) {
+        if let Some(sub) = state.thread_subs.get_mut(id) {
+            sub.request_id = Some(RequestId::Number(1));
+            sub.opening = sub.store_owned && sub.priority > 0;
+            sub.waiting = false;
+        }
+    }
+
+    /// The open thread never waits; background threads open two at a time, and a slot frees
+    /// when an opening's `synchronized` comes.
+    #[test]
+    fn background_threads_open_two_at_a_time() {
+        let mut state = state();
+        for (id, rank) in [("a", 1), ("b", 2), ("c", 3)] {
+            state.subscribe_from(id.into(), None, rank);
+        }
+        assert!(state.may_open("a"));
+        sent(&mut state, "a");
+        sent(&mut state, "b");
+        assert!(!state.may_open("c"), "both slots taken");
+        state.subscribe_from("open".into(), None, 0);
+        assert!(state.may_open("open"), "the open thread never waits");
+        state.opened("a");
+        assert!(state.admit_due && state.may_open("c"), "a slot freed");
+    }
+
+    /// A stream the server ended is not sent again by the queue; asking again re-queues it.
+    #[test]
+    fn an_ended_stream_waits_until_asked_again() {
+        let mut state = state();
+        state.subscribe_from("t".into(), Some(3), 1);
+        sent(&mut state, "t");
+        if let Some(sub) = state.thread_subs.get_mut("t") {
+            sub.request_id = None;
+            sub.opening = false;
+        }
+        assert!(
+            !state.thread_subs.get("t").is_some_and(|s| s.waiting),
+            "parked"
+        );
+        assert!(state.subscribe_from("t".into(), Some(3), 1), "asked again");
+        assert!(state.thread_subs.get("t").is_some_and(|s| s.waiting));
+    }
+
+    /// A thread's `synchronized`, arriving as an ordinary stream chunk, frees its slot and the
+    /// next waiting thread's subscribe goes out. (The raw chunk path once skipped this, so
+    /// only the first two background threads ever caught up.)
+    #[tokio::test]
+    async fn a_synchronized_chunk_admits_the_next_waiting_thread() {
+        let mut state = state();
+        for (id, rank) in [("a", 1), ("b", 2), ("c", 3)] {
+            state.subscribe_from(id.into(), None, rank);
+        }
+        sent(&mut state, "a");
+        sent(&mut state, "b");
+        let request_id = RequestId::Number(1);
+        state
+            .in_flight_streams
+            .insert(request_id.clone(), ActiveStream::Thread("a".into()));
+        let mut frames = Vec::new();
+        let sink = futures::sink::unfold(&mut frames, |frames, frame: Frame| async move {
+            frames.push(frame);
+            Ok::<_, WebSocketError>(frames)
+        });
+        let mut sink = std::pin::pin!(sink);
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        let synchronized = RawValue::from_string(r#"{"kind":"synchronized"}"#.into())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let frame = IncomingServerFrame::Chunk {
+            request_id,
+            values: vec![synchronized],
+        };
+        let timing = MessageTiming {
+            started_at: std::time::Instant::now(),
+            bytes: 0,
+        };
+        let mut missed = 0;
+        let handled = handle_incoming_frame(
+            &mut state,
+            frame,
+            &mut sink,
+            &events_tx,
+            &mut missed,
+            timing,
+        )
+        .await;
+        assert!(handled.is_ok());
+        assert!(events_rx.try_recv().is_ok(), "the marker reached the app");
+        assert!(
+            state
+                .thread_subs
+                .get("c")
+                .is_some_and(|s| s.request_id.is_some()),
+            "the waiting thread was sent"
+        );
+    }
+
+    /// A replacement window committed at a lower sequence (a restored server) moves the
+    /// resume cursor down, so a reconnect does not skip the changes after it.
+    #[test]
+    fn a_lower_committed_cursor_wins() {
+        let mut state = state();
+        state.subscribe_from("t".into(), Some(1_000), 1);
+        state.set_cursor("t", 500);
+        assert_eq!(
+            state.thread_subs.get("t").and_then(|s| s.after_sequence),
+            Some(500)
+        );
+    }
+
+    /// A new session subscribes the store's ranks first (the open thread is 0).
+    #[test]
+    fn a_new_session_subscribes_by_rank_then_recency() {
+        let mut state = state();
+        state.subscribe_from("background".into(), None, 3);
+        state.subscribe_from("open".into(), None, 0);
+        state.handle_offline_command(Command::SubscribeThread("plain".into()));
+        assert_eq!(
+            state.thread_ids_by_recency(),
+            ["open", "background", "plain"]
+        );
+    }
 }

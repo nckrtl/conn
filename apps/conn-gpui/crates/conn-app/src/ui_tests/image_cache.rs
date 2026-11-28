@@ -77,6 +77,10 @@ struct Served {
     /// Upload bodies, in arrival order.
     uploads: Arc<Mutex<Vec<Vec<u8>>>>,
     dispatches: Arc<Mutex<Vec<serde_json::Value>>>,
+    /// Requests for anything else, such as a thread outline; answered `404`.
+    other: Arc<Mutex<Vec<String>>>,
+    /// Threads asked for with `orchestration.subscribeThread`, which this server refuses.
+    subscribed: Arc<Mutex<Vec<String>>>,
 }
 
 impl FakeServer {
@@ -143,7 +147,14 @@ async fn serve(tcp: tokio::net::TcpStream, png: Arc<[u8]>, state: Served) {
         receive_upload(tcp, &line, request, &state).await;
         return;
     }
-    let id = path.trim_start_matches("/attachments/").to_owned();
+    let Some(id) = path.strip_prefix("/attachments/").map(str::to_owned) else {
+        state.other.lock().expect("requests").push(path.to_owned());
+        let _ = tcp
+            .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await;
+        let _ = tcp.shutdown().await;
+        return;
+    };
     *state
         .downloads
         .lock()
@@ -203,6 +214,14 @@ async fn serve_ws(tcp: tokio::net::TcpStream, state: Served) {
             let conn_wire::FromClient::Request(req) = frame else {
                 continue;
             };
+            if req.tag == "orchestration.subscribeThread" {
+                let thread = req.payload["threadId"].as_str().unwrap_or_default();
+                state
+                    .subscribed
+                    .lock()
+                    .expect("subscribed")
+                    .push(thread.to_owned());
+            }
             let exit = if req.tag == "assets.createUrl" {
                 let id = req.payload["resource"]["attachmentId"]
                     .as_str()
@@ -337,6 +356,20 @@ fn a_reopened_thread_paints_its_pictures_in_the_first_frame_without_a_download(
         "each picture downloads once"
     );
     settle(cx);
+    assert_eq!(
+        server.state.other.lock().expect("requests").len(),
+        1,
+        "a failed outline read is not asked again for the same thread state"
+    );
+    let subscribed = server.state.subscribed.lock().expect("subscribed").clone();
+    let mut once = subscribed.clone();
+    once.sort();
+    once.dedup();
+    assert_eq!(
+        subscribed.len(),
+        once.len(),
+        "a refused thread stream is not asked for again on the same connection"
+    );
 
     open_thread(cx, &app, "thread-other", kitchen_sink_thread());
     for _ in 0..3 {

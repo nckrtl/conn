@@ -77,6 +77,13 @@ pub enum FfiSessionPhase {
     Suspended,
 }
 
+/// The device's copy of a saved server, drawn before its connection exists.
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct FfiLaunchView {
+    pub shell: Option<FfiShellSnapshot>,
+    pub thread: Option<FfiThreadSnapshot>,
+}
+
 /// The one observable state. `revision` grows with every change, so an older state that
 /// arrives late can be dropped.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -227,6 +234,10 @@ struct Attempt<C> {
 }
 
 pub(crate) struct Machine<C> {
+    /// The app went to the background since the connection was last nudged, so its socket may
+    /// have died: the next foreground reconnects. A launch's first foreground leaves a healthy
+    /// connection alone.
+    backgrounded: bool,
     revision: u64,
     next_id: u64,
     attempt: Option<Attempt<C>>,
@@ -274,6 +285,7 @@ impl<C: SessionCore> Machine<C> {
             environment_id: None,
             open_thread: None,
             has_connected: false,
+            backgrounded: false,
             last_identity: None,
             identity_epoch: 0,
             grace: None,
@@ -585,9 +597,27 @@ impl<C: SessionCore> Machine<C> {
         fx
     }
 
-    /// The app came back to the foreground.
+    /// The app came back to the foreground. A connection that is up or coming up, and has not
+    /// been through the background since, is left alone: nudging it would tear down a working
+    /// socket and every stream on it (a cold launch's first `.active` did exactly that).
     pub(crate) fn foreground(&mut self) -> Effects<C> {
+        let live = self.attempt.as_ref().is_some_and(|a| {
+            matches!(
+                a.status,
+                FfiConnectionStatus::Connected | FfiConnectionStatus::Connecting
+            )
+        });
+        if live && !std::mem::take(&mut self.backgrounded) {
+            return Vec::new();
+        }
+        self.backgrounded = false;
         self.retry()
+    }
+
+    /// The app went to the background: the next foreground may find the socket dead.
+    pub(crate) fn background(&mut self) -> Effects<C> {
+        self.backgrounded = true;
+        Vec::new()
     }
 
     /// Where a link opens. Only a link for this session's already known identity stays here;
@@ -996,8 +1026,6 @@ pub struct ConnSession {
     machine: Mutex<Machine<Arc<ConnCore>>>,
     /// Where this session keeps its offline thread cache, if anywhere.
     cache_dir: Option<PathBuf>,
-    /// The app is in the background: connections keep no warm threads.
-    in_background: std::sync::atomic::AtomicBool,
     /// The current attempt's offline reader.
     offline: Mutex<Option<(u64, Arc<OfflineReader>)>>,
     this: Weak<ConnSession>,
@@ -1020,7 +1048,6 @@ impl ConnSession {
             listener,
             machine: Mutex::new(Machine::new()),
             cache_dir,
-            in_background: std::sync::atomic::AtomicBool::new(false),
             offline: Mutex::new(None),
             this: this.clone(),
         })
@@ -1034,12 +1061,7 @@ impl ConnSession {
         server_url: String,
         environment_id: Option<String>,
     ) {
-        if self
-            .in_background
-            .load(std::sync::atomic::Ordering::Relaxed)
-        {
-            core.set_foreground(false);
-        }
+        conn_client::perf::mark("session.attached");
         self.step(|m| m.attached(id, core, server_url, environment_id));
     }
 
@@ -1085,9 +1107,11 @@ impl ConnSession {
                 let Some(this) = self.this.upgrade() else {
                     return;
                 };
-                self.orbit
-                    .handle()
-                    .spawn(async move { this.run_attempt(id, target, saved, credential).await });
+                conn_client::perf::mark("session.start");
+                self.orbit.handle().spawn(async move {
+                    conn_client::perf::mark("session.attempt_runs");
+                    this.run_attempt(id, target, saved, credential).await;
+                });
             }
             Effect::FetchEnvironment { id, server_url } => {
                 let Some(this) = self.this.upgrade() else {
@@ -1140,14 +1164,10 @@ impl ConnSession {
                 environment_id,
             } => core.expect_environment(environment_id),
             Effect::WipeCache => {
-                if let Some((_, reader)) = self
-                    .offline
+                self.offline
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .take()
-                {
-                    reader.db.invalidate();
-                }
+                    .take();
                 if let Some(dir) = &self.cache_dir {
                     let _ = std::fs::remove_dir_all(dir);
                 }
@@ -1166,10 +1186,12 @@ impl ConnSession {
     }
 
     async fn open_offline(&self, id: u64, core: &ConnCore, dir: PathBuf, identity: String) {
-        match core
+        conn_client::perf::mark("offline.open_start");
+        let opened = core
             .prepare_offline(dir.to_string_lossy().into_owned(), identity)
-            .await
-        {
+            .await;
+        conn_client::perf::mark("offline.open_done");
+        match opened {
             Ok(reader) if self.is_current(id) => {
                 *self.offline.lock().unwrap_or_else(|e| e.into_inner()) = Some((id, reader));
                 self.step(|m| m.offline_ready(id));
@@ -1401,56 +1423,50 @@ impl ConnSession {
 
     /// The app's main session at launch: a saved manual server, else the primary agent.
     pub fn launch(&self, saved: Option<FfiSavedSession>) {
+        conn_client::perf::mark("session.launch");
         self.step(|m| m.launch(saved));
+    }
+
+    /// What the device holds for the saved server `identity`, drawn at launch while its
+    /// connection is still being found: the thread list and the thread `thread_id`. Neither is
+    /// current; the connection's own snapshots replace them.
+    pub async fn launch_view(&self, identity: String, thread_id: Option<String>) -> FfiLaunchView {
+        let Some(dir) = self.cache_dir.clone() else {
+            return FfiLaunchView::default();
+        };
+        self.orbit
+            .handle()
+            .spawn(async move {
+                // Another server's leftovers are not this one's threads.
+                if std::fs::read_to_string(dir.join(IDENTITY_FILE)).ok()? != identity {
+                    return None;
+                }
+                let path = cache_files(&dir).ok()?.join(crate::core::LOCAL_DATABASE);
+                let peek = conn_cache::peek(&path, &identity, thread_id.as_deref()).await;
+                let catalog = conn_state::providers::ModelCatalog::default();
+                let thread = peek.thread.map(|thread| {
+                    let meta = peek
+                        .shell
+                        .as_ref()
+                        .and_then(|shell| shell.find_thread(&thread.thread_id))
+                        .map(crate::types::ThreadSnapshotMeta::from_shell);
+                    crate::types::build_thread_snapshot(&thread, meta.as_ref(), &catalog)
+                });
+                Some(FfiLaunchView {
+                    shell: peek.shell.as_ref().map(crate::types::build_shell_snapshot),
+                    thread,
+                })
+            })
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
     }
 
     /// A linked environment's session at launch: its saved Orbit environment or manual server.
     pub fn restore(&self, saved: Option<FfiSavedSession>) {
+        conn_client::perf::mark("session.restore");
         self.step(|m| m.restore(saved));
-    }
-
-    /// Reads only the completed inbox file. Message database opening and backfill run separately.
-    pub async fn cached_shell(&self, identity: String) -> Option<FfiShellSnapshot> {
-        let dir = self.cache_dir.clone()?;
-        self.orbit
-            .handle()
-            .spawn(async move {
-                if tokio::fs::read_to_string(dir.join(IDENTITY_FILE))
-                    .await
-                    .ok()?
-                    != identity
-                {
-                    return None;
-                }
-                crate::offline::read_saved_shell(&cache_files(&dir).ok()?, &identity).await
-            })
-            .await
-            .ok()
-            .flatten()
-    }
-
-    /// Opens a saved environment's matching cache while its connection or discovery is pending.
-    pub async fn saved_offline_reader(&self, identity: String) -> Option<Arc<OfflineReader>> {
-        let dir = self.cache_dir.clone()?;
-        self.orbit
-            .handle()
-            .spawn(async move {
-                if tokio::fs::read_to_string(dir.join(IDENTITY_FILE))
-                    .await
-                    .ok()?
-                    != identity
-                {
-                    return None;
-                }
-                let dir = cache_files(&dir).ok()?;
-                if !dir.join("messages.sqlite3").is_file() {
-                    return None;
-                }
-                OfflineReader::open(dir, identity, None).await.ok()
-            })
-            .await
-            .ok()
-            .flatten()
     }
 
     /// The current connection's offline thread cache, once open.
@@ -1594,20 +1610,14 @@ impl ConnSession {
     }
 
     pub fn foreground(&self) {
-        self.in_background
-            .store(false, std::sync::atomic::Ordering::Relaxed);
-        if let Some(core) = self.core() {
-            core.set_foreground(true);
-        }
         self.step(Machine::foreground);
     }
 
-    /// The app went to the background: stop the warm thread streams until [`Self::foreground`].
+    /// The app went to the background: save the thread list now, for the next launch.
     pub fn background(&self) {
-        self.in_background
-            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.step(Machine::background);
         if let Some(core) = self.core() {
-            core.set_foreground(false);
+            core.save_shell();
         }
     }
 
@@ -1814,24 +1824,35 @@ mod tests {
         let parent = tempfile::tempdir()?;
         let root = parent.path().join("cache");
         let original = claim_cache_dir(&root, "env")?;
-        let reader = OfflineReader::open(original.clone(), "env".into(), None).await?;
-        reader
-            .db
-            .save_image("env", "thread", "version", b"old")
+        let config = conn_client::ServerConfig {
+            http_base_url: url::Url::parse("http://127.0.0.1:9")?,
+            credential: conn_client::Credential::Bearer("test".into()),
+        };
+        let connection =
+            conn_client::Connection::start(config, &tokio::runtime::Handle::current()).0;
+        let open = |dir: PathBuf| {
+            let connection = connection.clone();
+            async move {
+                conn_cache::Engine::open(
+                    &dir.join("local.sqlite3"),
+                    "env",
+                    connection,
+                    conn_cache::Settings::default(),
+                )
+                .await
+            }
+        };
+        open(original.clone())
+            .await?
+            .images()
+            .save("thread", "version", b"old")
             .await?;
         assert_eq!(claim_cache_dir(&root, "env")?, original);
-        reader.db.invalidate();
         std::fs::remove_dir_all(&root)?;
         let replacement = claim_cache_dir(&root, "env")?;
         assert_ne!(original, replacement);
-        assert!(reader.db.image("env", "thread", "version").await.is_err());
-        assert!(
-            OfflineReader::open(original, "env".into(), None)
-                .await
-                .is_err()
-        );
-        let fresh = OfflineReader::open(replacement, "env".into(), None).await?;
-        assert!(fresh.db.image("env", "thread", "version").await?.is_none());
+        let fresh = open(replacement).await?;
+        assert!(fresh.images().get("thread", "version").await?.is_none());
         Ok(())
     }
 
@@ -2176,6 +2197,33 @@ mod tests {
         assert!(!m.state().shows_offline, "the new window holds");
         let _ = m.end_grace(second);
         assert!(m.state().shows_offline);
+    }
+
+    /// A launch's first foreground leaves a working connection alone; one after the background
+    /// reconnects, since the socket may have died meanwhile.
+    #[test]
+    fn foreground_reconnects_only_after_the_background() {
+        let mut m = Machine::<FakeCore>::new();
+        let _ = m.launch(None);
+        let _ = m.attached(1, FakeCore::default(), "http://agent/".into(), None);
+        let _ = m.status(1, FfiConnectionStatus::Connected);
+        let reconnects = |fx: &Effects<FakeCore>| {
+            fx.iter()
+                .filter(|e| matches!(e, Effect::Reconnect(_)))
+                .count()
+        };
+        assert_eq!(
+            reconnects(&m.foreground()),
+            0,
+            "a cold launch keeps its connection"
+        );
+        let _ = m.background();
+        assert_eq!(
+            reconnects(&m.foreground()),
+            1,
+            "back from the background: reconnect"
+        );
+        assert_eq!(reconnects(&m.foreground()), 0, "once");
     }
 
     #[test]
@@ -3286,27 +3334,15 @@ mod tests {
             "node-new",
             "the cache now belongs to the new Node"
         );
-        match std::fs::read(
-            cache_files(&dir)
-                .expect("cache generation")
-                .join("shell.json"),
-        ) {
-            Ok(bytes) => {
-                let shell = conn_state::environments::LinkedShellSnapshot::from_json(&bytes)
-                    .expect("any shell already written must be a valid replacement snapshot");
-                assert_eq!(shell.environment_id, "node-new");
-            }
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(err) => panic!("cannot inspect the new Node's shell: {err}"),
-        }
-        let cold = ConnSession::with_orbit(session.orbit.clone(), Some(dir), recorder);
-        for (identity, allowed) in [("node-old", false), ("node-new", true)] {
-            assert_eq!(
-                rt.block_on(cold.saved_offline_reader(identity.to_owned()))
-                    .is_some(),
-                allowed
-            );
-        }
+        let files = cache_files(&dir).expect("cache generation");
+        assert!(
+            !files.join("shell.json").exists(),
+            "the old Node's inbox is gone"
+        );
+        assert!(
+            files.join("conn-local-v1.sqlite3").is_file(),
+            "the new Node's thread database is open"
+        );
         if let Some(core) = session.core() {
             core.disconnect();
         }

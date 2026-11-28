@@ -49,7 +49,6 @@ pub mod thread_feed;
 pub mod thread_models;
 pub mod thread_search;
 mod timeline;
-pub mod warm;
 
 pub use conn_contract::{
     AnnotationCapture, AnnotationRecord, AnnotationRecordSource, AnnotationStatus,
@@ -138,7 +137,8 @@ pub use crate::thread::{
     BackgroundWorkKind, ChildApproval, EntryTiming, ItemStatus, NoticeLevel, PendingApproval,
     PendingRequest, RunStatus, RunTiming, SecretRequestStatus, SubagentModel, SubagentRecord,
     ThreadContextWindowSnapshot, ThreadState, TimelineEntry, TurnAgents, TurnCheckpointSummary,
-    TurnItemStatus, child_approvals, parse_iso8601_epoch_ms, request_kind_label, turn_item_detail,
+    TurnItemStatus, child_approvals, child_approvals_with, parse_iso8601_epoch_ms,
+    request_kind_label, turn_item_detail,
 };
 pub use crate::timeline::{
     LocalDateTime, PLAN_PREVIEW_MAX_LINES, SubagentTone, TurnCheckpointFile, TurnDiffRow,

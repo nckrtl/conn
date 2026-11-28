@@ -30,6 +30,18 @@ mod types;
 
 uniffi::setup_scaffolding!();
 
+/// When the process started (Unix ms), for the `sync.*` perf lines (`CONN_PERF_LOG_FILE`).
+#[uniffi::export]
+pub fn perf_set_process_start(epoch_ms: f64) {
+    conn_client::perf::set_process_start(epoch_ms);
+}
+
+/// A named point on the launch path from Swift (`mark.<stage>`), for the perf log only.
+#[uniffi::export]
+pub fn perf_mark(stage: String) {
+    conn_client::perf::mark(&stage);
+}
+
 pub use crate::approvals::{FfiApprovalOption, FfiButtonTone, FfiPendingApproval};
 pub use crate::composer::{
     FfiComposerFile, FfiComposerLimits, FfiComposerTarget, FfiEncodedImage, FfiImageCodec,

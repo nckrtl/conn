@@ -53,6 +53,7 @@ struct ConnApp: App {
             .preferredColorScheme(ProcessInfo.processInfo.environment["CONN_TEST_APPEARANCE"].flatMap {
                 switch $0 { case "dark": .dark; case "light": .light; default: nil }
             })
+            .overlay(alignment: .topLeading) { KeyboardProbeView() }
             #endif
             .onChange(of: scenePhase) { _, newPhase in
                 store.handleScenePhase(newPhase)

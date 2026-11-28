@@ -182,7 +182,7 @@ async fn refuses_full_or_oversized_stores_without_changing_them() {
 }
 
 /// T3's `matchingOrigin`, `parseSavedUrl`, `parseTotpSetup` and `totpCode`
-/// (`tools/gen-credential-cases.mjs`).
+/// (recorded once from T3's code).
 #[test]
 fn fill_rules_match_t3s_functions() {
     let cases: Vec<serde_json::Value> =

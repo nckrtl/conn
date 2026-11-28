@@ -63,7 +63,8 @@ mod tests {
         after: Option<serde_json::Map<String, Value>>,
     }
 
-    /// The cases `tools/limits-diff.mjs` decodes with the T3 contract's own schemas.
+    /// The cases (`tools/limits-cases.json`), checked once against the T3 contract's own
+    /// schemas.
     #[test]
     fn cases_agree_with_the_contract() {
         #[derive(Deserialize)]

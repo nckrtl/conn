@@ -4,8 +4,8 @@
 //! parsed into a shortcut, `when` parsed into an expression tree, defaults whose command the
 //! file overrides left out.
 //!
-//! The defaults come from `keybindings.defaults.json`, generated from `packages/shared` by
-//! `tools/gen-keybindings.mjs`. The parser follows `packages/shared/src/keybindings.ts`.
+//! The defaults come from `keybindings.defaults.json`, hand-owned since upstream T3 Code
+//! `05e3674636`. The parser follows `packages/shared/src/keybindings.ts`.
 
 use std::{
     collections::HashSet,

@@ -13,8 +13,8 @@
 //! - Kept quirks: V8 reads UTF-16 units and stops at a NUL; a day composer reads its count
 //!   after filling it, so `"12"` is 2001-12-01; time-zone offsets overflow as V8's unsigned
 //!   32-bit sum does, against 32-bit Smis (Node builds V8 without pointer compression).
-//! - Proof: `conn-engine`'s `date_input_matches_t3s` holds T3's own answers for each string of
-//!   `tools/gen-date-cases.mjs` in five zones.
+//! - Proof: `conn-engine`'s `date_input_matches_t3s` holds T3's own answers for each recorded
+//!   string in five zones.
 
 /// Milliseconds since the epoch of `text` as Effect's `DateTime.make(text)` gives it, or `None`
 /// where that is `Option.none()`. `local_offset_ms(t)` is the local zone's offset in

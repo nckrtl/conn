@@ -588,7 +588,7 @@ mod tests {
         assert!(parse_lenient("{\"a\": 1 /* open").is_err());
     }
 
-    /// The cases `gen-upstream.mjs` decoded with T3's own `ServerSettings` decoder: the load
+    /// The cases T3's own `ServerSettings` decoder decoded (recorded once): the load
     /// takes exactly those T3 takes.
     #[test]
     fn the_load_agrees_with_t3_on_persisted_nulls() {

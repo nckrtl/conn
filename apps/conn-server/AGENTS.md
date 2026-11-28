@@ -33,9 +33,10 @@ Engine, method table), the wire, and the checks. Each crate has its own `README.
 6. **Parity is proven, not assumed.** Each feature has a check against the TypeScript server
    or a recording of the real client. A method we do not serve stays unregistered and answers
    "not supported". A capability is advertised only when the server serves it.
-7. **Drift must fail a check.** When upstream can change something, generate it from the Conn
-   monorepo or test it against the monorepo. Do not copy a list, a text or a default by hand
-   when a generator or a check can hold it.
+7. **Drift is found by the audit.** The files once generated from the Conn monorepo are
+   hand-owned now (README.md, "Frozen files"). Upstream changes to their sources reach the
+   audit (`tools/audit.sh`, `tools/upkeep/followed-files.txt`), not CI. Change a frozen file
+   by hand, with a test.
 8. **Checks stay green.** Run `tools/check.sh` before you say that work is done. On a Mac it
    proves macOS only: the compiler and clippy never see code marked for Linux
    (`#[cfg(target_os = "linux")]`). CI runs the same checks on Linux, so read the CI result
@@ -113,35 +114,30 @@ shutdown. Follow it byte for byte where a provider can see it.
 ## Commands
 
 ```sh
-(cd ../.. && vp i)                               # once: the monorepo's node_modules
-tools/check.sh                                   # every check that needs no model
-tools/follow-conn.sh [--capture]                 # follow Conn: regenerate, check, report
+tools/check.sh                                   # every check that needs no model or TypeScript
+(cd ../.. && vp i) && tools/audit.sh             # the audit kit: comparisons with the T3 server
 cargo run -p conn-server -- serve --state-dir /tmp/conn-state --project <dir>   # sealed; CONN_UNSEALED=1 for a real login
 (cd helpers/sdk-host && npm ci)                  # once, so Claude can run from a checkout
 crates/conn-provider-claude/tools/conformance/run.sh
 ```
 
-`tools/check.sh` runs format, clippy with warnings as errors, the tests, the release build,
-`cargo deny`, the generator checks, the Effect client, the client's own reducers, the replay,
-the `/mcp` parity check and Orbit's container flow on the fake provider.
+`tools/check.sh` runs format, clippy with warnings as errors, the tests, the decode check,
+`cargo deny`, the sealed run, the release build with every example, the capability gate and
+Orbit's container and instance flows on the fake provider and stubs. CI runs the same.
 
 ## The Conn monorepo is an input
 
-The contract (`packages/contracts`), the web client that the recorder drives, and the
-TypeScript server and adapters used for comparison live in the Conn monorepo (`nckrtl/conn`,
-a fork of T3 Code). The Conn Server sits inside it, in `apps/conn-server`, so it always
-follows the Conn commit it is part of. There is no pin.
+The TypeScript server and adapters used for comparison live in the Conn monorepo
+(`nckrtl/conn`, a fork of T3 Code). The Conn Server sits inside it, in `apps/conn-server`. Only
+the audit kit reads them; the checks and the build need nothing outside this folder.
 
-- Run every tool from `apps/conn-server`. The Node tools read the monorepo two levels up
+- Run every tool from `apps/conn-server`. The audit tools read the monorepo two levels up
   (`tools/monorepo.mjs`) and resolve packages from its `node_modules`: run `vp i` at the
   monorepo root first.
-- Generated files: `crates/conn-contract/src/generated.rs` and `methods.json`, `crates/conn-gateway-api/src/{types,ops}.rs` (from its pinned `openapi.json`), the `/mcp` tool
-  catalog and instruction texts in `crates/conn-mcp/src`, the keybinding defaults, and the
-  upstream tables from `tools/gen-upstream.mjs` (`crates/conn-server/src/scopes/generated.rs`,
-  `crates/conn-server/src/settings/generated.rs`, `crates/conn-contract/src/upstream.rs` with
-  `T3_SERVER_VERSION`, `tools/upkeep/http-routes.json`). Never edit one by hand; change its
-  generator and regenerate.
-- `docs/upkeep.md` says how the Conn Server follows Conn and what to do when a check is red.
+- Generated files: `crates/conn-gateway-api/src/{types,ops}.rs`, from its pinned
+  `openapi.json`; never edit them by hand. The contract, the `/mcp` catalog and texts, the
+  upstream tables and the instruction texts are hand-owned (README.md, "Frozen files").
+- `docs/upkeep.md` says how the Conn Server follows upstream and what to do when a check is red.
   `docs/scope.md` says what the server serves and what it skips by decision.
 - Do not change TypeScript in the Conn monorepo for Conn Server work.
 
@@ -149,17 +145,17 @@ follows the Conn commit it is part of. There is no pin.
 
 | To add | Put it in | Then |
 | --- | --- | --- |
-| An RPC method in an existing area | that area's file in `crates/conn-server/src/methods/` | the method table checks the tag, the kind and the scope against the contract at start; add a call to `crates/conn-server/tools/effect-client.mjs`, or the `decode coverage` check fails |
+| An RPC method in an existing area | that area's file in `crates/conn-server/src/methods/` | the method table checks the tag, the kind and the scope against the contract at start; add a test that decodes its answer as the contract type |
 | A new area | a new file there, and one line in `methods/mod.rs` | |
 | A feature service (state that methods, `/mcp` tools or the engine host share) | one field in `conn_mcp::Features` and one line in `feature_services` in `crates/conn-server/src/serve.rs` | `Deps`, the engine host and `/mcp` hold the same struct; nothing to copy |
 | A part that must stop | one line in `stop_in_order` in `crates/conn-server/src/serve.rs` | say why it sits where it does |
-| An engine command or event | `crates/conn-engine` (`commands.rs`, `runner.rs`, `store.rs`) | prove it with `crates/conn-engine/tools/client-check.mjs` |
-| An `/mcp` tool | `crates/conn-mcp/src/tools/` | `gen-tools.mjs --check` and `parity.mjs` |
+| An engine command or event | `crates/conn-engine` (`commands.rs`, `runner.rs`, `store.rs`) | prove it with an engine test |
+| An `/mcp` tool | `crates/conn-mcp/src/tools/` and its row in the hand-owned catalog | a `conn-mcp` test |
 | A provider | a crate that implements `Provider` and `Session` from `crates/conn-provider`; shared parts go in `crates/conn-provider-support` | replay tests against the T3 adapter's events, and the comparison in [Providers](#providers) |
-| A settings rule | `crates/conn-server/src/settings.rs` | add a case to `crates/conn-server/tools/settings-cases.json`; `settings-diff.mjs` runs it against the T3 server's own functions |
+| A settings rule | `crates/conn-server/src/settings.rs` | a test there |
 | A capability or `ServerConfig` flag | `capabilities` / `config_flags` in `crates/conn-server/src/environment.rs`; a capability also has its row in `crates/conn-server/tools/capabilities.json` | advertise only what the server serves. The `capabilities` check fails when a registered method's capability is off without a reason, or one is on with nothing registered; it does not read the `ServerConfig` flags |
 | A source control rule the engine needs too | `crates/conn-source-control-core`: text in, text out | the engine depends on no feature crate |
-| A part that follows upstream files | a pathspec in `tools/upkeep/followed-files.txt` | the `follow-conn.sh` report then prints that part's upstream commits |
+| A part that follows upstream files | a pathspec in `tools/upkeep/followed-files.txt` | the audit's report (`tools/bump-report.mjs`) then prints that part's upstream commits |
 | A helper two crates need (time, hex, base64, HMAC, atomic file write, ids) | `crates/conn-support`: std only (plus `sha2`, `uuid`, `getrandom`), no async, no state | a test there |
 | A dependency | the workspace `Cargo.toml` | state why and what it costs; `cargo deny` must pass |
 
@@ -180,8 +176,8 @@ Where this project differs from the skills:
   `# Errors` sections, `#[non_exhaustive]`) apply to crate boundaries only where they help
   a reader.
 - Dependencies cost binary size and memory here, so rule 4 above decides, with numbers.
-- `crates/conn-contract/src/generated.rs` is generated. Never edit or review it by hand;
-  change the generator.
+- `crates/conn-contract/src/generated.rs` is hand-owned and large. Edit it with its existing
+  macros, and add a `methods.json` row and a `sampled.jsonl` sample for a new method.
 
 `lints/beautiful-rust/` holds the skills' clippy set. The workspace turns on part of it in
 `Cargo.toml` and `clippy.toml`; `CRATES.md` ("Lint set") says which, why, and what follows in

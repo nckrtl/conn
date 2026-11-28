@@ -38,12 +38,8 @@ unicode-normalization.workspace = true
 regex-syntax.workspace = true
 
 [features]
-# A scripted provider for the client check (`examples/export_turn.rs`).
+# A scripted provider (`fake::FakeProvider`) for the examples and `replay_server`.
 fake-provider = []
-
-[[example]]
-name = "export_turn"
-required-features = ["fake-provider"]
 
 [[example]]
 name = "memory_load"

@@ -103,7 +103,7 @@ base_env=(
   "CONFORMANCE_MARKER=1"
   "SHELL=$OUT/login-shell"
 )
-# Under the canary (tools/check.sh), its Node hook and logs reach both sides alike.
+# Under the canary (tools/audit.sh), its Node hook and logs reach both sides alike.
 if [ -n "${CONN_CANARY_ROOT:-}" ]; then
   base_env+=("NODE_OPTIONS=${NODE_OPTIONS:-}" "CONN_CANARY_ROOT=$CONN_CANARY_ROOT"
     "CONN_NETWORK_LOG=${CONN_NETWORK_LOG:-}" "CONN_CANARY_NODE_NETWORK_LOG=${CONN_CANARY_NODE_NETWORK_LOG:-}")

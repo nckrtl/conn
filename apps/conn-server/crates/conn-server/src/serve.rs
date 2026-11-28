@@ -52,7 +52,7 @@ pub struct ServeOptions {
     /// `--managed-provision`: serve managed callers on a second ingress
     /// (`crate::managed`).
     pub managed_provision: Option<PathBuf>,
-    /// Receives each model manifest the server accepts; `main` gives it to the providers.
+    /// The bundled model manifest (`crate::model_manifest`); `main` gives it to the providers.
     pub model_manifest: conn_provider::LiveManifest,
     /// Providers report entry changes here; the config streams listen.
     pub status_notifier: conn_provider::StatusNotifier,
@@ -114,7 +114,7 @@ impl ServeOptions {
             session_idle: args.session_idle,
             sdk_host: args.sdk_host,
             managed_provision: args.managed_provision,
-            model_manifest: conn_provider::LiveManifest::default(),
+            model_manifest: crate::model_manifest::live(),
             status_notifier: conn_provider::StatusNotifier::default(),
         }
     }
@@ -162,7 +162,7 @@ pub async fn serve_with_instances(
         session_idle,
         sdk_host: _,
         managed_provision,
-        model_manifest,
+        model_manifest: _,
         status_notifier,
     } = options;
     // SIGHUP asks for a reload (`reload.rs`). Its default action stops the process, so the
@@ -412,11 +412,6 @@ pub async fn serve_with_instances(
         // An inert copy holds the original's peer links: it must not use them.
         peers: (!inert).then(|| crate::peers::PeerLinks::new(environment.clone(), engine.clone())),
         provider_status: crate::methods::provider::ProviderStatus::with_notifier(status_notifier),
-        model_manifest: Some(crate::model_manifest::ModelManifest::new(
-            state_dir.clone(),
-            environment.clone(),
-            model_manifest,
-        )),
         ..Deps::default()
     };
     start_agent_tools(&mut deps, &host, &sqlite_engine, addr);
@@ -489,10 +484,11 @@ pub async fn serve_with_instances(
         worktree_cleanup = Some(cleanup.start());
         let _ = host.worktree_cleanup.set(cleanup);
     }
-    // `model-manifest.json`, fetched and cached as the T3 server's provider checks do.
-    if let Some(manifest) = &state.deps.model_manifest {
-        manifest.start();
-    }
+    // `model-manifest.json` for Orbit's task turns: the bundled manifest.
+    tokio::spawn({
+        let state_dir = state_dir.clone();
+        async move { crate::model_manifest::write(&state_dir).await }
+    });
     // `spawn` starts nothing when the engine has attention events off.
     let managed_server = match provision {
         Some(provision) => {

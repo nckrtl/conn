@@ -1970,7 +1970,7 @@ fn names_word(text: &str, name: &str) -> bool {
 
 #[test]
 fn agent_texts_name_only_known_unserved_tools() {
-    // Every tool apps/server registers, whoever may see it (`tools/gen-tools.mjs`).
+    // Every tool apps/server registers, whoever may see it (`fixtures/t3-tool-names.txt`).
     let all: Vec<String> = include_str!("../fixtures/t3-tool-names.txt")
         .lines()
         .map(str::to_owned)

@@ -1247,7 +1247,7 @@ async fn head_lookups_keep_each_documents_answers_when_a_later_one_fails() {
 }
 
 /// T3's `runPullRequestAction`, `readCheckLogs` and `rerunChecks` traces
-/// (`tools/pr-action-recordings.mjs`), replayed on the same answers. Check reads and re-runs run
+/// (recorded once from T3's code), replayed on the same answers. Check reads and re-runs run
 /// concurrently in T3, so their requests compare as a set.
 #[tokio::test]
 async fn run_actions_and_ci_match_t3s_recorded_http_requests() {
@@ -1351,7 +1351,7 @@ async fn run_actions_and_ci_match_t3s_recorded_http_requests() {
     }
 }
 
-/// T3's `GitHubIssueTracker` traces (`tools/pr-action-recordings.mjs`), replayed on the same
+/// T3's `GitHubIssueTracker` traces (recorded once), replayed on the same
 /// answers: results, failures and every request in order.
 #[tokio::test]
 async fn issue_tracker_matches_t3s_recorded_http_requests() {

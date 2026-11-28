@@ -208,8 +208,7 @@ The T3 sources are under `apps/server/src/orchestration-v2/` unless a path says 
   `derivePendingBackgroundWork` (`src/background.rs`): provider thread rosters, then those
   rows, then pull request watches; `/mcp` reads it for its thread list and the live-caller
   rule. `background_work.updated` (not persisted) holds an idle session like the provider's
-  own probe, at most 64 provider turns tracked. `client-check.mjs` compares the roster with
-  T3's own function.
+  own probe, at most 64 provider turns tracked.
 - **Find in a thread.** `searchThread` and `searchThreadStream` read the visible timeline
   that `visible_rows` also writes into the transcript, so a run fork searches the parent
   history it shows, through the fork run. Each message counts matches in the text its
@@ -317,11 +316,3 @@ Work folding (`deferWork`, `view=work`) is not served.
   (`release_replay_gate`) holds the stub `codex` and the fake SDK host before a labelled
   frame through files in the scenario folder; the ACP stub has none yet. About 3 minutes; `--only <fixture>/<driver>` runs one,
   `--keep` keeps the work folder (each fixture's plan, stub log, database and result).
-- `tools/client-check.mjs`: the client's own decoders and reducers over
-  `examples/export_turn.rs` output. Needs `vp i` at the monorepo root. From
-  `apps/conn-server`:
-
-  ```sh
-  cargo run -p conn-engine --features fake-provider --example export_turn -- /tmp/x.json
-  node crates/conn-engine/tools/client-check.mjs /tmp/x.json
-  ```

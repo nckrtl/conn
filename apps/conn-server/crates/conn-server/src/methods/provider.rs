@@ -308,8 +308,7 @@ async fn discover_on_refresh(deps: &Deps) {
 
 /// T3's `refreshAll`: one full pass at a time, which every caller joins. The pass runs on its
 /// own task, so a caller that goes away (a closed connection) does not stop it for the
-/// others. It probes the instances at once, and at the end records the manifest it started
-/// with as probed.
+/// others. It probes the instances at once.
 pub async fn refresh_all(deps: &Deps) {
     let mut done = {
         let mut pass = deps
@@ -324,29 +323,14 @@ pub async fn refresh_all(deps: &Deps) {
                 *pass = Some(done.clone());
                 let deps = deps.clone();
                 tokio::spawn(async move {
-                    let manifest = deps
-                        .model_manifest
-                        .as_ref()
-                        .map(|manifest| manifest.current_updated_at());
                     discover_on_refresh(&deps).await;
                     let mut probes = tokio::task::JoinSet::new();
                     for provider in deps.providers.snapshot() {
                         let settings = instance_settings(&deps, provider.instance_id().as_str());
                         probes.spawn(async move { provider.refresh_status(settings).await });
                     }
-                    // A probe that ended abnormally leaves the manifest unprobed, so the next
-                    // opened picker runs the pass again.
-                    let mut complete = true;
-                    while let Some(joined) = probes.join_next().await {
-                        complete &= joined.is_ok();
-                    }
+                    while probes.join_next().await.is_some() {}
                     deps.provider_status.bump();
-                    if complete
-                        && let (Some(model_manifest), Some(updated)) =
-                            (&deps.model_manifest, manifest)
-                    {
-                        model_manifest.set_probed(updated);
-                    }
                     *deps
                         .provider_status
                         .pass
@@ -359,22 +343,6 @@ pub async fn refresh_all(deps: &Deps) {
         }
     };
     let _ = done.wait_for(|finished| *finished).await;
-}
-
-/// T3's `refreshModelCatalog`, for an opened model picker: refetch a manifest older than
-/// 5 minutes, and run full passes until the providers have been probed with the manifest now
-/// known. A pass that started before the fetch does not count, so a second one may follow.
-pub async fn refresh_model_catalog(deps: &Deps) {
-    let Some(manifest) = deps.model_manifest.clone() else {
-        return;
-    };
-    let updated = manifest.refresh_on_demand().await;
-    for _ in 0..2 {
-        if manifest.probed_updated_at() == updated {
-            return;
-        }
-        refresh_all(deps).await;
-    }
 }
 
 /// The model refresh of `server.refreshProviders` with `refreshModels`, after the probe: each

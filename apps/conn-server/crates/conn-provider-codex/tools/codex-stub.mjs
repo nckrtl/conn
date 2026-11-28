@@ -33,7 +33,7 @@
 // - `config.injectItems`: `thread/inject_items` is answered `{}` and logged as `inject`, not
 //   `extra`. T3's merge-back test fakes its `injectHistory` the same way, so its recording
 //   holds no injection.
-// - Probe mode (`config.probes`, for a whole server such as `idle-diff.mjs`): a provider status
+// - Probe mode (`config.probes`, for a whole server): a provider status
 //   probe's own app-server process is answered from canned replies and moves no cursor. See
 //   `PROBE_REPLIES` below. `config.version` answers `codex --version`.
 import * as NodeFS from "node:fs";

@@ -4,7 +4,7 @@
 //
 // The binary gets `sealedRunEnv` (tools/sealed-env.mjs): a fresh HOME, a stand-in SHELL, only
 // the variables it needs, a PATH without provider or host CLIs, no global git configuration,
-// the status probes and the model manifest fetch off, and our server's HTTP client refuses
+// the status probes off, and our server's HTTP client refuses
 // hosts outside loopback (CONN_NETWORK_LOG; the run then fails). The temp folder is removed when the
 // binary ends; one left by a killed runner is removed by the next run.
 //

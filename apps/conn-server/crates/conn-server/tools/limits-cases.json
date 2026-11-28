@@ -1,5 +1,5 @@
 {
- "comment": "Payloads at and over the contract limits that src/limits.rs applies. tools/limits-diff.mjs decodes each with the T3 contract's own schema; the Rust test cases_agree_with_the_contract runs each through limits::check. Both must give `ok`, and the payload after decode must equal `after` for each key it names.",
+ "comment": "Payloads at and over the contract limits that src/limits.rs applies. tools/limits-diff.mjs (removed) decoded each with the T3 contract's own schema; the Rust test cases_agree_with_the_contract runs each through limits::check. Both must give `ok`, and the payload after decode must equal `after` for each key it names.",
  "cases": [
   {"name":"env within limits","tag":"terminal.open","payload":{"threadId":"thread-1","terminalId":"default","cwd":"/tmp","env":{"FOO":"bar","_X1":"y"}},"ok":true},
   {"name":"env key with a digit first is dropped","tag":"terminal.open","payload":{"threadId":"thread-1","terminalId":"default","cwd":"/tmp","env":{"1FOO":"x","OK":"y"}},"ok":true,"after":{"env":{"OK":"y"}}},

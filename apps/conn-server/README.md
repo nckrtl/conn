@@ -8,10 +8,12 @@ the T3 server (`apps/server` in the Conn monorepo, TypeScript on Effect) with a 
 memory footprint. We reproduce behaviour at three boundaries (the client contract, `/mcp`, the
 provider protocols). We do not translate the TypeScript.
 
-**Base:** the Conn monorepo this folder sits in (`apps/conn-server` of `nckrtl/conn`). The tools
-read the contract, the web client and `apps/server` from the same tree.
-**Contract:** `crates/conn-contract/methods.json` records `contractDigest`, the sha256 of the
-tracked contract inputs, so a contract change fails `gen-contract.mjs --check`.
+**Base:** the Conn monorepo this folder sits in (`apps/conn-server` of `nckrtl/conn`). The
+checks need nothing outside this folder; the audit kit (`tools/audit.sh`) reads the TypeScript
+server from the same tree.
+**Contract:** hand-owned since upstream T3 Code `05e3674636` (`crates/conn-contract`). Its files
+were generated from `packages/contracts` until the generators were removed; see
+[Frozen files](#frozen-files).
 
 ## Run
 
@@ -34,14 +36,14 @@ every command.
 | `--project <dir>` (repeatable)              | the current folder in the short form; none with `serve` | Folders offered as projects, plus `projects.json` (`project add`)  |
 | `--label <name>`                            | the host name                                          | Environment label in clients                                       |
 | `--mode desktop`, `--bootstrap-fd <fd>`     | web                                                    | Conn desktop's start: reads its bootstrap line, accepts its token  |
-| `CONN_MODEL_MANIFEST_URL` (test seam)       | unset: T3 Code's manifest on GitHub                    | Where `model-manifest.json` is fetched from; `off` (or any value that is not an `http(s)` URL) never fetches. Every check sets `off` (`tools/check.sh`, `tools/sealed-env.mjs`); `orbit-flow.mjs` points it at a loopback stub |
 
 The default home is `~/.t3`, the T3 server's. To try the server next to a running T3 server,
 always pass `--base-dir` or `--state-dir` with a folder of its own.
 
 At start it takes the home's ownership lock (exit 78 when another server holds it), prints the
 address, the environment id, the method coverage and a `pairingUrl`, and writes
-`server-runtime.json`. SIGTERM or SIGINT stops it cleanly. A turn that was running when the
+`server-runtime.json` and `model-manifest.json` (the bundled model manifest, which Orbit reads;
+the server fetches none). SIGTERM or SIGINT stops it cleanly. A turn that was running when the
 server stopped continues on the next start in the same provider thread (at most 3 restarts in
 a row within 5 minutes).
 
@@ -58,65 +60,33 @@ browser) does not work; use Connections.
 
 ## Checks
 
-Run every check from `apps/conn-server`. One command runs all checks that need no model:
+Run every check from `apps/conn-server`. One command runs all checks that need no model and no
+TypeScript:
 
 ```sh
-(cd ../.. && vp i)                    # once: the monorepo's node_modules
-(cd helpers/sdk-host && npm ci)       # once: else the Claude checks are skipped
-tools/check.sh
+(cd helpers/sdk-host && npm ci)       # once: else instances-flow is skipped
+tools/check.sh                        # or --group rust, --group flows
 ```
 
-The Node tools load the contract, the client code and the TypeScript server from the monorepo
-two levels up (`tools/monorepo.mjs`), and resolve `effect`, `@t3tools/*` and Playwright from its
-`node_modules`. The Conn Server has no `node_modules` of its own. `tools/check.sh` stops with
-one line when the monorepo has no `node_modules`.
-
-CI path filters and sync triggers are listed in [`docs/upkeep.md`](docs/upkeep.md#when-the-checks-run).
-
-`tools/check.sh` runs, in order:
+CI runs the same two groups (`.github/workflows/conn-server-checks.yml`); see
+[`docs/upkeep.md`](docs/upkeep.md#when-the-checks-run).
 
 | Check               | Command                                                                                                                         | Proves                                                                                               |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| Timeout wrapper     | `bash tools/check-timeout.test.sh` | Each check stops at its time limit |
 | Toolchain pin       | `rust-toolchain.toml` against `RUST_TOOLCHAIN` in the monorepo's `.github/workflows/conn-server-*.yml`                          | CI builds with the pinned toolchain                                                                  |
 | Format, lint, tests | `cargo fmt --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace`           | All crates, offline, under the lint set (`CRATES.md`, "Lint set")                                    |
-| Release build       | `cargo build --release --workspace --bins --examples`                                                                           | The binaries below build                                                                             |
 | Recordings decode   | `cargo test --manifest-path fixtures/decode-check/Cargo.toml`                                                                   | Every recorded frame decodes with `conn_wire`                                                        |
-| Contract current    | `node crates/conn-contract/tools/gen-contract.mjs --check`                                                                      | Generated types match `packages/contracts`                                                           |
 | Gateway API current | `cargo run -p conn-gateway-api --features gen -- --check` | `conn-gateway-api` types and ops match its pinned `openapi.json` |
-| MCP tools current   | `node crates/conn-mcp/tools/gen-tools.mjs --check`                                                                              | Served tool definitions match `apps/server`                                                          |
-| GitHub GraphQL current | `node crates/conn-source-control/tools/gen-graphql.mjs --check` | GitHub's GraphQL operation texts match T3's generated modules, printed by `effect/graphql` |
-| Keybinding defaults | `node crates/conn-server/tools/gen-keybindings.mjs --check`                                                                     | The compiled-in defaults match `packages/shared`                                                     |
-| Effect client       | `node crates/conn-server/tools/effect-client.mjs target/release/conn-server`                                                    | Pairing, ticket, connect streams decode in Effect's `RpcClient`                                      |
-| Ack window          | same, with `target/release/examples/effect_fixture --fixture`                                                                   | Ack window and `Interrupt`                                                                           |
-| Client reducers     | `cargo run -p conn-engine --features fake-provider --example export_turn -- x.json`, then `crates/conn-engine/tools/client-check.mjs x.json` | Shell and thread streams rebuild the right state in the client's reducers                            |
-| Replay              | `node crates/conn-server/tools/replay.mjs target/release/examples/replay_server`                                                | Every call in the `remote` and `turn` recordings gets a decodable answer or the not-supported defect |
-| Text generation     | `node crates/conn-server/tools/textgen-diff.mjs target/release/examples/text_generation` | Text generator requests and answers, title prompts, contexts and titles equal T3's own code, on a loopback stub |
-| Registry            | `node crates/conn-source-control/tools/registry-diff.mjs target/release/examples/registry_cases` | GitHub and unknown-host fallback match T3's core registry with its GitHub definition, on every GitHub test literal and a fixed grid (8,901 cases) |
-| MCP parity          | `node crates/conn-mcp/tools/parity.mjs target/release/examples/replay_server`                                                   | `/mcp` answers as the T3 server's does, on the same calls                                            |
-| Peer links          | `node crates/conn-server/tools/peer-links-diff.mjs target/release/examples/replay_server` | Linking, forwarded tools, the link fence and link cards give T3 → T3's answers for Conn → Conn, Conn → T3 and T3 → Conn |
-| Devices current     | `node crates/conn-devices/tools/gen-devices.mjs --check` | The SSH bootstrap, the agent-device launcher, the tool pins and the hub proxy lists equal `apps/server`'s |
-| Device conformance  | `node crates/conn-devices/tools/conformance.mjs target/release/examples/replay_server` | `device.*`, the hub proxy and the four device tools answer as the T3 server's, and run the same ssh, npm and agent-device commands, on stand-ins |
-| Orbit idle check    | `node crates/conn-server/tools/idle-diff.mjs target/release/conn-server` | `/api/orchestration/shell` as Orbit's idle sleep and thread index read it equals the T3 server's in 14 states (no thread to a restart mid-turn) and 5 refusals; `/transcript` matches in status, refusals and decode, and is each server's own thread snapshot cut down, in 6 states and 4 refusals, and a run fork's transcript, thread snapshot and `subscribeThread` snapshot match T3's outline and fork marker; Codex on the conformance stub; differences listed in its `KNOWN` must stay exactly those |
-| Provider sign-in    | `node crates/conn-server/tools/provider-auth-diff.mjs target/release/conn-server` | every `provider.auth.*` reply for `claudeAgent`, `codex`, `grok` and an unknown id equals the T3 server's, and neither server runs a CLI for them (recording stubs) |
-| Codex instructions  | `node crates/conn-provider-codex/tools/gen-instructions.mjs --check`                                                             | T3's Codex `additionalContext` text is current, byte for byte                                         |
-| Codex conformance   | `node crates/conn-provider-codex/tools/conformance.mjs`                                                                         | Codex argv, environment, every stdin frame and shutdown equal the T3 server's, on a stub `codex`; also the `codex mcp list` and `codex exec` runs of a thread title |
-| ACP instructions    | `node crates/conn-provider-acp/tools/gen-instructions.mjs --check` | T3's ACP prompt wrapper and runtime notes are current, byte for byte |
-| ACP conformance     | `node crates/conn-provider-acp/tools/conformance.mjs` | Grok argv, environment, every stdin line and shutdown equal the T3 server's, on a stub agent |
-| Grok probe conformance | `node crates/conn-provider-acp/tools/probe-conformance.mjs` | Grok's `ServerProvider` entry and every CLI run of its status probe equal the T3 server's, on a stub CLI |
-| Codex model catalog | `node crates/conn-provider-codex/tools/gen-model-catalog.mjs --check` | The Codex model catalog the status probe applies matches T3's bundled `model-manifest.json` |
-| Codex probe conformance | `node crates/conn-provider-codex/tools/probe-conformance/run.mjs` | Codex's `ServerProvider` entry and every run of its status probe (argv, environment, folder, every stdin line, how it ended) equal the T3 server's `checkCodexProviderStatus`, on a stub `codex` (17 scenarios) |
-| Claude catalog      | `crates/conn-provider-claude/tools/gen-catalog/run.sh --check`                                                                   | The Claude model catalog matches T3's bundled catalog                                                |
-| Claude conformance  | `crates/conn-provider-claude/tools/conformance/run.sh` (skipped, with one line, without `npm ci` in `helpers/sdk-host`)          | The `claude` CLI gets the same argv, environment and stdin as from the T3 server, on a stub CLI      |
-| Claude probe conformance | `node crates/conn-provider-claude/tools/probe-conformance/run.mjs` (skipped with the Claude conformance) | Claude's `ServerProvider` entry and every CLI run of its status probe equal the T3 server's `checkClaudeProviderStatus`, and its thread titles equal `generateThreadTitle`, on a stub CLI |
-| T3 replay (Claude)  | `node crates/conn-provider-claude/tools/t3-replay/check.mjs`                                                                    | The T3 server's Claude transcripts: exactly the scenarios in `expected-failures.txt` fail            |
-| T3 fixture replay   | `node crates/conn-engine/tools/t3-fixture-replay/check.mjs`                                                                     | Runs T3's engine assertions for Claude, Codex, and Grok, including Grok's native child threads and background commands. The separate Antigravity checks exercise ACP wire behavior. |
-| Thread CLI diff     | `node crates/conn-server/tools/thread-cli-diff.mjs target/release/conn-server` | Orbit's task-turn commands (`t3 thread` start, send, list and show, `t3 auth session issue --scope … --json`, revoke, and `t3_copy_rpc.mjs`'s calls) give the same stdout, stderr and exit code as the T3 server's own `t3` CLI, on a stub `codex` with T3's transcripts |
-| Model manifest diff | `node crates/conn-server/tools/model-manifest-diff.mjs target/release/examples/model_manifest_cache` | `model-manifest.json` as this server writes it equals T3's `encodeManifestCache`, byte for byte |
-| Orbit flow          | `node crates/conn-server/tools/orbit-flow.mjs target/release/examples/replay_server`                                            | Orbit's container flow: start, project add, session issue, launch over `/mcp`, revoke, clean stop; then its task-turn path: the model check, `t3 thread` start, list, show, send, a turn that asks, and `t3_copy_rpc.mjs`'s read and interrupt   |
+| Dependencies        | `cargo deny check` | Advisories, licences, bans and sources (`deny.toml`) |
+| Sealed run          | `node tools/sealed-run-check.mjs` | A hand run of `cargo test` is sealed, the way out works, and the runner order holds |
+| Release build       | `cargo build --release --workspace --bins --examples --features fake-provider`                                                  | The binaries and every example build, the audit kit's included                                       |
+| Capabilities        | `node crates/conn-server/tools/capabilities-check.mjs target/release/conn-server` | A capability is advertised if and only if what it promises is registered; every contract flag has a row in `capabilities.json` |
+| Orbit flow          | `node crates/conn-server/tools/orbit-flow.mjs target/release/examples/replay_server`                                            | Orbit's container flow: start, project add, session issue, launch over `/mcp`, revoke, clean stop; then its task-turn path: the model check on the written `model-manifest.json`, `t3 thread` start, list, show, send, a turn that asks, and `t3_copy_rpc.mjs`'s read and interrupt   |
 | Instances flow      | `node crates/conn-server/tools/instances-flow.mjs target/release/conn-server` (skipped without `npm ci` in `helpers/sdk-host`)  | Claude and Codex instances from `providerInstances` written before start: a turn on each starts its stub with its settings; a change and a removal through `server.updateSettings` apply to the next session; disabled instances refused and listed disabled |
-| Canary (last)       | `node tools/canary.mjs verify` (set up by `tools/check.sh` before the first check) | No check read a decoy file of the home, changed the home, let a marker variable or file reach any output or written file, ran a provider or host CLI, or connected outside loopback; no passwd home lookup in our code |
+| Canary (last)       | `node tools/canary.mjs verify` (set up before the first check) | No check read a decoy file of the home, changed the home, let a marker variable or file reach any output or written file, ran a provider or host CLI, or connected outside loopback; no passwd home lookup in our code |
 
-**The canary.** `tools/check.sh` runs every check with a decoy HOME (marker files where
+**The canary.** `tools/check.sh` and `tools/audit.sh` run every check with a decoy HOME (marker files where
 `~/.claude`, `~/.codex`, `~/.grok`, `~/.config/gh`, `~/.gitconfig`, `~/.netrc` and `~/.t3` would
 be; the credential files mode 000), marker values in `ANTHROPIC_*`, `OPENAI_API_KEY`,
 `CODEX_HOME`, `XAI_API_KEY`, `GH_TOKEN`, `GITHUB_TOKEN`, `GITLAB_TOKEN`, `T3CODE_HOME` and
@@ -130,35 +100,63 @@ executables named after the provider and host CLIs (`claude`, `codex`, `grok`, `
 connection outside loopback. `mark` names the check behind each record.
 
 `replay_server` is `conn-server` with the engine's scripted fake provider, so these checks call
-no model. Each server they start gets a temp state folder; `parity.mjs` gives the T3 server a
-temp `T3CODE_HOME` and a free port.
+no model. Each server they start gets a temp state folder.
 
 Checks that call a model are not in `tools/check.sh`:
 
 - `cargo test -p conn-provider-claude live_ -- --ignored --test-threads=1` (real CLI, Haiku),
   and the same for `conn-provider-codex`.
-- `parity.mjs --model`: one Haiku turn on the T3 server.
 - `orbit-flow.mjs target/release/conn-server`: one Haiku turn.
-- The recorder with `--rust target/release/conn-server`.
 
-**Real web client.** The recorder (`fixtures/recorder`) drives the monorepo's web client in
-headless Chromium. On the fake provider:
+### The audit kit
+
+`tools/audit.sh` runs the comparisons against the T3 server's own code. The
+`audit-t3-providers` skill runs it; CI does not. It reads the TypeScript tree of this monorepo
+(`tools/monorepo.mjs`), so it needs `vp i` at the monorepo root and `npm ci` in
+`helpers/sdk-host`. No tool calls a model.
 
 ```sh
-(cd ../web && vp build)
-node fixtures/recorder/record.mjs pairing rust-turn rust-restart rust-vcs rust-files \
-  rust-terminal rust-settings rust-search rust-worktree \
-  --rust target/release/examples/replay_server --out /tmp/conn-recordings
+tools/audit.sh [--from <sha> --to <sha>]
 ```
 
-See [`fixtures/README.md`](fixtures/README.md) for every scenario and which need a model.
+| Tool | Proves |
+| --- | --- |
+| `tools/sdk-pin.mjs` | `helpers/sdk-host` pins the Claude Agent SDK version the T3 server locks |
+| Codex, Claude, ACP (Grok) and Antigravity conformance | argv, environment, every stdin frame and shutdown equal the T3 server's, on stub CLIs or a recorded agent |
+| Codex, Claude and Grok probe conformance | each `ServerProvider` entry and every CLI run of its status probe equal the T3 server's |
+| `claude t3-replay` | the T3 server's Claude transcripts: exactly the scenarios in `expected-failures.txt` fail |
+| `t3 fixture replay` | T3's testkit fixtures through this engine and our providers, judged by T3's own assertions |
+| `provider-auth-diff.mjs` | every `provider.auth.*` reply equals the T3 server's, and neither runs a CLI for them |
+| `textgen-diff.mjs` | text generation requests and titles equal T3's own code, on a loopback stub |
+| Codex, Antigravity and Claude model catalogs (`--check`) | the frozen catalogs equal the ones T3's manifest gives |
+| `tools/bump-report.mjs` (with `--from` and `--to`) | the upstream commits in that range for each part of the server (`tools/upkeep/followed-files.txt`), frozen parts included |
+
+The capture tools (`capture-ts-events.mjs`, Claude's `capture-ts/run.sh`) and the catalog
+generators without `--check` adopt upstream changes into `testdata` and the catalogs; the
+`cargo test` replays then hold them in CI. `tools/audit.sh` lists them.
+
+### Frozen files
+
+These files were generated from the Conn monorepo until the generators were removed. They are
+hand-owned now: change them by hand, with a test. Upstream changes to their sources reach the
+audit through `tools/upkeep/followed-files.txt`.
+
+- The contract: `crates/conn-contract/src/{generated.rs,upstream.rs}`, `methods.json`,
+  `tests/registry/mod.rs`, `tests/fixtures/sampled.jsonl`.
+- The `/mcp` catalog, schemas, texts and `exposure/generated.rs` in `crates/conn-mcp/src`; the
+  preview spec and script (`crates/conn-preview/src/{spec.json,injected.js}`); the MCP App
+  bootstrap and constants.
+- The upstream tables: scopes, settings, limits, text generation, close commands, `conn-vcs`,
+  devices, keybindings and GitHub GraphQL operations.
+- The Codex and ACP instruction texts.
+- The case files the Rust tests read (pull requests, credentials, themes, handoffs, composer
+  context, dates, limits).
+- The bundled model manifest (`crates/conn-server/src/model_manifest/bundled.json`).
 
 ## Upkeep
 
-The Conn Server follows the Conn commit it is part of. When Conn moves (a contract
-change), `tools/follow-conn.sh` regenerates every generated file, runs
-`tools/check.sh` and prints what changed since the Conn Server last followed. It does not
-commit. See [`docs/upkeep.md`](docs/upkeep.md).
+The Conn Server no longer follows Conn's TypeScript tree in CI. The audit kit compares it with
+the T3 server and lists upstream commits per part. See [`docs/upkeep.md`](docs/upkeep.md).
 
 Releases: push a tag `conn-server-v<version>` (the `conn-server` crate's version) to
 `nckrtl/conn`. `.github/workflows/conn-server-release.yml` builds
@@ -170,7 +168,7 @@ Release, which Orbit downloads.
 | Crate                   | Holds                                                                 |
 | ----------------------- | --------------------------------------------------------------------- |
 | `conn-wire`             | Effect RPC frame types and JSON codec                                 |
-| `conn-contract`         | Generated contract types (`tools/gen-contract.mjs`), method list, ids |
+| `conn-contract`         | Contract types (hand-owned, once generated), method list, ids          |
 | `conn-gateway-api`      | Typed Orbit Gateway operations generated from the Gateway's OpenAPI document; no HTTP client (see its README) |
 | `conn-engine`           | `Engine` trait; SQLite event store, projections, streams, turn runner |
 | `conn-provider`         | `Provider` and `Session` traits, `ProviderEvent`, `ProviderSet` (the instances, changed as the settings change) |
@@ -293,8 +291,8 @@ table.coverage()      // "15 of 235 methods (9 of 32 streams)", plus the missing
 - Registration panics at startup on a tag not in the contract, a duplicate, or a unary handler
   for a stream method (or the reverse).
 - Registration also panics on a tag with no entry in the scope table. That table holds the
-  auth scope T3 requires per method (T3 leaves none unguarded). It is generated from the T3
-  server's `RPC_REQUIRED_SCOPES` into `src/scopes/generated.rs` by `tools/gen-upstream.mjs`;
+  auth scope T3 requires per method (T3 leaves none unguarded). It holds the T3 server's
+  `RPC_REQUIRED_SCOPES` in `src/scopes/generated.rs` (hand-owned, once generated);
   the payload-dependent rules stay by hand in `scopes.rs`, and a test holds their list to the
   T3 server's. The table checks the scope before the handler runs and fails with
   `EnvironmentAuthorizationError`. Handlers do not check scopes.
@@ -455,10 +453,8 @@ routed; the client falls back to the socket.
 ## Status
 
 The method table reports coverage at startup. Every
-registered method checks the scope the T3 server requires (`src/scopes.rs`, its table
-generated). `assets.createUrl`, `terminal.open` and `terminal.attach` also get the contract's
-length, pattern and range limits before decode (`crates/conn-support/src/input.rs`, its table generated). Every registered method but two has a run that decodes its answer with the real
-client (`tools/decode-coverage.mjs`; the rest are in `decode-coverage.pending`). Every
+registered method checks the scope the T3 server requires (`src/scopes.rs`). `assets.createUrl`, `terminal.open` and `terminal.attach` also get the contract's
+length, pattern and range limits before decode (`crates/conn-support/src/input.rs`). Every
 capability flag of the contract has a row that says what proves it, and the advertised flags
 must agree with what is registered (`tools/capabilities-check.mjs`, `capabilities.json`). The engine's
 `dispatchCommand` coverage is in `crates/conn-engine/README.md`; each other area's crate README
@@ -575,7 +571,7 @@ host for all sessions: about 44 MB of private memory on macOS arm64.
   proves that the `claude` CLI gets the same argv, environment and stdin from the Conn Server
   as from the T3 server. `crates/conn-provider-claude/tools/t3-replay/run.sh` replays the T3
   server's own Claude transcripts against our session (18 of 39 pass, all that it drives; its
-  README lists the rest with reasons). `tools/check.sh` runs both.
+  README lists the rest with reasons). `tools/audit.sh` runs both.
 - **Live:** `cargo test -p conn-provider-claude live_ -- --ignored --test-threads=1` runs
   11 tests on Claude Haiku through the SDK host.
 

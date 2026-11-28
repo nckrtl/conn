@@ -18,11 +18,10 @@ GitCafe and Cursor origin are out of scope (Nick, 2026-11-16). Every area that
 
 ## Checks
 
-Pull requests trigger the Conn Server workflows directly. Main pushes run them after the first
-completion of CI, using the original push range for path selection and the pushed SHA for
-checkout and results. Both workflows cover `apps/conn-server` and both workflow files.
-`conn-server-checks.yml` also covers `apps/server`, `apps/web` and `packages`. Both workflows
-support manual runs. [upkeep.md](upkeep.md) has the details.
+Pull requests and main pushes run the Conn Server workflows. They read only `apps/conn-server`
+and run no TypeScript; the comparisons against the T3 server are the audit kit
+(`tools/audit.sh`). Both workflows support manual runs. [upkeep.md](upkeep.md) has the
+details.
 
 ## Release
 

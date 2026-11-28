@@ -15,7 +15,7 @@ is the main path.
 | `src/agent.rs` | agent-device sessions, config files, launchers |
 | `src/tool_api.rs` | `device_list`, `device_open`, `device_screenshot`, `device_close` |
 | `src/proxy.rs` | The hub proxy's allow-lists and the MJPEG still-frame repeat |
-| `src/generated.rs` | Generated from `apps/server` by `tools/gen-devices.mjs` |
+| `src/generated.rs` | From `apps/server`, hand-owned since upstream T3 Code `05e3674636` |
 
 The server side: `conn-server/src/methods/devices.rs` (the methods) and
 `conn-server/src/routes/device_hub.rs` (`/api/device-hub/*`); `conn-mcp/src/tools/devices.rs`.
@@ -43,10 +43,9 @@ frame (at most 16 MiB). Launchers follow the sessions; all go at start.
 
 ## Drift
 
-`tools/gen-devices.mjs --check` fails when T3's bootstrap script, launcher, tool pins
-(`deviceToolVersions.json`), screenshot script or proxy lists change. `tools/conformance.mjs`
-runs both servers on stand-in `ssh` and `npm` (`tools/stubs`) and compares every answer and
-every command they run; the inline ssh options are held there.
+T3's bootstrap script, launcher, tool pins (`deviceToolVersions.json`), screenshot script and
+proxy lists are hand-owned in `src/generated.rs`. Upstream changes to them reach the audit's
+report through `tools/upkeep/followed-files.txt`.
 
 ## Not served
 

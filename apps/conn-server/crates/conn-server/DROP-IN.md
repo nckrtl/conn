@@ -32,9 +32,9 @@ static web files, cookies, DPoP. Orbit never renews the 30-day Gateway session
 
 Orbit's task-turn path (`swamp/ansible/task-copy-turn.yml` and `t3_copy_rpc.mjs` at Orbit
 `main` `569302a`, 2026-11-14) runs `t3` and Node in the container as `agent`, with `HOME=/home/agent`.
-Every item is built. `thread-cli-diff.mjs` runs the same commands on the T3 server with its own
-`t3` and on this server with ours and finds no difference (30 steps); `orbit-flow.mjs` runs the
-path in Orbit's order on the fake provider.
+Every item is built. `orbit-flow.mjs` runs the path in Orbit's order on the fake provider.
+Until the TypeScript checks were removed, `thread-cli-diff.mjs` ran the same commands on the T3
+server with its own `t3` and found no difference (30 steps).
 
 | What | Orbit does | Reference | Conn Server |
 | --- | --- | --- | --- |
@@ -257,7 +257,7 @@ either server, never both at once.
 | `server-runtime.json`                                                                                                                                              | Running server's origin                                                                                     | **Writes the same format**; T3's `t3 pair`/`project` CLI finds a running Conn Server                                                                                                    |
 | `statev2.sqlite` (+ `-wal`/`-shm`), `state.sqlite`                                                                                                                 | Threads, projects, auth sessions and pairing links (`auth_sessions`, `auth_pairing_links`), everything else | **Read once, never written.** At the first start (no `engine.sqlite` yet) its projects and threads become `engine.sqlite` (`conn-engine/src/t3_import.rs`, below), and its live bearer sessions, unspent pairing codes, peer links and scheduled tasks go to `auth.json`, `peer-links.json` and `scheduled-tasks.json` (`src/t3_carry.rs`): paired devices and Orbit keep their tokens |
 | `secrets/` (`server-signing-key.bin`, …)                                                                                                                           | Secret store, signing keys                                                                                  | Reads T3's `server-signing-key` to accept the session tokens T3 issued (carried-over sessions only) and the `peer-link-*` tokens of peer links; writes `peer-link-*` and the MCP OAuth key in the same format |
-| `model-manifest.json` | The model catalog fetched from T3 Code's GitHub (`ModelManifest.ts`), `{"fetchedAtMs","manifest"}` | **Writes it the same way**: when (start, then at most hourly, 5 minutes after a failed try, only with `enableProviderUpdateChecks`), what (a manifest that decodes and is not older than the bundled or cached one) and the bytes (`model-manifest-diff.mjs`). Reads no model from it. Test seam: `CONN_MODEL_MANIFEST_URL` (`off` never fetches; an `http(s)` URL fetches from there); every check sets `off` |
+| `model-manifest.json` | The model catalog the T3 server fetches from T3 Code's GitHub (`ModelManifest.ts`), `{"fetchedAtMs","manifest"}` | **Writes it at every start in the same format, with the bundled manifest** (`src/model_manifest/bundled.json`); fetches none. Reads no model from it. `orbit-flow.mjs` checks the file |
 | `attachments/`, `logs/`, `anonymous-id`, `themes/`, `browser-artifacts/`, `annotations/`, `speech/`, `providers/`, `usage-model-rates.json` | Feature data and caches                                                                                     | Ignored (other tracks may take attachments and logs)                                                                                                                                    |
 | `<home>/worktrees`, `caches`, `runtime`, `tools`, `projects`, `scratch`                                                                                            | Worktrees, caches, managed tools                                                                            | Ignored                                                                                                                                                                                 |
 | `engine.sqlite`, `auth.json`, `auth.lock`, `projects.json`                                                                                                         | —                                                                                                           | **Conn Server only**: event store, sessions and links, projects added with `project add`                                                                                                |
@@ -319,15 +319,14 @@ The Conn Server moves to its own repository, `conn-server`. For delivery:
   name the same three.
 - **The contract digest.** `crates/conn-contract/methods.json` records `contractDigest`, the
   sha256 of the tracked contract inputs (`packages/contracts` and T3's `ProviderAdapter.ts`)
-  by path. It depends only on the tree: a commit id could not name the commit that changes
-  the contract, and a shallow checkout has no history. `gen-contract.mjs --check` fails when
-  Conn's contract moved. A Conn release that changes the
-  contract needs a Conn Server release built from it before Orbit or the desktop takes both.
+  by path, frozen with the hand-owned contract since upstream T3 Code `05e3674636`. A Conn
+  release that changes the contract needs a Conn Server release built from it before Orbit or
+  the desktop takes both.
 - **Which server a client talks to.** The descriptor (`/.well-known/t3/environment`) stays
   T3's: `serverVersion` is the T3 version whose contract is served, so clients' version checks
   behave. `GET /health` answers only on the Conn Server, with
   `{"server":"conn-server","version","contractDigest","methods"}`; the T3 server has no such
   route. A typed field (for example `serverImplementation` in the descriptor) would need a
   contract change in Conn first.
-- **Tools that need Conn.** `tools/gen-keybindings.mjs`, `fixtures/recorder` and the other
-  Node tools read the monorepo two levels above `apps/conn-server` (`tools/monorepo.mjs`).
+- **Tools that need Conn.** The audit kit (`tools/audit.sh`) reads the monorepo two levels
+  above `apps/conn-server` (`tools/monorepo.mjs`). The checks and the build do not.

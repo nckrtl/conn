@@ -939,7 +939,7 @@ mod live_tests {
     fn the_bundled_manifest_resolves_to_t3s_catalog() {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../server/src/provider/model-manifest.json"
+            "/../conn-server/src/model_manifest/bundled.json"
         );
         let manifest: Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
@@ -974,7 +974,7 @@ mod live_tests {
     fn bundled_manifest() -> Value {
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../server/src/provider/model-manifest.json"
+            "/../conn-server/src/model_manifest/bundled.json"
         );
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
     }

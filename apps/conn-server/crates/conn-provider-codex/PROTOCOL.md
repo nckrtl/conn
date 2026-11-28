@@ -242,7 +242,7 @@ the prompt on stdin and writes the last message, a JSON object, to `--output-las
 - A request error is `{"code", "message"}`. TS checks these codes:
   - `-32600 "Already initialized"`: success
   - `-32600` "already has an active writer": thread in use (`ProviderError::ThreadInUse` with
-    T3's `CODEX_THREAD_IN_USE_MESSAGE`; `tools/check-copies.mjs` holds the text)
+    T3's `CODEX_THREAD_IN_USE_MESSAGE`, copied by hand)
   - `-32601`: unknown method; `thread/inject_items` falls back
   - `-32600 "thread not found:"` on terminate: nothing is left to stop
 - A usage limit: the `error` notification or `turn.error` carries `codexErrorInfo` (HTTP

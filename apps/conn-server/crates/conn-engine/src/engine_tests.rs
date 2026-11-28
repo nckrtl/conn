@@ -2170,7 +2170,6 @@ async fn a_restart_continues_the_running_turn_in_the_same_provider_thread() {
 
 /// A clean stop (SIGTERM, a service restart) keeps the running turn for the next start, as T3
 /// does: the closing session's end of the turn is not stored, so the next start continues it.
-/// `idle-diff.mjs` compares the shell after such a restart with the T3 server's.
 #[tokio::test(flavor = "current_thread")]
 async fn a_shutdown_leaves_the_running_turn_for_the_next_start() {
     let db = TempDb::new("shutdown-running");
@@ -6324,7 +6323,7 @@ async fn a_message_sent_during_a_turn_queues_and_starts_after_it() {
     assert_eq!(p["runs"][1]["queuePosition"], 1);
     assert_eq!(p["runs"][2]["queuePosition"], 2);
     // Queued messages have no turn item yet. The shell's latest run is the newest queued one
-    // (T3's `latestUnheldRun`; `idle-diff.mjs` compares it with the T3 server); the running
+    // (T3's `latestUnheldRun`); the running
     // run stays the active and the activity run.
     assert_eq!(item_texts(&p), ["turn_start hang"]);
     let shell = engine.shell_snapshot().await.unwrap();

@@ -1,8 +1,8 @@
 //! Environment themes (`environmentTheme.ts`): the theme files published in
 //! `<state-dir>/themes`, their background images, and publishing one.
 //!
-//! The rules come from T3: `themes/upstream.json` and `themes/cases.json` are recorded by
-//! `tools/gen-theme-cases.mjs`. T3 watches the folder; this server reads it again when a
+//! The rules come from T3: `themes/upstream.json` and `themes/cases.json` were recorded once
+//! from T3's code and are hand-owned. T3 watches the folder; this server reads it again when a
 //! caller asks (`refresh`), and a config subscription asks once a second. A folder whose
 //! entries did not change is not read again.
 
@@ -34,7 +34,7 @@ const INVALID_ID: &str =
 const NOT_PUBLISHED: &str =
     "could not be published. The themes directory may be full or not writable.";
 
-/// What T3's shared theme modules hold, recorded by `gen-theme-cases.mjs`.
+/// What T3's shared theme modules hold (`themes/upstream.json`).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Upstream {
@@ -737,7 +737,7 @@ mod tests {
         assert!(is_unpublishable(&upstream.default_id));
     }
 
-    /// T3's own decode, encode and checks (`gen-theme-cases.mjs`).
+    /// T3's own decode, encode and checks (`themes/cases.json`).
     #[test]
     fn matches_the_recorded_t3_cases() {
         let cases: Vec<Case> = serde_json::from_str(include_str!("themes/cases.json")).unwrap();

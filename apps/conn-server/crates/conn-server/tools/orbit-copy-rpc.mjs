@@ -1,5 +1,5 @@
 // What Orbit's `swamp/ansible/t3_copy_rpc.mjs` does in a task copy, call by call, for the
-// checks (`thread-cli-diff.mjs`, `orbit-flow.mjs`): read a waiting run's question, or stop
+// check `orbit-flow.mjs`: read a waiting run's question, or stop
 // that run, through the server's own WebSocket RPC.
 //
 // 1. `$HOME/.t3/userdata/server-runtime.json` names the origin.

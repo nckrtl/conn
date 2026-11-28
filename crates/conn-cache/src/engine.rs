@@ -93,6 +93,8 @@ struct Held {
 /// A window on its way from the device, for [`Engine::finish_open`] or [`Engine::finish_older`].
 pub type Pending = oneshot::Receiver<Option<Window>>;
 
+type Committed = std::sync::Arc<std::sync::Mutex<HashMap<String, i64>>>;
+
 /// One environment's threads.
 pub struct Engine {
     env: String,
@@ -109,6 +111,12 @@ pub struct Engine {
     recent: VecDeque<String>,
     /// Subscribed threads and their catch-up rank.
     subscribed: HashMap<String, u32>,
+    /// The threads the last [`Self::update_kept`] keeps apart from being open; `None` before
+    /// the first.
+    kept: Option<HashSet<String>>,
+    /// Each thread's sequence as the database task last committed it: where a thread that left
+    /// its stream resumes.
+    committed: Committed,
     /// Threads whose stream sent something this client cannot read: their cursor stays put.
     stale: HashSet<String>,
     /// Threads whose rows a rollback hid: they wait for a fresh window.
@@ -172,7 +180,14 @@ impl Engine {
             .await?
             .and_then(|bytes| saved_shell(&bytes, env));
         let (jobs, rx) = mpsc::unbounded_channel();
-        tokio::spawn(run(pool.clone(), env.to_owned(), connection.clone(), rx));
+        let committed = Committed::default();
+        tokio::spawn(run(
+            pool.clone(),
+            env.to_owned(),
+            connection.clone(),
+            rx,
+            committed.clone(),
+        ));
         Ok(Self {
             env: env.to_owned(),
             connection,
@@ -188,6 +203,8 @@ impl Engine {
             open: vec![],
             recent: VecDeque::new(),
             subscribed: HashMap::new(),
+            kept: None,
+            committed: committed.clone(),
             stale: HashSet::new(),
             resetting: HashSet::new(),
             catching_up: HashSet::new(),
@@ -426,8 +443,9 @@ impl Engine {
         let Some(rank) = self.subscribed.get(id) else {
             return false;
         };
-        let after = self.index.get(id).and_then(|ix| ix.cursor);
-        self.connection.subscribe_thread_from(id, after, *rank);
+        let rank = *rank;
+        let after = self.cursor(id);
+        self.connection.subscribe_thread_from(id, after, rank);
         self.catching_up.insert(id.to_owned());
         true
     }
@@ -455,7 +473,7 @@ impl Engine {
             ix.opened_at = now_ms();
         }
         // The open thread catches up first.
-        let after = self.index.get(id).and_then(|ix| ix.cursor);
+        let after = self.cursor(id);
         if self.subscribed.get(id) != Some(&0) {
             if !self.subscribed.contains_key(id) {
                 self.catching_up.insert(id.to_owned());
@@ -536,10 +554,19 @@ impl Engine {
         true
     }
 
-    /// Closes a thread. It stays in memory among the last few closed, then leaves.
+    /// Closes a thread. It stays in memory among the last few closed, then leaves. A thread
+    /// the kept set does not hold (settled, say) leaves its stream now; its rows stay while it
+    /// is in memory, so opening it again resumes from its cursor, and go when it leaves.
     pub fn close_thread(&mut self, id: &str) {
         self.open.retain(|open| open != id);
-        if let Some(rank) = self.subscribed.get_mut(id) {
+        if !self.is_kept(id) {
+            if self.subscribed.remove(id).is_some() {
+                self.connection.unsubscribe_thread(id);
+            }
+            if !self.held.contains_key(id) {
+                self.forget(id, false);
+            }
+        } else if let Some(rank) = self.subscribed.get_mut(id) {
             *rank = rank.saturating_add(1);
         }
         if self.held.contains_key(id) {
@@ -557,8 +584,30 @@ impl Engine {
         while self.recent.len() > limit {
             if let Some(id) = self.recent.pop_back() {
                 self.held.remove(&id);
+                if !self.is_kept(&id) && !self.subscribed.contains_key(&id) {
+                    self.forget(&id, false);
+                }
             }
         }
+    }
+
+    /// Where `id`'s stream resumes: its last committed sequence, else the one read at start.
+    /// A thread the device dropped starts cold.
+    fn cursor(&self, id: &str) -> Option<i64> {
+        let ix = self.index.get(id)?;
+        let committed = self
+            .committed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .copied();
+        committed.or(ix.cursor)
+    }
+
+    /// Whether the kept set holds `id`; every thread is kept until the first
+    /// [`Self::update_kept`].
+    fn is_kept(&self, id: &str) -> bool {
+        self.kept.as_ref().is_none_or(|kept| kept.contains(id))
     }
 
     /// Asks for older rows of an open thread: from the device while it holds them, else one
@@ -702,6 +751,7 @@ impl Engine {
                     .or_insert((3, ix.active_at.max(ix.opened_at)));
             }
         }
+        self.kept = Some(want.keys().cloned().collect());
         for id in &self.open {
             want.insert(id.clone(), (0, i64::MAX));
         }
@@ -719,7 +769,7 @@ impl Engine {
                 u32::try_from(rank + 1).unwrap_or(u32::MAX)
             };
             if self.subscribed.get(&id) != Some(&rank) {
-                let after = self.index.get(&id).and_then(|ix| ix.cursor);
+                let after = self.cursor(&id);
                 if !self.subscribed.contains_key(&id) {
                     self.catching_up.insert(id.clone());
                 }
@@ -735,7 +785,15 @@ impl Engine {
             .cloned()
             .collect();
         for id in leaving {
-            self.forget(&id, false);
+            // A closed thread still in memory keeps its rows until it leaves memory, so
+            // opening it again resumes from its cursor.
+            if self.held.contains_key(&id) && !self.open.contains(&id) {
+                if self.subscribed.remove(&id).is_some() {
+                    self.connection.unsubscribe_thread(&id);
+                }
+            } else {
+                self.forget(&id, false);
+            }
         }
         if conn_client::perf::enabled() {
             self.perf.kept_ranked = true;
@@ -750,6 +808,10 @@ impl Engine {
             self.connection.unsubscribe_thread(id);
         }
         self.index.remove(id);
+        self.committed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(id);
         self.write(
             id,
             ThreadWrite {
@@ -845,6 +907,7 @@ async fn run(
     env: String,
     connection: Connection,
     mut jobs: mpsc::UnboundedReceiver<Job>,
+    committed_at: Committed,
 ) {
     let mut batch: HashMap<String, ThreadWrite> = HashMap::new();
     let mut reads = vec![];
@@ -893,9 +956,21 @@ async fn run(
                 }
             }
             let threads: Vec<String> = writes.keys().cloned().collect();
+            let forgotten: Vec<String> = writes
+                .iter()
+                .filter(|(_, write)| write.forget)
+                .map(|(thread, _)| thread.clone())
+                .collect();
             match db::commit(&pool, &env, writes).await {
                 Ok(committed) => {
+                    let mut at = committed_at
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    for thread in &forgotten {
+                        at.remove(thread);
+                    }
                     for (thread, seq) in committed {
+                        at.insert(thread.clone(), seq);
                         connection.set_thread_cursor(&thread, seq);
                     }
                 }
@@ -1025,6 +1100,7 @@ mod tests {
                 entries(&live)
             );
             settle(&first, &thread).await;
+            let first_cursor = first.cursor(&thread);
             drop(first);
 
             // At launch, before any connection: the same rows, read without writing.
@@ -1041,6 +1117,10 @@ mod tests {
                 second.index.get(&thread).and_then(|ix| ix.cursor),
                 last,
                 "cursor moved with the rows"
+            );
+            assert_eq!(
+                first_cursor, last,
+                "{fixture}: the engine resumes from the commit"
             );
             open(&mut second, &thread).await;
             let reopened = second
@@ -1284,6 +1364,49 @@ mod tests {
                 .unwrap_or_default();
             assert_eq!(index.get(&thread).and_then(|ix| ix.cursor), last, "{env}");
         }
+    }
+
+    /// A thread the kept set does not hold leaves its stream when it closes, not only on the
+    /// next shell change; a kept one stays subscribed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn closing_an_unkept_thread_unsubscribes_it() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let mut engine = engine(&dir.path().join("local.sqlite3"), Settings::default()).await;
+        engine.close_thread("never-ranked");
+        open(&mut engine, "settled").await;
+        engine.close_thread("settled");
+        assert!(
+            engine.subscribed.contains_key("settled"),
+            "no kept set yet: kept until judged"
+        );
+        open(&mut engine, "settled").await;
+        engine.update_kept(&ShellState::default());
+        assert!(engine.subscribed.contains_key("settled"), "open: kept");
+        engine.close_thread("settled");
+        assert!(!engine.subscribed.contains_key("settled"), "closed: left");
+        engine.index.entry("settled".into()).or_default().cursor = Some(9);
+        open(&mut engine, "settled").await;
+        assert!(
+            engine.subscribed.contains_key("settled"),
+            "reopened from its cursor"
+        );
+        engine.close_thread("settled");
+        engine.update_kept(&ShellState::default());
+        assert_eq!(
+            engine.cursor("settled"),
+            Some(9),
+            "a shell change keeps its rows"
+        );
+        for other in ["x1", "x2", "x3"] {
+            open(&mut engine, other).await;
+            engine.handle(
+                other,
+                from_json(json!({"kind": "synchronized"})).unwrap_or_else(|e| panic!("{e}")),
+            );
+            engine.close_thread(other);
+        }
+        assert!(engine.thread("settled").is_none(), "left memory");
+        assert!(!engine.index.contains_key("settled"), "and the device");
     }
 
     /// The thread list saved on one launch draws on the next, before the server answers.

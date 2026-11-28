@@ -100,8 +100,9 @@ struct ThreadSubState {
     store_owned: bool,
     /// Lower goes first when a new session subscribes again; ties go most recent first.
     priority: u32,
-    /// A store-owned background thread whose subscribe went out and whose `synchronized` has
-    /// not come yet: it holds one of the [`BACKGROUND_OPENINGS`] slots.
+    /// A store-owned thread whose subscribe went out and whose `synchronized` has not come
+    /// yet. A background one holds one of the [`BACKGROUND_OPENINGS`] slots; the open thread
+    /// holds them all.
     opening: bool,
     /// Its subscribe should go out but has not: new, re-requested, or the session restarted.
     /// A stream the server ended stays out until something asks for it again.
@@ -358,16 +359,21 @@ impl DriverState {
     }
 
     /// Whether `thread_id`'s subscribe may go out now: always, except a store-owned background
-    /// thread while [`BACKGROUND_OPENINGS`] others are still opening.
+    /// thread while the open thread (rank 0) is still catching up or [`BACKGROUND_OPENINGS`]
+    /// others are.
     fn may_open(&self, thread_id: &str) -> bool {
         let background = |sub: &ThreadSubState| sub.store_owned && sub.priority > 0;
         match self.thread_subs.get(thread_id) {
             Some(sub) if background(sub) => {
-                self.thread_subs
-                    .values()
-                    .filter(|sub| background(sub) && sub.opening)
-                    .count()
-                    < BACKGROUND_OPENINGS
+                let opening = self.thread_subs.values().filter(|sub| sub.opening);
+                let mut slots = 0;
+                for sub in opening {
+                    if !background(sub) {
+                        return false;
+                    }
+                    slots += 1;
+                }
+                slots < BACKGROUND_OPENINGS
             }
             _ => true,
         }
@@ -1237,7 +1243,7 @@ where
     if let Some(sub) = state.thread_subs.get_mut(thread_id) {
         sub.request_id = Some(request_id.clone());
         sub.subscribed_at = Some(std::time::Instant::now());
-        sub.opening = sub.store_owned && sub.priority > 0;
+        sub.opening = sub.store_owned;
         sub.waiting = false;
     }
     state.in_flight_streams.insert(
@@ -1821,13 +1827,14 @@ mod tests {
     fn sent(state: &mut DriverState, id: &str) {
         if let Some(sub) = state.thread_subs.get_mut(id) {
             sub.request_id = Some(RequestId::Number(1));
-            sub.opening = sub.store_owned && sub.priority > 0;
+            sub.opening = sub.store_owned;
             sub.waiting = false;
         }
     }
 
     /// The open thread never waits; background threads open two at a time, and a slot frees
-    /// when an opening's `synchronized` comes.
+    /// when an opening's `synchronized` comes. While the open thread catches up, no background
+    /// thread starts.
     #[test]
     fn background_threads_open_two_at_a_time() {
         let mut state = state();
@@ -1840,8 +1847,36 @@ mod tests {
         assert!(!state.may_open("c"), "both slots taken");
         state.subscribe_from("open".into(), None, 0);
         assert!(state.may_open("open"), "the open thread never waits");
+        sent(&mut state, "open");
         state.opened("a");
-        assert!(state.admit_due && state.may_open("c"), "a slot freed");
+        assert!(state.admit_due, "a slot freed");
+        assert!(!state.may_open("c"), "the open thread catches up first");
+        state.admit_due = false;
+        state.opened("open");
+        assert!(
+            state.admit_due && state.may_open("c"),
+            "then the background goes"
+        );
+    }
+
+    /// On a new session the open thread and the background threads all wait: only the open
+    /// thread goes out, and the background follows once it caught up.
+    #[test]
+    fn after_a_reconnect_the_open_thread_catches_up_alone() {
+        let mut state = state();
+        for (id, rank) in [("open", 0), ("a", 1), ("b", 2)] {
+            state.subscribe_from(id.into(), Some(5), rank);
+        }
+        let mut went = vec![];
+        for id in state.thread_ids_by_recency() {
+            if state.may_open(&id) {
+                sent(&mut state, &id);
+                went.push(id);
+            }
+        }
+        assert_eq!(went, ["open"]);
+        state.opened("open");
+        assert!(state.may_open("a") && state.may_open("b"));
     }
 
     /// A stream the server ended is not sent again by the queue; asking again re-queues it.

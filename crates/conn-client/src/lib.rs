@@ -919,27 +919,11 @@ impl Connection {
         });
     }
 
-    /// Requests a new bounded projection even when a previous stream can resume.
-    pub fn refresh_thread(&self, thread_id: &str) {
-        let _ = self
-            .cmd_tx
-            .send(Command::RefreshThread(thread_id.to_owned()));
-    }
-
     /// Interrupts and removes the thread subscription for `thread_id`.
     pub fn unsubscribe_thread(&self, thread_id: &str) {
         let _ = self
             .cmd_tx
             .send(Command::UnsubscribeThread(thread_id.to_owned()));
-    }
-
-    /// Ends the thread subscription like [`Self::unsubscribe_thread`] and also forgets the kept
-    /// sequence. The next [`Self::subscribe_thread`] then asks for a snapshot, not a replay, so
-    /// call it only when the caller drops the thread's reducer too.
-    pub fn forget_thread(&self, thread_id: &str) {
-        let _ = self
-            .cmd_tx
-            .send(Command::ForgetThread(thread_id.to_owned()));
     }
 
     /// Subscribes to `panels.requests` as a first-class auto-resubscribed stream so agent panel
@@ -1460,25 +1444,6 @@ mod tests {
             json!(true),
             "resubscribe must keep acceptBoundedSnapshot=true"
         );
-
-        // A second subscribe for a live stream sends nothing (a speculative hover subscription is
-        // reused by the open). Forgetting then drops the cursor: the next request is a snapshot
-        // request, and no duplicate (which would carry afterSequence=42) came before it.
-        conn.subscribe_thread("thread-1");
-        conn.forget_thread("thread-1");
-        conn.subscribe_thread("thread-1");
-        let third_sub = tokio::time::timeout(Duration::from_secs(5), sub_payloads_rx.recv())
-            .await?
-            .ok_or("missing third subscribeThread payload")?;
-        assert!(
-            third_sub.get("afterSequence").is_none(),
-            "a forgotten thread must resubscribe without afterSequence: {third_sub}"
-        );
-
-        conn.refresh_thread("thread-1");
-        let fresh = sub_payloads_rx.recv().await.ok_or("missing refresh")?;
-        assert!(fresh.get("afterSequence").is_none());
-        assert_eq!(fresh["acceptBoundedSnapshot"], json!(true));
 
         // Typed orchestration.getTurnItem RPC.
         let item = conn

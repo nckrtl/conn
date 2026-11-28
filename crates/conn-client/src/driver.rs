@@ -67,10 +67,7 @@ pub(crate) enum Command {
         thread_id: String,
         after: i64,
     },
-    RefreshThread(String),
     UnsubscribeThread(String),
-    /// Ends the thread subscription and also drops its kept sequence.
-    ForgetThread(String),
     SubscribePanelRequests(DesktopPanelSubscription),
     UnsubscribePanelRequests,
     SubscribeAnnotations(String),
@@ -325,22 +322,6 @@ impl DriverState {
         }
     }
 
-    fn reset_thread(&mut self, thread_id: &str) -> Option<RequestId> {
-        self.thread_last_sequences.remove(thread_id);
-        let touched = self.next_touch();
-        self.thread_subs
-            .insert(thread_id.to_owned(), ThreadSubState::new(None, touched))
-            .and_then(|sub| sub.request_id)
-    }
-
-    /// Ends `thread_id`'s subscription and drops its cursor. Returns the stream to interrupt.
-    fn forget_thread(&mut self, thread_id: &str) -> Option<RequestId> {
-        self.thread_last_sequences.remove(thread_id);
-        self.thread_subs
-            .remove(thread_id)
-            .and_then(|sub| sub.request_id)
-    }
-
     /// Adds or re-ranks a store-owned subscription. True when it needs a request on the wire.
     fn subscribe_from(&mut self, thread_id: String, after: Option<i64>, priority: u32) -> bool {
         let touched = self.next_touch();
@@ -428,9 +409,6 @@ impl DriverState {
             Command::SubscribeServerConfig => {
                 self.server_config_subscribed = true;
             }
-            Command::RefreshThread(thread_id) => {
-                self.reset_thread(&thread_id);
-            }
             Command::SubscribeThread(thread_id) => {
                 self.touch_thread(&thread_id);
             }
@@ -455,9 +433,6 @@ impl DriverState {
                 {
                     self.thread_last_sequences.insert(thread_id, seq);
                 }
-            }
-            Command::ForgetThread(thread_id) => {
-                self.forget_thread(&thread_id);
             }
             Command::SubscribePanelRequests(subscription) => {
                 self.panel_subscription = Some(subscription);
@@ -1020,13 +995,6 @@ where
                 send_server_config_subscribe(state, ws_write).await?;
             }
         }
-        Command::RefreshThread(thread_id) => {
-            if let Some(request_id) = state.reset_thread(&thread_id) {
-                state.in_flight_streams.remove(&request_id);
-                send_client_frame(ws_write, &FromClient::Interrupt { request_id }).await?;
-            }
-            send_thread_subscribe(state, &thread_id, ws_write).await?;
-        }
         Command::SubscribeThread(thread_id) => {
             let added = state.touch_thread(&thread_id);
             let needs_send = added
@@ -1073,12 +1041,6 @@ where
                 }
             }
             admit_threads(state, ws_write).await?;
-        }
-        Command::ForgetThread(thread_id) => {
-            if let Some(request_id) = state.forget_thread(&thread_id) {
-                state.in_flight_streams.remove(&request_id);
-                send_client_frame(ws_write, &FromClient::Interrupt { request_id }).await?;
-            }
         }
         Command::SubscribePanelRequests(subscription) => {
             let next = Some(subscription);

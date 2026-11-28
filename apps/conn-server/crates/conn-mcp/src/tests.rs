@@ -5130,8 +5130,9 @@ async fn a_question_asked_while_a_wait_upgrades_its_wake_wakes_the_parent() {
             json!({"threadId": child, "message": "question", "mode": "queue"}),
         )
         .await;
+    let mut asked = false;
     for _ in 0..200 {
-        let asked = projection_of(&f, &child).await["turnItems"]
+        asked = projection_of(&f, &child).await["turnItems"]
             .as_array()
             .is_some_and(|items| items.iter().any(|i| i["type"] == "user_input_request"));
         if asked {
@@ -5139,6 +5140,7 @@ async fn a_question_asked_while_a_wait_upgrades_its_wake_wakes_the_parent() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    assert!(asked, "the child asked before the upgrade");
     assert!(
         question_wakes(&f, &parent).await.is_empty(),
         "a blocking wait holds the wake back"

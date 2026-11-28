@@ -1097,6 +1097,8 @@ fn question_task(
             && row["childThreadId"] == child_id
             && row["completedAt"].is_null()
             && !TERMINAL.contains(&row["status"].as_str().unwrap_or_default())
+            // Cancelled, though its child may not have confirmed the Stop yet.
+            && row["cancelledRunId"].is_null()
     });
     Ok(task.map(|task| (parent_id, task)))
 }

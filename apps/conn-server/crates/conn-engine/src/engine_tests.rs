@@ -9377,6 +9377,44 @@ async fn a_question_wake_whose_task_settled_never_starts() {
     assert!(run["startedAt"].is_null());
 }
 
+/// `task_cancel` marks the task `cancelledRunId` and asks for a Stop. Until the child confirms
+/// it, the task still runs and its question still waits, but its queued wake never starts.
+#[tokio::test(flavor = "current_thread")]
+async fn a_question_wake_of_a_cancelled_task_never_starts() {
+    let db = TempDb::new("delegate-question-cancelled");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    dispatch(&engine, message("t1", "c2", "question")).await;
+    until_question(&engine, "t1").await;
+    dispatch(&engine, delegate("d1", "stuck-question", Some("always"))).await;
+    let child = "thread:delegated-task:d1";
+    until_question(&engine, child).await;
+    let wake = question_wakes(&projection(&engine, "t1").await)[0].clone();
+
+    engine
+        .cancel_delegated_task(json!({"commandId": "c3", "parentThreadId": "t1",
+            "taskId": "node:delegated-task:d1", "threadId": child, "reason": null,
+            "modeLimit": null}))
+        .await
+        .unwrap();
+    let task = &projection(&engine, "t1").await["subagents"][0];
+    assert_eq!(task["status"], "running", "{task}");
+    assert!(task["cancelledRunId"].is_string(), "{task}");
+    let requests = projection(&engine, child).await["runtimeRequests"].clone();
+    assert_eq!(requests[0]["status"], "pending", "{requests}");
+
+    dispatch(
+        &engine,
+        json!({"type": "runtime-request.respond", "commandId": "c4", "threadId": "t1",
+               "requestId": "question:run:t1:1", "answers": {"q": "go on"}}),
+    )
+    .await;
+    let parent = run_to_end(&engine, "t1", "run:t1:1").await;
+    let run = wake_run(&parent, &wake);
+    assert_eq!(run["status"], "cancelled");
+    assert!(run["startedAt"].is_null());
+}
+
 /// A follow-up task asks in the same child after the original settled: the wake names the
 /// follow-up, and the original's end does not make it stale.
 #[tokio::test(flavor = "current_thread")]

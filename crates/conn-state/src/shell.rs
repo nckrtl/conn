@@ -265,6 +265,15 @@ fn flag_up<'a>(
     }
 }
 
+/// Whether two threads came from one environment. Unmerged shells know no environments and
+/// match by id.
+fn same_environment(a: Option<&str>, b: Option<&str>) -> bool {
+    match (a, b) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    }
+}
+
 /// `pendingSubagentRequestsByThread`: the threads to flag for a subagent's live request, up its
 /// subagent chain and through a side chat to its parent.
 /// `environment_of` names the environment a listed thread came from, when the shell knows it;
@@ -278,10 +287,8 @@ fn rolled_up_requests<'a>(
     let by_id: HashMap<&str, &ThreadShell> = threads.iter().map(|t| (t.id.as_str(), t)).collect();
     // Another environment's thread with a child's parent id is not its parent. Unmerged shells
     // know no environments and match by id.
-    let same_environment = |a: &str, b: &str| match (environment_of(a), environment_of(b)) {
-        (Some(a), Some(b)) => a == b,
-        _ => true,
-    };
+    let same_environment =
+        |a: &str, b: &str| same_environment(environment_of(a), environment_of(b));
     for child in threads {
         let parent_id = child.lineage.parent_thread_id.as_deref();
         if parent_id.is_some_and(|parent| !same_environment(&child.id, parent)) {
@@ -894,8 +901,8 @@ impl ShellState {
     /// (a parent the shell does not know, or a loop) stands for the thread itself.
     #[must_use]
     pub fn listed_ancestor<'a>(&'a self, thread_id: &str) -> Option<&'a str> {
-        let start = self.find_thread(thread_id)?;
-        let mut thread = start;
+        let (start, start_env) = self.find_thread_with_environment(thread_id)?;
+        let (mut thread, mut thread_env) = (start, start_env);
         let mut visited: HashSet<&str> = HashSet::new();
         // The bound only ends a chain that loops without revisiting.
         for _ in 0..64 {
@@ -913,18 +920,20 @@ impl ShellState {
             if !visited.insert(thread.id.as_str()) {
                 return Some(start.id.as_str());
             }
+            let Some((parent, parent_env)) = self.find_thread_with_environment(parent_id) else {
+                return Some(start.id.as_str());
+            };
             // Another environment's copy of the parent id is not the parent.
             let parent_here = match thread.delegated_from.as_ref() {
-                Some(from) if is_listed_lineage(&thread.lineage) => self.delegated_here(from),
-                _ => self.same_environment(&thread.id, parent_id),
+                Some(from) if is_listed_lineage(&thread.lineage) => {
+                    self.delegated_by(from, parent_env)
+                }
+                _ => same_environment(thread_env, parent_env),
             };
             if !parent_here {
                 return Some(start.id.as_str());
             }
-            match self.find_thread(parent_id) {
-                Some(parent) => thread = parent,
-                None => return Some(start.id.as_str()),
-            }
+            (thread, thread_env) = (parent, parent_env);
         }
         Some(start.id.as_str())
     }
@@ -965,6 +974,18 @@ impl ShellState {
         {
             return Vec::new();
         }
+        // `parent_id` is the row `find_thread` returns; its children belong to that row's
+        // environment, which may not be the one `foreign_of` names for the id.
+        let root_env = self
+            .find_thread_with_environment(parent_id)
+            .and_then(|(_, env)| env);
+        let env_of_parent = |id: &str| {
+            if id == parent_id {
+                root_env
+            } else {
+                self.environment_of(id)
+            }
+        };
         let mut children: HashMap<&str, Vec<&ThreadShell>> = HashMap::new();
         for thread in &self.threads {
             let parent = thread.lineage.parent_thread_id.as_deref();
@@ -972,11 +993,11 @@ impl ShellState {
                 && (thread.lineage.relationship_to_parent == Some(Relationship::Subagent)
                     || thread.lineage.side_chat == Some(true))
             {
-                if self.same_environment(&thread.id, parent) {
+                if same_environment(self.environment_of(&thread.id), env_of_parent(parent)) {
                     children.entry(parent).or_default().push(thread);
                 }
             } else if let Some(from) = thread.delegated_from.as_ref()
-                && self.delegated_here(from)
+                && self.delegated_by(from, env_of_parent(&from.thread_id))
             {
                 children
                     .entry(from.thread_id.as_str())
@@ -1032,19 +1053,40 @@ impl ShellState {
         }
     }
 
-    /// Whether two listed threads came from one environment. Unmerged shells know no
-    /// environments and match by id.
-    fn same_environment(&self, a: &str, b: &str) -> bool {
-        match (self.environment_of(a), self.environment_of(b)) {
-            (Some(a), Some(b)) => a == b,
-            _ => true,
+    /// [`Self::find_thread`] with the environment of the row it found. An id listed in more than
+    /// one environment's older pages has one `foreign_of` entry, so the row decides.
+    fn find_thread_with_environment(
+        &self,
+        thread_id: &str,
+    ) -> Option<(&ThreadShell, Option<&str>)> {
+        let own = self.environment_id.as_deref();
+        if let Some(thread) = self
+            .threads
+            .iter()
+            .chain(&self.archived_threads)
+            .find(|t| t.id == thread_id)
+        {
+            return Some((thread, self.environment_of(thread_id)));
         }
+        if let Some(thread) = self.older.threads.iter().find(|t| t.id == thread_id) {
+            return Some((thread, own));
+        }
+        self.foreign.iter().find_map(|foreign| {
+            foreign
+                .loaded
+                .iter()
+                .find(|t| t.id == thread_id)
+                .map(|thread| (thread, Some(foreign.environment_id.as_str())))
+        })
     }
 
-    /// Whether the thread listed with `from`'s thread id is the one that delegated the task.
-    fn delegated_here(&self, from: &conn_contract::OrchestrationV2LinkedSender) -> bool {
-        self.environment_of(&from.thread_id)
-            .is_none_or(|env| self.names_environment(env, &from.environment_id))
+    /// Whether a thread of environment `env` with `from`'s thread id delegated the task.
+    fn delegated_by(
+        &self,
+        from: &conn_contract::OrchestrationV2LinkedSender,
+        env: Option<&str>,
+    ) -> bool {
+        env.is_none_or(|env| self.names_environment(env, &from.environment_id))
     }
 
     /// Whether `named`, an id from a task's `delegatedFrom`, is merged environment `env`: its

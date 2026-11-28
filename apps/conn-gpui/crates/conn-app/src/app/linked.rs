@@ -655,9 +655,7 @@ impl ConnApp {
         if self.linked.is_empty() {
             return;
         }
-        self.linked
-            .shells
-            .set_environment_aliases(self.environment_aliases());
+        self.record_configured_ids();
         let primary_id = self.primary_environment_id();
         let primary_label = self.primary_environment_label();
         self.linked.origins = self.linked.shells.merge_into(
@@ -669,32 +667,40 @@ impl ConnApp {
         self.linked.merges.full += 1;
     }
 
-    /// The id each environment's own server reports for itself, to the id merges name it by,
-    /// where they differ: a delegated task names its parent's environment by the reported id.
-    fn environment_aliases(&self) -> HashMap<String, String> {
-        let mut aliases: HashMap<String, String> = self
-            .linked_target_ids()
-            .into_iter()
-            .filter_map(|target| {
-                let reported = self.linked_server_environment_id(&target)?.to_owned();
-                Some((reported, target))
+    /// Hands the merge the id each server's config reports for itself: a delegated task names
+    /// its parent's environment by it, while merges name environments by Orbit target id or URL.
+    /// Only held shells take one, so a switched-off environment's config claims nothing. A
+    /// changed id is saved with the shell. Returns whether any changed.
+    fn record_configured_ids(&mut self) -> bool {
+        let mut changed = self
+            .linked
+            .shells
+            .set_primary_configured_id(self.primary_environment.as_deref());
+        let reported: Vec<(String, String)> = self
+            .linked
+            .configs
+            .iter()
+            .filter_map(|(target, config)| {
+                Some((target.clone(), config.environment_id()?.to_owned()))
             })
             .collect();
-        if let Some(reported) = self.primary_environment.clone() {
-            aliases.insert(reported, self.primary_environment_id());
+        for (target, configured) in reported {
+            if self
+                .linked
+                .shells
+                .set_configured_environment_id(&target, &configured)
+            {
+                self.linked.dirty.insert(target);
+                changed = true;
+            }
         }
-        aliases
+        changed
     }
 
     /// Merges again when a server reported an environment id the merged shell does not know
     /// yet, so tasks delegated from its threads roll up to them.
     pub(super) fn sync_environment_aliases(&mut self) {
-        if !self.linked.is_empty()
-            && self
-                .linked
-                .shells
-                .set_environment_aliases(self.environment_aliases())
-        {
+        if !self.linked.is_empty() && self.record_configured_ids() {
             self.remerge_linked_shells();
         }
     }
@@ -1202,6 +1208,15 @@ impl ConnApp {
         self.linked
             .configs
             .insert(environment_id.to_owned(), config);
+    }
+
+    /// Test helper: the subagent request the merged list flags on `thread_id`.
+    #[cfg(test)]
+    pub(crate) fn merged_subagent_request_for_test(
+        &self,
+        thread_id: &str,
+    ) -> Option<conn_state::PendingSubagentRequest> {
+        self.shell.subagent_request(thread_id)
     }
 
     /// Test helper: the ids of every thread of the merged list.

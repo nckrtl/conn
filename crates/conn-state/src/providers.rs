@@ -1899,7 +1899,7 @@ fn compatibility_note(
 pub struct ServerConfigChange {
     /// The provider list differs from the one held.
     pub providers_changed: bool,
-    /// The scratch root or a capability the client reads differs.
+    /// The scratch root, the environment id or a capability the client reads differs.
     pub config_changed: bool,
     /// `settingsUpdated` (or a snapshot) brought different settings.
     pub settings_changed: bool,
@@ -2051,11 +2051,13 @@ impl ServerConfigState {
         let was_loaded = std::mem::replace(&mut self.loaded, true);
         let scratch = config.scratch_workspace_root.clone();
         let refresh = config.environment.capabilities.model_catalog_refresh == Some(true);
+        let environment_id = Some(config.environment.environment_id.clone());
         let config_changed = !was_loaded
             || scratch != self.scratch_workspace_root
-            || refresh != self.model_catalog_refresh;
+            || refresh != self.model_catalog_refresh
+            || environment_id != self.environment_id;
         self.scratch_workspace_root = scratch;
-        self.environment_id = Some(config.environment.environment_id.clone());
+        self.environment_id = environment_id;
         self.model_catalog_refresh = refresh;
         let settings_changed = self.settings.as_ref() != Some(&config.settings);
         self.settings = Some(config.settings.clone());
@@ -2220,6 +2222,18 @@ mod live_tests {
             Some("1a28c0a2-29b1-414d-9e2d-be55ecd752fd"),
             "the descriptor's own id, which the server's thread links carry"
         );
+    }
+
+    #[test]
+    fn a_new_environment_id_alone_is_a_config_change() {
+        let mut state = loaded();
+        let mut snapshot = snapshot_json();
+        snapshot["config"]["environment"]["environmentId"] = json!("reinstalled");
+        let change = state.apply(event(snapshot));
+        assert!(change.config_changed);
+        assert_eq!(state.environment_id(), Some("reinstalled"));
+        let change = state.apply(event(snapshot_json()));
+        assert!(change.config_changed, "and back again");
     }
 
     #[test]

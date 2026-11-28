@@ -6,7 +6,7 @@ use std::sync::Arc;
 use conn_state::ShellState;
 use conn_state::environments::LinkedShells;
 
-use crate::session::ConnSession;
+use crate::session::{ConnSession, FfiSessionPhase};
 
 /// One thread of one environment.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, uniffi::Record)]
@@ -23,7 +23,11 @@ pub fn inbox_attention(sessions: Vec<Arc<ConnSession>>) -> Vec<FfiThreadKey> {
     let shells: Vec<(String, Arc<ShellState>)> = sessions
         .iter()
         .filter_map(|session| {
-            let environment_id = session.state().environment_id?;
+            let state = session.state();
+            if !matches!(state.phase, FfiSessionPhase::Live { .. }) {
+                return None;
+            }
+            let environment_id = state.environment_id?;
             Some((environment_id, session.core()?.roll_up_shell()?))
         })
         .collect();

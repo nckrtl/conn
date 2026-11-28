@@ -113,6 +113,8 @@ enum PumpControl {
     /// The device database is open: the engine and the image reader on it.
     EnableEngine(Box<conn_cache::Engine>, Arc<crate::OfflineReader>),
     OpenThread(String),
+    /// The session learned which environment this core serves.
+    NameEnvironment(String),
     /// The window [`conn_cache::Engine::open_thread`] read from the device.
     FinishOpen {
         thread_id: String,
@@ -455,6 +457,13 @@ impl ConnCore {
     pub(crate) fn expect_environment(&self, environment_id: String) {
         self.connection
             .set_expected_environment(Some(environment_id));
+    }
+
+    /// Names the environment this core serves, for the roll-ups its shell computes alone.
+    pub(crate) fn name_environment(&self, environment_id: String) {
+        let _ = self
+            .ctrl_tx
+            .send(PumpControl::NameEnvironment(environment_id));
     }
 
     /// True when another environment answered at this server's address (the bearer wasn't sent).
@@ -1794,6 +1803,13 @@ impl PumpState {
                 }
                 true
             }
+            PumpControl::NameEnvironment(environment_id) => {
+                self.shell.name_environment(&environment_id);
+                if self.shell.synchronized {
+                    self.emit_or_buffer_shell(build_shell_snapshot(&self.shell));
+                }
+                true
+            }
             PumpControl::OpenThread(thread_id) => {
                 self.open_threads.insert(thread_id.clone());
                 self.ended_threads.remove(&thread_id);
@@ -2287,6 +2303,8 @@ impl PumpState {
         self.shell.synchronized = false;
         self.coalescer.reset_shell();
         self.shell_watch.send_replace(self.saved_shell.clone());
+        // The inbox's roll-up reads nothing from here until the server's shell is current again.
+        self.roll_up_watch.send_replace(None);
     }
 
     /// Draws the thread list saved on the device until the server's shell arrives.

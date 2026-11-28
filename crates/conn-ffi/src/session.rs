@@ -1123,6 +1123,7 @@ impl ConnSession {
                 });
             }
             Effect::PrepareOffline { id, core, identity } => {
+                core.name_environment(identity.clone());
                 let (Some(this), Some(dir)) = (self.this.upgrade(), self.cache_dir.clone()) else {
                     return;
                 };

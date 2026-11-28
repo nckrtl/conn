@@ -6,4 +6,4 @@ mod db;
 mod engine;
 mod rows;
 pub use db::{ThreadIndex, Window};
-pub use engine::{Engine, Images, Pending, Settings};
+pub use engine::{Engine, Images, Peek, Pending, Settings, peek};

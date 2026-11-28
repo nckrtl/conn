@@ -192,6 +192,27 @@ pub(crate) async fn open(path: &Path) -> Result<SqlitePool, sqlx::Error> {
     Ok(pool)
 }
 
+/// Opens an existing database of this schema to read, without creating or migrating it.
+pub(crate) async fn open_existing(path: &Path) -> Result<SqlitePool, sqlx::Error> {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            SqliteConnectOptions::new()
+                .filename(path)
+                .create_if_missing(false)
+                .busy_timeout(std::time::Duration::from_secs(1)),
+        )
+        .await?;
+    let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+        .fetch_one(&pool)
+        .await?;
+    if version != SCHEMA_VERSION {
+        pool.close().await;
+        return Err(sqlx::Error::RowNotFound);
+    }
+    Ok(pool)
+}
+
 pub(crate) async fn read_index(
     pool: &SqlitePool,
     env: &str,

@@ -45,7 +45,7 @@ const KEPT_DEBOUNCE: Duration = Duration::from_millis(1000);
 /// waits for a whole backlog to drain.
 const MAX_EVENTS_PER_DRAIN: usize = 64;
 /// The thread engine's database in a pairing's cache directory.
-const LOCAL_DATABASE: &str = "conn-local-v1.sqlite3";
+pub(crate) const LOCAL_DATABASE: &str = "conn-local-v1.sqlite3";
 /// Maximum time `Drop` waits for worker threads to wind down when dropped off-runtime.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_millis(250);
 

@@ -261,7 +261,30 @@ final class CoreStore {
             session?.restore(saved: saved)
         }
         coldLaunchSession = saved
-        if scope.isEmpty { openRestoredThread() }
+        if scope.isEmpty {
+            openRestoredThread()
+            drawLaunchView()
+        }
+    }
+
+    /// Draws each saved server's thread list, and the restored thread, from the device while
+    /// its connection is still being found. The connection's own snapshots replace them.
+    private func drawLaunchView() {
+        for owner in inboxOwners {
+            guard let session = owner.session, let saved = owner.coldLaunchSession,
+                  let identity = saved.environmentId ?? saved.orbitServerId else { continue }
+            let threadId = owner === self ? openThreadId : nil
+            Task {
+                let view = await session.launchView(identity: identity, threadId: threadId)
+                guard owner.coldLaunchSession != nil, owner.environmentId == identity || saved.orbitServerId == identity
+                else { return }
+                if owner.shell == nil, let shell = view.shell { owner.shell = shell }
+                if let thread = view.thread, owner.openThreadId == thread.threadId, owner.openThread == nil {
+                    owner.openThread = thread
+                }
+                owner.updateWorkspaceVisibility()
+            }
+        }
     }
 
     /// Opens the thread the workspace will restore (its saved route) at launch, before any view

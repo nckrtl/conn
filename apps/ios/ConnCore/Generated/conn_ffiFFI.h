@@ -1107,6 +1107,11 @@ void uniffi_conn_ffi_fn_method_connsession_foreground(uint64_t ptr, RustCallStat
 void uniffi_conn_ffi_fn_method_connsession_launch(uint64_t ptr, RustBuffer saved, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_LAUNCH_VIEW
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_LAUNCH_VIEW
+uint64_t uniffi_conn_ffi_fn_method_connsession_launch_view(uint64_t ptr, RustBuffer identity, RustBuffer thread_id
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_LINKED_NODES
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_METHOD_CONNSESSION_LINKED_NODES
 uint64_t uniffi_conn_ffi_fn_method_connsession_linked_nodes(uint64_t ptr, RustBuffer primary_id, RustBuffer saved, RustBuffer disabled
@@ -2278,6 +2283,12 @@ uint16_t uniffi_conn_ffi_checksum_method_connsession_foreground(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_LAUNCH
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_LAUNCH
 uint16_t uniffi_conn_ffi_checksum_method_connsession_launch(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_LAUNCH_VIEW
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_METHOD_CONNSESSION_LAUNCH_VIEW
+uint16_t uniffi_conn_ffi_checksum_method_connsession_launch_view(void
     
 );
 #endif

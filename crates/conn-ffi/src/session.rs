@@ -77,6 +77,13 @@ pub enum FfiSessionPhase {
     Suspended,
 }
 
+/// The device's copy of a saved server, drawn before its connection exists.
+#[derive(Clone, Debug, Default, PartialEq, Eq, uniffi::Record)]
+pub struct FfiLaunchView {
+    pub shell: Option<FfiShellSnapshot>,
+    pub thread: Option<FfiThreadSnapshot>,
+}
+
 /// The one observable state. `revision` grows with every change, so an older state that
 /// arrives late can be dropped.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -1418,6 +1425,42 @@ impl ConnSession {
     pub fn launch(&self, saved: Option<FfiSavedSession>) {
         conn_client::perf::mark("session.launch");
         self.step(|m| m.launch(saved));
+    }
+
+    /// What the device holds for the saved server `identity`, drawn at launch while its
+    /// connection is still being found: the thread list and the thread `thread_id`. Neither is
+    /// current; the connection's own snapshots replace them.
+    pub async fn launch_view(&self, identity: String, thread_id: Option<String>) -> FfiLaunchView {
+        let Some(dir) = self.cache_dir.clone() else {
+            return FfiLaunchView::default();
+        };
+        self.orbit
+            .handle()
+            .spawn(async move {
+                // Another server's leftovers are not this one's threads.
+                if std::fs::read_to_string(dir.join(IDENTITY_FILE)).ok()? != identity {
+                    return None;
+                }
+                let path = cache_files(&dir).ok()?.join(crate::core::LOCAL_DATABASE);
+                let peek = conn_cache::peek(&path, &identity, thread_id.as_deref()).await;
+                let catalog = conn_state::providers::ModelCatalog::default();
+                let thread = peek.thread.map(|thread| {
+                    let meta = peek
+                        .shell
+                        .as_ref()
+                        .and_then(|shell| shell.find_thread(&thread.thread_id))
+                        .map(crate::types::ThreadSnapshotMeta::from_shell);
+                    crate::types::build_thread_snapshot(&thread, meta.as_ref(), &catalog)
+                });
+                Some(FfiLaunchView {
+                    shell: peek.shell.as_ref().map(crate::types::build_shell_snapshot),
+                    thread,
+                })
+            })
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
     }
 
     /// A linked environment's session at launch: its saved Orbit environment or manual server.

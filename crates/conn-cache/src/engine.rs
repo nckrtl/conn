@@ -165,14 +165,7 @@ impl Engine {
         let index = db::read_index(&pool, env).await?;
         let saved_shell = db::read_shell(&pool, env)
             .await?
-            .and_then(|bytes| conn_state::environments::LinkedShellSnapshot::from_json(&bytes))
-            .filter(|saved| saved.environment_id == env)
-            .map(|saved| {
-                // Drawn at once, current only when the server's shell arrives.
-                let mut shell = saved.into_shell();
-                shell.synchronized = false;
-                shell
-            });
+            .and_then(|bytes| saved_shell(&bytes, env));
         let (jobs, rx) = mpsc::unbounded_channel();
         tokio::spawn(run(pool.clone(), env.to_owned(), connection.clone(), rx));
         Ok(Self {
@@ -755,6 +748,46 @@ impl Engine {
     }
 }
 
+/// What the device can draw before its connection exists.
+#[derive(Debug, Default)]
+pub struct Peek {
+    pub shell: Option<ShellState>,
+    pub thread: Option<ThreadState>,
+}
+
+/// Reads the saved thread list and `thread`'s stored window without writing, to draw at launch
+/// while the connection is still being found. Neither is synchronized. Empty when the file is
+/// missing, of another schema, or busy.
+pub async fn peek(path: &Path, env: &str, thread: Option<&str>) -> Peek {
+    let Ok(pool) = db::open_existing(path).await else {
+        return Peek::default();
+    };
+    let shell = db::read_shell(&pool, env)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|bytes| saved_shell(&bytes, env));
+    let thread = match thread {
+        Some(id) => db::read_window(&pool, env, id, None)
+            .await
+            .ok()
+            .flatten()
+            .map(|window| held_from(id, window).state),
+        None => None,
+    };
+    pool.close().await;
+    Peek { shell, thread }
+}
+
+/// A saved thread list for `env`: drawn at once, current only when the server's shell arrives.
+fn saved_shell(bytes: &[u8], env: &str) -> Option<ShellState> {
+    let saved = conn_state::environments::LinkedShellSnapshot::from_json(bytes)
+        .filter(|saved| saved.environment_id == env)?;
+    let mut shell = saved.into_shell();
+    shell.synchronized = false;
+    Some(shell)
+}
+
 fn held_from(id: &str, window: Window) -> Held {
     let source = if window.timeline.is_empty() {
         "server"
@@ -969,6 +1002,14 @@ mod tests {
             );
             settle(&first, &thread).await;
             drop(first);
+
+            // At launch, before any connection: the same rows, read without writing.
+            let peeked = peek(&path, "env", Some(&thread))
+                .await
+                .thread
+                .unwrap_or_else(|| panic!("peeked"));
+            assert_eq!(entries(&peeked), entries(&live), "{fixture}");
+            assert!(!peeked.synchronized, "drawn, not current");
 
             let mut second = engine(&path, Settings::default()).await;
             let last = items.iter().filter_map(|i| i["sequence"].as_i64()).max();
@@ -1189,11 +1230,17 @@ mod tests {
         let path = dir.path().join("local.sqlite3");
         let mut shell = ShellState::default();
         shell.sequence = Some(42);
+        let missing = peek(&path, "env", None).await;
+        assert!(missing.shell.is_none() && missing.thread.is_none());
+        assert!(!path.exists(), "a peek creates no file");
         let mut first = engine(&path, Settings::default()).await;
         assert!(first.take_saved_shell().is_none());
         first.save_shell(&shell, true);
         settle(&first, "any").await;
         drop(first);
+        let peeked = peek(&path, "env", None).await.shell;
+        assert_eq!(peeked.map(|shell| shell.sequence), Some(Some(42)));
+        assert!(peek(&path, "other", None).await.shell.is_none());
         let mut second = engine(&path, Settings::default()).await;
         let saved = second.take_saved_shell().unwrap_or_else(|| panic!("saved"));
         assert_eq!(saved.sequence, Some(42));

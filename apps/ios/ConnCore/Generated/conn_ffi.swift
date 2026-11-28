@@ -1894,6 +1894,13 @@ public protocol ConnSessionProtocol: AnyObject, Sendable {
      */
     func launch(saved: FfiSavedSession?) 
     
+    /**
+     * What the device holds for the saved server `identity`, drawn at launch while its
+     * connection is still being found: the thread list and the thread `thread_id`. Neither is
+     * current; the connection's own snapshots replace them.
+     */
+    func launchView(identity: String, threadId: String?) async  -> FfiLaunchView
+    
     func linkedNodes(primaryId: String, saved: [String], disabled: [String]) async throws  -> FfiLinkedDiscovery
     
     /**
@@ -2100,6 +2107,28 @@ open func launch(saved: FfiSavedSession?)  {try! rustCall() {
         FfiConverterOptionTypeFfiSavedSession.lower(saved),uniffiCallStatus
     )
 }
+}
+    
+    /**
+     * What the device holds for the saved server `identity`, drawn at launch while its
+     * connection is still being found: the thread list and the thread `thread_id`. Neither is
+     * current; the connection's own snapshots replace them.
+     */
+open func launchView(identity: String, threadId: String?)async  -> FfiLaunchView  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_conn_ffi_fn_method_connsession_launch_view(
+                        self.uniffiCloneHandle(),FfiConverterString.lower(identity),FfiConverterOptionString.lower(threadId)
+                )
+            },
+            pollFunc: ffi_conn_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_conn_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_conn_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeFfiLaunchView_lift,
+            errorHandler: nil
+            
+        )
 }
     
 open func linkedNodes(primaryId: String, saved: [String], disabled: [String])async throws  -> FfiLinkedDiscovery  {
@@ -6515,6 +6544,63 @@ public func FfiConverterTypeFfiInsightTrendPoint_lift(_ buf: RustBuffer) throws 
 #endif
 public func FfiConverterTypeFfiInsightTrendPoint_lower(_ value: FfiInsightTrendPoint) -> RustBuffer {
     return FfiConverterTypeFfiInsightTrendPoint.lower(value)
+}
+
+
+/**
+ * The device's copy of a saved server, drawn before its connection exists.
+ */
+public struct FfiLaunchView: Equatable, Hashable {
+    public var shell: FfiShellSnapshot?
+    public var thread: FfiThreadSnapshot?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(shell: FfiShellSnapshot?, thread: FfiThreadSnapshot?) {
+        self.shell = shell
+        self.thread = thread
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiLaunchView: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiLaunchView: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiLaunchView {
+        return
+            try FfiLaunchView(
+                shell: FfiConverterOptionTypeFfiShellSnapshot.read(from: &buf), 
+                thread: FfiConverterOptionTypeFfiThreadSnapshot.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiLaunchView, into buf: inout [UInt8]) {
+        FfiConverterOptionTypeFfiShellSnapshot.write(value.shell, into: &buf)
+        FfiConverterOptionTypeFfiThreadSnapshot.write(value.thread, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLaunchView_lift(_ buf: RustBuffer) throws -> FfiLaunchView {
+    return try FfiConverterTypeFfiLaunchView.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiLaunchView_lower(_ value: FfiLaunchView) -> RustBuffer {
+    return FfiConverterTypeFfiLaunchView.lower(value)
 }
 
 
@@ -17918,6 +18004,30 @@ fileprivate struct FfiConverterOptionTypeFfiThemeTokens: FfiConverterRustBuffer 
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeFfiThreadSnapshot: FfiConverterRustBuffer {
+    typealias SwiftType = FfiThreadSnapshot?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeFfiThreadSnapshot.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeFfiThreadSnapshot.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeFfiTurnAgents: FfiConverterRustBuffer {
     typealias SwiftType = FfiTurnAgents?
 
@@ -20161,6 +20271,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_launch() != 24523) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_method_connsession_launch_view() != 22571) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_connsession_linked_nodes() != 18623) {

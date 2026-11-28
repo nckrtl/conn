@@ -609,7 +609,8 @@ mod tests {
     async fn failed_installs_allow_the_next_caller_to_retry() {
         let root =
             std::env::temp_dir().join(format!("conn-preview-retry-{}", conn_support::uuid_v4()));
-        let installer = Installer::new(root.clone());
+        // The lazy cache path, whatever the host's `CONN_SERVER_BROWSER_PATH` says.
+        let installer = Installer::with_browser_path(root.clone(), None);
         let (_tx, rx) = watch::channel(Some(Err(Error("previous failure".into()))));
         *installer.pending.lock().await = Some(rx);
         assert_ne!(
@@ -643,7 +644,10 @@ mod tests {
             std::env::temp_dir().join(format!("conn-preview-install-{}", conn_support::uuid_v4()));
         let path = installed_fixture(&root);
         assert_eq!(
-            Installer::new(root.clone()).executable().await.unwrap(),
+            Installer::with_browser_path(root.clone(), None)
+                .executable()
+                .await
+                .unwrap(),
             path
         );
         std::fs::remove_dir_all(root).unwrap();

@@ -68,6 +68,11 @@ fn listed(
         .map_or(&[], |(_, fields)| *fields)
 }
 
+/// The secret fields of a provider driver's `config` (`PROVIDER_CONFIG`).
+pub(super) fn provider_secret_fields(driver: &str) -> &'static [&'static str] {
+    listed(PROVIDER_CONFIG, driver)
+}
+
 /// `{ provider, reference }`: a secret kept by a secret provider, not a secret itself.
 pub(super) fn is_secret_reference(value: &Value) -> bool {
     value.get("provider").is_some_and(Value::is_string)
@@ -365,6 +370,19 @@ pub(super) fn restore_echoed_references(
 /// reference shows the marker.
 pub(super) fn redact(settings: &mut Map<String, Value>) {
     super::retain_supported_hosts(settings);
+    // A secret field holding a number, a boolean or a list (a hand edit) is no shape the
+    // maps below touch: it shows the marker, never its value.
+    walk(settings, &mut |visit| {
+        if let Visit::Group(fields, secret_fields, _) = visit {
+            for field in secret_fields {
+                if let Some(slot) = fields.get_mut(*field)
+                    && matches!(slot, Value::Number(_) | Value::Bool(_) | Value::Array(_))
+                {
+                    *slot = json!(SECRET_REDACTED);
+                }
+            }
+        }
+    });
     map_secrets(settings, &mut |secret| {
         if secret.sensitive {
             Mapped {
@@ -528,14 +546,6 @@ pub(super) fn apply(dir: &Path, changes: &[Change]) -> Result<Undo, (&'static st
         }
     }
     Ok(undo)
-}
-
-/// Whether applying `changes` would leave the store as it is: each write holds the stored
-/// value and each removed secret is absent. A store that cannot be read counts as changed.
-pub(super) fn unchanged(dir: &Path, changes: &[Change]) -> bool {
-    changes.iter().all(|change| {
-        secret_store::read(dir, &change.name).is_ok_and(|stored| stored == change.write)
-    })
 }
 
 /// What [`apply`] changed, to undo when the settings file cannot be written after it.

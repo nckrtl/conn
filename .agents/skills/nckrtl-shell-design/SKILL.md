@@ -325,9 +325,7 @@ Do not reintroduce these:
 4. Lint the touched files (`vp lint <files>`) and run `vp run check:changed`.
    That always typechecks `@t3tools/desktop` via the existing Vite task.
    `scripts/build-desktop-artifact.ts` runs the same task before packing and
-   fails closed. Packaging also requires the full HEAD SHA to be the tip of an
-   origin `sync/*` branch (`scripts/publish-sync-branch.ts` then
-   `scripts/check-sync-provenance.ts`). Do not add `scripts.typecheck` to
+   fails closed. Do not add `scripts.typecheck` to
    `apps/desktop/package.json`.
    Do not run repo-wide checks.
 5. Visual check, when the user agrees: use the `test-t3-app` skill. Check

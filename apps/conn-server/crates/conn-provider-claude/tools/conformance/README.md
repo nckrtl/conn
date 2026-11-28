@@ -9,7 +9,7 @@ from the T3 server. No model is called.
 ```
 
 Needs: `npm ci` in `helpers/sdk-host`, and `vp i` at the Conn monorepo root. Rerun it on
-every SDK or CLI change and after an upstream sync. Exit 0 means no difference.
+every SDK or CLI change and after porting an upstream provider fix. Exit 0 means no difference.
 
 ## How it works
 

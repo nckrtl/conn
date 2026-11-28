@@ -9,7 +9,7 @@ Conn Server has its own release history. Use upstream changes to find scenarios 
 
 ## Establish the review window
 
-Identify the last **upstream T3 commit actually examined** from the previous audit, chat, or PR. Fetch the default branches of `pingdotgg/t3code` and `nckrtl/conn` into separate refs. Check the remote URLs first; a fresh Conn clone may have only `origin`. Upstream is read-only: only fetch from it. Record three full SHAs: the T3 baseline, the T3 tip, and the Conn revision under test. A date-only request can use the upstream first-parent history at the requested time and timezone. If no baseline is recoverable, state the window you chose.
+Take the baseline, the last **upstream T3 commit actually examined**, from the "Provider audit checkpoint" block in `FORK.md`. Ask the user only if the block is missing. Fetch the default branches of `pingdotgg/t3code` and `nckrtl/conn` into separate refs. Check the remote URLs first; a fresh Conn clone may have only `origin`. Upstream is read-only: only fetch from it. Record three full SHAs: the T3 baseline, the T3 tip, and the Conn revision under test. A date-only request can use the upstream first-parent history at the requested time and timezone.
 
 Verify the baseline is an ancestor of the T3 tip. Inspect `git log --oneline BASE..TIP` and `git diff --name-status BASE TIP` **within T3**. Conn's SHA identifies the code being tested. Comparing the two projects' heads or counting commits between them cannot establish provider behavior.
 
@@ -17,7 +17,7 @@ Verify the baseline is an ancestor of the T3 tip. Inspect `git log --oneline BAS
 
 Start with Codex, Claude, Grok, and Antigravity unless the request or current Conn capability list gives a different scope. Scan the full commit subjects and changed paths before narrowing. Provider changes can land in orchestration, MCP, permissions, session recovery, shared contracts, usage reporting, SDK dependencies, or replay fixtures. Inspect the upstream patch and regression test together. Extract the triggering input, event order, expected result, and any CLI or SDK version boundary.
 
-Read `FORK.md`, `apps/conn-server/AGENTS.md`, and the relevant crate README. Follow the scenario through the actual Conn implementation:
+Read `apps/conn-server/docs/scope.md`, `apps/conn-server/AGENTS.md`, and the relevant crate README. Follow the scenario through the actual Conn implementation:
 
 | Boundary                                                         | Starting point under `apps/conn-server/`                            |
 | ---------------------------------------------------------------- | ------------------------------------------------------------------- |
@@ -39,6 +39,8 @@ For example, an SDK callback reaching Conn proves only that the callback is wire
 For a checkup, lead with which changes Conn needs and why. For each recommendation, give the user-visible effect, the exact observed result, and links to the upstream change and pinned Conn code. Label source-only findings and missing runtime evidence. Briefly identify important cases Conn already handles or deliberately delegates to Orbit. An empty review window or zero applicable changes is a valid result.
 
 Close the report with the **upstream SHA reviewed through**, plus the Conn SHA tested and any unexamined areas or pending replays. Carry unresolved cases into the next audit. The upstream SHA is a search checkpoint, independent of which fixes have merged.
+
+Then update the checkpoint block in `FORK.md`: the upstream SHA reviewed through, the Conn SHA tested, the date, a link to the report or PR, and the unexamined areas (full SHAs). Commit it with the fix PR, or in a small PR of its own when nothing needed fixing.
 
 When asked to implement, put the failing case in the owning Rust crate, fix the behavior through its normal entry point, and rerun the regression and affected conformance checks. Preserve older supported runtimes and stored data. Follow the server’s checks for shared contract or fixture changes. In the PR, link the source change and show what the same scenario did before and after the fix. PRs and issues go to `nckrtl/conn` only; pass `--repo nckrtl/conn` to every `gh` command. Never push to `pingdotgg/t3code`, and never open PRs, issues, or comments there.
 

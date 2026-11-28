@@ -5,7 +5,7 @@
 Primary sources of truth (always check these before guessing):
 - `.claude/skills/nckrtl-shell-design/SKILL.md`
 - `.claude/skills/nckrtl-shell-design/references/tokens.md`
-- `FORK.md` ("Shell design", "Icons", "Workspaces")
+- `docs/conn-features.md` ("Shell design", "Icons", "Workspaces")
 - `apps/web/src/index.css` (shell tokens at the end of the file)
 - `packages/shared/src/themePalettes.ts` (all 60+ semantic `THEME_COLOR_ROLES` and built-in themes)
 - `apps/desktop/src/window/DesktopWindow.ts` (macOS traffic light positioning & vibrancy)

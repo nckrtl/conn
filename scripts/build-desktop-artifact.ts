@@ -42,12 +42,6 @@ import {
   selectCliRuntimeExternalDependencies,
 } from "./lib/cli-external-packages.ts";
 import { DESKTOP_TYPECHECK_LABEL, desktopTypecheckVpArgs } from "./desktop-typecheck.ts";
-import {
-  checkPublishedSyncSource,
-  sealPublishedSyncSource,
-  syncSourceProvenanceMessage,
-  type SyncSourceProvenance,
-} from "./sync-source-provenance.ts";
 import { loadRepoEnv } from "./lib/public-config.ts";
 import {
   UPSTREAM_APP_BRAND,
@@ -878,37 +872,28 @@ const spawnAndCollectOutput = Effect.fn("spawnAndCollectOutput")(function* (
   return { stdout, stderr, exitCode } as const;
 });
 
-export class DesktopSyncSourceProvenanceError extends Schema.TaggedError<DesktopSyncSourceProvenanceError>()(
-  "DesktopSyncSourceProvenanceError",
-  { reason: Schema.String },
-) {
-  override get message(): string {
-    return this.reason;
+const resolveGitCommitHash = Effect.fn("resolveGitCommitHash")(function* (repoRoot: string) {
+  const result = yield* spawnAndCollectOutput(
+    ChildProcess.make("git", ["rev-parse", "--short=12", "HEAD"], {
+      cwd: repoRoot,
+    }),
+  ).pipe(
+    Effect.orElseSucceed(() => ({
+      stdout: "",
+      stderr: "",
+      exitCode: 1,
+    })),
+  );
+
+  if (result.exitCode !== 0) {
+    return "unknown";
   }
-}
-
-const provenanceFailure = (cause: unknown) =>
-  new DesktopSyncSourceProvenanceError({
-    reason: syncSourceProvenanceMessage(cause),
-  });
-
-export const requireDesktopBuildSourceProvenance = Effect.fn("requireDesktopBuildSourceProvenance")(
-  function* (repoRoot: string) {
-    return yield* Effect.try({
-      try: () => checkPublishedSyncSource({ repo: repoRoot }),
-      catch: provenanceFailure,
-    });
-  },
-);
-
-export const sealDesktopBuildSourceProvenance = Effect.fn("sealDesktopBuildSourceProvenance")(
-  function* (repoRoot: string, expected: SyncSourceProvenance) {
-    return yield* Effect.try({
-      try: () => sealPublishedSyncSource({ repo: repoRoot, expected }),
-      catch: provenanceFailure,
-    });
-  },
-);
+  const hash = result.stdout.trim();
+  if (!/^[0-9a-f]{7,40}$/i.test(hash)) {
+    return "unknown";
+  }
+  return hash.toLowerCase();
+});
 
 const resolvePythonForNodeGyp = Effect.fn("resolvePythonForNodeGyp")(function* () {
   const fs = yield* FileSystem.FileSystem;
@@ -990,7 +975,6 @@ interface StagePackageJson {
   readonly version: string;
   readonly buildVersion: string;
   readonly t3codeCommitHash: string;
-  readonly t3codeSyncRef: string;
   readonly t3codeWebAuthn?: MacWebAuthnEntitlements;
   readonly private: true;
   readonly packageManager: string;
@@ -3694,7 +3678,6 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
   yield* typecheckDesktopPackage(repoRoot, options.verbose);
-  let sourceProvenance = yield* requireDesktopBuildSourceProvenance(repoRoot);
   const hostPlatform = yield* HostProcess.Platform;
   if (hostPlatform === "linux" && options.platform === "linux") {
     yield* preflightLinuxDesktopBuild(options.arch);
@@ -3771,6 +3754,7 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     appVersion,
     resolveForkBrand(loadRepoEnv({ repoRoot })),
   );
+  const commitHash = yield* resolveGitCommitHash(repoRoot);
   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
   const stageRoot = yield* mkdir({
     prefix: `t3code-desktop-${options.platform}-stage-`,
@@ -3997,13 +3981,11 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     options.platform === "win"
       ? path.join(stageAppDir, WINDOWS_SERVER_RESOURCE_SOURCE_DIR, WINDOWS_SERVER_ASAR_RESOURCE)
       : undefined;
-  sourceProvenance = yield* sealDesktopBuildSourceProvenance(repoRoot, sourceProvenance);
   const stagePackageJson: StagePackageJson = {
     name: "t3code",
     version: appVersion,
     buildVersion: appVersion,
-    t3codeCommitHash: sourceProvenance.commit,
-    t3codeSyncRef: sourceProvenance.syncRef,
+    t3codeCommitHash: commitHash,
     // Read by apps/desktop/src/preview/Passkeys.ts; must match the signed entitlements.
     ...(macWebAuthn ? { t3codeWebAuthn: macWebAuthn } : {}),
     private: true,
@@ -4228,7 +4210,6 @@ const buildDesktopArtifactUnlocked = Effect.fn("buildDesktopArtifactUnlocked")(f
     });
   }
 
-  yield* sealDesktopBuildSourceProvenance(repoRoot, sourceProvenance);
   yield* Effect.log("[desktop-artifact] Done. Artifacts:").pipe(
     Effect.annotateLogs({ artifacts: copiedArtifacts }),
   );

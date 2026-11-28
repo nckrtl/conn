@@ -5,7 +5,7 @@ import viteConfig from "../../vite.config.ts?raw";
 import workspaceVisuals from "../components/sidebar/workspaceVisuals.tsx?raw";
 
 // Conn fork guard: an upstream merge must not silently drop the wiring that
-// sends Lucide imports to Conn's generated icon module. See FORK.md, "Icons".
+// sends Lucide imports to Conn's generated icon module. See docs/conn-features.md, "Icons".
 describe("Conn icon module", () => {
   it("maps lucide-react to src/icons in Vite and TypeScript", () => {
     expect(viteConfig).toContain("find: /^lucide-react$/");

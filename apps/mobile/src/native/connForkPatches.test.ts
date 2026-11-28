@@ -4,9 +4,9 @@ import * as NodePath from "node:path";
 
 import { describe, expect, it } from "vite-plus/test";
 
-// Conn fork guard: an upstream merge must not silently drop the fork's
-// vendored-package patches or the screens that rely on them. See FORK.md,
-// "Vendored dependency patches".
+// Conn fork guard: a change must not silently drop the fork's
+// vendored-package patches or the screens that rely on them. See
+// docs/development.md, "Vendored dependency patches".
 const mobileRoot = NodePath.join(import.meta.dirname, "../..");
 const read = (path: string) => NodeFS.readFileSync(NodePath.join(mobileRoot, path), "utf8");
 

@@ -79,8 +79,8 @@ the server and both clients.
 
 ### Costs we accept
 
-- Every in-scope upstream server change must be ported. The nightly upstream sync does this
-  ([`apps/conn-server/docs/upkeep.md`](../../conn-server/docs/upkeep.md)).
+- Upstream provider fixes in scope must be ported by hand; the nightly upstream sync has
+  stopped ([`apps/conn-server/docs/upkeep.md`](../../conn-server/docs/upkeep.md)).
 - Claude still runs through Anthropic's Agent SDK in a small Node program, the SDK host. The
   server starts it with the first Claude session and stops it after the last one (about 44 MB).
 

@@ -111,7 +111,7 @@ vi.mock("../../state/use-remote-environment-registry", () => ({
   // Conn: project rows name the machine when several connections are saved.
   useSavedRemoteConnections: () => ({ savedConnectionsById: {} }),
 }));
-// Conn: Orbit mode (FORK.md, "Orbit"); its store loads Expo native modules.
+// Conn: Orbit mode (docs/conn-features.md, "Orbit"); its store loads Expo native modules.
 vi.mock("../orbit/orbitGatewayStore", () => ({ useOrbitGateway: () => ({ provider: "t3" }) }));
 vi.mock("../../state/workspace", () => ({
   useWorkspaceState: () => ({ state: { hasReadyEnvironment: true } }),

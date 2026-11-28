@@ -67,4 +67,4 @@ Unregister temporary and obsolete backup paths with `lsregister -u`, register
 `/Applications/Conn.app` with `lsregister -f`, and check its name and path in
 `lsregister -dump`. Do not reset the whole LaunchServices database. Launch only
 when the user requests it. The first launch copies the old app's user data
-(see FORK.md, "Conn"). User data in `~/.t3` is untouched.
+(see `docs/conn-features.md`, "Conn (app rename)"). User data in `~/.t3` is untouched.

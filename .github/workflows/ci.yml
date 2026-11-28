@@ -162,7 +162,7 @@ jobs:
             !/apps/mobile/modules/t3-terminal/Vendor/**/*.a
           sparse-checkout-cone-mode: false
 
-      # Fork: GitHub-hosted runners keep their own sources; see FORK.md "Pull request runners".
+      # Fork: GitHub-hosted runners keep their own sources; see docs/development.md, "Pull request runners".
       - if: github.repository == 'pingdotgg/t3code' && needs.changes.outputs.build != 'false'
         uses: ./.github/actions/setup-apt-mirrors
 
@@ -378,7 +378,7 @@ jobs:
             !/apps/mobile/modules/t3-terminal/Vendor/**/*.a
           sparse-checkout-cone-mode: false
 
-      # Fork: GitHub-hosted runners keep their own sources; see FORK.md "Pull request runners".
+      # Fork: GitHub-hosted runners keep their own sources; see docs/development.md, "Pull request runners".
       - if: github.repository == 'pingdotgg/t3code'
         uses: ./.github/actions/setup-apt-mirrors
 

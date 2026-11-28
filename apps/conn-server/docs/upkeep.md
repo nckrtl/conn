@@ -6,8 +6,7 @@ it fails a check. No step calls a model.
 
 ## When the checks run
 
-Pull requests and `sync/**` pushes trigger both workflows directly when their path filters
-match. Both workflows also support manual runs.
+Pull requests trigger both workflows directly when their path filters match. Both workflows also support manual runs.
 
 After the first completion of CI for a main push, `conn-server-after-ci.yml` applies the same
 filters to the original push range. It runs the selected workflows at the pushed SHA even
@@ -25,27 +24,19 @@ them as one-day artifacts, and runs four comparison groups. Rust validation runs
 all groups run the canary. Only companion jobs for main pushes save Rust and pnpm caches.
 The final `Conn Server checks` gate fails if any group fails or skips.
 Each check has a timeout that stops its process group; each CI job also has a time limit.
-The nightly sync waits for the workflows triggered by its changes before it merges.
 
-## In the nightly sync
+## After a change in Conn
 
-The sync follows the Conn Server every night (Nick, 2026-11-16; `FORK.md`, "Upstream scope").
-On the `sync/*` branch, after the upstream merge:
-
-1. Run `tools/follow-conn.sh --capture`. It regenerates what is generated, runs
-   `tools/check.sh` and reports the upstream commits each part follows.
-2. Port each upstream change in scope that the report or a red check names, as the T3 server
-   makes it. Scope is the container profile: the areas `docs/orbit-profile.md` rates needed
-   or useful. Each port gets the test or the check that failed without it.
-3. Skip what is out of scope: Windows, the providers this server does not build, the hosts
-   and features the profile rates not needed. A check that goes red only for such a change
-   gets its scope fixed, with the reason; it is not weakened.
-4. An in-scope change that cannot be ported that night becomes a known difference with its
-   reason, in the check's known list and in `docs/status.md`.
-5. Commit on the sync branch, and let both workflows pass before the merge.
+Full upstream merges ended after 2026-11-19, and the nightly sync that followed the Conn
+Server has stopped (`FORK.md`, "Relationship to T3 Code"). Run `tools/follow-conn.sh` when
+the contract, the web client or `apps/server` in this tree changes. Upstream provider fixes
+are ported by hand; scope is the container profile, the areas `docs/orbit-profile.md` rates
+needed or useful. An in-scope change that cannot be ported yet becomes a known difference
+with its reason, in the check's known list and in `docs/status.md`. A check is never
+weakened to pass.
 
 Source-control parity follows only GitHub and the core registry's unknown-host fallback
-(`FORK.md`, "Upstream scope"). `registry-diff` constructs T3's registry with its GitHub
+(`docs/scope.md`, "Platforms and hosts"). `registry-diff` constructs T3's registry with its GitHub
 definition alone; it does not import or harvest other hosts. The followed files include
 source-control core and GitHub, but no other host packages.
 

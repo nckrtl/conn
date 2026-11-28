@@ -8,7 +8,8 @@
 //! refresh of `bundled.json` (the `audit-t3-providers` skill) and a Conn Server release.
 //!
 //! `bundled.json` is hand-owned since upstream T3 Code `05e3674636`, where it equals
-//! `apps/server/src/provider/model-manifest.json`.
+//! `apps/server/src/provider/model-manifest.json`, except that Claude Fable 5.2 has its own
+//! `fable-5-2` profile with Fast Mode, as in the next upstream manifest.
 
 use std::path::Path;
 

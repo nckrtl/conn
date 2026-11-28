@@ -1810,6 +1810,8 @@ mod tests {
             merged.shell.subagent_request("parent"),
             Some(crate::shell::PendingSubagentRequest::Approval)
         );
+        assert_eq!(merged.shell.listed_ancestor("task"), Some("parent"));
+        assert_eq!(merged.shell.child_approval_threads("parent").len(), 1);
     }
 
     #[test]
@@ -1834,6 +1836,42 @@ mod tests {
             merged.shell.subagent_request("parent"),
             Some(crate::shell::PendingSubagentRequest::Approval)
         );
+        assert_eq!(merged.shell.listed_ancestor("task"), Some("parent"));
+        assert_eq!(merged.shell.child_approval_threads("parent").len(), 1);
+    }
+
+    #[test]
+    fn an_upgraded_cache_rolls_a_task_up_to_its_offline_parent_by_id() {
+        // A cache saved before configured ids, its machine offline: nothing knows
+        // `agent-config`, so the task matches its parent by thread id, as before.
+        let mut before = LinkedShells::default();
+        before.ensure("agent-target", "agent");
+        before.restore("agent-target", parent_shell());
+        let mut json: Value = serde_json::from_slice(
+            &before
+                .snapshot("agent-target")
+                .expect("a shell to save")
+                .to_json()
+                .expect("serializes"),
+        )
+        .expect("json");
+        json.as_object_mut()
+            .expect("object")
+            .remove("configuredEnvironmentId");
+        let mut linked = LinkedShells::default();
+        linked.restore_snapshot(
+            LinkedShellSnapshot::from_json(&serde_json::to_vec(&json).expect("json"))
+                .expect("an old cache reads"),
+        );
+        linked.ensure("nick-target", "nick");
+        linked.apply("nick-target", delegated_task("agent-config"));
+        let merged = linked.merged("primary", "primary", &ShellState::default());
+        assert_eq!(
+            merged.shell.subagent_request("parent"),
+            Some(crate::shell::PendingSubagentRequest::Approval)
+        );
+        assert_eq!(merged.shell.listed_ancestor("task"), Some("parent"));
+        assert_eq!(merged.shell.child_approval_threads("parent").len(), 1);
     }
 
     #[test]
@@ -1878,5 +1916,103 @@ mod tests {
             merged.shell.subagent_request("parent"),
             Some(crate::shell::PendingSubagentRequest::Approval)
         );
+        assert_eq!(merged.shell.listed_ancestor("task"), Some("parent"));
+        assert_eq!(merged.shell.child_approval_threads("parent").len(), 1);
+    }
+
+    /// Env a and env b both hold `shared`; a's copy is listed. b's subagent of `shared` and
+    /// c's task delegated from b's `shared` belong to b's copy.
+    fn merged_with_a_foreign_shared_parent() -> ShellState {
+        let asks = |t: &mut Value| {
+            t["status"] = json!("running");
+            t["pendingRuntimeRequest"] =
+                json!({"id": "r", "kind": "command", "createdAt": "2026-11-13T09:00:00.000Z"});
+        };
+        let mut primary = ShellState::default();
+        primary.apply(snapshot(
+            vec![],
+            vec![thread_json("shared", "p", |_| {})],
+            vec![],
+        ));
+        let mut linked = LinkedShells::default();
+        linked.ensure("b", "b");
+        linked.apply(
+            "b",
+            snapshot(
+                vec![],
+                vec![
+                    thread_json("shared", "p", |_| {}),
+                    thread_json("sub", "p", |t| {
+                        t["lineage"]["parentThreadId"] = json!("shared");
+                        t["lineage"]["relationshipToParent"] = json!("subagent");
+                        asks(t);
+                    }),
+                ],
+                vec![],
+            ),
+        );
+        linked.ensure("c", "c");
+        let task = thread_json("task", "p", |t| {
+            t["delegatedFrom"] =
+                json!({"environmentId": "b", "threadId": "shared", "title": "Shared"});
+            asks(t);
+        });
+        linked.apply("c", snapshot(vec![], vec![task], vec![]));
+        linked.merged("a", "a", &primary).shell
+    }
+
+    #[test]
+    fn a_child_has_no_listed_ancestor_in_another_environments_thread_with_its_parents_id() {
+        let shell = merged_with_a_foreign_shared_parent();
+        assert_eq!(shell.listed_ancestor("sub"), Some("sub"));
+        assert_eq!(shell.listed_ancestor("task"), Some("task"));
+    }
+
+    #[test]
+    fn child_approvals_skip_children_of_another_environments_thread_with_the_same_id() {
+        let shell = merged_with_a_foreign_shared_parent();
+        assert!(shell.child_approval_threads("shared").is_empty());
+    }
+
+    #[test]
+    fn a_task_delegated_by_one_older_copy_of_its_parent_skips_the_copy_found_first() {
+        // a and b both paged in an older `parent`; find_thread returns a's.
+        let paged_parent = |shell: &mut ShellState| {
+            shell.apply(older_snapshot(
+                vec![],
+                vec![],
+                "2026-11-10T00:00:00.000Z",
+                json!([{ "projectId": "p", "count": 1 }]),
+            ));
+            let request = shell.next_older_page(0, 5).expect("a page to read");
+            shell.older_page_started(&request);
+            let page: OlderSettledPage = from_json(json!({
+                "snapshotSequence": 5,
+                "threads": [thread_json("parent", "p", |t| {
+                    t["settledAt"] = json!("2026-11-01T09:00:00.000Z");
+                })],
+                "counts": []
+            }))
+            .expect("page decodes");
+            shell.apply_older_page(&request, page);
+        };
+        let mut primary = ShellState::default();
+        paged_parent(&mut primary);
+        let mut b = ShellState::default();
+        paged_parent(&mut b);
+        let mut linked = LinkedShells::default();
+        linked.ensure("b", "b");
+        linked.restore("b", b);
+        linked.ensure("c", "c");
+        let task = thread_json("task", "p", |t| {
+            t["delegatedFrom"] = json!({"environmentId": "b", "threadId": "parent", "title": "P"});
+            t["status"] = json!("running");
+            t["pendingRuntimeRequest"] =
+                json!({"id": "r", "kind": "command", "createdAt": "2026-11-13T09:00:00.000Z"});
+        });
+        linked.apply("c", snapshot(vec![], vec![task], vec![]));
+        let shell = linked.merged("a", "a", &primary).shell;
+        assert_eq!(shell.listed_ancestor("task"), Some("task"));
+        assert!(shell.child_approval_threads("parent").is_empty());
     }
 }

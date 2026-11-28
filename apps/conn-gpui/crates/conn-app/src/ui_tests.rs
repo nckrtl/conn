@@ -495,12 +495,102 @@ fn agent_cards_use_local_and_linked_sender_titles(cx: &mut TestAppContext) {
     }
 }
 
-/// `Open thread` on an agent card opens the sender's thread without opening the card. A sender
-/// the shell does not know has no action.
+/// A loopback HTTP server that answers a thread outline for each of `live` and `404` for every
+/// other thread. It refuses the WebSocket, so the connection never replaces the test's shell.
+fn outline_server(live: &'static [&'static str]) -> url::Url {
+    let addr = RT.block_on(async {
+        let listener = match TcpListener::bind("127.0.0.1:0").await {
+            Ok(listener) => listener,
+            Err(err) => panic!("failed to bind loopback listener: {err}"),
+        };
+        let addr = match listener.local_addr() {
+            Ok(addr) => addr,
+            Err(err) => panic!("failed to read listener addr: {err}"),
+        };
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 4096];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let request = String::from_utf8_lossy(&buf[..n]).into_owned();
+                let outline_of = request
+                    .strip_prefix("GET /api/orchestration/threads/")
+                    .and_then(|rest| rest.split_once("/outline "))
+                    .map(|(thread, _)| thread.to_owned());
+                let response = match outline_of {
+                    Some(thread) if live.contains(&thread.as_str()) => {
+                        let body = r#"{"snapshotSequence":1,"markers":[]}"#;
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                    }
+                    Some(_) => "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        .to_owned(),
+                    None => "HTTP/1.1 503 Service Unavailable\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        .to_owned(),
+                };
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        addr
+    });
+    match url::Url::parse(&format!("http://{addr}")) {
+        Ok(url) => url,
+        Err(err) => panic!("invalid loopback URL: {err}"),
+    }
+}
+
+/// Runs the app until `done` holds or five seconds pass, for answers from a loopback server.
+fn wait_until(
+    cx: &mut TestAppContext,
+    window: AnyWindowHandle,
+    done: impl Fn(&mut TestAppContext) -> bool,
+) -> bool {
+    for _ in 0..500 {
+        cx.run_until_parked();
+        let _ = cx.update_window(window, |_, window, cx| window.render_frame(cx));
+        if done(cx) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    false
+}
+
+/// `Open thread` on an agent card opens the sender by its environment and thread: a linked
+/// sender on that environment under its current title, and a local sender the shell leaves out
+/// once its server confirms it. An unreachable environment keeps the title and has no action; a
+/// deleted thread says so, keeps the open thread and leaves the card closed, by pointer and by
+/// Enter.
 #[gpui_kit::test]
 fn agent_card_opens_the_sender_thread(cx: &mut TestAppContext) {
-    let (window, app) = mount_app(cx);
-    let mount = |cx: &mut TestAppContext, sender: &str| {
+    let url = outline_server(&["thread-idle"]);
+    let config = || ServerConfig {
+        http_base_url: url.clone(),
+        credential: Credential::Bearer("test-token".to_owned()),
+    };
+    let (window, app) = mount_app_with_server(
+        cx,
+        Some(crate::live::StartupServer {
+            config: config(),
+            label: None,
+            orbit_server_id: None,
+        }),
+    );
+    cx.executor().allow_parking();
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.set_shell(kitchen_sink_shell(), cx);
+            app.connect_linked_for_test("mini", config(), cx);
+            app.add_linked_shell_for_test(
+                "mini",
+                "mini",
+                linked_mini_shell("/work/mini", "Mini diagnostics"),
+                cx,
+            );
+        })
+    });
+    let mount = |cx: &mut TestAppContext, sender: conn_state::AgentMessageSender| {
         let mut thread = kitchen_sink_thread();
         thread.entries.truncate(1);
         let TimelineEntry::User {
@@ -512,25 +602,90 @@ fn agent_card_opens_the_sender_thread(cx: &mut TestAppContext) {
             panic!("user fixture")
         };
         *created_by_agent = true;
-        *source = Some(conn_state::AgentMessageSender::LocalThread(sender.into()));
+        *source = Some(sender);
         cx.update(|cx| {
             app.update(cx, |app, cx| {
-                app.set_shell(kitchen_sink_shell(), cx);
                 app.set_thread_for_test("thread-selected".into(), thread, cx);
+                app.chat_for_test()
+                    .update(cx, |chat, cx| chat.set_error(None, cx));
             })
         });
         let _ = cx.update_window(window, |_, window, cx| window.render_frame(cx));
     };
+    let selected = |cx: &mut TestAppContext| {
+        cx.read(|cx| app.read(cx).selected_thread_for_test().map(str::to_owned))
+    };
+    let error = |cx: &mut TestAppContext| {
+        cx.read(|cx| app.read(cx).chat_for_test().read(cx).error_for_test())
+    };
+    let title = |cx: &mut TestAppContext| {
+        cx.update_window(window, |_, window, _| {
+            window
+                .find_by_label("Expand agent message")
+                .description()
+                .map(str::to_owned)
+        })
+        .ok()
+        .flatten()
+    };
+    let linked = |environment: &str, title: &str| conn_state::AgentMessageSender::Linked {
+        environment_id: environment.into(),
+        thread_id: "thread-mini".into(),
+        title: title.into(),
+    };
 
-    mount(cx, "thread-unknown");
+    // An environment this app cannot reach: the delivered title, and no action.
+    mount(cx, linked("env-gone", "Delivered title"));
+    assert_eq!(title(cx).as_deref(), Some("Delivered title"));
     assert!(!labelled(cx, window, "Open thread"));
 
-    mount(cx, "thread-working-bg");
+    // A linked sender shows its current title and opens on its own environment.
+    mount(cx, linked("mini", "Delivered title"));
+    assert_eq!(title(cx).as_deref(), Some("Mini diagnostics"));
     click_row(cx, window, "Open thread", MouseButton::Left);
-    assert_eq!(
-        cx.read(|cx| app.read(cx).selected_thread_for_test().map(str::to_owned)),
-        Some("thread-working-bg".to_owned())
+    assert_eq!(selected(cx).as_deref(), Some("thread-mini"));
+
+    // A local sender the shell leaves out opens once its server has it.
+    mount(
+        cx,
+        conn_state::AgentMessageSender::LocalThread("thread-idle".into()),
     );
+    click_row(cx, window, "Open thread", MouseButton::Left);
+    assert!(wait_until(cx, window, |cx| selected(cx).as_deref()
+        == Some("thread-idle")));
+
+    // A deleted sender says so, keeps the open thread, and leaves the card closed.
+    mount(
+        cx,
+        conn_state::AgentMessageSender::LocalThread("thread-gone".into()),
+    );
+    click_row(cx, window, "Open thread", MouseButton::Left);
+    assert!(wait_until(cx, window, |cx| error(cx).is_some()));
+    assert_eq!(
+        error(cx).as_deref(),
+        Some("This thread is no longer available.")
+    );
+    assert_eq!(selected(cx).as_deref(), Some("thread-selected"));
+    assert!(labelled(cx, window, "Expand agent message"));
+
+    // Keyboard: Tab from the card reaches its own `Open thread` stop, and Enter there opens the
+    // sender without toggling the card (a click on the card opened it).
+    cx.update(|cx| {
+        app.read(cx)
+            .chat_for_test()
+            .update(cx, |chat, cx| chat.set_error(None, cx));
+    });
+    click_row(cx, window, "Expand agent message", MouseButton::Left);
+    assert!(labelled(cx, window, "Collapse agent message"));
+    press(cx, window, "tab");
+    press(cx, window, "enter");
+    let _ = cx.update_window(window, |_, window, cx| {
+        window.key_up("enter", cx);
+        window.render_frame(cx);
+    });
+    assert!(wait_until(cx, window, |cx| error(cx).is_some()));
+    assert!(labelled(cx, window, "Collapse agent message"));
+    assert_eq!(selected(cx).as_deref(), Some("thread-selected"));
 }
 
 #[gpui_kit::test]

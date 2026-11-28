@@ -9053,6 +9053,70 @@ async fn settled_results_wake_once_per_spawning_run() {
     assert_eq!(cohorts, [json!(8), json!(2)]);
 }
 
+/// A result that waited for its parent to settle does not jump the queue: a prompt the user
+/// queued before the result arrived runs first. In T3 the run end starts the prompt before
+/// the wake's continuation dispatches; here the shared selector picks (`QueuedRunOrder.ts`).
+#[tokio::test(flavor = "current_thread")]
+async fn a_settled_wake_runs_after_an_older_queued_prompt() {
+    let db = TempDb::new("delegate-wake-order");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let mut thread = engine
+        .subscribe_thread(from_json(json!({"threadId": "t1"})).unwrap())
+        .await
+        .unwrap();
+    next(&mut thread).await;
+    dispatch(&engine, message("t1", "c2", "hang")).await;
+    until_provider_turn(&mut thread).await;
+    dispatch(
+        &engine,
+        message_with(
+            "t1",
+            "c3",
+            "queued prompt",
+            json!({"type": "queue_after_active"}),
+            None,
+        ),
+    )
+    .await;
+    dispatch(&engine, delegate("d1", "look around", None)).await;
+    run_to_end(
+        &engine,
+        "thread:delegated-task:d1",
+        "run:thread:delegated-task:d1:1",
+    )
+    .await;
+    dispatch(
+        &engine,
+        json!({"type": "run.interrupt", "commandId": "stop", "threadId": "t1", "runId": "run:t1:1"}),
+    )
+    .await;
+    let p = run_to_end(&engine, "t1", "run:t1:3").await;
+    let wake = p["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "run:t1:3")
+        .unwrap()["userMessageId"]
+        .clone();
+    assert!(
+        wake.as_str()
+            .unwrap()
+            .starts_with("message:delegated-completion:"),
+        "{wake}"
+    );
+    let starts: Vec<String> = item_texts(&p)
+        .into_iter()
+        .filter(|t| t.starts_with("queued_turn") || t.starts_with("turn_start"))
+        .collect();
+    assert_eq!(starts.len(), 3, "{starts:?}");
+    assert_eq!(starts[1], "queued_turn queued prompt", "{starts:?}");
+    assert!(
+        starts[2].starts_with("queued_turn Delegated task node:delegated-task:d1"),
+        "{starts:?}"
+    );
+}
+
 /// Waits until `thread` has a pending runtime request, and returns it.
 async fn until_pending_request(engine: &SqliteEngine, thread: &str) -> Value {
     let mut stream = engine

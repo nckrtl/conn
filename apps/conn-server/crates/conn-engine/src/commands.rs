@@ -491,6 +491,17 @@ fn delivery(
 ) -> Result<(Delivery, Option<Value>), CommandError> {
     let active = active_run(tx, &c.thread_id)?;
     let Some(active) = active else {
+        // A delegated result woken at a run's end queues behind work already waiting, and the
+        // run end's queue drain picks the next run (`queuedRunsInDeliveryOrder`). In T3 the
+        // run end starts that work before the wake's continuation dispatches.
+        if c.delegated_completion.is_some()
+            && c.dispatch_mode.kind == "queue_after_active"
+            && queued_runs(tx, &c.thread_id)?
+                .iter()
+                .any(|run| run["queueHeld"] != true)
+        {
+            return Ok((Delivery::Queue { first: false }, None));
+        }
         return Ok((Delivery::Start, None));
     };
     // A steer the provider declined waits first in line: it was meant for this turn.

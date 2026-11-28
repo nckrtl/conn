@@ -106,6 +106,7 @@ pub(crate) struct OlderSettled {
 /// cut, frontier and status, and the older pages read from it (`olderOf(environmentId)`).
 #[derive(Clone, Debug, Default)]
 struct ForeignOlder {
+    environment_id: String,
     cut: Option<OlderSettledCut>,
     frontier: Option<SettledCursor>,
     status: PageStatus,
@@ -264,7 +265,11 @@ fn flag_up<'a>(
 
 /// `pendingSubagentRequestsByThread`: the threads to flag for a subagent's live request, up its
 /// subagent chain and through a side chat to its parent.
-fn rolled_up_requests(threads: &[ThreadShell]) -> HashMap<String, PendingSubagentRequest> {
+/// `environment_of` names the environment a listed thread came from, when the shell knows it.
+fn rolled_up_requests<'a>(
+    threads: &'a [ThreadShell],
+    environment_of: impl Fn(&str) -> Option<&'a str>,
+) -> HashMap<String, PendingSubagentRequest> {
     let mut requests: HashMap<String, Rolled> = HashMap::new();
     let by_id: HashMap<&str, &ThreadShell> = threads.iter().map(|t| (t.id.as_str(), t)).collect();
     for child in threads {
@@ -286,10 +291,17 @@ fn rolled_up_requests(threads: &[ThreadShell]) -> HashMap<String, PendingSubagen
     }
     // A task delegated from another environment's thread asks on that thread, with what its own
     // children ask (`delegatedSubagentRequestsAtom`). Each pass settles one more hop of a chain.
+    // Another environment's copy of the same thread id is not the thread that delegated it.
     let tasks: Vec<(&ThreadShell, &str)> = threads
         .iter()
         .filter(|t| is_listed_lineage(&t.lineage))
-        .filter_map(|t| Some((t, t.delegated_from.as_ref()?.thread_id.as_str())))
+        .filter_map(|t| {
+            let from = t.delegated_from.as_ref()?;
+            let parent = from.thread_id.as_str();
+            environment_of(parent)
+                .is_none_or(|env| env == from.environment_id)
+                .then_some((t, parent))
+        })
         .collect();
     for _ in 0..tasks.len() {
         let before = requests.clone();
@@ -343,8 +355,9 @@ pub(crate) struct Added<'a> {
 }
 
 /// The Settled paging a merge keeps of `other`, before its threads are counted.
-fn foreign_paging(other: &ShellState) -> ForeignOlder {
+fn foreign_paging(environment_id: &str, other: &ShellState) -> ForeignOlder {
     ForeignOlder {
+        environment_id: environment_id.to_owned(),
         cut: other.older.cut.clone(),
         frontier: other.older.frontier.clone(),
         status: other.older.status,
@@ -419,6 +432,8 @@ pub struct ShellState {
     /// Where the snapshot cut the Settled shelf, and the older settled threads read since.
     pub(crate) older: OlderSettled,
     requests: HashMap<String, PendingSubagentRequest>,
+    /// The environment this shell's own threads came from, once a merge names it.
+    environment_id: Option<String>,
     /// The Settled paging of the other environments merged in (`extend_with_environment`).
     foreign: Vec<ForeignOlder>,
     /// Which of `foreign` a merged-in thread belongs to, by thread id.
@@ -610,8 +625,8 @@ impl ShellState {
     /// connected environment in one sidebar. An id this shell already holds keeps its first
     /// copy, so the primary environment always wins a collision. Threads sort again by activity.
     /// The older-settled paging state stays this environment's own.
-    pub fn extend_with_environment(&mut self, other: &ShellState) {
-        self.extend_with_environments(std::iter::once(other));
+    pub fn extend_with_environment(&mut self, environment_id: &str, other: &ShellState) {
+        self.extend_with_environments(std::iter::once((environment_id, other)));
     }
 
     /// [`Self::extend_with_environment`] for several environments, in order, with one sort and
@@ -619,9 +634,10 @@ impl ShellState {
     /// projects and of the active or archived threads it added.
     pub(crate) fn extend_with_environments<'a>(
         &mut self,
-        others: impl IntoIterator<Item = &'a ShellState>,
+        others: impl IntoIterator<Item = (&'a str, &'a ShellState)>,
     ) -> Vec<Added<'a>> {
-        let others: Vec<&'a ShellState> = others.into_iter().collect();
+        let (environment_ids, others): (Vec<&'a str>, Vec<&'a ShellState>) =
+            others.into_iter().unzip();
         // Decide with borrowed ids first, then clone each added row once.
         let mut added: Vec<Added<'a>> = Vec::with_capacity(others.len());
         let mut rows: Vec<(usize, Place, &'a ThreadShell)> = Vec::new();
@@ -666,8 +682,12 @@ impl ShellState {
         }
         self.projects.extend(projects.into_iter().cloned());
         let base = self.foreign.len();
-        self.foreign
-            .extend(others.iter().map(|other| foreign_paging(other)));
+        self.foreign.extend(
+            environment_ids
+                .iter()
+                .zip(&others)
+                .map(|(id, other)| foreign_paging(id, other)),
+        );
         for (index, place, thread) in rows {
             self.place_foreign(base + index, place, thread.clone());
         }
@@ -959,7 +979,18 @@ impl ShellState {
 
     /// Recomputes the requests rolled up to each parent.
     pub(crate) fn refresh_derived(&mut self) {
-        self.requests = rolled_up_requests(&self.threads);
+        let requests = rolled_up_requests(&self.threads, |id| match self.foreign_of.get(id) {
+            Some(&index) => self.foreign.get(index).map(|f| f.environment_id.as_str()),
+            None => self.environment_id.as_deref(),
+        });
+        self.requests = requests;
+    }
+
+    /// Names the environment this shell's own threads came from.
+    pub(crate) fn set_environment_id(&mut self, environment_id: &str) {
+        if self.environment_id.as_deref() != Some(environment_id) {
+            self.environment_id = Some(environment_id.to_owned());
+        }
     }
 
     /// Returns `true` when `thread` belongs in the Settled shelf (`settledAt` or `archivedAt` set).

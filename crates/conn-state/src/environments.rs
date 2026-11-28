@@ -326,7 +326,9 @@ impl LinkedShells {
             .iter()
             .filter_map(|id| self.shells.get(id).map(|linked| (id, linked)))
             .collect();
-        let added = shell.extend_with_environments(held.iter().map(|(_, linked)| &linked.shell));
+        shell.set_environment_id(primary_id);
+        let added = shell
+            .extend_with_environments(held.iter().map(|(id, linked)| (id.as_str(), &linked.shell)));
         for ((id, linked), added) in held.into_iter().zip(added) {
             origins.labels.insert(id.clone(), linked.label.clone());
             origins.linked_order.push(id.clone());
@@ -1379,7 +1381,7 @@ mod tests {
                     origins.thread_env.insert(thread.id.clone(), id.clone());
                 }
             }
-            shell.extend_with_environment(&env.shell);
+            shell.extend_with_environment(id, &env.shell);
         }
         shell.refresh_derived();
         origins
@@ -1587,6 +1589,41 @@ mod tests {
         assert_eq!(
             blind["p-vm-site"], blind["p-conn"],
             "the blind grouping merges the folders"
+        );
+    }
+
+    #[test]
+    fn a_delegated_tasks_approval_flags_only_the_environment_copy_that_delegated_it() {
+        let shared = || thread_json("shared", "p", |_| {});
+        let shell_of = |threads: Vec<Value>| {
+            let mut shell = ShellState::default();
+            shell.apply(snapshot(vec![], threads, vec![]));
+            shell
+        };
+        let task = thread_json("task", "p", |t| {
+            t["delegatedFrom"] =
+                json!({"environmentId": "b", "threadId": "shared", "title": "Shared"});
+            t["status"] = json!("running");
+            t["pendingRuntimeRequest"] =
+                json!({"id": "r", "kind": "command", "createdAt": "2026-11-13T09:00:00.000Z"});
+        });
+        let mut linked = LinkedShells::default();
+        linked.ensure("b", "b");
+        linked.apply("b", snapshot(vec![], vec![shared()], vec![]));
+        linked.ensure("c", "c");
+        linked.apply("c", snapshot(vec![], vec![task.clone()], vec![]));
+
+        // The primary's copy of `shared` shows; env b's copy delegated the task.
+        let merged = linked.merged("a", "a", &shell_of(vec![shared()]));
+        assert_eq!(merged.shell.subagent_request("shared"), None);
+
+        let mut from_b = LinkedShells::default();
+        from_b.ensure("c", "c");
+        from_b.apply("c", snapshot(vec![], vec![task], vec![]));
+        let merged = from_b.merged("b", "b", &shell_of(vec![shared()]));
+        assert_eq!(
+            merged.shell.subagent_request("shared"),
+            Some(crate::shell::PendingSubagentRequest::Approval)
         );
     }
 }

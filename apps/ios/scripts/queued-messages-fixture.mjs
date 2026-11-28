@@ -9,6 +9,7 @@
 // finished), its folder a Git repo with changes; "qplain" is in a plain folder until `vcs.init`.
 // "qolder" is an older settled thread the shell leaves out: only its own stream serves it, so it
 // opens from a `conn://thread/primary/qolder` link.
+// GET /drop?ms=N closes every socket and refuses new ones for N ms, so the app reconnects.
 import { readFileSync } from "node:fs";
 
 const root = process.argv[2];
@@ -262,10 +263,20 @@ function apply(cmd) {
   }
 }
 
+const sockets = new Set();
+let refuseUntil = 0;
+
 const server = Bun.serve({
   hostname: "127.0.0.1", port: Number(process.env.PORT ?? 0),
   fetch(req, server) {
-    const path = new URL(req.url).pathname;
+    const url = new URL(req.url);
+    const path = url.pathname;
+    if (path === "/drop") {
+      refuseUntil = Date.now() + Number(url.searchParams.get("ms") ?? 0);
+      for (const ws of sockets) ws.close();
+      return Response.json({ ok: true });
+    }
+    if (path === "/ws" && Date.now() < refuseUntil) { console.log("refused ws"); return new Response(null, { status: 503 }); }
     if (path === "/ws" && server.upgrade(req)) return;
     if (path === "/commands") return Response.json(commands);
     if (path === "/reset") {
@@ -285,6 +296,7 @@ const server = Bun.serve({
     return new Response(null, { status: 404 });
   },
   websocket: {
+    open(ws) { sockets.add(ws); },
     message(ws, text) {
       for (const frame of [JSON.parse(text)].flat()) {
         if (frame._tag === "Ping") { ws.send(JSON.stringify({ _tag: "Pong" })); continue; }
@@ -330,6 +342,7 @@ const server = Bun.serve({
       }
     },
     close(ws) {
+      sockets.delete(ws);
       for (const [id, list] of subscribers) subscribers.set(id, list.filter((s) => s.ws !== ws));
     },
   },

@@ -104,8 +104,9 @@ pub struct Engine {
     settings: Settings,
     index: HashMap<String, ThreadIndex>,
     held: HashMap<String, Held>,
-    /// Stream items for threads whose window is being read, applied once it arrives.
-    loading: HashMap<String, Vec<Item>>,
+    /// Stream items for threads whose window is being read, applied once it arrives, each
+    /// snapshot with its lowest timeline place.
+    loading: HashMap<String, Vec<(Item, Option<f64>)>>,
     open: Vec<String>,
     /// Closed threads still in memory, newest first.
     recent: VecDeque<String>,
@@ -293,6 +294,8 @@ impl Engine {
         let mut write = ThreadWrite::default();
         let mut forget = false;
         let mut snapshot_floor: Option<f64> = None;
+        // The thread's own timeline row this event replaces: its id and place.
+        let mut own_row: Option<(String, Option<f64>)> = None;
         match &item {
             Item::Synchronized(_) => {}
             Item::Snapshot(snapshot) => {
@@ -316,6 +319,9 @@ impl Engine {
                     Change::Row(row) => {
                         if row.kind == "runs" && row.body["status"] == "rolled_back" {
                             self.reset(thread);
+                        }
+                        if row.kind == OWN {
+                            own_row = Some((row.id.clone(), row.ord));
                         }
                         let floor = self.index.get(thread).and_then(|ix| ix.floor);
                         let below = row.kind == OWN
@@ -369,7 +375,7 @@ impl Engine {
             self.note_synchronized(thread, caught_up);
         }
         if let Some(buffer) = self.loading.get_mut(thread) {
-            buffer.push(item);
+            buffer.push((item, snapshot_floor));
             return false;
         }
         let Some(held) = self.held.get_mut(thread) else {
@@ -384,13 +390,10 @@ impl Engine {
         }
         // An update of a row below the window stays on the device; drawing it at the end
         // would put an old row under the newest.
-        if let Item::Event(event) = &item
-            && let Some(floor) = held.floor
-            && let Ok(value) = serde_json::to_value(&event.event)
-            && let Change::Row(row) = rows::change_of(&value)
-            && row.kind == OWN
-            && row.ord.is_some_and(|ord| ord < floor)
-            && !held.state.entries.iter().any(|entry| entry.id() == row.id)
+        if let Some(floor) = held.floor
+            && let Some((id, ord)) = &own_row
+            && ord.is_some_and(|ord| ord < floor)
+            && !held.state.entries.iter().any(|entry| entry.id() == id)
         {
             return false;
         }
@@ -536,13 +539,9 @@ impl Engine {
         };
         held.generation = self.next_generation;
         self.next_generation += 1;
-        for item in buffer {
+        for (item, floor) in buffer {
             if let Item::Snapshot(snapshot) = &item {
-                let projection = serde_json::to_value(&snapshot.projection).unwrap_or(Value::Null);
-                held.floor = rows::snapshot_rows(id, &projection)
-                    .iter()
-                    .filter_map(|row| row.ord)
-                    .reduce(f64::min);
+                held.floor = floor;
                 held.more_local = false;
                 held.older = snapshot.history_cursor.clone().flatten();
             }
@@ -894,11 +893,14 @@ fn held_from(id: &str, window: Window) -> Held {
         "projection": projection,
         "hasMoreHistory": more,
     });
-    match from_json::<Item>(snapshot) {
-        Ok(item) => {
+    // The snapshot struct itself, not the item union, whose `Deserialize` copies the whole
+    // window into a second DOM first (`conn_client`'s `decode_thread_stream_item`).
+    match serde_json::from_value::<conn_contract::OrchestrationV2ThreadStreamItemSnapshot>(snapshot)
+    {
+        Ok(snapshot) => {
             // Ready to draw, not caught up: `synchronized` waits for the stream's own marker,
             // so the syncing bar shows until the thread is current.
-            state.apply(item);
+            state.apply(Item::Snapshot(snapshot));
         }
         Err(e) => eprintln!("conn-cache: stored window of {id} does not decode: {e}"),
     }

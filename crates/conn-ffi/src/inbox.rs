@@ -36,33 +36,43 @@ pub fn inbox_attention(sessions: Vec<Arc<ConnSession>>) -> Vec<FfiThreadKey> {
 
 fn rolled_up_attention(shells: &[(&str, &ShellState)]) -> Vec<FfiThreadKey> {
     // Only a delegated task reaches across environments; each core flags everything else.
-    let delegates = shells.iter().any(|(_, shell)| {
-        shell
-            .threads
-            .iter()
-            .chain(&shell.archived_threads)
-            .any(|thread| thread.delegated_from.is_some())
-    });
-    let Some(((primary_id, primary), linked)) = shells.split_first().filter(|_| delegates) else {
-        return Vec::new();
-    };
-    let mut environments = LinkedShells::default();
-    for (id, shell) in linked {
-        environments.ensure(id, id);
-        environments.restore(id, (*shell).clone());
-    }
-    let merged = environments.merged(primary_id, primary_id, primary);
-    merged
-        .shell
-        .threads
+    let mut targets: Vec<&str> = shells
         .iter()
-        .chain(&merged.shell.archived_threads)
-        .filter(|thread| merged.shell.subagent_request(&thread.id).is_some())
-        .map(|thread| FfiThreadKey {
-            environment_id: merged.origins.environment_of_thread(&thread.id).to_owned(),
-            thread_id: thread.id.clone(),
-        })
-        .collect()
+        .flat_map(|(_, shell)| shell.threads.iter().chain(&shell.archived_threads))
+        .filter_map(|thread| thread.delegated_from.as_ref())
+        .map(|from| from.environment_id.as_str())
+        .filter(|target| shells.iter().any(|(id, _)| id == target))
+        .collect();
+    targets.sort_unstable();
+    targets.dedup();
+    // A merge keeps one copy of a thread id that two environments share. Merging with each
+    // delegating environment first keeps all of its threads, so its roll-ups survive.
+    let mut keys = Vec::new();
+    for target in targets {
+        let Some(primary) = shells.iter().find(|(id, _)| *id == target).map(|(_, s)| *s) else {
+            continue;
+        };
+        let mut environments = LinkedShells::default();
+        for (id, shell) in shells.iter().filter(|(id, _)| *id != target) {
+            environments.ensure(id, id);
+            environments.restore(id, (*shell).clone());
+        }
+        let merged = environments.merged(target, target, primary);
+        keys.extend(
+            merged
+                .shell
+                .threads
+                .iter()
+                .chain(&merged.shell.archived_threads)
+                .filter(|thread| !merged.origins.is_linked_thread(&thread.id))
+                .filter(|thread| merged.shell.subagent_request(&thread.id).is_some())
+                .map(|thread| FfiThreadKey {
+                    environment_id: target.to_owned(),
+                    thread_id: thread.id.clone(),
+                }),
+        );
+    }
+    keys
 }
 
 #[cfg(test)]
@@ -184,5 +194,16 @@ mod tests {
         let elsewhere = shell(vec![task("task", ("z", "parent"), true)]);
         let flagged = rolled_up_attention(&[("x", &x), ("y", &elsewhere)]);
         assert!(!flagged.contains(&key("x", "parent")), "{flagged:?}");
+    }
+
+    #[test]
+    fn a_thread_id_two_environments_share_keeps_each_ones_roll_up() {
+        // A and B both hold `t`; only B's copy delegated the task on C.
+        let a = shell(vec![thread("t", |_| {})]);
+        let b = shell(vec![thread("t", |_| {})]);
+        let c = shell(vec![task("task", ("b", "t"), true)]);
+        let flagged = rolled_up_attention(&[("a", &a), ("b", &b), ("c", &c)]);
+        assert!(flagged.contains(&key("b", "t")), "{flagged:?}");
+        assert!(!flagged.contains(&key("a", "t")), "{flagged:?}");
     }
 }

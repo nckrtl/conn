@@ -334,6 +334,7 @@ private struct ThreadListV2RowView: View {
             HStack(alignment: .center, spacing: titleGap) {
                 ProjectFaviconView(title: projectTitle, size: iconSize)
                     .opacity(settled ? 0.6 : 1)
+                    // Settled rows draw no dot, pending attention included, as in GPUI and web.
                     .projectStatusDot(settled ? nil : statusTone)
 
                 Text(thread.title.isEmpty ? "Untitled thread" : thread.title)

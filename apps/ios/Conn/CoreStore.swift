@@ -28,6 +28,11 @@ final class InboxPublications {
             onCommit?()
         }
     }
+
+    /// Commits a batch with nothing to publish, for what `onCommit` reads from outside the shells.
+    func invalidate() {
+        submit(scope: "\u{0}invalidate") {}
+    }
 }
 
 /// One environment's store: the main one (`scope` empty) or a linked one. It renders its
@@ -150,8 +155,10 @@ final class CoreStore {
             || rolledUpAttention.contains(FfiThreadKey(environmentId: owner.environmentId ?? "", threadId: thread.id))
     }
 
+    /// Runs after each inbox commit, and after a machine is linked, forgotten, connects or drops.
     private func refreshRolledUpAttention() {
-        let keys = Set(inboxAttention(sessions: inboxOwners.compactMap(\.session)))
+        let listed = inboxOwners.filter { $0.shell != nil }
+        let keys = Set(inboxAttention(sessions: listed.compactMap(\.session)))
         if keys != rolledUpAttention { rolledUpAttention = keys }
     }
 
@@ -161,6 +168,7 @@ final class CoreStore {
             linkedOrder.append(child.scope)
             UserDefaults.standard.set(linkedOrder, forKey: "linkedSessions")
         }
+        publications.invalidate()
     }
 
     /// The connection status the workspace shows inline. Once this scope has connected, a
@@ -775,6 +783,7 @@ final class CoreStore {
         linked.removeValue(forKey: id)?.disconnect()
         linkedOrder.removeAll { $0 == id }
         UserDefaults.standard.set(linkedOrder, forKey: "linkedSessions")
+        publications.invalidate()
     }
 
     private func clearLinkedSessions() {
@@ -789,6 +798,7 @@ final class CoreStore {
         linked.removeAll()
         linkedOrder.removeAll()
         UserDefaults.standard.removeObject(forKey: "linkedSessions")
+        publications.invalidate()
     }
 
     func reconnect() {
@@ -962,6 +972,7 @@ final class CoreStore {
             break
         }
         updateWorkspaceVisibility()
+        publications.invalidate()
         if case .live = newState.phase, let core {
             uploads.use(core, connection: newState.connectionId)
         } else {

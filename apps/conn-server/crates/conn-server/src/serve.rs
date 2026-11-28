@@ -438,6 +438,13 @@ pub async fn serve_with_instances(
         deps,
     };
 
+    // Orbit's task turns read `model-manifest.json` once the server says it is ready.
+    if !crate::model_manifest::write(&state_dir).await {
+        eprintln!(
+            "conn-server: could not write {}",
+            crate::model_manifest::FILE_NAME
+        );
+    }
     crate::routes::preview_tunnel::serving_on(addr.port());
     let runtime = RuntimeState::new(&addr.ip().to_string(), addr.port(), conn_support::uuid_v4());
     // The write and its fsync run on a blocking thread, as all file work here does.
@@ -484,11 +491,6 @@ pub async fn serve_with_instances(
         worktree_cleanup = Some(cleanup.start());
         let _ = host.worktree_cleanup.set(cleanup);
     }
-    // `model-manifest.json` for Orbit's task turns: the bundled manifest.
-    tokio::spawn({
-        let state_dir = state_dir.clone();
-        async move { crate::model_manifest::write(&state_dir).await }
-    });
     // `spawn` starts nothing when the engine has attention events off.
     let managed_server = match provision {
         Some(provision) => {

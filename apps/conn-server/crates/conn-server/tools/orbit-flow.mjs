@@ -233,9 +233,8 @@ try {
   );
   const driver = settings.providerInstances?.[model.instanceId]?.driver ?? model.instanceId;
   const manifestFile = NodePath.join(home, "userdata", "model-manifest.json");
-  // The server writes it at start; give it a moment if it has not yet.
-  for (let i = 0; i < 40 && !NodeFS.existsSync(manifestFile); i++) await sleep(250);
-  if (!NodeFS.existsSync(manifestFile)) fail("no model-manifest.json after a start");
+  // Written before the server said it was ready: Orbit reads it at once.
+  if (!NodeFS.existsSync(manifestFile)) fail("no model-manifest.json once the server is ready");
   {
     const written = JSON.parse(NodeFS.readFileSync(manifestFile, "utf8"));
     if (JSON.stringify(written.manifest) !== JSON.stringify(JSON.parse(manifestText))) {

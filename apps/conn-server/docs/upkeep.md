@@ -14,8 +14,8 @@ the `audit-t3-providers` skill runs. No step calls a model.
   deny, sealed run) and `--group flows` (release build with every example, capabilities,
   orbit-flow, instances-flow). Both end with the canary. The final `Conn Server checks` gate
   fails if either fails.
-- `conn-server-ci.yml` (production musl build): pull requests and main pushes that touch
-  `apps/conn-server/**` or the workflow.
+- `conn-server-ci.yml` (production musl build): every main push, and every pull request whose
+  full diff the same selector (`.github/scripts/conn-server-checks-paths.cjs`) picks.
 - `conn-server-release.yml`: a `conn-server-v*` tag.
 
 Only main pushes save Rust caches. Each check has a timeout that stops its process group;

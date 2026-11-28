@@ -251,8 +251,7 @@ const QUEUE_LIST_TEXT_CHARS: usize = 1_000;
 const QUEUE_READ_TEXT_CHARS: usize = 16_000;
 const QUEUE_DEFAULT_LIMIT: usize = 20;
 
-/// `queuedRunsInDeliveryOrder`: delegated completions first, then queue position (else
-/// ordinal), then ordinal.
+/// `queuedRunsInDeliveryOrder`: the order the engine starts them in.
 fn queued_in_delivery_order(projection: &Value) -> Vec<&Value> {
     let completions: HashSet<&str> = projection["messages"]
         .as_array()
@@ -261,27 +260,17 @@ fn queued_in_delivery_order(projection: &Value) -> Vec<&Value> {
         .filter(|m| !m["delegatedCompletion"].is_null())
         .filter_map(|m| m["id"].as_str())
         .collect();
-    let mut runs: Vec<&Value> = projection["runs"]
+    let queued = projection["runs"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|r| r["status"] == "queued")
         .collect();
-    let key = |run: &Value| {
-        let automatic = run["userMessageId"]
+    conn_engine::queued_in_delivery_order(queued, |run| {
+        run["userMessageId"]
             .as_str()
-            .is_some_and(|id| completions.contains(id));
-        let ordinal = run["ordinal"].as_f64().unwrap_or(0.0);
-        let position = run["queuePosition"].as_f64().unwrap_or(ordinal);
-        (std::cmp::Reverse(automatic), position, ordinal)
-    };
-    runs.sort_by(|a, b| {
-        let (a, b) = (key(a), key(b));
-        a.0.cmp(&b.0)
-            .then(a.1.total_cmp(&b.1))
-            .then(a.2.total_cmp(&b.2))
-    });
-    runs
+            .is_some_and(|id| completions.contains(id))
+    })
 }
 
 /// `queueEntry`: a queued run and the start of its message.

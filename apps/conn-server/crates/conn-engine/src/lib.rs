@@ -437,6 +437,45 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 /// send was admitted: T3's `ThreadManagementThreadArchivedError`.
 pub const THREAD_ARCHIVED_ERROR: &str = "ThreadManagementThreadArchivedError";
 
+/// `queuedRunsInDeliveryOrder` (`QueuedRunOrder.ts`): queued runs by `queuePosition` (else
+/// ordinal), then ordinal. Delegated completions and other messages each keep that order and
+/// interleave by `requestedAt`, a completion first on a tie, so neither holds the other back.
+/// The engine starts runs in this order and `conn_queue` lists them in it.
+pub fn queued_in_delivery_order(
+    mut queued: Vec<&Value>,
+    is_completion: impl Fn(&Value) -> bool,
+) -> Vec<&Value> {
+    let key = |run: &Value| {
+        let ordinal = run["ordinal"].as_u64().unwrap_or(0);
+        (run["queuePosition"].as_u64().unwrap_or(ordinal), ordinal)
+    };
+    queued.sort_by_key(|run| key(run));
+    let requested = |run: &Value| {
+        run["requestedAt"]
+            .as_str()
+            .and_then(conn_support::time::millis_from_iso)
+            .unwrap_or(0)
+    };
+    let (completions, messages): (Vec<&Value>, Vec<&Value>) =
+        queued.into_iter().partition(|run| is_completion(run));
+    let mut ordered = Vec::with_capacity(completions.len() + messages.len());
+    let (mut completions, mut messages) = (
+        completions.into_iter().peekable(),
+        messages.into_iter().peekable(),
+    );
+    while let (Some(completion), Some(message)) = (completions.peek(), messages.peek()) {
+        let next = if requested(completion) <= requested(message) {
+            completions.next()
+        } else {
+            messages.next()
+        };
+        ordered.extend(next);
+    }
+    ordered.extend(completions);
+    ordered.extend(messages);
+    ordered
+}
+
 /// Why a thread may not receive a send from an agent or a schedule, as `sendToThread` checks
 /// it (`ThreadManagementService.ts:872`): an archived thread receives no message. `thread` is
 /// a projection's `thread`. Both the `/mcp` send and the scheduled-task runner ask this.
@@ -852,6 +891,32 @@ mod tests {
     use serde_json::json;
     use std::sync::Mutex;
     use tokio::sync::broadcast;
+
+    /// `QueuedRunOrder.ts`: an older prompt runs before a later wake, though the wake was
+    /// queued first; the queue keeps each kind's order; a tie goes to the completion.
+    #[test]
+    fn queued_runs_interleave_completions_by_request_time() {
+        let run = |id: &str, position: u64, requested: &str| {
+            json!({"id": id, "ordinal": position, "queuePosition": position,
+                "requestedAt": format!("2026-11-28T10:00:{requested}.000Z")})
+        };
+        let runs = [
+            run("wake-late", 1, "05"),
+            run("prompt-old", 2, "01"),
+            run("prompt-mid", 3, "05"),
+            run("wake-later", 4, "09"),
+        ];
+        let order: Vec<_> = queued_in_delivery_order(runs.iter().collect(), |r| {
+            r["id"].as_str().unwrap().starts_with("wake")
+        })
+        .into_iter()
+        .map(|r| r["id"].as_str().unwrap())
+        .collect();
+        assert_eq!(
+            order,
+            ["prompt-old", "wake-late", "prompt-mid", "wake-later"]
+        );
+    }
 
     /// A toy engine: every command becomes one shell update.
     struct ToyEngine {

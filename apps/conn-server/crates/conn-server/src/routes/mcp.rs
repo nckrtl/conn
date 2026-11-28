@@ -160,6 +160,11 @@ fn sender_thread(headers: &HeaderMap) -> Option<PeerSender> {
     })
 }
 
+/// Only a peer link's session names a thread there; any other caller's header is ignored.
+fn sender_thread_of(client: &ClientCaller, headers: &HeaderMap) -> Option<PeerSender> {
+    client.linked.then(|| sender_thread(headers)).flatten()
+}
+
 fn json_refusal(status: StatusCode, error: &str, message: &str) -> Response {
     (
         status,
@@ -227,9 +232,7 @@ async fn mcp(
                 );
             };
             client.narrowed = limit;
-            if client.linked {
-                client.sender_thread = sender_thread(&headers);
-            }
+            client.sender_thread = sender_thread_of(&client, &headers);
             // A link waits while Linked environments is off here.
             if client.linked && state.deps.peers.as_ref().is_none_or(|p| !p.enabled()) {
                 return json_refusal(
@@ -328,5 +331,36 @@ mod tests {
         ] {
             assert_eq!(parse(bad), None, "{bad}");
         }
+    }
+
+    /// The auth gate: only an MCP client session issued for a peer link may name a sender.
+    #[test]
+    fn only_a_peer_link_session_names_a_sender() {
+        let dir = std::env::temp_dir().join(format!(
+            "conn-server-mcp-sender-{}",
+            crate::auth::random_hex(6)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let auth = crate::auth::AuthStore::open(dir.join("auth.json")).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "t3-sender-thread",
+            HeaderValue::from_static("env-a/thread-1/Planner"),
+        );
+        for peer_link in [true, false] {
+            let issued = auth
+                .issue_mcp_client_session("Peer", "auto", peer_link, Default::default(), 60_000)
+                .unwrap();
+            let Some(Caller::Client(client)) = client_caller(&auth, &issued.token) else {
+                panic!("an MCP client")
+            };
+            assert_eq!(client.linked, peer_link);
+            assert_eq!(
+                sender_thread_of(&client, &headers).map(|s| s.thread_id),
+                peer_link.then(|| "thread-1".to_owned()),
+                "peer_link {peer_link}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -46,25 +46,36 @@ export function contractCommands() {
   return new Set(Array.from(list?.[1].matchAll(/"([^"]+)"/g) ?? [], (m) => m[1]));
 }
 
+const COMMANDS_RS = "crates/conn-engine/src/commands.rs";
+const HANDLER =
+  /\bfn handler\(command_type: &str\) -> Option<Handler> \{\s*Some\(match command_type \{([\s\S]*?)\s_ => return None,\s*\}\)\s*\}/;
+const ARM = /\s*("[^"\n]+"(?:\s*\|\s*"[^"\n]+")*)\s*=>\s*[\w:]+,/g;
+
 /**
- * The command types the engine handles: every one of `types` that heads an arm of the `match`
- * in `fn handler` of crates/conn-engine/src/commands.rs, read from its signature to its
- * fallback arm. `fn refusal` names commands too, and the engine refuses those. Throws when the
- * match is not found or holds no command, so a reshaped handler fails the check instead of
- * emptying the set. tools/bump-report.mjs and crates/conn-server/tests/engine_commands.rs
- * find the match by the same two anchors.
+ * The command types that head an arm of `fn handler` in crates/conn-engine/src/commands.rs,
+ * before any contract filter. `fn refusal` names commands too, and the engine refuses those.
+ * This reads one shape: the whole function is one `match` of string patterns onto function
+ * paths that ends in `_ => return None`. Line comments are left out. Anything else in the
+ * function throws, so a reshaped handler (an arm moved to a helper, the match moved to another
+ * function) fails the caller instead of changing the set. Not seen from here: a command that
+ * `dispatch_claimed` in crates/conn-engine/src/engine.rs serves before it asks `handler`.
  */
+export function handlerArms() {
+  const unread = (why) => new Error(`tools/served.mjs cannot read \`fn handler\` in ${COMMANDS_RS}: ${why}`);
+  const text = NodeFS.readFileSync(NodePath.join(repoRoot, COMMANDS_RS), "utf8");
+  const body = HANDLER.exec(text)?.[1].replace(/\/\/.*$/gm, "");
+  if (body === undefined) throw unread("it is not one match that ends in `_ => return None`");
+  const rest = body.replace(ARM, "").trim();
+  if (rest) throw unread(`this is no string arm onto a function: ${rest.split("\n")[0]}`);
+  return Array.from(body.matchAll(ARM)).flatMap((arm) =>
+    Array.from(arm[1].matchAll(/"([^"]+)"/g), (m) => m[1]),
+  );
+}
+
+/** The command types the engine handles: every one of `types` among [`handlerArms`]. */
 export function engineCommands(types) {
-  const file = "crates/conn-engine/src/commands.rs";
-  const text = NodeFS.readFileSync(NodePath.join(repoRoot, file), "utf8");
-  const start = text.indexOf("fn handler(command_type: &str)");
-  const end = start === -1 ? -1 : text.indexOf("_ => return None", start);
-  if (end === -1) {
-    throw new Error(`${file}: no \`fn handler(command_type: &str)\` with a \`_ => return None\` arm`);
-  }
-  const arms = text.slice(start, end).matchAll(/"([^"]+)"(?=\s*(?:=>|\|))/g);
-  const handled = new Set(Array.from(arms, (m) => m[1]).filter((type) => types.has(type)));
-  if (handled.size === 0) throw new Error(`${file}: no contract command heads an arm of \`fn handler\``);
+  const handled = new Set(handlerArms().filter((type) => types.has(type)));
+  if (handled.size === 0) throw new Error(`${COMMANDS_RS}: no contract command heads an arm of \`fn handler\``);
   return handled;
 }
 

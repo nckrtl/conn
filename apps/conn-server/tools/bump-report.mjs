@@ -22,7 +22,7 @@ import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
 import { monorepoRoot, repoRoot } from "./monorepo.mjs";
-import { binaryCoverage, registeredTags, servedCount as countOf } from "./served.mjs";
+import { binaryCoverage, handlerArms, registeredTags, servedCount as countOf } from "./served.mjs";
 import { gitEnv } from "./sealed-env.mjs";
 
 const args = process.argv.slice(2);
@@ -472,13 +472,13 @@ function commandTypes(root) {
   return new Set([...body.matchAll(/^\s+((?:"[^"]+"\s*\|?\s*)+)=>/gm)].flatMap((m) =>
     [...m[1].matchAll(/"([^"]+)"/g)].map((x) => x[1])));
 }
-/** The command types the engine handles: the string patterns of `fn handler`. */
+/** The command types the engine handles: the arms of `fn handler`, as the capability gate reads them. */
 function engineHandled() {
-  const text = readText(repoRoot, "crates/conn-engine/src/commands.rs") ?? "";
-  const start = text.indexOf("fn handler(command_type: &str)");
-  const end = text.indexOf("_ => return None", start);
-  if (start === -1 || end === -1) return undefined;
-  return new Set([...text.slice(start, end).matchAll(/"([^"]+)"/g)].map((m) => m[1]));
+  try {
+    return new Set(handlerArms());
+  } catch {
+    return undefined;
+  }
 }
 const oldCommands = commandTypes(before);
 const newCommands = commandTypes(repoRoot);

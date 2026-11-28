@@ -1272,6 +1272,11 @@ RustBuffer uniffi_conn_ffi_fn_func_highlight_code(RustBuffer source, RustBuffer 
 RustBuffer uniffi_conn_ffi_fn_func_parse_file_patches(RustBuffer patch, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_INBOX_ATTENTION
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_INBOX_ATTENTION
+RustBuffer uniffi_conn_ffi_fn_func_inbox_attention(RustBuffer sessions, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_ORBIT_DERIVE_INSTANCE_NAME
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_FN_FUNC_ORBIT_DERIVE_INSTANCE_NAME
 RustBuffer uniffi_conn_ffi_fn_func_orbit_derive_instance_name(RustBuffer message, RustBuffer suffix, RustCallStatus *_Nonnull out_status
@@ -1643,6 +1648,12 @@ uint16_t uniffi_conn_ffi_checksum_func_highlight_code(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_PARSE_FILE_PATCHES
 #define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_PARSE_FILE_PATCHES
 uint16_t uniffi_conn_ffi_checksum_func_parse_file_patches(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_INBOX_ATTENTION
+#define UNIFFI_FFIDEF_UNIFFI_CONN_FFI_CHECKSUM_FUNC_INBOX_ATTENTION
+uint16_t uniffi_conn_ffi_checksum_func_inbox_attention(void
     
 );
 #endif

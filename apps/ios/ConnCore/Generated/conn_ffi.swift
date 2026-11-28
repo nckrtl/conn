@@ -11936,6 +11936,63 @@ public func FfiConverterTypeFfiThreadDetailsAgent_lower(_ value: FfiThreadDetail
 
 
 /**
+ * One thread of one environment.
+ */
+public struct FfiThreadKey: Equatable, Hashable {
+    public var environmentId: String
+    public var threadId: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(environmentId: String, threadId: String) {
+        self.environmentId = environmentId
+        self.threadId = threadId
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension FfiThreadKey: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeFfiThreadKey: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> FfiThreadKey {
+        return
+            try FfiThreadKey(
+                environmentId: FfiConverterString.read(from: &buf), 
+                threadId: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: FfiThreadKey, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.environmentId, into: &buf)
+        FfiConverterString.write(value.threadId, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiThreadKey_lift(_ buf: RustBuffer) throws -> FfiThreadKey {
+    return try FfiConverterTypeFfiThreadKey.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeFfiThreadKey_lower(_ value: FfiThreadKey) -> RustBuffer {
+    return FfiConverterTypeFfiThreadKey.lower(value)
+}
+
+
+/**
  * A pull request linked to the thread, with what opening its record needs.
  */
 public struct FfiThreadPullRequest: Equatable, Hashable {
@@ -19129,6 +19186,31 @@ fileprivate struct FfiConverterSequenceString: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeConnSession: FfiConverterRustBuffer {
+    typealias SwiftType = [ConnSession]
+
+    public static func write(_ value: [ConnSession], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeConnSession.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [ConnSession] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [ConnSession]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeConnSession.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFfiApprovalOption: FfiConverterRustBuffer {
     typealias SwiftType = [FfiApprovalOption]
 
@@ -19979,6 +20061,31 @@ fileprivate struct FfiConverterSequenceTypeFfiThreadDetailsAgent: FfiConverterRu
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeFfiThreadKey: FfiConverterRustBuffer {
+    typealias SwiftType = [FfiThreadKey]
+
+    public static func write(_ value: [FfiThreadKey], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeFfiThreadKey.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [FfiThreadKey] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [FfiThreadKey]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeFfiThreadKey.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeFfiThreadPullRequest: FfiConverterRustBuffer {
     typealias SwiftType = [FfiThreadPullRequest]
 
@@ -20539,6 +20646,19 @@ public func parseFilePatches(patch: String) -> [FfiFilePatch]  {
 })
 }
 /**
+ * The threads a child's request needs the user on, with the inbox's environments merged as the
+ * desktop sidebar merges them: a task on one machine flags the thread on another that delegated
+ * it. Pass every session the inbox lists, the primary first, whatever the inbox filter shows.
+ */
+public func inboxAttention(sessions: [ConnSession]) -> [FfiThreadKey]  {
+    return try!  FfiConverterSequenceTypeFfiThreadKey.lift(try! rustCall() {
+        uniffiCallStatus in
+    uniffi_conn_ffi_fn_func_inbox_attention(
+        FfiConverterSequenceTypeConnSession.lower(sessions),uniffiCallStatus
+    )
+})
+}
+/**
  * Derives an Orbit clone Instance name from the thread's first message plus a suffix
  * (wrapping [`conn_orbit::orbit_thread_instance_name`]).
  */
@@ -20742,6 +20862,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_func_parse_file_patches() != 33357) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_conn_ffi_checksum_func_inbox_attention() != 26853) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_func_orbit_derive_instance_name() != 52176) {

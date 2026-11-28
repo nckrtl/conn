@@ -13,6 +13,8 @@ enum OrbitConnectState: Equatable {
 @MainActor
 final class InboxPublications {
     private var pending: [String: () -> Void] = [:]
+    /// Runs after each committed batch.
+    var onCommit: (() -> Void)?
 
     func submit(scope: String, publish: @escaping () -> Void) {
         let schedule = pending.isEmpty
@@ -23,6 +25,7 @@ final class InboxPublications {
             let batch = pending
             pending.removeAll(keepingCapacity: true)
             for commit in batch.values { commit() }
+            onCommit?()
         }
     }
 }
@@ -138,6 +141,20 @@ final class CoreStore {
     private var linkedOrder: [String] = []
     var inboxOwners: [CoreStore] { [self] + linkedOrder.compactMap { linked[$0] } }
 
+    /// Threads a child's request needs the user on once every environment is merged, so a task
+    /// on another machine flags the thread that delegated it. Read on the main store.
+    private(set) var rolledUpAttention: Set<FfiThreadKey> = []
+
+    func needsAttention(_ thread: FfiThreadSummary, owner: CoreStore) -> Bool {
+        thread.activity == .needsAttention
+            || rolledUpAttention.contains(FfiThreadKey(environmentId: owner.environmentId ?? "", threadId: thread.id))
+    }
+
+    private func refreshRolledUpAttention() {
+        let keys = Set(inboxAttention(sessions: inboxOwners.compactMap(\.session)))
+        if keys != rolledUpAttention { rolledUpAttention = keys }
+    }
+
     private func registerLinked(_ child: CoreStore) {
         linked[child.scope] = child
         if !linkedOrder.contains(child.scope) {
@@ -211,6 +228,9 @@ final class CoreStore {
     init(scope: String = "", deferOrbit: Bool = false, publications: InboxPublications = InboxPublications()) {
         self.publications = publications
         self.scope = scope
+        if scope.isEmpty {
+            publications.onCommit = { [weak self] in self?.refreshRolledUpAttention() }
+        }
         let arguments = ProcessInfo.processInfo.arguments
         if scope.isEmpty && arguments.contains("--reset-session") {
             for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix("workspace.route.") {

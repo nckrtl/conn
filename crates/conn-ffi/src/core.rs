@@ -204,6 +204,8 @@ pub struct ConnCore {
     /// `steer_active` without blocking the pump task.
     thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
     shell_watch: watch::Receiver<Option<FfiShellSnapshot>>,
+    /// The shell behind the last published snapshot, for the inbox's cross-environment roll-up.
+    roll_up_watch: watch::Receiver<Option<Arc<ShellState>>>,
     status_watch: watch::Receiver<FfiConnectionStatus>,
     limits: watch::Receiver<FfiComposerLimits>,
     pub(crate) uploads: conn_client::uploads::Uploads,
@@ -332,6 +334,10 @@ impl ConnCore {
         self.shell_watch.borrow().clone()
     }
 
+    pub(crate) fn roll_up_shell(&self) -> Option<Arc<ShellState>> {
+        self.roll_up_watch.borrow().clone()
+    }
+
     /// Saves the thread list for the next launch now.
     pub(crate) fn save_shell(&self) {
         let _ = self.ctrl_tx.send(PumpControl::SaveShell);
@@ -404,6 +410,7 @@ impl ConnCore {
         let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel();
         let thread_runs = Arc::new(RwLock::new(HashMap::new()));
         let (shell_watch_tx, shell_watch) = watch::channel(None);
+        let (roll_up_tx, roll_up_watch) = watch::channel(None);
         let (status_watch_tx, status_watch) = watch::channel(FfiConnectionStatus::Connecting);
 
         let (limits_tx, limits) = watch::channel(FfiComposerLimits::default());
@@ -413,7 +420,7 @@ impl ConnCore {
             (ctrl_rx, ctrl_tx.clone()),
             listener,
             Arc::clone(&thread_runs),
-            (shell_watch_tx, status_watch_tx, limits_tx),
+            (shell_watch_tx, roll_up_tx, status_watch_tx, limits_tx),
             SessionIdentity {
                 server_url: normalized_url.clone(),
                 orbit_server_id,
@@ -430,6 +437,7 @@ impl ConnCore {
             ctrl_tx,
             thread_runs,
             shell_watch,
+            roll_up_watch,
             status_watch,
             limits,
             image_reader: Default::default(),
@@ -1515,6 +1523,7 @@ struct PumpState {
     status_changed_at_ms: i64,
     thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
     shell_watch: watch::Sender<Option<FfiShellSnapshot>>,
+    roll_up_watch: watch::Sender<Option<Arc<ShellState>>>,
     status_watch: watch::Sender<FfiConnectionStatus>,
     limits: watch::Sender<FfiComposerLimits>,
     /// `conn_client::perf` lines still to log: the shell of this connection, opened threads.
@@ -1528,8 +1537,9 @@ impl PumpState {
         ctrl_tx: mpsc::UnboundedSender<PumpControl>,
         listener: Arc<dyn CoreListener>,
         thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
-        (shell_watch, status_watch, limits): (
+        (shell_watch, roll_up_watch, status_watch, limits): (
             watch::Sender<Option<FfiShellSnapshot>>,
+            watch::Sender<Option<Arc<ShellState>>>,
             watch::Sender<FfiConnectionStatus>,
             watch::Sender<FfiComposerLimits>,
         ),
@@ -1560,6 +1570,7 @@ impl PumpState {
             status_changed_at_ms: now_epoch_ms(),
             thread_runs,
             shell_watch,
+            roll_up_watch,
             status_watch,
             limits,
             perf_shell_pending: true,
@@ -2297,6 +2308,8 @@ impl PumpState {
 
     fn publish_shell(&mut self, snapshot: FfiShellSnapshot) {
         self.saved_shell = None;
+        self.roll_up_watch
+            .send_replace(Some(Arc::new(self.shell.clone())));
         self.shell_watch.send_replace(Some(snapshot.clone()));
         self.listener.on_shell(snapshot);
         if std::mem::take(&mut self.perf_shell_pending) {
@@ -2403,8 +2416,9 @@ async fn run_pump(
     ),
     listener: Arc<dyn CoreListener>,
     thread_runs: Arc<RwLock<HashMap<String, ThreadRunMeta>>>,
-    (shell_watch, status_watch, limits): (
+    (shell_watch, roll_up_watch, status_watch, limits): (
         watch::Sender<Option<FfiShellSnapshot>>,
+        watch::Sender<Option<Arc<ShellState>>>,
         watch::Sender<FfiConnectionStatus>,
         watch::Sender<FfiComposerLimits>,
     ),
@@ -2418,7 +2432,7 @@ async fn run_pump(
         ctrl_tx,
         listener,
         thread_runs,
-        (shell_watch, status_watch, limits),
+        (shell_watch, roll_up_watch, status_watch, limits),
         identity,
     );
 

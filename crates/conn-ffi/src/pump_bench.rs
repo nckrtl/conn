@@ -206,6 +206,7 @@ fn run_burst(turns: usize, burst: usize, pace: Option<Duration>, shell_every: us
     let recorder = std::sync::Arc::new(Recorder::default());
     let listener: std::sync::Arc<dyn CoreListener> = recorder.clone();
     let (shell_tx, _shell_rx) = watch::channel(None);
+    let (roll_up_tx, _roll_up_rx) = watch::channel(None);
     let (status_tx, _status_rx) = watch::channel(FfiConnectionStatus::Connecting);
     let (limits_tx, _limits_rx) = watch::channel(FfiComposerLimits::default());
     rt.spawn(run_pump(
@@ -214,7 +215,7 @@ fn run_burst(turns: usize, burst: usize, pace: Option<Duration>, shell_every: us
         (ctrl_rx, ctrl_tx.clone()),
         listener,
         std::sync::Arc::default(),
-        (shell_tx, status_tx, limits_tx),
+        (shell_tx, roll_up_tx, status_tx, limits_tx),
         SessionIdentity {
             server_url: "http://127.0.0.1:9/".into(),
             orbit_server_id: None,
@@ -386,6 +387,7 @@ fn bare_pump(
         recorder.clone(),
         std::sync::Arc::default(),
         (
+            watch::channel(None).0,
             watch::channel(None).0,
             watch::channel(FfiConnectionStatus::Connecting).0,
             watch::channel(FfiComposerLimits::default()).0,

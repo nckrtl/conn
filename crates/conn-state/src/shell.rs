@@ -106,6 +106,7 @@ pub(crate) struct OlderSettled {
 /// cut, frontier and status, and the older pages read from it (`olderOf(environmentId)`).
 #[derive(Clone, Debug, Default)]
 struct ForeignOlder {
+    environment_id: String,
     cut: Option<OlderSettledCut>,
     frontier: Option<SettledCursor>,
     status: PageStatus,
@@ -232,13 +233,58 @@ fn side_chat_request(thread: &ThreadShell) -> Option<Rolled> {
     request_kind(thread).map(as_rolled)
 }
 
+/// Flags `parent_id` with a child's `request`, and its parents while they are subagents or side
+/// chats (`flag` in `pendingSubagentRequestsByThread`). Each hop stays on one environment.
+fn flag_up<'a>(
+    requests: &mut HashMap<String, Rolled>,
+    by_id: &HashMap<&'a str, &'a ThreadShell>,
+    same_environment: &impl Fn(&str, &str) -> bool,
+    parent_id: Option<&'a str>,
+    request: Rolled,
+    child_id: &'a str,
+) {
+    // The coordinator answers a child's questions; approvals and user-only cards need the user.
+    if request == Rolled::UserInput {
+        return;
+    }
+    let mut seen: HashSet<&str> = HashSet::from([child_id]);
+    let mut next = parent_id;
+    while let Some(id) = next
+        && seen.insert(id)
+    {
+        if requests.get(id) != Some(&Rolled::Approval) {
+            requests.insert(id.to_owned(), request);
+        }
+        next = by_id.get(id).and_then(|parent| {
+            (parent.lineage.relationship_to_parent == Some(Relationship::Subagent)
+                || parent.lineage.side_chat == Some(true))
+            .then_some(parent.lineage.parent_thread_id.as_deref())
+            .flatten()
+            .filter(|next| same_environment(id, next))
+        });
+    }
+}
+
 /// `pendingSubagentRequestsByThread`: the threads to flag for a subagent's live request, up its
 /// subagent chain and through a side chat to its parent.
-fn rolled_up_requests(threads: &[ThreadShell]) -> HashMap<String, PendingSubagentRequest> {
+/// `environment_of` names the environment a listed thread came from, when the shell knows it.
+fn rolled_up_requests<'a>(
+    threads: &'a [ThreadShell],
+    environment_of: impl Fn(&str) -> Option<&'a str>,
+) -> HashMap<String, PendingSubagentRequest> {
     let mut requests: HashMap<String, Rolled> = HashMap::new();
     let by_id: HashMap<&str, &ThreadShell> = threads.iter().map(|t| (t.id.as_str(), t)).collect();
+    // Another environment's thread with a child's parent id is not its parent. Unmerged shells
+    // know no environments and match by id.
+    let same_environment = |a: &str, b: &str| match (environment_of(a), environment_of(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    };
     for child in threads {
         let parent_id = child.lineage.parent_thread_id.as_deref();
+        if parent_id.is_some_and(|parent| !same_environment(&child.id, parent)) {
+            continue;
+        }
         if child.lineage.side_chat == Some(true) {
             if let (Some(parent), Some(request)) = (parent_id, side_chat_request(child))
                 && requests.get(parent) != Some(&Rolled::Approval)
@@ -250,27 +296,52 @@ fn rolled_up_requests(threads: &[ThreadShell]) -> HashMap<String, PendingSubagen
         if child.lineage.relationship_to_parent != Some(Relationship::Subagent) {
             continue;
         }
-        let Some(request) = subagent_request(child) else {
-            continue;
-        };
-        // The coordinator answers a child's questions; approvals and user-only cards need the user.
-        if request == Rolled::UserInput {
-            continue;
+        if let Some(request) = subagent_request(child) {
+            flag_up(
+                &mut requests,
+                &by_id,
+                &same_environment,
+                parent_id,
+                request,
+                child.id.as_str(),
+            );
         }
-        let mut seen: HashSet<&str> = HashSet::from([child.id.as_str()]);
-        let mut next = parent_id;
-        while let Some(id) = next
-            && seen.insert(id)
-        {
-            if requests.get(id) != Some(&Rolled::Approval) {
-                requests.insert(id.to_owned(), request);
+    }
+    // A task delegated from another environment's thread asks on that thread, with what its own
+    // children ask (`delegatedSubagentRequestsAtom`). Each pass settles one more hop of a chain.
+    // Another environment's copy of the same thread id is not the thread that delegated it.
+    let tasks: Vec<(&ThreadShell, &str)> = threads
+        .iter()
+        .filter(|t| is_listed_lineage(&t.lineage))
+        .filter_map(|t| {
+            let from = t.delegated_from.as_ref()?;
+            let parent = from.thread_id.as_str();
+            environment_of(parent)
+                .is_none_or(|env| env == from.environment_id)
+                .then_some((t, parent))
+        })
+        .collect();
+    for _ in 0..tasks.len() {
+        let before = requests.clone();
+        for &(task, parent_id) in &tasks {
+            let own = subagent_request(task);
+            let request = match own {
+                Some(Rolled::Approval) => own,
+                _ => requests.get(task.id.as_str()).copied().or(own),
+            };
+            if let Some(request) = request {
+                flag_up(
+                    &mut requests,
+                    &by_id,
+                    &same_environment,
+                    Some(parent_id),
+                    request,
+                    task.id.as_str(),
+                );
             }
-            next = by_id.get(id).and_then(|parent| {
-                (parent.lineage.relationship_to_parent == Some(Relationship::Subagent)
-                    || parent.lineage.side_chat == Some(true))
-                .then_some(parent.lineage.parent_thread_id.as_deref())
-                .flatten()
-            });
+        }
+        if requests == before {
+            break;
         }
     }
     requests
@@ -303,8 +374,9 @@ pub(crate) struct Added<'a> {
 }
 
 /// The Settled paging a merge keeps of `other`, before its threads are counted.
-fn foreign_paging(other: &ShellState) -> ForeignOlder {
+fn foreign_paging(environment_id: &str, other: &ShellState) -> ForeignOlder {
     ForeignOlder {
+        environment_id: environment_id.to_owned(),
         cut: other.older.cut.clone(),
         frontier: other.older.frontier.clone(),
         status: other.older.status,
@@ -379,6 +451,8 @@ pub struct ShellState {
     /// Where the snapshot cut the Settled shelf, and the older settled threads read since.
     pub(crate) older: OlderSettled,
     requests: HashMap<String, PendingSubagentRequest>,
+    /// The environment this shell's own threads came from, once a merge names it.
+    environment_id: Option<String>,
     /// The Settled paging of the other environments merged in (`extend_with_environment`).
     foreign: Vec<ForeignOlder>,
     /// Which of `foreign` a merged-in thread belongs to, by thread id.
@@ -570,8 +644,8 @@ impl ShellState {
     /// connected environment in one sidebar. An id this shell already holds keeps its first
     /// copy, so the primary environment always wins a collision. Threads sort again by activity.
     /// The older-settled paging state stays this environment's own.
-    pub fn extend_with_environment(&mut self, other: &ShellState) {
-        self.extend_with_environments(std::iter::once(other));
+    pub fn extend_with_environment(&mut self, environment_id: &str, other: &ShellState) {
+        self.extend_with_environments(std::iter::once((environment_id, other)));
     }
 
     /// [`Self::extend_with_environment`] for several environments, in order, with one sort and
@@ -579,9 +653,10 @@ impl ShellState {
     /// projects and of the active or archived threads it added.
     pub(crate) fn extend_with_environments<'a>(
         &mut self,
-        others: impl IntoIterator<Item = &'a ShellState>,
+        others: impl IntoIterator<Item = (&'a str, &'a ShellState)>,
     ) -> Vec<Added<'a>> {
-        let others: Vec<&'a ShellState> = others.into_iter().collect();
+        let (environment_ids, others): (Vec<&'a str>, Vec<&'a ShellState>) =
+            others.into_iter().unzip();
         // Decide with borrowed ids first, then clone each added row once.
         let mut added: Vec<Added<'a>> = Vec::with_capacity(others.len());
         let mut rows: Vec<(usize, Place, &'a ThreadShell)> = Vec::new();
@@ -626,8 +701,12 @@ impl ShellState {
         }
         self.projects.extend(projects.into_iter().cloned());
         let base = self.foreign.len();
-        self.foreign
-            .extend(others.iter().map(|other| foreign_paging(other)));
+        self.foreign.extend(
+            environment_ids
+                .iter()
+                .zip(&others)
+                .map(|(id, other)| foreign_paging(id, other)),
+        );
         for (index, place, thread) in rows {
             self.place_foreign(base + index, place, thread.clone());
         }
@@ -919,7 +998,18 @@ impl ShellState {
 
     /// Recomputes the requests rolled up to each parent.
     pub(crate) fn refresh_derived(&mut self) {
-        self.requests = rolled_up_requests(&self.threads);
+        let requests = rolled_up_requests(&self.threads, |id| match self.foreign_of.get(id) {
+            Some(&index) => self.foreign.get(index).map(|f| f.environment_id.as_str()),
+            None => self.environment_id.as_deref(),
+        });
+        self.requests = requests;
+    }
+
+    /// Names the environment this shell's own threads came from.
+    pub(crate) fn set_environment_id(&mut self, environment_id: &str) {
+        if self.environment_id.as_deref() != Some(environment_id) {
+            self.environment_id = Some(environment_id.to_owned());
+        }
     }
 
     /// Returns `true` when `thread` belongs in the Settled shelf (`settledAt` or `archivedAt` set).
@@ -1523,6 +1613,52 @@ mod tests {
             ]
         );
         assert!(state.child_approval_threads("other").is_empty());
+    }
+
+    #[test]
+    fn a_delegated_tasks_approval_flags_the_thread_that_delegated_it_until_answered() {
+        let task = |id: &'static str, parent: &'static str, kind: Option<&'static str>| {
+            thread_json(id, "p", move |t| {
+                t["delegatedFrom"] =
+                    json!({"environmentId": "env-b", "threadId": parent, "title": "P"});
+                t["status"] = json!("running");
+                if let Some(kind) = kind {
+                    t["pendingRuntimeRequest"] =
+                        json!({"id": "r", "kind": kind, "createdAt": "2026-11-13T09:00:00.000Z"});
+                }
+            })
+        };
+        let mut state = snapshot(
+            vec![
+                thread_json("parent", "p", |_| {}),
+                task("task", "parent", Some("command")),
+                thread_json("asker-parent", "p", |_| {}),
+                task("asker", "asker-parent", Some("user_input")),
+                thread_json("nested-parent", "p", |_| {}),
+                task("nested", "nested-parent", None),
+                thread_json("leaf", "p", child_of("nested", |_| {})),
+            ],
+            None,
+        );
+        assert_eq!(
+            state.subagent_request("parent"),
+            Some(PendingSubagentRequest::Approval)
+        );
+        assert_eq!(state.activity("parent"), ThreadActivity::NeedsAttention);
+        // The coordinator answers a task's questions; a subagent's approval in the task needs the user.
+        assert_eq!(state.subagent_request("asker-parent"), None);
+        assert_eq!(
+            state.subagent_request("nested-parent"),
+            Some(PendingSubagentRequest::Approval)
+        );
+
+        let answered = task("task", "parent", None);
+        state.apply(
+            from_json(json!({"kind": "thread.updated", "sequence": 8, "location": "active", "thread": answered}))
+                .expect("update decodes"),
+        );
+        assert_eq!(state.subagent_request("parent"), None);
+        assert_ne!(state.activity("parent"), ThreadActivity::NeedsAttention);
     }
 
     #[test]

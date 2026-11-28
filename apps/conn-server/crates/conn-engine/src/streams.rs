@@ -187,6 +187,13 @@ pub(crate) async fn subscribe_thread(
         .db(move |store| -> Result<Option<Opening>, String> {
             let high = store.high_water();
             let imported = store.imported_through();
+            // Nothing changed since the client's cursor: no change reads, and no page read.
+            if let Some(after) = changes_after.filter(|after| *after == high)
+                && can_replay(after, high, imported)
+                && store.thread_known(&id)?
+            {
+                return Ok(Some((vec![], high, None)));
+            }
             // Rows a client holds are patched by changed rows unless the server now hides some
             // (a rollback) or the thread was created again; then the snapshot below replaces them.
             // A long gap gets the newest window instead: changes grow with time away, a window

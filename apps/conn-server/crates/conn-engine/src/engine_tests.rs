@@ -1738,6 +1738,21 @@ async fn a_changes_resume_sends_each_changed_row_once_and_resets_on_a_rollback()
     dispatch(&engine, message("t1", "m21", "live")).await;
     assert_eq!(next(&mut resumed).await["kind"], "event");
     drop(resumed);
+    until_run_ends(&mut live).await;
+
+    // A client already at the high water gets no rows, then live events after its cursor.
+    let high = engine.inner().db(|s| s.high_water()).await;
+    let mut current = subscribe(json!({"threadId": "t1", "changesAfterSequence": high,
+        "requestCompletionMarker": true}))
+    .await
+    .unwrap();
+    assert_eq!(next(&mut current).await["kind"], "synchronized");
+    dispatch(&engine, message("t1", "m21b", "live")).await;
+    let first = next(&mut current).await;
+    assert_eq!(first["kind"], "event");
+    assert_eq!(first["sequence"], high + 1);
+    drop(current);
+    until_run_ends(&mut live).await;
 
     // The same read without the flag is T3's: a snapshot.
     let mut plain = subscribe(json!({"threadId": "t1", "afterSequence": after}))

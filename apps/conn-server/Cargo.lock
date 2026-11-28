@@ -206,6 +206,7 @@ dependencies = [
  "conn-provider-acp",
  "conn-provider-claude",
  "conn-provider-codex",
+ "conn-provider-support",
  "conn-source-control",
  "conn-support",
  "conn-vcs",

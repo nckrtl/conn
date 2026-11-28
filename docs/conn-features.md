@@ -963,7 +963,8 @@ Search replaces the group with a toolbar search field for the selected tab.
 Cancelling or leaving it empty restores the group. On Threads, the workspace,
 environment and project filter sits inside the field, like Mail, replacing
 upstream's filter pills. Pull requests keeps its own filter row. The field uses
-the composer's text size. This needs the `react-native-screens` patch below.
+the composer's text size. This needs the `react-native-screens` patch in
+[Vendored dependency patches](development.md#vendored-dependency-patches).
 
 Sources:
 
@@ -984,7 +985,8 @@ connecting.
 Markdown uses the system font with weights and JetBrains Mono for code. Blocks
 and headings have 12pt above/between them; list items have 6pt between them.
 List markers start at the list's edge, with an 8pt gap to the text for both
-numbers and bullets. This needs the enriched-markdown patch below.
+numbers and bullets. This needs the enriched-markdown patch in
+[Vendored dependency patches](development.md#vendored-dependency-patches).
 
 On iOS 26 and later, a native `EdgeBlur` replaces upstream's color fade under
 the composer and header, and the composer is realigned. `T3EdgeBlurView` lives

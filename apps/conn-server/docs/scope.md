@@ -8,7 +8,9 @@ the web client and `apps/server` from this tree.
 ## Platforms and hosts
 
 Conn's GUI targets macOS and iOS only. The Conn Server runs on Linux in Orbit containers
-(macOS later). Windows, Android and the Linux desktop app are out of scope.
+(macOS later). Windows, Android and the Linux desktop app are out of scope, and so are the
+hosted web app (app.t3.codes and its previews), the T3 Connect relay (`infra/relay`) and the
+marketing site (`apps/marketing`). None of them is a Conn surface.
 
 Only GitHub is used as a source-control host. GitLab, Forgejo, Bitbucket, Azure DevOps,
 GitCafe and Cursor origin are out of scope (Nick, 2026-11-16). Every area that

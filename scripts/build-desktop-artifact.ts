@@ -872,10 +872,22 @@ const spawnAndCollectOutput = Effect.fn("spawnAndCollectOutput")(function* (
   return { stdout, stderr, exitCode } as const;
 });
 
+// Inherited GIT_DIR, GIT_WORK_TREE or GIT_INDEX_FILE would resolve another checkout's HEAD.
+export const gitSubprocessEnv = (
+  env: Readonly<Record<string, string | undefined>> = process.env,
+): Record<string, string> => {
+  const clean: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value !== undefined && !key.startsWith("GIT_")) clean[key] = value;
+  }
+  return clean;
+};
+
 const resolveGitCommitHash = Effect.fn("resolveGitCommitHash")(function* (repoRoot: string) {
   const result = yield* spawnAndCollectOutput(
     ChildProcess.make("git", ["rev-parse", "--short=12", "HEAD"], {
       cwd: repoRoot,
+      env: gitSubprocessEnv(),
     }),
   ).pipe(
     Effect.orElseSucceed(() => ({

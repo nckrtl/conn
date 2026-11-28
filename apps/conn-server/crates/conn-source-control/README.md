@@ -1,8 +1,8 @@
 # conn-source-control
 
 GitHub source control for the Conn Server. We use the same CLI calls, credentials and API
-requests as the T3 server's GitHub driver. Conn supports only GitHub (`docs/scope.md`, "Platforms
-scope", Nick's decision of 2026-11-16). Other hosts read as unknown git remotes: their host,
+requests as the T3 server's GitHub driver. Conn supports only GitHub (Nick's decision of 2026-11-16; see
+[Platforms and hosts](../../docs/scope.md#platforms-and-hosts)). Other hosts read as unknown git remotes: their host,
 base URL and normal git repository key are kept; no host-specific discovery or API runs.
 
 The specification is `packages/source-control-core`, `packages/source-control-github` and

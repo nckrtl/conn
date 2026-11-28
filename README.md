@@ -22,8 +22,8 @@ and SDKs.
   state folder. See [Run](apps/conn-server/README.md#run). Check it with `tools/check.sh`.
 - **Desktop client:** see [Prerequisites & commands](apps/conn-gpui/README.md#prerequisites--commands)
   and the [dev loop](apps/conn-gpui/docs/dev-loop.md).
-- **iPhone app:** builds only in the nick-vm macOS VM. See "Build in nick-vm" in
-  [AGENTS.md](AGENTS.md).
+- **iPhone app:** builds only in the nick-vm macOS VM. See
+  [iPhone app (native)](docs/development.md#iphone-app-native).
 - **Shared core:** `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`
   and `cargo test --workspace` at the repo root.
 - **Design labs:** `vp i`, then `vp run lab:gpui` or `vp run lab:ios` at the repo root.

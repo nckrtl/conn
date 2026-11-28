@@ -28,6 +28,7 @@ import {
   BundleNotSelfContainedError,
   BuildCommandFailedError,
   typecheckDesktopPackage,
+  gitSubprocessEnv,
   parseWslRuntimeArchiveMembers,
   readWorkspaceConfig,
   createBuildConfig,
@@ -293,6 +294,20 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.equal(commands.length, 1);
       assert.deepStrictEqual(commands[0]?.args, [...desktopTypecheckVpArgs]);
     }).pipe(Effect.provide(spawner), Effect.scoped);
+  });
+
+  it("resolves the build commit without inherited GIT_ variables", () => {
+    assert.deepStrictEqual(
+      gitSubprocessEnv({
+        PATH: "/usr/bin",
+        GIT_DIR: "/other/.git",
+        GIT_WORK_TREE: "/other",
+        GIT_INDEX_FILE: "/other/.git/index",
+        GIT_COMMON_DIR: "/other/.git",
+        UNSET: undefined,
+      }),
+      { PATH: "/usr/bin" },
+    );
   });
 
   it("packages the brand's own stable icons and leaves nightly ones alone", () => {

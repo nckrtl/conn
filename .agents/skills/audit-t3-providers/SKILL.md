@@ -40,7 +40,7 @@ For a checkup, lead with which changes Conn needs and why. For each recommendati
 
 Close the report with the **upstream SHA reviewed through**, plus the Conn SHA tested and any unexamined areas or pending replays. Carry unresolved cases into the next audit. The upstream SHA is a search checkpoint, independent of which fixes have merged.
 
-Then update the checkpoint block in `FORK.md`: the upstream SHA reviewed through, the Conn SHA tested, the date, a link to the report or PR, and the unexamined areas (full SHAs). Commit it with the fix PR, or in a small PR of its own when nothing needed fixing.
+Move the checkpoint only after a full-scope audit: Codex, Claude, Grok and Antigravity, plus engine, contract and MCP changes. A narrower audit reports its range and leaves the checkpoint alone. After a full-scope audit, update the checkpoint block in `FORK.md`: the upstream SHA reviewed through, the Conn SHA tested, the date, a link to the report or PR, and the unexamined areas (full SHAs). Commit it with the fix PR, or in a small PR of its own when nothing needed fixing.
 
 When asked to implement, put the failing case in the owning Rust crate, fix the behavior through its normal entry point, and rerun the regression and affected conformance checks. Preserve older supported runtimes and stored data. Follow the server’s checks for shared contract or fixture changes. In the PR, link the source change and show what the same scenario did before and after the fix. PRs and issues go to `nckrtl/conn` only; pass `--repo nckrtl/conn` to every `gh` command. Never push to `pingdotgg/t3code`, and never open PRs, issues, or comments there.
 

@@ -21,7 +21,7 @@ Builds:
   See [apps/conn-server/docs/scope.md](apps/conn-server/docs/scope.md), "Release".
 - **Desktop client.** Built and bundled on the Mac with the scripts in
   `apps/conn-gpui/scripts`. See [apps/conn-gpui/README.md](apps/conn-gpui/README.md).
-- **iPhone app.** Built in nick-vm; see "Build in nick-vm" in [AGENTS.md](AGENTS.md).
+- **iPhone app.** Built in nick-vm; see [iPhone app (native)](docs/development.md#iphone-app-native).
 - **Legacy apps.** The Electron desktop app and the T3 server still build from `main` with the
   [build guide](.agents/skills/nckrtl-shell-design/references/build.md). See
   [docs/development.md](docs/development.md).

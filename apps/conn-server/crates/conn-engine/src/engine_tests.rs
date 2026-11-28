@@ -9117,6 +9117,58 @@ async fn a_settled_wake_runs_after_an_older_queued_prompt() {
     );
 }
 
+/// A usage limit that holds the queue at run end does not strand a waiting result: the queue
+/// cannot start, so the idle parent takes the wake at once (`Orchestrator.ts:15627`) and the
+/// user's prompt waits for the limit.
+#[tokio::test(flavor = "current_thread")]
+async fn a_usage_limit_at_run_end_still_delivers_a_waiting_result() {
+    let db = TempDb::new("delegate-wake-limit");
+    let (engine, _) = open(&db);
+    dispatch(&engine, create("t1", "c1")).await;
+    let hold = gate(&engine).await;
+    dispatch(&engine, message("t1", "c2", "fail-usage-limit")).await;
+    dispatch(&engine, queued("c3", "queued prompt")).await;
+    dispatch(&engine, delegate("d1", "look around", None)).await;
+    run_to_end(
+        &engine,
+        "thread:delegated-task:d1",
+        "run:thread:delegated-task:d1:1",
+    )
+    .await;
+    drop(hold);
+    // The run's end commits the wake's start with it, while the limit holds the prompt.
+    let p = run_to_end(&engine, "t1", "run:t1:1").await;
+    assert_eq!(run_for(&p, "c2")["status"], "failed");
+    assert_eq!(
+        run_for(&p, "c3")["status"],
+        "queued",
+        "the limit holds the prompt"
+    );
+    let wake = p["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "run:t1:3")
+        .unwrap();
+    assert!(
+        wake["userMessageId"]
+            .as_str()
+            .unwrap()
+            .starts_with("message:delegated-completion:"),
+        "{wake}"
+    );
+    assert_ne!(wake["status"], "queued", "{wake}");
+    // The wake runs to its end: nothing waits for someone to send again.
+    let p = run_to_end(&engine, "t1", "run:t1:3").await;
+    let wake = p["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "run:t1:3")
+        .unwrap();
+    assert_eq!(wake["status"], "completed", "{wake}");
+}
+
 /// Waits until `thread` has a pending runtime request, and returns it.
 async fn until_pending_request(engine: &SqliteEngine, thread: &str) -> Value {
     let mut stream = engine

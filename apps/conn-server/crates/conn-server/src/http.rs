@@ -2854,6 +2854,91 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A settings path that is a link to a managed file not yet written: a failed first write
+    /// keeps the link, and the next batch writes through it to the managed target.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failed_batch_keeps_a_settings_link() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp("link");
+        let managed = dir.join("managed");
+        std::fs::create_dir_all(&managed).unwrap();
+        let path = dir.join("settings.json");
+        std::os::unix::fs::symlink(managed.join("settings.json"), &path).unwrap();
+        let (addr, auth, _) = serve_settings(&dir, None).await;
+        let admin = token(&auth, &["providers:manage"]);
+        let upsert = json!([{"operation": "upsert", "instanceId": "c",
+                             "instance": {"driver": "codex", "enabled": false}}]);
+        std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let (status, _) = instances_post(addr, &admin, upsert.clone()).await;
+        std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(status, 500);
+        assert!(
+            path.symlink_metadata().unwrap().file_type().is_symlink(),
+            "the link is gone"
+        );
+        let (status, body) = instances_post(addr, &admin, upsert).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(path.symlink_metadata().unwrap().file_type().is_symlink());
+        let written = std::fs::read_to_string(managed.join("settings.json")).unwrap();
+        assert!(written.contains("codex"), "{written}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A batch that fails on the store leaves a settings file it never changed alone: same
+    /// file, same mode.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failed_batch_leaves_an_unchanged_settings_file_alone() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = temp("mode");
+        let path = dir.join("settings.json");
+        std::fs::write(
+            &path,
+            json!({"providerInstances": {"c": {"driver": "codex"}}}).to_string(),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let (addr, auth, _) = serve_settings(&dir, None).await;
+        let admin = token(&auth, &["providers:manage"]);
+        std::fs::create_dir_all(config_secret_path(&dir, "agy", "antigravity", "apiKey")).unwrap();
+        let before = file_state(&path);
+        let (status, _) = instances_post(
+            addr,
+            &admin,
+            json!([{"operation": "upsert", "instanceId": "agy",
+                    "instance": agy(json!("k-mode"), json!([]))}]),
+        )
+        .await;
+        assert_eq!(status, 500);
+        assert_eq!(file_state(&path), before);
+        assert_eq!(std::fs::metadata(&path).unwrap().mode() & 0o777, 0o640);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Provisioning does not read other features' entries in the shared store: an unreadable
+    /// saved test login does not fail a credential-free upsert.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_unreadable_unrelated_secret_does_not_fail_a_batch() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp("unrelated");
+        let (addr, auth, _) = serve_settings(&dir, None).await;
+        let admin = token(&auth, &["providers:manage"]);
+        let logins = dir.join("secrets").join("test-logins.bin");
+        std::fs::create_dir_all(dir.join("secrets")).unwrap();
+        std::fs::write(&logins, "saved logins").unwrap();
+        std::fs::set_permissions(&logins, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let (status, body) = instances_post(
+            addr,
+            &admin,
+            json!([{"operation": "upsert", "instanceId": "codexRouted",
+                    "instance": {"driver": "codex", "enabled": false}}]),
+        )
+        .await;
+        std::fs::set_permissions(&logins, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(std::fs::read_to_string(&logins).unwrap(), "saved logins");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// Without the engine the POST answers ADR 0274's 503 body, before it reads the body, and
     /// saves nothing.
     #[tokio::test(flavor = "current_thread")]

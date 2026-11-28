@@ -17,6 +17,29 @@ use super::generated::{
 };
 use conn_support::secret_store;
 
+/// The start of every store name a settings secret gets here: the namers in [`walk`], the
+/// environment slots and the retired host names. Other features keep their own entries in the
+/// same folder (`test-logins`, `secret-request-…`, `peer-link-…`, signing keys); a settings
+/// save never changes those.
+const NAME_PREFIXES: &[&str] = &[
+    "voice-cloud-",
+    "provider-config-",
+    "provider-env-",
+    "source-control-",
+    "usage-limit-source-",
+    "text-generator-",
+    "device-host-",
+    "simlock-device-host-",
+    "github-token-",
+    "bitbucket-access-token",
+    "bitbucket-api-token",
+];
+
+/// Whether `name` is a store name a settings save can write or remove.
+pub(super) fn is_settings_secret(name: &str) -> bool {
+    NAME_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+}
+
 /// A field secret (in a group's config) or a provider instance's environment variable.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Kind {

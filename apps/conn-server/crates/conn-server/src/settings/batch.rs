@@ -66,7 +66,7 @@ impl SettingsStore {
             .map_err(|error| BatchError::Failed(self.error("read-file", error.to_string())))?;
         let result = self.commit(mutations);
         if result.is_err() {
-            snapshot.restore(&self.path, &self.secrets_dir);
+            snapshot.restore(&self.secrets_dir);
         }
         result
     }
@@ -118,16 +118,21 @@ impl SettingsStore {
     }
 }
 
-/// The settings file and the secret store as they were before a batch's writes.
+/// The settings file and the settings secrets as they were before a batch's writes.
 struct Snapshot {
-    file: Option<Vec<u8>>,
+    /// Where the settings live: the end of the symlink chain at the settings path, so a
+    /// restore works on the managed target and never on the link.
+    target: PathBuf,
+    /// Its bytes and mode, `None` when it did not exist.
+    file: Option<(Vec<u8>, u32)>,
     secrets: Vec<(PathBuf, Vec<u8>)>,
 }
 
 impl Snapshot {
     fn take(path: &Path, dir: &Path) -> io::Result<Self> {
-        let file = match std::fs::read(path) {
-            Ok(bytes) => Some(bytes),
+        let target = conn_support::fs::resolve_symlink_target(path)?;
+        let file = match std::fs::read(&target) {
+            Ok(bytes) => Some((bytes, file_mode(&target)?)),
             Err(error) if error.kind() == io::ErrorKind::NotFound => None,
             Err(error) => return Err(error),
         };
@@ -136,11 +141,16 @@ impl Snapshot {
             let bytes = std::fs::read(&path)?;
             secrets.push((path, bytes));
         }
-        Ok(Self { file, secrets })
+        Ok(Self {
+            target,
+            file,
+            secrets,
+        })
     }
 
-    /// Puts both back; a step that fails is logged by path, never with a value.
-    fn restore(self, path: &Path, dir: &Path) {
+    /// Puts back what changed, and only that; a step that fails is logged by path, never with
+    /// a value.
+    fn restore(self, dir: &Path) {
         let mut failed: Vec<PathBuf> = Vec::new();
         for current in secret_files(dir).unwrap_or_default() {
             if !self.secrets.iter().any(|(kept, _)| *kept == current)
@@ -156,19 +166,16 @@ impl Snapshot {
                 failed.push(kept.clone());
             }
         }
-        let file = match &self.file {
-            Some(bytes) => conn_support::fs::resolve_symlink_target(path)
-                .and_then(|target| conn_support::fs::write_private(&target, bytes)),
-            None => std::fs::remove_file(path).or_else(|error| {
-                if error.kind() == io::ErrorKind::NotFound {
-                    Ok(())
-                } else {
-                    Err(error)
-                }
-            }),
+        let now = std::fs::read(&self.target).ok();
+        let file = match (&self.file, now) {
+            (Some((bytes, _)), Some(now)) if now == *bytes => Ok(()),
+            (None, None) => Ok(()),
+            (Some((bytes, mode)), _) => conn_support::fs::write_atomic(&self.target, bytes, *mode),
+            // The batch created it: remove the file, never a link that pointed at it.
+            (None, Some(_)) => std::fs::remove_file(&self.target),
         };
         if file.is_err() {
-            failed.push(path.to_owned());
+            failed.push(self.target);
         }
         for path in failed {
             eprintln!(
@@ -179,7 +186,18 @@ impl Snapshot {
     }
 }
 
-/// The `<name>.bin` files of the secret store; none when the folder does not exist.
+#[cfg(unix)]
+fn file_mode(path: &Path) -> io::Result<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    Ok(std::fs::metadata(path)?.permissions().mode() & 0o7777)
+}
+
+#[cfg(not(unix))]
+fn file_mode(_: &Path) -> io::Result<u32> {
+    Ok(0o600)
+}
+
+/// The settings secrets' `<name>.bin` files in the store; none when the folder does not exist.
 fn secret_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -189,7 +207,12 @@ fn secret_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
     let mut files = Vec::new();
     for entry in entries {
         let path = entry?.path();
-        if path.extension().is_some_and(|extension| extension == "bin") && path.is_file() {
+        let settings_secret = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_suffix(".bin"))
+            .is_some_and(secrets::is_settings_secret);
+        if settings_secret && path.is_file() {
             files.push(path);
         }
     }

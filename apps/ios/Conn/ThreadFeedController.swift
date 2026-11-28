@@ -558,11 +558,13 @@ final class ThreadFeedController: UIViewController, UICollectionViewDelegate, UI
     private func updateChrome() {
         let cv = collectionView
         let distance = cv.maxOffsetY - cv.contentOffset.y
-        // Shown once the reader is more than 100 pt above the end, hidden within it.
-        let shows = hasContent && (forceJump || distance > 100)
+        // Shown once the reader is more than 100 pt above the end, hidden within it. Never while
+        // pinned: rows growing at the end run ahead of the offset until the next pass follows.
+        let shows = hasContent && (forceJump || (!pinned && distance > 100))
         if chrome.showsJump != shows {
             // Explicit, so the jump circle's entrance and exit play.
             withAnimation(.smooth(duration: 0.35)) { chrome.showsJump = shows }
+            if shows { probe?.jumpShows += 1 }
         }
         probe?.report(cv, pinned: pinned, distance: distance, layout: layout, order: order)
     }
@@ -870,6 +872,8 @@ final class FeedProbeView: UIView {
     private var hitches = 0
     private var last: CFTimeInterval = 0
     private var state = ""
+    /// How many times the jump circle came in since launch.
+    var jumpShows = 0
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -902,7 +906,7 @@ final class FeedProbeView: UIView {
     }
 
     private func publish() {
-        let value = state + " fr=\(frames) hitch=\(hitches)"
+        let value = state + " fr=\(frames) hitch=\(hitches) js=\(jumpShows)"
         if accessibilityValue != value { accessibilityValue = value }
     }
 

@@ -1,11 +1,13 @@
 // PORT=47941 bun apps/ios/scripts/feed-fixture.mjs .   (from the repo root)
 // A disposable Conn server for the thread feed's scroll proofs (ConnUITests/FeedScrollUITests).
-// Threads: "feed" (30 finished turns) and "stream" (20 finished turns, then a running turn whose
-// reply streams), plus filler. The test drives the stream over HTTP, so growth is deterministic:
+// Threads: "feed" (30 finished turns), "tall" (14 turns of long replies, with a tall image in
+// every other question, the last one in view) and "stream" (20 finished turns, then a running turn whose reply
+// streams), plus filler. The test drives the stream over HTTP, so growth is deterministic:
 //   GET /grow?lines=N   appends N lines to the streaming reply and pushes a snapshot
 //   GET /add            appends a new streaming reply after the current one (a new feed row)
 //   GET /reset          starts over
 import { readFileSync } from "node:fs";
+import { deflateSync } from "node:zlib";
 
 const root = process.argv[2];
 const read = (p) => JSON.parse(readFileSync(root + "/crates/conn-state/tests/fixtures/" + p, "utf8"));
@@ -22,6 +24,7 @@ const iso = (ms) => new Date(ms).toISOString();
 const threadDefs = [
   { id: "feed", title: "Feed: long finished thread", pairs: 30, running: false },
   { id: "stream", title: "Feed: streaming reply", pairs: 20, running: true },
+  { id: "tall", title: "Feed: tall rows and images", pairs: 14, running: false, tall: true },
   ...Array.from({ length: 4 }, (_, i) => ({ id: "f" + i, title: "Filler thread " + i, pairs: 2, running: false })),
 ];
 const threads = threadDefs.map((def, i) => {
@@ -40,14 +43,54 @@ const subscribers = new Map();
 let streamLines = 0;
 let extraReplies = 0;
 
-function message(run, id, role, text, at, threadId, streaming = false) {
-  return { attachments: [], createdAt: at, createdBy: role === "user" ? "user" : "agent",
+// A 300 x 900 PNG, so a loaded image is taller than the 4:3 tile it shows before it loads.
+function png(width, height) {
+  const crcTable = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc = (buf) => {
+    let c = 0xffffffff;
+    for (const b of buf) c = crcTable[(c ^ b) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const body = Buffer.concat([Buffer.from(type), data]);
+    const out = Buffer.alloc(body.length + 8);
+    out.writeUInt32BE(data.length, 0);
+    body.copy(out, 4);
+    out.writeUInt32BE(crc(body), body.length + 4);
+    return out;
+  };
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 2;
+  const raw = Buffer.alloc((width * 3 + 1) * height);
+  for (let y = 0; y < height; y++) {
+    const row = y * (width * 3 + 1);
+    for (let x = 0; x < width; x++) {
+      raw[row + 1 + x * 3] = (y * 255 / height) | 0;
+      raw[row + 2 + x * 3] = 90;
+      raw[row + 3 + x * 3] = (x * 255 / width) | 0;
+    }
+  }
+  return Buffer.concat([Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]), chunk("IHDR", header),
+    chunk("IDAT", deflateSync(raw)), chunk("IEND", Buffer.alloc(0))]);
+}
+const tallImage = png(300, 900);
+const imageAttachment = (id) => ({ type: "image", id, name: "tall-" + id + ".png", mimeType: "image/png", sizeBytes: tallImage.length });
+
+function message(run, id, role, text, at, threadId, streaming = false, attachments = []) {
+  return { attachments, createdAt: at, createdBy: role === "user" ? "user" : "agent",
     creationSource: role === "user" ? "web" : "provider", id, nodeId: run.rootNodeId, role, runId: run.id,
     streaming, text, threadId, updatedAt: at };
 }
 
-function turnItem(run, mid, role, text, at, threadId, ordinal, streaming = false) {
-  return { attachments: [], completedAt: streaming ? null : at, createdBy: role === "user" ? "user" : "agent",
+function turnItem(run, mid, role, text, at, threadId, ordinal, streaming = false, attachments = []) {
+  return { attachments, completedAt: streaming ? null : at, createdBy: role === "user" ? "user" : "agent",
     creationSource: role === "user" ? "web" : "provider", id: "turn-item:" + mid,
     inputIntent: role === "user" ? "turn_start" : undefined, messageId: mid, nativeItemRef: null,
     nodeId: run.rootNodeId, ordinal, parentItemId: null, providerThreadId: null,
@@ -85,8 +128,9 @@ function buildProjection(id) {
       queuePosition: null, rootNodeId: "node:" + runId + ":root" };
     p.runs.push(run);
     const user = "Question " + (n + 1) + (n % 3 === 0 ? ": how does the feed keep its place when rows above it change height and new rows land below?" : ": keep going.");
-    p.messages.push(message(run, "u" + n, "user", user, at, id));
-    p.turnItems.push(turnItem(run, "u" + n, "user", user, at, id, ordinal * 1000000 + 1));
+    const files = def.tall && n % 2 === 1 ? [imageAttachment("img" + n)] : [];
+    p.messages.push(message(run, "u" + n, "user", user, at, id, false, files));
+    p.turnItems.push(turnItem(run, "u" + n, "user", user, at, id, ordinal * 1000000 + 1, false, files));
     if (running) {
       const text = streamText(Math.max(1, streamLines));
       p.messages.push(message(run, "a" + n, "assistant", text, at, id, true));
@@ -98,7 +142,11 @@ function buildProjection(id) {
         p.turnItems.push(turnItem(run, mid, "assistant", extra, at, id, ordinal * 1000000 + 3 + x, true));
       }
     } else {
-      const reply = [paragraph(n + 1), "", ...Array.from({ length: 1 + (n % 4) }, (_, k) => "- Point " + (k + 1) + " of reply " + (n + 1) + ".")].join("\n");
+      // The last reply is short, so the last question and its image open in view.
+      const tall = def.tall && n < total - 1;
+      const points = tall ? 8 + (n % 5) * 3 : 1 + (n % 4);
+      const body = tall ? [paragraph(n + 1), "", paragraph(n + 1), "", "```", ...Array.from({ length: 6 }, (_, k) => "line " + k + " of the code block"), "```", ""] : [paragraph(n + 1), ""];
+      const reply = [...body, ...Array.from({ length: points }, (_, k) => "- Point " + (k + 1) + " of reply " + (n + 1) + ".")].join("\n");
       p.messages.push(message(run, "a" + n, "assistant", reply, at, id));
       p.turnItems.push(turnItem(run, "a" + n, "assistant", reply, at, id, ordinal * 1000000 + 2));
     }
@@ -147,6 +195,7 @@ const server = Bun.serve({
       push("stream");
       return Response.json({ extra: extraReplies });
     }
+    if (path.startsWith("/assets/")) return new Response(tallImage, { headers: { "content-type": "image/png" } });
     if (path.endsWith("/outline")) return Response.json({ snapshotSequence: 1, markers: [] });
     if (path === "/api/auth/session") return Response.json({ authenticated: true });
     if (path === "/oauth/token") return Response.json({ access_token: "fixture" });
@@ -170,6 +219,9 @@ const server = Bun.serve({
           list.push({ ws, requestId: frame.id });
           subscribers.set(id, list);
           chunk(snapshot(id));
+        } else if (frame.tag === "assets.createUrl") {
+          const value = { relativeUrl: "/assets/" + frame.payload.resource.attachmentId, expiresAt: Date.now() + 3_600_000 };
+          ws.send(JSON.stringify({ _tag: "Exit", requestId: frame.id, exit: { _tag: "Success", value } }));
         } else if (frame.tag === "orchestration.dispatchCommand") {
           ws.send(JSON.stringify({ _tag: "Exit", requestId: frame.id, exit: { _tag: "Success", value: { sequence: 1 } } }));
         } else {

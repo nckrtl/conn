@@ -913,6 +913,14 @@ impl ShellState {
             if !visited.insert(thread.id.as_str()) {
                 return Some(start.id.as_str());
             }
+            // Another environment's copy of the parent id is not the parent.
+            let parent_here = match thread.delegated_from.as_ref() {
+                Some(from) if is_listed_lineage(&thread.lineage) => self.delegated_here(from),
+                _ => self.same_environment(&thread.id, parent_id),
+            };
+            if !parent_here {
+                return Some(start.id.as_str());
+            }
             match self.find_thread(parent_id) {
                 Some(parent) => thread = parent,
                 None => return Some(start.id.as_str()),
@@ -964,8 +972,12 @@ impl ShellState {
                 && (thread.lineage.relationship_to_parent == Some(Relationship::Subagent)
                     || thread.lineage.side_chat == Some(true))
             {
-                children.entry(parent).or_default().push(thread);
-            } else if let Some(from) = thread.delegated_from.as_ref() {
+                if self.same_environment(&thread.id, parent) {
+                    children.entry(parent).or_default().push(thread);
+                }
+            } else if let Some(from) = thread.delegated_from.as_ref()
+                && self.delegated_here(from)
+            {
                 children
                     .entry(from.thread_id.as_str())
                     .or_default()
@@ -1006,13 +1018,33 @@ impl ShellState {
     pub(crate) fn refresh_derived(&mut self) {
         let requests = rolled_up_requests(
             &self.threads,
-            |id| match self.foreign_of.get(id) {
-                Some(&index) => self.foreign.get(index).map(|f| f.environment_id.as_str()),
-                None => self.environment_id.as_deref(),
-            },
+            |id| self.environment_of(id),
             |env, named| self.names_environment(env, named),
         );
         self.requests = requests;
+    }
+
+    /// The environment `thread_id` came from, when a merge named it.
+    fn environment_of(&self, thread_id: &str) -> Option<&str> {
+        match self.foreign_of.get(thread_id) {
+            Some(&index) => self.foreign.get(index).map(|f| f.environment_id.as_str()),
+            None => self.environment_id.as_deref(),
+        }
+    }
+
+    /// Whether two listed threads came from one environment. Unmerged shells know no
+    /// environments and match by id.
+    fn same_environment(&self, a: &str, b: &str) -> bool {
+        match (self.environment_of(a), self.environment_of(b)) {
+            (Some(a), Some(b)) => a == b,
+            _ => true,
+        }
+    }
+
+    /// Whether the thread listed with `from`'s thread id is the one that delegated the task.
+    fn delegated_here(&self, from: &conn_contract::OrchestrationV2LinkedSender) -> bool {
+        self.environment_of(&from.thread_id)
+            .is_none_or(|env| self.names_environment(env, &from.environment_id))
     }
 
     /// Whether `named`, an id from a task's `delegatedFrom`, is merged environment `env`: its

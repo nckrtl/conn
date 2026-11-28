@@ -1879,4 +1879,58 @@ mod tests {
             Some(crate::shell::PendingSubagentRequest::Approval)
         );
     }
+
+    /// Env a and env b both hold `shared`; a's copy is listed. b's subagent of `shared` and
+    /// c's task delegated from b's `shared` belong to b's copy.
+    fn merged_with_a_foreign_shared_parent() -> ShellState {
+        let asks = |t: &mut Value| {
+            t["status"] = json!("running");
+            t["pendingRuntimeRequest"] =
+                json!({"id": "r", "kind": "command", "createdAt": "2026-11-13T09:00:00.000Z"});
+        };
+        let mut primary = ShellState::default();
+        primary.apply(snapshot(
+            vec![],
+            vec![thread_json("shared", "p", |_| {})],
+            vec![],
+        ));
+        let mut linked = LinkedShells::default();
+        linked.ensure("b", "b");
+        linked.apply(
+            "b",
+            snapshot(
+                vec![],
+                vec![
+                    thread_json("shared", "p", |_| {}),
+                    thread_json("sub", "p", |t| {
+                        t["lineage"]["parentThreadId"] = json!("shared");
+                        t["lineage"]["relationshipToParent"] = json!("subagent");
+                        asks(t);
+                    }),
+                ],
+                vec![],
+            ),
+        );
+        linked.ensure("c", "c");
+        let task = thread_json("task", "p", |t| {
+            t["delegatedFrom"] =
+                json!({"environmentId": "b", "threadId": "shared", "title": "Shared"});
+            asks(t);
+        });
+        linked.apply("c", snapshot(vec![], vec![task], vec![]));
+        linked.merged("a", "a", &primary).shell
+    }
+
+    #[test]
+    fn a_child_has_no_listed_ancestor_in_another_environments_thread_with_its_parents_id() {
+        let shell = merged_with_a_foreign_shared_parent();
+        assert_eq!(shell.listed_ancestor("sub"), Some("sub"));
+        assert_eq!(shell.listed_ancestor("task"), Some("task"));
+    }
+
+    #[test]
+    fn child_approvals_skip_children_of_another_environments_thread_with_the_same_id() {
+        let shell = merged_with_a_foreign_shared_parent();
+        assert!(shell.child_approval_threads("shared").is_empty());
+    }
 }

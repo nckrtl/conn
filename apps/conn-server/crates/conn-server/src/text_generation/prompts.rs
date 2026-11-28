@@ -4,9 +4,9 @@
 //! (`textGenerationUtils.ts`), `extractJsonObject` (`packages/shared/src/schemaJson.ts`) and
 //! the output schema `{ title, needsRefinement }`.
 //!
-//! The prompt texts come from the monorepo (`generated.rs`, by `tools/gen-upstream.mjs`).
-//! Lengths are UTF-16 units, as in JavaScript. `crates/conn-server/tools/textgen-diff.mjs`
-//! runs the T3 functions and these on the same cases and fails when they differ.
+//! The prompt texts are hand-owned (`generated.rs`). Lengths are UTF-16 units, as in
+//! JavaScript. The audit's `crates/conn-server/tools/textgen-diff.mjs` runs the T3 functions
+//! and these on the same cases and fails when they differ.
 
 use serde_json::Value;
 

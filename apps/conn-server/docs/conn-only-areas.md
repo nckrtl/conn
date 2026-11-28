@@ -78,9 +78,9 @@ lowercase. Names come from `mapSecretFieldGroups` (`S/settingsSecrets.ts`) and
   with `conn_support::secret_store`. The settings it hands its own code (`SettingsStore::raw`)
   hold the values read from the store, kept in memory as before. Before, it kept every value
   in `settings.json` (0600). Both servers can read and write the same state folder:
-  `crates/conn-server/tools/secrets-interop.mjs` runs the T3 server's own settings service and
-  this server on shared folders (a folder from before the change, saves by either server, a
-  key used for a text generator request) and checks that no value is lost or left in the file.
+  `secrets-interop.mjs` (removed with the TypeScript checks) ran the T3 server's own settings
+  service and this server on shared folders (a folder from before the change, saves by either server, a
+  key used for a text generator request) and checked that no value is lost or left in the file.
 - **Who can read a value.** The OS user that runs the server (and any process of that user,
   such as an agent's shell): the files are 0600 in a 0700 folder, in clear text, as in T3.
   No client can: no method returns a settings secret.

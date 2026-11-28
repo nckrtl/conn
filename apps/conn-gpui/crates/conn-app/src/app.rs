@@ -5793,10 +5793,6 @@ impl ConnApp {
                     }
                     let minute = now / 60;
                     let new_minute = minute != last_minute;
-                    if new_minute {
-                        // Threads leave the keep window as time passes.
-                        app.schedule_kept(cx);
-                    }
                     if app.thread_details.open || new_minute {
                         last_minute = minute;
                         cx.notify();

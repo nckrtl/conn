@@ -16,8 +16,7 @@ A key takes the registry's URL parser, which takes the remote text; that is why 
 here whole.
 
 `conn-source-control` shows `registry` as its own module and writes the wake texts
-(`pull_requests/watch.rs`). The checks live there too: `tools/registry-diff.mjs` and
-`tools/pr-watch-diff.mjs` run T3's functions and these on the same cases.
+(`pull_requests/watch.rs`).
 
 Put a rule here only when the engine needs it. Everything else about a host belongs in
 `conn-source-control`.

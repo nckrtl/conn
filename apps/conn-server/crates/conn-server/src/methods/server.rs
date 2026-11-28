@@ -102,12 +102,11 @@ pub fn register(table: &mut MethodTable, deps: &Deps) {
     table.unary("server.refreshProviders", move |_, input: Value| {
         let deps = providers.clone();
         async move {
-            use crate::model_manifest::Window;
             let only = input["instanceId"].as_str();
-            // T3 awaits the refresh before it answers. `modelCatalogOnly` (an opened model
-            // picker) ignores the other fields; the config stream carries the result.
+            // `modelCatalogOnly` (an opened model picker) ignores the other fields. T3 probes
+            // the providers only when an on-demand manifest fetch changed the manifest; the
+            // bundled manifest never changes, so nothing runs.
             if input["modelCatalogOnly"] == true {
-                super::provider::refresh_model_catalog(&deps).await;
                 return Ok(json!({ "providers": [] }));
             }
             // A workspace (`cwd`, `fresh`) is not scanned and keeps main's behaviour: the
@@ -122,9 +121,6 @@ pub fn register(table: &mut MethodTable, deps: &Deps) {
                 return Ok(json!({ "providers": current_providers(&deps) }));
             }
             let refresh_models = input["refreshModels"] == true;
-            if refresh_models && let Some(manifest) = &deps.model_manifest {
-                manifest.refresh(Window::Force).await;
-            }
             super::provider::refresh(&deps, only).await;
             if refresh_models {
                 super::provider::refresh_models(&deps, only).await?;
@@ -1106,13 +1102,12 @@ mod tests {
         }
     }
 
-    /// T3's `serverRefreshProviders`: `modelCatalogOnly` answers no providers and probes them
-    /// only when an on-demand manifest fetch changed the manifest; `refreshModels` runs each
+    /// T3's `serverRefreshProviders`: `modelCatalogOnly` answers no providers and probes none,
+    /// as the bundled manifest never changes; `refreshModels` runs each
     /// targeted provider's model refresh after the probe, and a failure answers
     /// `ProviderSetupError` with operation `refresh-models`.
     #[tokio::test(flavor = "current_thread")]
     async fn refresh_providers_follows_model_catalog_only_and_refresh_models() {
-        use crate::model_manifest::{ModelManifest, Source, tests as manifest};
         use crate::table::{CallContext, Handler};
         use std::sync::atomic::Ordering::Relaxed;
         let (env, dir) = environment();
@@ -1125,7 +1120,6 @@ mod tests {
             })
         };
         let (good, bad) = (model("good", false), model("bad", true));
-        let (url, server) = manifest::serve_once(manifest::manifest("2999-01-01T00:00:00.000Z"), 1);
         let deps = Deps {
             environment: Some(env.clone()),
             providers: vec![
@@ -1133,12 +1127,6 @@ mod tests {
                 bad.clone() as Arc<dyn conn_provider::Provider>,
             ]
             .into(),
-            model_manifest: Some(ModelManifest::with_source(
-                Source::Url(url),
-                dir.clone(),
-                env.clone(),
-                Default::default(),
-            )),
             ..Deps::default()
         };
         let mut table = MethodTable::new();
@@ -1148,32 +1136,28 @@ mod tests {
         };
         let call = |input: Value| call(CallContext::default(), input);
 
-        // A newer manifest: no providers in the reply, every provider probed once.
+        // An opened picker: no providers in the reply, nothing probed or refreshed.
         let reply = call(json!({"modelCatalogOnly": true, "refreshModels": true})).await;
         assert_eq!(reply, Ok(json!({"providers": []})));
-        assert_eq!(server.join().unwrap(), 1);
-        assert_eq!(good.probes.load(Relaxed), 1);
-        assert_eq!(bad.probes.load(Relaxed), 1);
+        assert_eq!(good.probes.load(Relaxed), 0);
+        assert_eq!(bad.probes.load(Relaxed), 0);
         assert_eq!(
             good.refreshes.load(Relaxed),
             0,
             "the other fields are ignored"
         );
-        // Fetched within 5 minutes: nothing changes, nothing is probed.
-        call(json!({"modelCatalogOnly": true})).await.unwrap();
-        assert_eq!(good.probes.load(Relaxed), 1);
 
         // Without `refreshModels` no model refresh runs.
         let reply = call(json!({"instanceId": "good"})).await.unwrap();
         assert_eq!(reply["providers"].as_array().unwrap().len(), 2);
         assert_eq!(good.refreshes.load(Relaxed), 0);
-        assert_eq!(good.probes.load(Relaxed), 2);
+        assert_eq!(good.probes.load(Relaxed), 1);
         // With it: the targeted instance only, probed again after its refresh.
         call(json!({"instanceId": "good", "refreshModels": true}))
             .await
             .unwrap();
         assert_eq!(good.refreshes.load(Relaxed), 1);
-        assert_eq!(good.probes.load(Relaxed), 4);
+        assert_eq!(good.probes.load(Relaxed), 3);
         assert_eq!(bad.refreshes.load(Relaxed), 0);
         let mut changes = deps.provider_status.subscribe();
         let seen = *changes.borrow_and_update();
@@ -1213,7 +1197,7 @@ mod tests {
         assert_eq!(good.probes.load(Relaxed), probes + 1);
         assert_eq!(reply["providers"], json!(current_providers(&deps)));
         // A workspace refresh keeps main's behaviour even with `refreshModels`: one probe,
-        // no manifest fetch or model refresh, every entry in the reply.
+        // no model refresh, every entry in the reply.
         let refreshes = good.refreshes.load(Relaxed);
         let reply = call(json!({"instanceId": "good", "cwd": "/w", "refreshModels": true}))
             .await
@@ -1287,11 +1271,10 @@ mod tests {
     }
 
     /// T3's shared `refreshAll` (`ProviderRegistry.test.ts`, "keeps a shared refresh running
-    /// after its first caller is interrupted"): a second opened picker joins the pass in
+    /// after its first caller is interrupted"): a second full refresh joins the pass in
     /// flight instead of answering early, and cancelling the first caller does not lose it.
     #[tokio::test(flavor = "current_thread")]
-    async fn model_catalog_refreshes_share_one_pass_that_outlives_its_first_caller() {
-        use crate::model_manifest::{ModelManifest, Source, tests as manifest};
+    async fn full_refreshes_share_one_pass_that_outlives_its_first_caller() {
         use crate::table::{CallContext, Handler};
         use std::sync::atomic::Ordering::Relaxed;
         let (env, dir) = environment();
@@ -1301,16 +1284,9 @@ mod tests {
             started: tokio::sync::Notify::new(),
             release: tokio::sync::Semaphore::new(0),
         });
-        let (url, server) = manifest::serve_once(manifest::manifest("2999-01-01T00:00:00.000Z"), 1);
         let deps = Deps {
             environment: Some(env.clone()),
             providers: vec![blocked.clone() as Arc<dyn conn_provider::Provider>].into(),
-            model_manifest: Some(ModelManifest::with_source(
-                Source::Url(url),
-                dir.clone(),
-                env.clone(),
-                Default::default(),
-            )),
             ..Deps::default()
         };
         let mut table = MethodTable::new();
@@ -1318,12 +1294,11 @@ mod tests {
         let Some(Handler::Unary(call)) = table.get("server.refreshProviders") else {
             panic!("server.refreshProviders is not registered");
         };
-        let picker = || call(CallContext::default(), json!({"modelCatalogOnly": true}));
+        let refresh = || call(CallContext::default(), json!({}));
 
-        let first = tokio::spawn(picker());
+        let first = tokio::spawn(refresh());
         blocked.started.notified().await;
-        assert_eq!(server.join().unwrap(), 1);
-        let second = tokio::spawn(picker());
+        let second = tokio::spawn(refresh());
         for _ in 0..16 {
             tokio::task::yield_now().await;
         }
@@ -1334,131 +1309,8 @@ mod tests {
         first.abort();
         let _ = first.await;
         blocked.release.add_permits(1);
-        assert_eq!(second.await.unwrap(), Ok(json!({"providers": []})));
+        assert!(second.await.unwrap().is_ok());
         assert_eq!(blocked.probes.load(Relaxed), 1, "one shared pass");
-        // The pass recorded the manifest it probed with: the next picker probes nothing.
-        assert_eq!(picker().await, Ok(json!({"providers": []})));
-        assert_eq!(blocked.probes.load(Relaxed), 1);
-        std::fs::remove_dir_all(dir).unwrap();
-    }
-
-    /// A provider that classifies two models with Codex's catalog code on each probe, as
-    /// `CodexDriver` applies `ModelCatalog.current` to its probe result.
-    struct CatalogProbe {
-        id: conn_contract::ProviderInstanceId,
-        manifest: conn_provider::LiveManifest,
-        entry: std::sync::Mutex<Value>,
-    }
-
-    impl conn_provider::Provider for CatalogProbe {
-        fn instance_id(&self) -> &conn_contract::ProviderInstanceId {
-            &self.id
-        }
-        fn driver(&self) -> &str {
-            "codex"
-        }
-        fn capabilities(
-            &self,
-        ) -> conn_provider::BoxFuture<
-            '_,
-            conn_provider::ProviderResult<conn_contract::ProviderCapabilities>,
-        > {
-            Box::pin(async {
-                Err(conn_provider::ProviderError::Unsupported {
-                    operation: "capabilities",
-                })
-            })
-        }
-        fn open_session(
-            &self,
-            _input: conn_provider::OpenSessionInput,
-        ) -> conn_provider::BoxFuture<'_, conn_provider::ProviderResult<conn_provider::OpenedSession>>
-        {
-            Box::pin(async {
-                Err(conn_provider::ProviderError::Unsupported {
-                    operation: "open_session",
-                })
-            })
-        }
-        fn server_provider_entry(&self, _checked_at: &str) -> Option<Value> {
-            Some(self.entry.lock().unwrap().clone())
-        }
-        fn refresh_status(&self, _instance: Option<Value>) -> conn_provider::BoxFuture<'_, ()> {
-            use conn_provider_codex::{CodexConfig, status};
-            let config = CodexConfig {
-                model_manifest: self.manifest.clone(),
-                ..CodexConfig::default()
-            };
-            let settings = status::StatusSettings {
-                enabled: true,
-                ..status::StatusSettings::default()
-            };
-            let checked_at = "2026-11-23T00:00:00.000Z";
-            let mut entry = status::pending_entry("codex", &config, &settings, &[], checked_at);
-            let no_options = json!({"optionDescriptors": []});
-            entry["models"] = json!([
-                {"slug": "gpt-6-astra", "name": "A", "isCustom": false, "isDefault": true,
-                 "aliases": ["default"], "capabilities": no_options},
-                {"slug": "gpt-x", "name": "X", "isCustom": false, "capabilities": no_options}
-            ]);
-            status::apply_model_catalog(&mut entry, &self.manifest, 0);
-            *self.entry.lock().unwrap() = entry;
-            Box::pin(async {})
-        }
-    }
-
-    /// T3 applies the current manifest to the probe result: once an opened picker fetched a
-    /// manifest with a new Codex default, `server.getConfig` shows it.
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_fetched_manifest_reaches_the_codex_entry_in_the_config() {
-        use crate::model_manifest::{ModelManifest, Source, tests as manifest};
-        use crate::table::{CallContext, Handler};
-        let (env, dir) = environment();
-        let live = conn_provider::LiveManifest::default();
-        let codex = Arc::new(CatalogProbe {
-            id: "codex".into(),
-            manifest: live.clone(),
-            entry: std::sync::Mutex::new(Value::Null),
-        });
-        let (url, server) = manifest::serve_once(manifest::manifest("2999-01-01T00:00:00.000Z"), 1);
-        let deps = Deps {
-            environment: Some(env.clone()),
-            providers: vec![codex.clone() as Arc<dyn conn_provider::Provider>].into(),
-            model_manifest: Some(ModelManifest::with_source(
-                Source::Url(url),
-                dir.clone(),
-                env.clone(),
-                live,
-            )),
-            ..Deps::default()
-        };
-        let mut table = MethodTable::new();
-        register(&mut table, &deps);
-        let unary = |method: &str| match table.get(method) {
-            Some(Handler::Unary(call)) => call.clone(),
-            _ => panic!("{method} is not registered"),
-        };
-        let default_model = |config: Value| {
-            config["providers"][0]["models"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|m| m["isDefault"] == true)
-                .map(|m| m["slug"].clone())
-        };
-        conn_provider::Provider::refresh_status(&*codex, None).await;
-        let config = unary("server.getConfig")(CallContext::default(), json!({}));
-        assert_eq!(
-            default_model(config.await.unwrap()),
-            Some(json!("gpt-6-astra"))
-        );
-
-        let picker = unary("server.refreshProviders");
-        let reply = picker(CallContext::default(), json!({"modelCatalogOnly": true})).await;
-        assert_eq!(reply, Ok(json!({"providers": []})));
-        assert_eq!(server.join().unwrap(), 1);
-        let config = unary("server.getConfig")(CallContext::default(), json!({}));
-        assert_eq!(default_model(config.await.unwrap()), Some(json!("gpt-x")));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1518,92 +1370,5 @@ mod tests {
             json!([command])
         );
         assert_eq!(out[1], without);
-    }
-
-    /// A provider whose probe ends abnormally on its first run.
-    struct Crashes {
-        id: conn_contract::ProviderInstanceId,
-        probes: std::sync::atomic::AtomicUsize,
-    }
-
-    impl conn_provider::Provider for Crashes {
-        fn instance_id(&self) -> &conn_contract::ProviderInstanceId {
-            &self.id
-        }
-        fn driver(&self) -> &str {
-            "codex"
-        }
-        fn capabilities(
-            &self,
-        ) -> conn_provider::BoxFuture<
-            '_,
-            conn_provider::ProviderResult<conn_contract::ProviderCapabilities>,
-        > {
-            Box::pin(async {
-                Err(conn_provider::ProviderError::Unsupported {
-                    operation: "capabilities",
-                })
-            })
-        }
-        fn open_session(
-            &self,
-            _input: conn_provider::OpenSessionInput,
-        ) -> conn_provider::BoxFuture<'_, conn_provider::ProviderResult<conn_provider::OpenedSession>>
-        {
-            Box::pin(async {
-                Err(conn_provider::ProviderError::Unsupported {
-                    operation: "open_session",
-                })
-            })
-        }
-        fn refresh_status(&self, _instance: Option<Value>) -> conn_provider::BoxFuture<'_, ()> {
-            let first = self
-                .probes
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                == 0;
-            Box::pin(async move {
-                assert!(!first, "the first probe ends abnormally");
-            })
-        }
-    }
-
-    /// T3 records the probed manifest only when the pass completes: a probe that ended
-    /// abnormally leaves it unprobed, so the next opened picker runs the pass again.
-    #[tokio::test(flavor = "current_thread")]
-    async fn an_abnormal_probe_leaves_the_manifest_unprobed() {
-        use crate::model_manifest::{ModelManifest, Source, tests as manifest};
-        use crate::table::{CallContext, Handler};
-        use std::sync::atomic::Ordering::Relaxed;
-        let (env, dir) = environment();
-        let crashes = Arc::new(Crashes {
-            id: "codex".into(),
-            probes: Default::default(),
-        });
-        let (url, server) = manifest::serve_once(manifest::manifest("2999-01-01T00:00:00.000Z"), 1);
-        let deps = Deps {
-            environment: Some(env.clone()),
-            providers: vec![crashes.clone() as Arc<dyn conn_provider::Provider>].into(),
-            model_manifest: Some(ModelManifest::with_source(
-                Source::Url(url),
-                dir.clone(),
-                env.clone(),
-                Default::default(),
-            )),
-            ..Deps::default()
-        };
-        let mut table = MethodTable::new();
-        register(&mut table, &deps);
-        let Some(Handler::Unary(call)) = table.get("server.refreshProviders") else {
-            panic!("server.refreshProviders is not registered");
-        };
-        let picker = || call(CallContext::default(), json!({"modelCatalogOnly": true}));
-        assert_eq!(picker().await, Ok(json!({"providers": []})));
-        assert_eq!(server.join().unwrap(), 1);
-        // The first pass ended abnormally, so a second pass ran in the same call.
-        assert_eq!(crashes.probes.load(Relaxed), 2);
-        // That one completed: the manifest counts as probed.
-        assert_eq!(picker().await, Ok(json!({"providers": []})));
-        assert_eq!(crashes.probes.load(Relaxed), 2);
-        std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -13,11 +13,8 @@
 //! server's secret store, `<state>/secrets/<name>.bin`, and the file holds `••••••` in their
 //! place (`settings/secrets.rs`); a secret found inline moves to the store at start, as in T3.
 //! Clients see secrets redacted per group, and a secret a client echoes as `••••••` keeps its
-//! stored value; the groups and fields come from the T3 server (`settings/generated.rs`, by
-//! `tools/gen-upstream.mjs`).
-//!
-//! `crates/conn-server/tools/settings-diff.mjs` runs the T3 server's own functions and this
-//! server on the same cases (`settings-cases.json`) and fails when they differ.
+//! stored value; the groups and fields come from the T3 server (`settings/generated.rs`,
+//! hand-owned).
 
 use std::{
     collections::BTreeMap,
@@ -817,7 +814,7 @@ fn patched_idle_compaction(settings: &Map<String, Value>, patch: &Map<String, Va
 
 /// A patch that picks a background activity preset, and nothing custom: the preset and its
 /// intervals (`applyServerSettingsPatch` with `normalizeBackgroundActivitySettings`). Custom
-/// intervals are not ported yet; settings-diff.mjs lists that case as a known difference.
+/// intervals are not ported yet.
 fn preset_background_profile(patch: &Map<String, Value>) -> Option<(&'static str, u64, u64)> {
     let custom = [
         "backgroundActivity",

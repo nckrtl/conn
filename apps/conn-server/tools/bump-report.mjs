@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Prints the report of what moved in Conn since the Conn Server last followed it: the contract,
 // /mcp, keybindings, scopes, engine commands, HTTP routes and the upstream files each part
-// follows, and what the Conn Server does not serve. tools/follow-conn.sh calls it.
+// follows, and what the Conn Server does not serve. tools/audit.sh calls it (--from, --to).
 //
 //   node tools/bump-report.mjs --before <snapshot dir> --from <old sha> --to <new sha>
 //        [--checks <file>] [--binary <conn-server>] [--reference-events <file>]

@@ -4,23 +4,19 @@ name: Conn Server CI
 # Format, Clippy, tests, cargo-deny and the canary run once in conn-server-checks.yml.
 
 on:
+  # Every PR starts the workflow; the `changes` job decides from the full diff, as in
+  # conn-server-checks.yml. GitHub's `paths` filter sees only part of a large PR's changes.
   pull_request:
-    paths:
-      - apps/conn-server/**
-      - .github/workflows/conn-server-ci.yml
-      - .github/workflows/conn-server-checks.yml
-  workflow_call:
-    inputs:
-      source_sha:
-        type: string
-        required: true
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: conn-server-ci-${{ github.event_name == 'workflow_run' && format('after-ci-{0}', github.run_id) || github.event.pull_request.number || github.sha }}
+  group: conn-server-ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -33,15 +29,59 @@ defaults:
     working-directory: apps/conn-server
 
 jobs:
+  changes:
+    name: Conn Server changes
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: .
+    outputs:
+      run: ${{ steps.detect.outputs.run }}
+    steps:
+      # A pull request checks out GitHub's merge commit with fetch-depth: 2, so its first
+      # parent is the base branch and the diff is the PR's change.
+      - name: Checkout
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 2
+          sparse-checkout: |
+            /.github/scripts/conn-server-checks-paths.cjs
+          sparse-checkout-cone-mode: false
+
+      # Fails open: when the diff cannot be resolved, the build runs.
+      - name: Detect
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -uo pipefail
+          run_all() {
+            echo "$* Running the build."
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          case "$EVENT_NAME" in
+            pull_request) base=HEAD^1 ;;
+            *) run_all "A ${EVENT_NAME} run always builds." ;;
+          esac
+          git diff -z --name-only --no-renames "$base" HEAD > "$RUNNER_TEMP/changed-paths" \
+            || run_all "Could not diff against ${base}."
+          node .github/scripts/conn-server-checks-paths.cjs "$RUNNER_TEMP/changed-paths" > "$RUNNER_TEMP/run" \
+            || run_all "Could not select."
+          cat "$RUNNER_TEMP/run" >> "$GITHUB_OUTPUT"
+
   musl:
     name: Linux musl release build
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 12
     steps:
       - name: Checkout
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
-          ref: ${{ inputs.source_sha }}
           sparse-checkout: |
             /apps/conn-server/
           sparse-checkout-cone-mode: false
@@ -89,7 +129,7 @@ jobs:
           path: apps/conn-server/target/x86_64-unknown-linux-musl/release/conn-server
           retention-days: 1
       - name: Save Cargo on main
-        if: github.event_name == 'workflow_run' && inputs.source_sha != '' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |

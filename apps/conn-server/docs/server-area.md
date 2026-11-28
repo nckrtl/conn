@@ -31,7 +31,7 @@ The small leftovers were done instead (see the end).
 | `server.probe` | orchestration:read | `methods/server.rs` | none |
 | `server.getConfig` | orchestration:read | `methods/server.rs`, `environment.rs` | settings, keybindings, providers |
 | `server.refreshProviders` | orchestration:read | `methods/server.rs` | provider entries |
-| `server.updateSettings` | settings:write | `settings.rs`, checked by `settings-diff.mjs` | `<state>/settings.json` |
+| `server.updateSettings` | settings:write | `settings.rs` and its tests | `<state>/settings.json` |
 | `server.upsertKeybinding`, `server.removeKeybinding` | settings:write | `keybindings.rs` | `<state>/keybindings.json` |
 | `server.getHostResources` | orchestration:read | `diagnostics.rs` | none (reads `/proc` or `sysctl`, `vm_stat`) |
 | `server.getProcessDiagnostics`, `server.signalProcess` | diagnostics:read; environment:maintain | `diagnostics.rs` | none |
@@ -189,11 +189,11 @@ that list.
 - **Payload limits.** The generated contract types carry no schema checks. `conn-support/src/input.rs`
   applies the length, pattern, range and entry-count checks of `assets.createUrl`,
   `server.listTextGeneratorModels` (the `ProviderInstanceId` of `id`, the base URL's length),
-  `terminal.open` and `terminal.attach`, generated from the schema AST by
-  `tools/gen-upstream.mjs`. A terminal env entry with a bad key (`1FOO`) is dropped, as
+  `terminal.open` and `terminal.attach`, from the schema AST (hand-owned since upstream
+  `05e3674636`). A terminal env entry with a bad key (`1FOO`) is dropped, as
   Effect's `Record` decode drops it; more than 128 entries, a key over 128 or a value over
   8,192 UTF-16 units fail. Proof: `tools/limits-cases.json` (43 cases) through the T3
-  contract's decode (`limits-diff.mjs`, a check step) and through `limits::check` (a test).
+  contract's decode (checked once, when generated) and through `limits::check` (a test).
   Add a method tag to `LIMITED_METHODS` to cover it. The hand limits in `methods/files.rs`
   could move to this table. Difference left: Effect trims a `TrimmedNonEmptyString` before it
   checks the length; this check reads the string as sent.
@@ -244,7 +244,8 @@ that list.
   key (`conn_source_control::Secret`); no `Debug`, error or log shows it.
 - **Proofs.** 22 unit tests (the cases of `TextGenerators.test.ts` on a loopback stub, the
   title retries on a paused clock, the project override); the client's decoders accept both
-  answers (`effect-client.mjs`); `textgen-diff.mjs` (a check step) runs T3's own code and
+  answers (`effect-client.mjs`, until the TypeScript checks were removed); `textgen-diff.mjs`
+  (in `tools/audit.sh`) runs T3's own code and
   ours against one loopback stub: 102 comparisons of answers, request method, path, headers
   and body bytes, prompts, thread contexts, sanitized titles and the model order.
 - **Headers.** Each request carries what Node's fetch adds for the T3 server: `accept: */*`,

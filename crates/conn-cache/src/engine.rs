@@ -21,6 +21,12 @@ use tokio::sync::{mpsc, oneshot};
 use crate::db::{self, ThreadIndex, ThreadWrite, Window};
 use crate::rows::{self, Change, OWN};
 
+/// How long the database task gathers writes before it commits them, unless a read comes.
+const WRITE_WINDOW: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// How often a changed thread list is saved at most. It is megabytes, and only a cache.
+const SHELL_SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The one setting: which threads stay on the device follows the thread list, not a setting.
 #[derive(Clone, Copy, Debug)]
 pub struct Settings {
@@ -65,8 +71,8 @@ impl Images {
 
 enum Job {
     Write(String, ThreadWrite),
-    /// The thread list to save, as `LinkedShellSnapshot` JSON.
-    Shell(Vec<u8>),
+    /// The thread list to save; the task writes it as `LinkedShellSnapshot` JSON.
+    Shell(Box<ShellState>),
     Read {
         thread: String,
         before: Option<f64>,
@@ -90,6 +96,8 @@ struct Held {
 /// A window on its way from the device, for [`Engine::finish_open`] or [`Engine::finish_older`].
 pub type Pending = oneshot::Receiver<Option<Window>>;
 
+type Committed = std::sync::Arc<std::sync::Mutex<HashMap<String, i64>>>;
+
 /// One environment's threads.
 pub struct Engine {
     env: String,
@@ -99,13 +107,20 @@ pub struct Engine {
     settings: Settings,
     index: HashMap<String, ThreadIndex>,
     held: HashMap<String, Held>,
-    /// Stream items for threads whose window is being read, applied once it arrives.
-    loading: HashMap<String, Vec<Item>>,
+    /// Stream items for threads whose window is being read, applied once it arrives, each
+    /// snapshot with its lowest timeline place.
+    loading: HashMap<String, Vec<(Item, Option<f64>)>>,
     open: Vec<String>,
     /// Closed threads still in memory, newest first.
     recent: VecDeque<String>,
     /// Subscribed threads and their catch-up rank.
     subscribed: HashMap<String, u32>,
+    /// The threads the last [`Self::update_kept`] keeps apart from being open; `None` before
+    /// the first.
+    kept: Option<HashSet<String>>,
+    /// Each thread's sequence as the database task last committed it: where a thread that left
+    /// its stream resumes.
+    committed: Committed,
     /// Threads whose stream sent something this client cannot read: their cursor stays put.
     stale: HashSet<String>,
     /// Threads whose rows a rollback hid: they wait for a fresh window.
@@ -118,6 +133,8 @@ pub struct Engine {
     /// answers.
     saved_shell: Option<ShellState>,
     shell_saved_at: Option<std::time::Instant>,
+    /// The shell sequence last saved: an unchanged list is not written again.
+    shell_saved_sequence: Option<Option<i64>>,
     next_generation: u64,
     runtime: tokio::runtime::Handle,
     perf: Perf,
@@ -167,7 +184,20 @@ impl Engine {
             .await?
             .and_then(|bytes| saved_shell(&bytes, env));
         let (jobs, rx) = mpsc::unbounded_channel();
-        tokio::spawn(run(pool.clone(), env.to_owned(), connection.clone(), rx));
+        // The cursors on the device are committed: a thread resumes only from one of those.
+        let committed: Committed = std::sync::Arc::new(std::sync::Mutex::new(
+            index
+                .iter()
+                .filter_map(|(id, ix)| Some((id.clone(), ix.cursor?)))
+                .collect(),
+        ));
+        tokio::spawn(run(
+            pool.clone(),
+            env.to_owned(),
+            connection.clone(),
+            rx,
+            committed.clone(),
+        ));
         Ok(Self {
             env: env.to_owned(),
             connection,
@@ -177,11 +207,14 @@ impl Engine {
             index,
             saved_shell,
             shell_saved_at: None,
+            shell_saved_sequence: None,
             held: HashMap::new(),
             loading: HashMap::new(),
             open: vec![],
             recent: VecDeque::new(),
             subscribed: HashMap::new(),
+            kept: None,
+            committed,
             stale: HashSet::new(),
             resetting: HashSet::new(),
             catching_up: HashSet::new(),
@@ -264,6 +297,8 @@ impl Engine {
         let mut write = ThreadWrite::default();
         let mut forget = false;
         let mut snapshot_floor: Option<f64> = None;
+        // The thread's own timeline row this event replaces: its id and place.
+        let mut own_row: Option<(String, Option<f64>)> = None;
         match &item {
             Item::Synchronized(_) => {}
             Item::Snapshot(snapshot) => {
@@ -287,6 +322,9 @@ impl Engine {
                     Change::Row(row) => {
                         if row.kind == "runs" && row.body["status"] == "rolled_back" {
                             self.reset(thread);
+                        }
+                        if row.kind == OWN {
+                            own_row = Some((row.id.clone(), row.ord));
                         }
                         let floor = self.index.get(thread).and_then(|ix| ix.floor);
                         let below = row.kind == OWN
@@ -340,7 +378,7 @@ impl Engine {
             self.note_synchronized(thread, caught_up);
         }
         if let Some(buffer) = self.loading.get_mut(thread) {
-            buffer.push(item);
+            buffer.push((item, snapshot_floor));
             return false;
         }
         let Some(held) = self.held.get_mut(thread) else {
@@ -355,13 +393,10 @@ impl Engine {
         }
         // An update of a row below the window stays on the device; drawing it at the end
         // would put an old row under the newest.
-        if let Item::Event(event) = &item
-            && let Some(floor) = held.floor
-            && let Ok(value) = serde_json::to_value(&event.event)
-            && let Change::Row(row) = rows::change_of(&value)
-            && row.kind == OWN
-            && row.ord.is_some_and(|ord| ord < floor)
-            && !held.state.entries.iter().any(|entry| entry.id() == row.id)
+        if let Some(floor) = held.floor
+            && let Some((id, ord)) = &own_row
+            && ord.is_some_and(|ord| ord < floor)
+            && !held.state.entries.iter().any(|entry| entry.id() == id)
         {
             return false;
         }
@@ -420,8 +455,9 @@ impl Engine {
         let Some(rank) = self.subscribed.get(id) else {
             return false;
         };
-        let after = self.index.get(id).and_then(|ix| ix.cursor);
-        self.connection.subscribe_thread_from(id, after, *rank);
+        let rank = *rank;
+        let after = self.cursor(id);
+        self.connection.subscribe_thread_from(id, after, rank);
         self.catching_up.insert(id.to_owned());
         true
     }
@@ -449,7 +485,7 @@ impl Engine {
             ix.opened_at = now_ms();
         }
         // The open thread catches up first.
-        let after = self.index.get(id).and_then(|ix| ix.cursor);
+        let after = self.cursor(id);
         if self.subscribed.get(id) != Some(&0) {
             if !self.subscribed.contains_key(id) {
                 self.catching_up.insert(id.to_owned());
@@ -506,13 +542,9 @@ impl Engine {
         };
         held.generation = self.next_generation;
         self.next_generation += 1;
-        for item in buffer {
+        for (item, floor) in buffer {
             if let Item::Snapshot(snapshot) = &item {
-                let projection = serde_json::to_value(&snapshot.projection).unwrap_or(Value::Null);
-                held.floor = rows::snapshot_rows(id, &projection)
-                    .iter()
-                    .filter_map(|row| row.ord)
-                    .reduce(f64::min);
+                held.floor = floor;
                 held.more_local = false;
                 held.older = snapshot.history_cursor.clone().flatten();
             }
@@ -530,11 +562,22 @@ impl Engine {
         true
     }
 
-    /// Closes a thread. It stays in memory among the last few closed, then leaves.
+    /// Closes a thread. It stays in memory among the last few closed, then leaves. A thread
+    /// the kept set does not hold (settled, say) leaves its stream now; its rows stay while it
+    /// is in memory, so opening it again resumes from its cursor, and go when it leaves.
     pub fn close_thread(&mut self, id: &str) {
         self.open.retain(|open| open != id);
-        if let Some(rank) = self.subscribed.get_mut(id) {
+        if !self.is_kept(id) {
+            if self.subscribed.remove(id).is_some() {
+                self.connection.unsubscribe_thread(id);
+            }
+            if !self.held.contains_key(id) {
+                self.forget(id, false);
+            }
+        } else if let Some(rank) = self.subscribed.get_mut(id) {
+            // The driver learns it too, so after a reconnect the open thread catches up first.
             *rank = rank.saturating_add(1);
+            self.connection.rank_thread(id, *rank);
         }
         if self.held.contains_key(id) {
             self.recent.retain(|recent| recent != id);
@@ -551,8 +594,28 @@ impl Engine {
         while self.recent.len() > limit {
             if let Some(id) = self.recent.pop_back() {
                 self.held.remove(&id);
+                if !self.is_kept(&id) && !self.subscribed.contains_key(&id) {
+                    self.forget(&id, false);
+                }
             }
         }
+    }
+
+    /// Where `id`'s stream resumes: the sequence its rows were last committed at. A thread
+    /// with no committed window, or one the device dropped, starts cold.
+    fn cursor(&self, id: &str) -> Option<i64> {
+        self.index.get(id)?;
+        self.committed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(id)
+            .copied()
+    }
+
+    /// Whether the kept set holds `id`; every thread is kept until the first
+    /// [`Self::update_kept`].
+    fn is_kept(&self, id: &str) -> bool {
+        self.kept.as_ref().is_none_or(|kept| kept.contains(id))
     }
 
     /// Asks for older rows of an open thread: from the device while it holds them, else one
@@ -630,19 +693,23 @@ impl Engine {
         self.saved_shell.take()
     }
 
-    /// Saves the thread list for the next launch: at most every few seconds, unless `now` (for
-    /// going to the background or quitting). Call it with a synchronized shell.
-    pub fn save_shell(&mut self, shell: &ShellState, now: bool) {
-        const EVERY: std::time::Duration = std::time::Duration::from_secs(5);
-        if !now && self.shell_saved_at.is_some_and(|at| at.elapsed() < EVERY) {
-            return;
-        }
+    /// Whether a thread list at `sequence` should be saved now: always when `now` (going to
+    /// the background or quitting), else only when it changed and the last save is
+    /// [`SHELL_SAVE_EVERY`] old. The list is a cache; the server's shell replaces it.
+    #[must_use]
+    pub fn shell_save_due(&self, sequence: Option<i64>, now: bool) -> bool {
+        now || (self.shell_saved_sequence != Some(sequence)
+            && self
+                .shell_saved_at
+                .is_none_or(|at| at.elapsed() >= SHELL_SAVE_EVERY))
+    }
+
+    /// Saves a synchronized thread list for the next launch. The database task serializes and
+    /// writes it, off the caller's thread. Ask [`Self::shell_save_due`] first.
+    pub fn save_shell(&mut self, shell: ShellState) {
         self.shell_saved_at = Some(std::time::Instant::now());
-        let snapshot =
-            conn_state::environments::LinkedShellSnapshot::capture_inventory(&self.env, shell);
-        if let Ok(bytes) = snapshot.to_json() {
-            let _ = self.jobs.send(Job::Shell(bytes));
-        }
+        self.shell_saved_sequence = Some(shell.sequence);
+        let _ = self.jobs.send(Job::Shell(Box::new(shell)));
     }
 
     /// Resolves once everything queued before this call is written, for a quit that must not
@@ -661,8 +728,14 @@ impl Engine {
     /// shell only: a thread missing from a shell is judged by its stored record, never by its
     /// absence.
     pub fn update_kept(&mut self, shell: &ShellState) {
+        self.update_kept_where(shell, |_| true);
+    }
+
+    /// [`Self::update_kept`] on the threads of `shell` that `own` accepts: a merged list judged
+    /// for one environment without copying it.
+    pub fn update_kept_where(&mut self, shell: &ShellState, own: impl Fn(&str) -> bool) {
         let mut want: HashMap<String, (u8, i64)> = HashMap::new();
-        for thread in shell.top_level_active_threads() {
+        for thread in shell.top_level_active_threads().filter(|t| own(&t.id)) {
             let tier = match shell.activity(&thread.id) {
                 ThreadActivity::NeedsAttention => 1,
                 ThreadActivity::Working => 2,
@@ -672,7 +745,7 @@ impl Engine {
             want.insert(thread.id.clone(), (tier, updated));
         }
         for (id, ix) in &self.index {
-            let shown = shell.find_thread(id);
+            let shown = shell.find_thread(id).filter(|_| own(id));
             if shown.is_some_and(|t| t.deleted_at.is_some()) {
                 continue;
             }
@@ -686,6 +759,7 @@ impl Engine {
                     .or_insert((3, ix.active_at.max(ix.opened_at)));
             }
         }
+        self.kept = Some(want.keys().cloned().collect());
         for id in &self.open {
             want.insert(id.clone(), (0, i64::MAX));
         }
@@ -702,13 +776,19 @@ impl Engine {
             } else {
                 u32::try_from(rank + 1).unwrap_or(u32::MAX)
             };
-            if self.subscribed.get(&id) != Some(&rank) {
-                let after = self.index.get(&id).and_then(|ix| ix.cursor);
-                if !self.subscribed.contains_key(&id) {
-                    self.catching_up.insert(id.clone());
+            match self.subscribed.get(&id) {
+                Some(now) if *now == rank => {}
+                // Only the order changes: a stream the server ended or refused stays down.
+                Some(_) => {
+                    self.connection.rank_thread(&id, rank);
+                    self.subscribed.insert(id, rank);
                 }
-                self.connection.subscribe_thread_from(&id, after, rank);
-                self.subscribed.insert(id, rank);
+                None => {
+                    let after = self.cursor(&id);
+                    self.catching_up.insert(id.clone());
+                    self.connection.subscribe_thread_from(&id, after, rank);
+                    self.subscribed.insert(id, rank);
+                }
             }
         }
         let leaving: Vec<String> = self
@@ -719,7 +799,15 @@ impl Engine {
             .cloned()
             .collect();
         for id in leaving {
-            self.forget(&id, false);
+            // A closed thread still in memory keeps its rows until it leaves memory, so
+            // opening it again resumes from its cursor.
+            if self.held.contains_key(&id) && !self.open.contains(&id) {
+                if self.subscribed.remove(&id).is_some() {
+                    self.connection.unsubscribe_thread(&id);
+                }
+            } else {
+                self.forget(&id, false);
+            }
         }
         if conn_client::perf::enabled() {
             self.perf.kept_ranked = true;
@@ -734,6 +822,10 @@ impl Engine {
             self.connection.unsubscribe_thread(id);
         }
         self.index.remove(id);
+        self.committed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(id);
         self.write(
             id,
             ThreadWrite {
@@ -759,7 +851,7 @@ pub struct Peek {
 /// while the connection is still being found. Neither is synchronized. Empty when the file is
 /// missing, of another schema, or busy.
 pub async fn peek(path: &Path, env: &str, thread: Option<&str>) -> Peek {
-    let Ok(pool) = db::open_existing(path).await else {
+    let Ok((pool, indexed)) = db::open_existing(path).await else {
         return Peek::default();
     };
     let shell = db::read_shell(&pool, env)
@@ -768,7 +860,7 @@ pub async fn peek(path: &Path, env: &str, thread: Option<&str>) -> Peek {
         .flatten()
         .and_then(|bytes| saved_shell(&bytes, env));
     let thread = match thread {
-        Some(id) => db::read_window(&pool, env, id, None)
+        Some(id) => db::read_window(&pool, env, id, None, indexed)
             .await
             .ok()
             .flatten()
@@ -804,11 +896,14 @@ fn held_from(id: &str, window: Window) -> Held {
         "projection": projection,
         "hasMoreHistory": more,
     });
-    match from_json::<Item>(snapshot) {
-        Ok(item) => {
+    // The snapshot struct itself, not the item union, whose `Deserialize` copies the whole
+    // window into a second DOM first (`conn_client`'s `decode_thread_stream_item`).
+    match serde_json::from_value::<conn_contract::OrchestrationV2ThreadStreamItemSnapshot>(snapshot)
+    {
+        Ok(snapshot) => {
             // Ready to draw, not caught up: `synchronized` waits for the stream's own marker,
             // so the syncing bar shows until the thread is current.
-            state.apply(item);
+            state.apply(Item::Snapshot(snapshot));
         }
         Err(e) => eprintln!("conn-cache: stored window of {id} does not decode: {e}"),
     }
@@ -823,41 +918,60 @@ fn held_from(id: &str, window: Window) -> Held {
 }
 
 /// The database task: commits everything queued in one transaction, moves the resume cursors,
-/// then answers the reads queued with it, so a read sees every write queued before it.
+/// then answers the reads queued with it, so a read sees every write queued before it. Writes
+/// alone are gathered for [`WRITE_WINDOW`] first; a cursor still moves only after its commit.
 async fn run(
     pool: SqlitePool,
     env: String,
     connection: Connection,
     mut jobs: mpsc::UnboundedReceiver<Job>,
+    committed_at: Committed,
 ) {
     let mut batch: HashMap<String, ThreadWrite> = HashMap::new();
-    let mut reads = vec![];
+    let mut reads: Reads = vec![];
     // Threads whose rows a failed write lost: their cursor stays until a fresh window, so a
     // later write cannot move it past the lost change.
     let mut frozen: HashSet<String> = HashSet::new();
-    let mut shell: Option<Vec<u8>> = None;
-    while let Some(job) = jobs.recv().await {
-        let mut next = Some(job);
-        while let Some(job) = next.take().or_else(|| jobs.try_recv().ok()) {
-            match job {
-                Job::Write(thread, write) => match batch.get_mut(&thread) {
-                    Some(earlier) => earlier.merge(write),
-                    None => {
-                        batch.insert(thread, write);
-                    }
-                },
-                Job::Read {
-                    thread,
-                    before,
-                    reply,
-                } => reads.push((thread, before, reply)),
-                Job::Shell(bytes) => shell = Some(bytes),
+    let mut shell: Option<Box<ShellState>> = None;
+    loop {
+        if batch.is_empty() && reads.is_empty() && shell.is_none() {
+            match jobs.recv().await {
+                Some(job) => take(job, &mut batch, &mut reads, &mut shell),
+                None => return,
             }
         }
-        if let Some(bytes) = shell.take()
-            && let Err(e) = db::write_shell(&pool, &env, &bytes).await
-        {
-            eprintln!("conn-cache: shell save failed: {e}");
+        // A read, a flush or the thread list goes at once; writes alone wait a moment for more,
+        // so a streaming turn commits a few times a second rather than on every token.
+        let mut closed = false;
+        let due = tokio::time::Instant::now() + WRITE_WINDOW;
+        loop {
+            while let Ok(job) = jobs.try_recv() {
+                take(job, &mut batch, &mut reads, &mut shell);
+            }
+            if !reads.is_empty() || shell.is_some() || batch.is_empty() {
+                break;
+            }
+            match tokio::time::timeout_at(due, jobs.recv()).await {
+                Ok(Some(job)) => take(job, &mut batch, &mut reads, &mut shell),
+                Ok(None) => {
+                    closed = true;
+                    break;
+                }
+                Err(_) => break,
+            }
+        }
+        if let Some(list) = shell.take() {
+            let saved =
+                conn_state::environments::LinkedShellSnapshot::capture_inventory(&env, &list);
+            drop(list);
+            match saved.to_json() {
+                Ok(bytes) => {
+                    if let Err(e) = db::write_shell(&pool, &env, &bytes).await {
+                        eprintln!("conn-cache: shell save failed: {e}");
+                    }
+                }
+                Err(e) => eprintln!("conn-cache: shell save failed: {e}"),
+            }
         }
         if !batch.is_empty() {
             let mut writes = std::mem::take(&mut batch);
@@ -869,9 +983,21 @@ async fn run(
                 }
             }
             let threads: Vec<String> = writes.keys().cloned().collect();
+            let forgotten: Vec<String> = writes
+                .iter()
+                .filter(|(_, write)| write.forget)
+                .map(|(thread, _)| thread.clone())
+                .collect();
             match db::commit(&pool, &env, writes).await {
                 Ok(committed) => {
+                    let mut at = committed_at
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    for thread in &forgotten {
+                        at.remove(thread);
+                    }
                     for (thread, seq) in committed {
+                        at.insert(thread.clone(), seq);
                         connection.set_thread_cursor(&thread, seq);
                     }
                 }
@@ -883,12 +1009,39 @@ async fn run(
             }
         }
         for (thread, before, reply) in reads.drain(..) {
-            let window = db::read_window(&pool, &env, &thread, before)
+            let window = db::read_window(&pool, &env, &thread, before, true)
                 .await
                 .ok()
                 .flatten();
             let _ = reply.send(window);
         }
+        if closed {
+            return;
+        }
+    }
+}
+
+type Reads = Vec<(String, Option<f64>, oneshot::Sender<Option<Window>>)>;
+
+fn take(
+    job: Job,
+    batch: &mut HashMap<String, ThreadWrite>,
+    reads: &mut Reads,
+    shell: &mut Option<Box<ShellState>>,
+) {
+    match job {
+        Job::Write(thread, write) => match batch.get_mut(&thread) {
+            Some(earlier) => earlier.merge(write),
+            None => {
+                batch.insert(thread, write);
+            }
+        },
+        Job::Read {
+            thread,
+            before,
+            reply,
+        } => reads.push((thread, before, reply)),
+        Job::Shell(list) => *shell = Some(list),
     }
 }
 
@@ -1001,6 +1154,7 @@ mod tests {
                 entries(&live)
             );
             settle(&first, &thread).await;
+            let first_cursor = first.cursor(&thread);
             drop(first);
 
             // At launch, before any connection: the same rows, read without writing.
@@ -1017,6 +1171,10 @@ mod tests {
                 second.index.get(&thread).and_then(|ix| ix.cursor),
                 last,
                 "cursor moved with the rows"
+            );
+            assert_eq!(
+                first_cursor, last,
+                "{fixture}: the engine resumes from the commit"
             );
             open(&mut second, &thread).await;
             let reopened = second
@@ -1073,6 +1231,31 @@ mod tests {
             .unwrap_or_default();
         assert_eq!(cursor(index), Some(9_000_002), "the fresh window moves it");
         assert!(engine.stale.is_empty() && engine.resetting.is_empty());
+    }
+
+    /// A first window that never reached the device leaves no cursor to resume from: opening
+    /// the thread asks for a snapshot, not the changes after one it does not hold.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_lost_first_window_resumes_from_nothing() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let items = stream("thread_turn_stream.json");
+        let thread = items[0]["projection"]["thread"]["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        let mut engine = engine(&dir.path().join("local.sqlite3"), Settings::default()).await;
+        sqlx::query(
+            "CREATE TRIGGER boom BEFORE INSERT ON rows BEGIN SELECT RAISE(ABORT, 'disk full'); END",
+        )
+        .execute(&engine.pool)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+        engine.handle(
+            &thread,
+            from_json(items[0].clone()).unwrap_or_else(|e| panic!("{e}")),
+        );
+        settle(&engine, &thread).await;
+        assert_eq!(engine.cursor(&thread), None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -1223,6 +1406,120 @@ mod tests {
         );
     }
 
+    /// Environments on one device file share its connection: their batches queue instead of
+    /// one failing on a locked file, and every cursor moves with its rows.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn environments_on_one_file_all_commit() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let path = dir.path().join("local.sqlite3");
+        let items = stream("thread_turn_stream.json");
+        let thread = items[0]["projection"]["thread"]["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        let rt = tokio::runtime::Handle::current();
+        let mut engines = vec![];
+        for env in ["a", "b", "c", "d"] {
+            let engine = Engine::open(&path, env, connection(&rt), Settings::default())
+                .await
+                .unwrap_or_else(|e| panic!("open: {e}"));
+            engines.push(engine);
+        }
+        for engine in &mut engines {
+            for item in &items {
+                engine.handle(
+                    &thread,
+                    from_json(item.clone()).unwrap_or_else(|e| panic!("{e}")),
+                );
+            }
+        }
+        for engine in &engines {
+            settle(engine, &thread).await;
+        }
+        let last = items.iter().filter_map(|i| i["sequence"].as_i64()).max();
+        for env in ["a", "b", "c", "d"] {
+            let index = db::read_index(&engines[0].pool, env)
+                .await
+                .unwrap_or_default();
+            assert_eq!(index.get(&thread).and_then(|ix| ix.cursor), last, "{env}");
+        }
+    }
+
+    /// The first launch after the upgrade peeks at a version 1 file, which lacks the window
+    /// indexes: the open thread still draws from it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_version_1_file_still_draws_at_launch() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let path = dir.path().join("local.sqlite3");
+        let items = stream("thread_turn_stream.json");
+        let thread = items[0]["projection"]["thread"]["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        let mut engine = engine(&path, Settings::default()).await;
+        engine.handle(
+            &thread,
+            from_json(items[0].clone()).unwrap_or_else(|e| panic!("{e}")),
+        );
+        settle(&engine, &thread).await;
+        sqlx::raw_sql(
+            "DROP INDEX rows_control_run; DROP INDEX rows_control_live; PRAGMA user_version = 1;",
+        )
+        .execute(&engine.pool)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+        let peeked = peek(&path, "env", Some(&thread)).await.thread;
+        assert!(peeked.is_some_and(|t| !t.entries.is_empty()));
+    }
+
+    /// A thread the kept set does not hold leaves its stream when it closes, not only on the
+    /// next shell change; a kept one stays subscribed.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn closing_an_unkept_thread_unsubscribes_it() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let mut engine = engine(&dir.path().join("local.sqlite3"), Settings::default()).await;
+        engine.close_thread("never-ranked");
+        open(&mut engine, "settled").await;
+        engine.close_thread("settled");
+        assert!(
+            engine.subscribed.contains_key("settled"),
+            "no kept set yet: kept until judged"
+        );
+        open(&mut engine, "settled").await;
+        engine.update_kept(&ShellState::default());
+        assert!(engine.subscribed.contains_key("settled"), "open: kept");
+        engine.close_thread("settled");
+        assert!(!engine.subscribed.contains_key("settled"), "closed: left");
+        engine.index.entry("settled".into()).or_default().cursor = Some(9);
+        engine
+            .committed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert("settled".into(), 9);
+        open(&mut engine, "settled").await;
+        assert!(
+            engine.subscribed.contains_key("settled"),
+            "reopened from its cursor"
+        );
+        engine.close_thread("settled");
+        engine.update_kept(&ShellState::default());
+        assert_eq!(
+            engine.cursor("settled"),
+            Some(9),
+            "a shell change keeps its rows"
+        );
+        for other in ["x1", "x2", "x3"] {
+            open(&mut engine, other).await;
+            engine.handle(
+                other,
+                from_json(json!({"kind": "synchronized"})).unwrap_or_else(|e| panic!("{e}")),
+            );
+            engine.close_thread(other);
+        }
+        assert!(engine.thread("settled").is_none(), "left memory");
+        assert!(!engine.index.contains_key("settled"), "and the device");
+    }
+
     /// The thread list saved on one launch draws on the next, before the server answers.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_saved_thread_list_opens_with_the_next_launch() {
@@ -1235,7 +1532,10 @@ mod tests {
         assert!(!path.exists(), "a peek creates no file");
         let mut first = engine(&path, Settings::default()).await;
         assert!(first.take_saved_shell().is_none());
-        first.save_shell(&shell, true);
+        assert!(first.shell_save_due(shell.sequence, false));
+        first.save_shell(shell.clone());
+        assert!(!first.shell_save_due(shell.sequence, false), "unchanged");
+        assert!(first.shell_save_due(shell.sequence, true), "at quit");
         settle(&first, "any").await;
         drop(first);
         let peeked = peek(&path, "env", None).await.shell;
@@ -1317,7 +1617,7 @@ mod tests {
         db::commit(&pool, "env", batch)
             .await
             .unwrap_or_else(|e| panic!("{e}"));
-        let window = db::read_window(&pool, "env", "t", None)
+        let window = db::read_window(&pool, "env", "t", None, true)
             .await
             .unwrap_or_else(|e| panic!("{e}"))
             .unwrap_or_else(|| panic!("a window"));
@@ -1327,6 +1627,215 @@ mod tests {
                 .iter()
                 .any(|row| row.kind == "messages" && row.id == "m2")
         );
+    }
+
+    /// A long thread's rows: per turn a user and an assistant message, `tools` tool items of
+    /// `pad` bytes, its run, attempt, provider turn, subagent and checkpoint; the last run is
+    /// live, and one more run is queued with only its message.
+    fn long_thread(turns: usize, tools: usize, pad: usize) -> ThreadWrite {
+        let mut write = ThreadWrite {
+            record: Some(json!({"id": "t", "updatedAt": "2026-11-28T00:00:00.000Z"})),
+            seq: Some(1),
+            ..ThreadWrite::default()
+        };
+        let body = "x".repeat(pad);
+        let mut ord = 0;
+        for turn in 0..turns {
+            let run = format!("r{turn}");
+            let live = turn + 1 == turns;
+            let mut item = |kind: &str, extra: Value| {
+                ord += 1;
+                let mut it = json!({"id": format!("i{ord}"), "ordinal": ord, "type": kind,
+                    "runId": run, "status": "completed"});
+                if let (Value::Object(it), Value::Object(extra)) = (&mut it, extra) {
+                    it.extend(extra);
+                }
+                write.put(rows::row(OWN, it));
+            };
+            item(
+                "user_message",
+                json!({"messageId": format!("mu{turn}"), "text": body}),
+            );
+            for _ in 0..tools {
+                item("command_execution", json!({"output": body}));
+            }
+            item(
+                "assistant_message",
+                json!({"messageId": format!("ma{turn}"), "text": body}),
+            );
+            let status = if live { "running" } else { "completed" };
+            write.put(rows::row("runs", json!({"id": run, "status": status})));
+            write.put(rows::row(
+                "attempts",
+                json!({"id": format!("a{turn}"), "runId": run, "status": status}),
+            ));
+            write.put(rows::row(
+                "providerTurns",
+                json!({"id": format!("p{turn}"), "runAttemptId": format!("a{turn}")}),
+            ));
+            write.put(rows::row(
+                "subagents",
+                json!({"id": format!("s{turn}"), "runId": run, "prompt": body}),
+            ));
+            write.put(rows::row(
+                "checkpoints",
+                json!({"id": format!("c{turn}"), "runId": run}),
+            ));
+            for id in [format!("mu{turn}"), format!("ma{turn}")] {
+                write.put(rows::row(
+                    "messages",
+                    json!({"id": id, "runId": run, "text": body}),
+                ));
+            }
+        }
+        write.put(rows::row(
+            "runs",
+            json!({"id": "rq", "status": "queued", "userMessageId": "mq"}),
+        ));
+        write.put(rows::row(
+            "messages",
+            json!({"id": "mq", "runId": "rq", "text": "queued"}),
+        ));
+        write.put(rows::row(
+            "messages",
+            json!({"id": "loose", "text": "no run"}),
+        ));
+        write
+    }
+
+    /// The thread line keeps what a write leaves out: fields patch a stored record, a change
+    /// never moves the cursor back, a fresh window does, and `older` changes only when given.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_thread_line_keeps_what_a_write_leaves_out() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let pool = db::open(&dir.path().join("local.sqlite3"))
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let commit = |write: ThreadWrite| {
+            let pool = pool.clone();
+            async move {
+                let mut batch = HashMap::new();
+                batch.insert("t".to_owned(), write);
+                db::commit(&pool, "env", batch)
+                    .await
+                    .unwrap_or_else(|e| panic!("{e}"));
+                db::read_index(&pool, "env")
+                    .await
+                    .unwrap_or_default()
+                    .remove("t")
+                    .unwrap_or_default()
+            }
+        };
+        let record = json!({"id": "t", "title": "a", "updatedAt": "2026-11-28T00:00:00.000Z"});
+        let ix = commit(ThreadWrite {
+            record: Some(record),
+            seq: Some(10),
+            older: Some(Some("c1".into())),
+            ..ThreadWrite::default()
+        })
+        .await;
+        assert_eq!((ix.cursor, ix.older.as_deref()), (Some(10), Some("c1")));
+        assert!(ix.active_at > 0);
+        let ix = commit(ThreadWrite {
+            record_fields: Some(json!({"lastVisitedAt": "x"})),
+            seq: Some(7),
+            opened_at: Some(5),
+            ..ThreadWrite::default()
+        })
+        .await;
+        let record = ix.record.unwrap_or_default();
+        assert_eq!(
+            (record["title"].as_str(), record["lastVisitedAt"].as_str()),
+            (Some("a"), Some("x"))
+        );
+        assert_eq!(
+            (ix.cursor, ix.older.as_deref(), ix.opened_at),
+            (Some(10), Some("c1"), 5),
+            "kept"
+        );
+        let ix = commit(ThreadWrite {
+            reset: true,
+            seq: Some(4),
+            older: Some(None),
+            ..ThreadWrite::default()
+        })
+        .await;
+        assert_eq!(
+            (ix.cursor, ix.older, ix.opened_at),
+            (Some(4), None, 5),
+            "a fresh window"
+        );
+        assert_eq!(ix.record.unwrap_or_default()["title"], "a");
+    }
+
+    /// The control rows a window brings are exactly those of the query before the indexes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn window_control_rows_match_the_scanning_query() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let pool = db::open(&dir.path().join("local.sqlite3"))
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut batch = HashMap::new();
+        batch.insert("t".to_owned(), long_thread(60, 3, 16));
+        db::commit(&pool, "env", batch)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let window = db::read_window(&pool, "env", "t", None, true)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("a window"));
+        let mut runs: Vec<String> = window
+            .timeline
+            .iter()
+            .filter_map(|r| r.run.clone())
+            .collect();
+        runs.sort();
+        runs.dedup();
+        let attempts: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM rows WHERE env = 'env' AND thread = 't' AND kind = 'attempts'
+             AND run IN (SELECT value FROM json_each(?))",
+        )
+        .bind(serde_json::to_string(&runs).unwrap_or_default())
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+        let mut scope = runs.clone();
+        scope.extend(attempts);
+        let ids: Vec<&str> = window
+            .timeline
+            .iter()
+            .filter_map(|r| r.body["messageId"].as_str())
+            .collect();
+        let before: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(db::CONTROL_ROWS_SCAN)
+            .bind("env")
+            .bind("t")
+            .bind(serde_json::to_string(&rows::ALWAYS).unwrap_or_default())
+            .bind(serde_json::to_string(&scope).unwrap_or_default())
+            .bind(serde_json::to_string(&ids).unwrap_or_default())
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut before: Vec<(String, String)> = before
+            .iter()
+            .map(|row| (sqlx::Row::get(row, 0), sqlx::Row::get(row, 1)))
+            .collect();
+        let mut now: Vec<(String, String)> = window
+            .control
+            .iter()
+            .map(|r| (r.kind.clone(), r.id.clone()))
+            .collect();
+        before.sort();
+        now.sort();
+        assert!(
+            now.iter().any(|(k, id)| k == "messages" && id == "mq"),
+            "queued message"
+        );
+        assert!(
+            now.iter().any(|(k, _)| k == "providerTurns"),
+            "attempt rows"
+        );
+        assert!(!now.iter().any(|(_, id)| id == "loose"), "out of scope");
+        assert_eq!(now, before);
     }
 
     /// When the device file cannot be opened, the engine runs on a database in memory: threads
@@ -1430,7 +1939,7 @@ mod tests {
             .unwrap_or_default();
         assert!(!index.contains_key(&thread));
         assert!(
-            db::read_window(&engine.pool, "env", &thread, None)
+            db::read_window(&engine.pool, "env", &thread, None, true)
                 .await
                 .ok()
                 .flatten()

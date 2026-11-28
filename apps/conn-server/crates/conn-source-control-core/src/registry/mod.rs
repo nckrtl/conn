@@ -5,8 +5,7 @@
 //! T3: `packages/source-control-core/src/shared/definition.ts` (`makeSourceControlDefinitionRegistry`
 //! and its helpers), with only `packages/source-control-github/src/shared/definition.ts`.
 //! URLs use the WHATWG parser (`url`), as `new URL` reads them. What only clients use (icons, autolinks, media, checkout commands, settings
-//! forms) is not here. `tools/registry-diff.mjs` runs T3's registry and this one on the same
-//! cases and fails on any difference.
+//! forms) is not here.
 
 mod paths;
 pub mod thread_keys;

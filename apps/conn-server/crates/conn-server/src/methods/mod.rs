@@ -66,8 +66,6 @@ pub struct Deps {
     pub oauth: Option<Arc<crate::oauth::McpOAuth>>,
     /// Links to other environments (`crate::peers`); without it `peerLinks.*` is not served.
     pub peers: Option<Arc<crate::peers::PeerLinks>>,
-    /// `model-manifest.json` (`crate::model_manifest`); `server.refreshProviders` refreshes it.
-    pub model_manifest: Option<Arc<crate::model_manifest::ModelManifest>>,
     /// `provider.auth.*` flows (`provider_auth`).
     pub provider_auth: provider_auth::AuthFlows,
 }

@@ -1,5 +1,4 @@
-//! Cases from T3's `definition.test.ts` files. `tools/registry-diff.mjs` runs many more against
-//! T3's own registry.
+//! Cases from T3's `definition.test.ts` files.
 
 use super::thread_keys::{
     KeySource, legacy_thread_pull_request_key, normalize_thread_pull_request_key,

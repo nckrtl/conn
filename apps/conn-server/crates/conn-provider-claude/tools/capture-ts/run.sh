@@ -22,7 +22,7 @@ CAPTURE_CLI_DIR="$(cd "$CAPTURE_CLI_DIR" && pwd)"
 # Sealed: T3's code runs with a throwaway HOME and only what node needs from the shell, so it
 # finds no real ~/.claude and no ANTHROPIC_*, CLAUDE_* or token variable.
 sealed_home="$(mktemp -d "${TMPDIR:-/tmp}/conn-claude-sealed.XXXXXX")"
-# Under the canary (tools/check.sh), its Node hook and logs pass the seal; nothing else does.
+# Under the canary (tools/audit.sh), its Node hook and logs pass the seal; nothing else does.
 canary_env=()
 if [ -n "${CONN_CANARY_ROOT:-}" ]; then
   canary_env=(NODE_OPTIONS="${NODE_OPTIONS:-}" CONN_CANARY_ROOT="$CONN_CANARY_ROOT"

@@ -1,5 +1,5 @@
-//! `conn-server` with the engine's scripted fake provider in place of Claude, for
-//! `tools/replay.mjs`: same flags, same routes, no model calls.
+//! `conn-server` with the engine's scripted fake provider in place of Claude, for the flows
+//! in `tools/check.sh`: same flags, same routes, no model calls.
 
 use std::sync::Arc;
 

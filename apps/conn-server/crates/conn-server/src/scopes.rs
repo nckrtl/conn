@@ -1,5 +1,5 @@
-//! The auth scope each RPC method needs. The table is generated (`scopes/generated.rs`, by
-//! `tools/gen-upstream.mjs`) from `RPC_REQUIRED_SCOPES` in
+//! The auth scope each RPC method needs. The table (`scopes/generated.rs`, hand-owned) holds
+//! `RPC_REQUIRED_SCOPES` in
 //! `apps/server/src/auth/RpcAuthorization.ts` and `CLIENT_GUARDED_RPC_SCOPES` in
 //! `packages/contracts/src/clientRpcPermissions.ts`. The rules that read the payload stay by
 //! hand in [`from_payload`]; a test holds their list to the T3 server's.
@@ -321,15 +321,14 @@ mod tests {
         for method in conn_contract::methods() {
             assert!(
                 is_declared(&method.tag),
-                "`{}` has no scope: run tools/gen-upstream.mjs",
+                "`{}` has no scope: add it to scopes/generated.rs",
                 method.tag
             );
         }
         assert_eq!(
             SCOPES.len(),
             conn_contract::methods().len(),
-            "scopes/generated.rs and the contract come from different Conn commits: \
-             run tools/gen-upstream.mjs"
+            "scopes/generated.rs and methods.json list different methods"
         );
     }
 

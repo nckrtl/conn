@@ -1,130 +1,100 @@
-# Upkeep: keep the Conn Server in step with Conn
+# Upkeep: keep the Conn Server in step with upstream T3
 
-The Conn Server lives in the Conn monorepo (`apps/conn-server`), so it always meets the Conn
-commit it is part of. Every generator reads this tree, and a generated file that differs from
-it fails a check. No step calls a model.
+CI runs only native checks: `tools/check.sh` needs nothing outside `apps/conn-server` and no
+TypeScript. The comparisons against the T3 server are the audit kit, `tools/audit.sh`, which
+the `audit-t3-providers` skill runs. No step calls a model.
 
 ## When the checks run
 
-Pull requests trigger both workflows directly when their path filters match. Both workflows also support manual runs.
+- `conn-server-checks.yml` (`tools/check.sh`): every pull request starts it; its `changes`
+  job runs the checks only when the diff touches what they read
+  (`.github/scripts/conn-server-checks-paths.cjs`: `apps/conn-server/**`, the root
+  `rustfmt.toml`, the three Conn Server workflows and the selector). Pushes to main always
+  run it. Two jobs: `--group rust` (format, clippy, tests, decode check, gateway-api, cargo
+  deny, sealed run) and `--group flows` (release build with every example, capabilities,
+  orbit-flow, instances-flow). Both end with the canary. The final `Conn Server checks` gate
+  fails if either fails.
+- `conn-server-ci.yml` (production musl build): every main push, and every pull request whose
+  full diff the same selector (`.github/scripts/conn-server-checks-paths.cjs`) picks.
+- `conn-server-release.yml`: a `conn-server-v*` tag.
 
-After the first completion of CI for a main push, `conn-server-after-ci.yml` applies the same
-filters to the original push range. It runs the selected workflows at the pushed SHA even
-if CI failed. Companion results are published on that SHA. A companion retry updates the
-same report for each gate of that source CI run.
+Only main pushes save Rust caches. Each check has a timeout that stops its process group;
+each CI job also has a time limit.
 
-The path filters are:
+## Frozen files
 
-- `conn-server-ci.yml` (production musl build): `apps/conn-server/**` and both workflow files.
-- `conn-server-checks.yml` (`tools/check.sh`, including monorepo comparisons):
-  `apps/conn-server/**`, `apps/server/**`, `apps/web/**`, `packages/**` and both workflow files.
+The contract, the `/mcp` catalog and texts, the upstream tables, the instruction texts and the
+case files were generated from Conn's TypeScript tree until the generators were removed. They
+are hand-owned since upstream T3 Code `05e3674636`; README.md, "Frozen files", lists them. A
+change is an edit by hand with a test. Regenerating them from upstream would delete Conn's own
+features, so upstream changes to their sources are ported by hand: the audit's report lists
+them per part.
 
-`conn-server-checks.yml` builds release and debug comparison binaries in parallel, shares
-them as one-day artifacts, and runs four comparison groups. Rust validation runs in parallel with the build;
-all groups run the canary. Only companion jobs for main pushes save Rust and pnpm caches.
-The final `Conn Server checks` gate fails if any group fails or skips.
-Each check has a timeout that stops its process group; each CI job also has a time limit.
+## The audit
 
-## After a change in Conn
+Full upstream merges ended after 2026-11-19 (`FORK.md`, "Relationship to T3 Code"). Upstream
+provider fixes are ported by hand through the `audit-t3-providers` skill; scope is the
+container profile, the areas `docs/orbit-profile.md` rates needed or useful.
 
-Full upstream merges ended after 2026-11-19, and the nightly sync that followed the Conn
-Server has stopped (`FORK.md`, "Relationship to T3 Code"). Run `tools/follow-conn.sh` when
-the contract, the web client or `apps/server` in this tree changes. Upstream provider fixes
-are ported by hand; scope is the container profile, the areas `docs/orbit-profile.md` rates
-needed or useful. An in-scope change that cannot be ported yet becomes a known difference
-with its reason, in the check's known list and in `docs/status.md`. A check is never
-weakened to pass.
+`tools/audit.sh [--from <sha> --to <sha>]` runs, with the canary:
+
+- the provider comparisons: Codex, Claude, ACP (Grok) and Antigravity conformance; the Codex,
+  Claude and Grok probe conformance; the Claude T3 replay; the T3 fixture replay;
+- `provider-auth-diff` and `textgen-diff`;
+- the frozen model catalogs (`--check`) and the Claude Agent SDK pin (`tools/sdk-pin.mjs`);
+- with `--from` and `--to`, `tools/bump-report.mjs`: the upstream commits in that range for
+  each part (`tools/upkeep/followed-files.txt`), frozen parts included.
+
+It needs `vp i` at the monorepo root and `npm ci` in `helpers/sdk-host`, and it reads the
+TypeScript tree of this monorepo. Run it in your own checkout or worktree: the capture tools put
+temporary test files into the monorepo's `apps/server`.
+
+An in-scope change that cannot be ported yet becomes a known difference with its reason, in
+the tool's known list and in `docs/status.md`. A tool is never weakened to pass.
 
 Source-control parity follows only GitHub and the core registry's unknown-host fallback
-(`docs/scope.md`, "Platforms and hosts"). `registry-diff` constructs T3's registry with its GitHub
-definition alone; it does not import or harvest other hosts. The followed files include
-source-control core and GitHub, but no other host packages.
+(`docs/scope.md`, "Platforms and hosts"). The followed files include source-control core and
+GitHub, but no other host packages.
 
-## The tools
+### Adopt upstream changes
 
-| Command | What it does |
-| --- | --- |
-| `tools/follow-conn.sh [--since <commit>] [--capture] [--no-checks]` | Regenerates the contract, the `/mcp` catalog and texts, the keybindings, the upstream tables (`tools/gen-upstream.mjs`: scopes, settings keys, HTTP routes, the T3 server version, settings secrets), the Codex and ACP instruction texts and the Claude model catalog, runs `tools/check.sh`, and prints the report of what moved in Conn since `<commit>` (default: the last commit that changed `apps/conn-server`). `--capture` also regenerates the provider crates' reference events (about 2 minutes). It never commits. It exits 1 when a step fails, or when the contract has more Opaque fallbacks than before. |
-| `tools/check.sh` | Every check that needs no model. |
+The capture tools (`crates/conn-provider-codex/tools/capture-ts-events.mjs`,
+`crates/conn-provider-acp/tools/capture-ts-events.mjs`,
+`crates/conn-provider-claude/tools/capture-ts/run.sh`) bring new upstream fixtures into the
+provider crates' `testdata`; `tools/reference-events.mjs` then puts back every reference file
+whose events did not change, so `git diff` shows only real changes. The catalog generators
+without `--check` refresh the Codex, Antigravity and Claude catalogs, and a copy of the T3
+server's `model-manifest.json` refreshes `crates/conn-server/src/model_manifest/bundled.json`.
+The `cargo test` replays then hold them in CI. New models reach users with a Conn Server
+release.
 
-`follow-conn.sh` keeps its log and report in `target/follow-conn/<commit>.{log,report.txt}`.
-Run it in your own checkout or worktree, after `vp i` at the root and `npm ci` in
-`helpers/sdk-host`: `--capture` puts temporary test files into the monorepo's `apps/server`.
+### When an audit tool is red
 
-## Green (exit 0)
-
-1. Commit every change on a branch, with the report as the commit body, and open a pull
-   request when Nick allows it. The Conn Server checks run on it.
-2. Read **What to do** at the top of the report: it lists the red checks, the served methods
-   and `/mcp` tools that changed shape, the provider parts with upstream commits and the state
-   of their conformance checks, pins that differ, and changed reference events. A green run
-   can still list work there.
-
-A new method that we do not serve stays unregistered and answers "not supported": that is
-correct, not a failure. A changed provider file means the provider crate may need to follow it.
-
-## Red (exit 1)
-
-The tree keeps the regenerated state. Fix it as below, or commit it on a branch with `WIP: red`
-in the subject and the report as the body, and hand the branch to a person or an agent.
-
-## Fix a red run
-
-Read the report, then the log. Then:
-
-| Failed step | Usual cause | Fix |
+| Tool | Usual cause | Fix |
 | --- | --- | --- |
-| `gen-contract` | A schema shape the generator does not know, or an Effect upgrade | Change `crates/conn-contract/tools/gen-contract.mjs`. Never edit `generated.rs`. |
-| More Opaque fallbacks | Same | Same. The report prints a warning. |
-| `gen-tools` | The T3 server registers a new service, or drops a tool we serve | Add the service to the mock list in `gen-tools.mjs`, or remove the tool from `tools.implemented` and from `conn-mcp`. |
-| `gen-keybindings` | `packages/shared` moved its defaults | Update `gen-keybindings.mjs`. |
-| `gen-upstream` | An upstream table moved or changed shape (scope maps, `EnvironmentHttpApi`, `settingsSecrets.ts` groups) | Update `tools/gen-upstream.mjs`; its error names the source. Never edit a generated file. |
-| `opaque fallbacks` | The contract generator met a shape it cannot type | Teach `gen-contract.mjs` the shape. |
-| `cargo test` in `scopes` | The T3 server added or dropped a payload-dependent scope rule | Follow `requiredScopesForRpcCall` and `clientRpcRequiredScopes` in `scopes.rs` `from_payload` and `HAND_PAYLOAD_RULES`. |
-| `cargo test engine_commands` | The contract dropped or renamed a command type the engine handles | Follow the rename in `crates/conn-engine/src/commands.rs`. |
-| `check-copies` | A hand-kept auth or wire table no longer matches upstream | Update `auth.rs` or `conn-wire` to the value the check prints. |
-| `decode coverage` | A newly registered method has no run that decodes its answer | Add a call to `effect-client.mjs`; only if that is impossible, a line with a reason in `decode-coverage.pending`. |
-| `capabilities` | The contract has a new capability flag, or a method was registered whose flag is still off | Give the flag a row in `crates/conn-server/tools/capabilities.json` that says what proves it. Turn the flag on in `environment.rs` only when the server serves what it promises; until then the row carries `off` with the reason. |
-| `settings-diff` | The T3 server's settings rules moved | Follow the printed path in `settings.rs`, and add a case to `settings-cases.json`. |
-| `cargo clippy`, `cargo test`, `release build` | A changed method type | Follow the **changed** lines of the report in `crates/conn-server/src/methods`. |
-| `effect-client`, `replay`, `client-check` | The wire, the frame parts or the client reducers moved | Compare with `packages/shared/src/socketFrameParts.ts` and the `effect` version in the lockfile. |
-| `parity` | `/mcp` answers moved | Compare with the T3 server's `/mcp` for the tools in the report. |
-| `cargo test` in `conn-mcp` catalog | `fixtures/ts-tools-list.json` is a T3 `tools/list` from an older Conn | `node crates/conn-mcp/tools/parity.mjs --record-tools-list crates/conn-mcp/fixtures/ts-tools-list.json target/release/examples/replay_server` |
 | `codex conformance`, `claude conformance` | What a CLI is sent moved upstream (argv, environment, the spawn script, a prompt text) | Follow the adapter commits in the report. The diff names the field. A launch difference is a defect, never a listed exception. |
 | `claude t3-replay` | A T3 Claude transcript changed its result | Fix the session; if it is a known gap, list it in `crates/conn-provider-claude/tools/t3-replay/expected-failures.txt` with the reason. A listed one that passes fails too: remove it. |
-| `claude catalog --check` | T3's bundled Claude models moved | `crates/conn-provider-claude/tools/gen-catalog/run.sh` (follow-conn.sh runs it). |
-| `gen-upstream` says a settings key "needs …" | A settings patch key needs a new scope set | Teach `gen-upstream.mjs` and `scopes.rs` `settings_scopes` the domain. |
+| `claude catalog --check` and the other catalogs | T3's bundled models moved | Run the generator without `--check`, and refresh `bundled.json`. |
+| `sdk pin` | T3 moved its Claude Agent SDK | Move `helpers/sdk-host/package.json` and `npm install`, then rerun the Claude tools and the capture. |
+
+## When a check is red
+
+| Failed check | Usual cause | Fix |
+| --- | --- | --- |
+| `cargo test` in `scopes` | A payload-dependent scope rule changed | Follow `from_payload` and `HAND_PAYLOAD_RULES` in `scopes.rs`. |
+| `cargo test engine_commands` | A command type the engine handles was dropped or renamed in the contract | Follow the rename in `crates/conn-engine/src/commands.rs`. |
+| `capabilities` | The contract has a new capability flag, or a method was registered whose flag is still off | Give the flag a row in `crates/conn-server/tools/capabilities.json` that says what proves it. Turn the flag on in `environment.rs` only when the server serves what it promises; until then the row carries `off` with the reason. |
+| `cargo clippy`, `cargo test`, `release build` | A changed method type | Follow the change in `crates/conn-server/src/methods`. |
 | `cargo deny` | A new advisory | Plan the crate change; add a dated exception to `deny.toml` only with a reason. |
-
-Then run `tools/check.sh` until it is green, and commit as for a green run.
-
-For each part in **Upstream commits per part** that changed, read the commits (the report
-prints the subjects) and the diff in Conn (`git diff <old> <new> -- <the part's files>`), and
-compare them with that part here. A served method whose shape changed needs the same: the
-report groups them by the types that moved. When the report says a pin differs
-(`← differs`), move the pin (`helpers/sdk-host/package.json` and `npm install` for the Claude
-Agent SDK; `check-copies` fails until it matches T3's lockfile), then run `follow-conn.sh`
-again with `--capture`.
-
-`--capture` runs both capture tools. `tools/reference-events.mjs` then puts back every
-reference file whose events did not change (uuids, capture-day times, temp folder names and
-notes are normalized), so `git diff` shows only real changes, and the report lists them.
 
 ## Notes
 
-- To find the Conn commit that broke a check, check out older commits of the monorepo in a
-  worktree and run `tools/check.sh` there.
-- `tools/upkeep/followed-files.txt` maps Conn pathspecs to the part here that follows them
+- `tools/upkeep/followed-files.txt` maps upstream pathspecs to the part here that follows them
   (crates and some files of `conn-server`). Add a pathspec when a part starts to follow a
-  file. The report lists new upstream files no part follows; that list is for reading, and
-  never fails a run.
-- `tools/upkeep/http-routes.json` is generated: the T3 server's HTTP routes. The report
-  compares it with the routes this server registers.
-- A new upstream method, route or command type that we do not serve is reported, not
-  failed. A changed scope, settings secret field or server version changes a generated file
-  and shows in the report.
-- `tools/upkeep/mcp-tools.json` holds a digest of each T3 `/mcp` tool. It lets the next
-  run say which tool changed and which part.
+  file. The report lists new upstream files no part follows; that list is for reading.
+- `tools/upkeep/http-routes.json` holds the T3 server's HTTP routes, and
+  `tools/upkeep/mcp-tools.json` a digest of each T3 `/mcp` tool, both frozen. The report
+  compares them with what this server registers.
 
 ## Bumps
 

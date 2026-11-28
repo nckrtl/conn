@@ -1,7 +1,6 @@
 //! A pull request watch's evaluation and its wake texts, as T3's
 //! `apps/server/src/orchestration-v2/pullRequestWatch.ts` decides them:
 //! `evaluatePullRequestWatch`, `pullRequestWatchMessage` and `combinePullRequestWatchWakes`.
-//! `tools/pr-watch-diff.mjs` runs the same cases through T3's functions and ours.
 //!
 //! Watches, details and remarks stay JSON: the watch's optional fields mean different things
 //! when absent and when `null`, as in T3.

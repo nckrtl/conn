@@ -35,8 +35,6 @@ futures-util = { version = "0.3", default-features = false, features = ["alloc"]
 regex-automata.workspace = true
 
 [dev-dependencies]
-# examples/pr_link_sync_cases.rs applies a sync's commands with the engine's deciders.
-conn-engine.workspace = true
 conn-support = { workspace = true, features = ["test-util"] }
 tokio = { workspace = true, features = ["rt", "macros", "test-util", "net"] }
 

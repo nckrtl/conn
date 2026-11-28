@@ -1,5 +1,5 @@
-# The T3 tools conn-server serves, one per line. `tools/gen-tools.mjs` writes their
-# definitions from apps/server into src/catalog.jsonl; a test checks every name has a handler.
+# The T3 tools conn-server serves, one per line. Their definitions are in src/catalog.jsonl
+# (hand-owned); a test checks every name has a handler.
 orchestrator_capabilities
 delegate_task
 task_status

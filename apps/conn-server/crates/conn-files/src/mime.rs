@@ -392,38 +392,6 @@ mod tests {
         assert_eq!(sniff(b"%PDF-1.4"), Some("application/pdf"));
     }
 
-    /// `PREVIEW_ASSET_EXTENSIONS` in the T3 server's `AssetAccess.ts`, plus the browser
-    /// documents it spreads in: a change there fails here.
-    #[test]
-    fn page_dependencies_follow_the_t3_server() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../..");
-        let read = |path: &str| std::fs::read_to_string(root.join(path)).unwrap();
-        let literals = |text: &str| -> Vec<String> {
-            text.split('"')
-                .skip(1)
-                .step_by(2)
-                .filter(|s| s.starts_with('.'))
-                .map(str::to_owned)
-                .collect()
-        };
-        let shared = read("packages/shared/src/filePreview.ts");
-        let browser = shared
-            .split("WORKSPACE_BROWSER_PREVIEW_EXTENSIONS = [")
-            .nth(1)
-            .and_then(|rest| rest.split(']').next())
-            .unwrap();
-        let access = read("apps/server/src/assets/AssetAccess.ts");
-        let set = access
-            .split("PREVIEW_ASSET_EXTENSIONS = new Set([")
-            .nth(1)
-            .and_then(|rest| rest.split("]);").next())
-            .unwrap();
-        assert!(set.contains("...WORKSPACE_BROWSER_PREVIEW_EXTENSIONS"));
-        let mut expected = literals(browser);
-        expected.extend(literals(set));
-        assert_eq!(PAGE_DEPENDENCY, expected);
-    }
-
     #[test]
     fn reads_image_sizes() {
         let mut png = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR".to_vec();

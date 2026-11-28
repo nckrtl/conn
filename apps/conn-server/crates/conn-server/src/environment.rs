@@ -499,10 +499,10 @@ mod tests {
 mod orbit_instance_tests {
     use super::*;
 
+    /// A copy of Conn's TypeScript server fixture (`apps/server/src/orbit/fixtures`).
     #[test]
-    fn reads_the_typescript_servers_orbit_instance_fixture() {
-        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../server/src/orbit/fixtures/orbit-instance");
+    fn reads_the_orbit_instance_fixture() {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("testdata/orbit-instance");
         let facts = read_orbit_instance(&fixture);
         let descriptor = descriptor("existing-id", "Test server", false, facts);
 

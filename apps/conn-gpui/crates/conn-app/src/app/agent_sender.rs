@@ -94,6 +94,8 @@ impl ConnApp {
         sender: &AgentMessageSender,
         cx: &mut Context<'_, Self>,
     ) {
+        self.sender_open_generation += 1;
+        let generation = self.sender_open_generation;
         let viewed = self.layout.selected_thread_id.clone();
         let Some((environment, thread_id)) = self.sender_thread(sender, viewed.as_deref()) else {
             return;
@@ -117,8 +119,10 @@ impl ConnApp {
         cx.spawn(async move |this, cx| {
             let live = connection.thread_is_live(&thread_id).await;
             let _ = this.update(cx, |app, cx| {
-                // The answer is for the thread the click came from.
-                if app.layout.selected_thread_id != viewed {
+                // Only the latest click acts, and only while its thread is still open.
+                if app.sender_open_generation != generation
+                    || app.layout.selected_thread_id != viewed
+                {
                     return;
                 }
                 match live {

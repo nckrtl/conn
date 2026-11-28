@@ -7367,6 +7367,51 @@ fn a_switched_off_environment_does_not_claim_a_configured_id_it_shares(cx: &mut 
 }
 
 #[gpui_kit::test]
+fn a_switched_away_primary_does_not_lend_its_configured_id_to_the_new_one(cx: &mut TestAppContext) {
+    // The primary was `a` (config id `a-config`); the app switched to another server, which has
+    // not reported its config yet. `a` is now linked and holds the parent; its task on `c`
+    // names the parent's server `a-config`.
+    let mut task = make_thread_shell(ThreadSeedSpec {
+        id: "thread-task",
+        project_id: "proj-c",
+        title: "Task",
+        status: "running",
+        activity_run_status: Some("running"),
+        pinned_at: None,
+        settled_at: None,
+        pending_kind: Some("command"),
+    });
+    task.delegated_from = Some(
+        from_json(json!({
+            "environmentId": "a-config", "threadId": "thread-a", "title": "Parent"
+        }))
+        .unwrap(),
+    );
+    let mut c = linked_shell_named("c");
+    c.threads = vec![task];
+    let (_window, app) = mount_app(cx);
+    cx.update(|cx| {
+        app.update(cx, |app, cx| {
+            app.learn_primary_environment_for_test("a-config", cx);
+            app.switch_server_state_for_test(cx);
+            app.set_shell(kitchen_sink_shell(), cx);
+            for (id, configured, shell) in [
+                ("a", "a-config", linked_shell_named("a")),
+                ("c", "c-config", c),
+            ] {
+                app.set_linked_config_for_test(id, server_config_of(configured));
+                app.add_linked_shell_for_test(id, id, shell, cx);
+            }
+        });
+    });
+    assert_eq!(
+        cx.read(|cx| app.read(cx).merged_subagent_request_for_test("thread-a")),
+        Some(conn_state::PendingSubagentRequest::Approval),
+        "`a-config` names linked `a`, not the new primary"
+    );
+}
+
+#[gpui_kit::test]
 fn a_scratch_thread_on_another_machine_names_its_machine_on_the_meta_line(cx: &mut TestAppContext) {
     let (window, app) = mount_app(cx);
     cx.update(|cx| {

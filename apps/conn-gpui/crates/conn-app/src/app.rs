@@ -1970,6 +1970,7 @@ impl ConnApp {
         }
         let change = std::sync::Arc::make_mut(&mut self.server_config).apply(event);
         if change.config_changed {
+            self.sync_environment_aliases();
             let root = self
                 .server_config
                 .scratch_workspace_root()

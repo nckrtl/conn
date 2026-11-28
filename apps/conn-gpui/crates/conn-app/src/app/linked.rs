@@ -670,12 +670,14 @@ impl ConnApp {
     /// Hands the merge the id each server's config reports for itself: a delegated task names
     /// its parent's environment by it, while merges name environments by Orbit target id or URL.
     /// Only held shells take one, so a switched-off environment's config claims nothing. A
-    /// changed id is saved with the shell. Returns whether any changed.
+    /// changed id is saved with the shell. The primary's id comes from the connected primary's
+    /// config only: the saved `primary_environment` may still name the server switched away
+    /// from. Returns whether any changed.
     fn record_configured_ids(&mut self) -> bool {
         let mut changed = self
             .linked
             .shells
-            .set_primary_configured_id(self.primary_environment.as_deref());
+            .set_primary_configured_id(self.server_config.environment_id());
         let reported: Vec<(String, String)> = self
             .linked
             .configs

@@ -21,6 +21,9 @@ use tokio::sync::{mpsc, oneshot};
 use crate::db::{self, ThreadIndex, ThreadWrite, Window};
 use crate::rows::{self, Change, OWN};
 
+/// How long the database task gathers writes before it commits them, unless a read comes.
+const WRITE_WINDOW: std::time::Duration = std::time::Duration::from_millis(200);
+
 /// How often a changed thread list is saved at most. It is megabytes, and only a cache.
 const SHELL_SAVE_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
@@ -848,7 +851,7 @@ pub struct Peek {
 /// while the connection is still being found. Neither is synchronized. Empty when the file is
 /// missing, of another schema, or busy.
 pub async fn peek(path: &Path, env: &str, thread: Option<&str>) -> Peek {
-    let Ok(pool) = db::open_existing(path).await else {
+    let Ok((pool, indexed)) = db::open_existing(path).await else {
         return Peek::default();
     };
     let shell = db::read_shell(&pool, env)
@@ -857,7 +860,7 @@ pub async fn peek(path: &Path, env: &str, thread: Option<&str>) -> Peek {
         .flatten()
         .and_then(|bytes| saved_shell(&bytes, env));
     let thread = match thread {
-        Some(id) => db::read_window(&pool, env, id, None)
+        Some(id) => db::read_window(&pool, env, id, None, indexed)
             .await
             .ok()
             .flatten()
@@ -915,7 +918,8 @@ fn held_from(id: &str, window: Window) -> Held {
 }
 
 /// The database task: commits everything queued in one transaction, moves the resume cursors,
-/// then answers the reads queued with it, so a read sees every write queued before it.
+/// then answers the reads queued with it, so a read sees every write queued before it. Writes
+/// alone are gathered for [`WRITE_WINDOW`] first; a cursor still moves only after its commit.
 async fn run(
     pool: SqlitePool,
     env: String,
@@ -924,27 +928,36 @@ async fn run(
     committed_at: Committed,
 ) {
     let mut batch: HashMap<String, ThreadWrite> = HashMap::new();
-    let mut reads = vec![];
+    let mut reads: Reads = vec![];
     // Threads whose rows a failed write lost: their cursor stays until a fresh window, so a
     // later write cannot move it past the lost change.
     let mut frozen: HashSet<String> = HashSet::new();
     let mut shell: Option<Box<ShellState>> = None;
-    while let Some(job) = jobs.recv().await {
-        let mut next = Some(job);
-        while let Some(job) = next.take().or_else(|| jobs.try_recv().ok()) {
-            match job {
-                Job::Write(thread, write) => match batch.get_mut(&thread) {
-                    Some(earlier) => earlier.merge(write),
-                    None => {
-                        batch.insert(thread, write);
-                    }
-                },
-                Job::Read {
-                    thread,
-                    before,
-                    reply,
-                } => reads.push((thread, before, reply)),
-                Job::Shell(list) => shell = Some(list),
+    loop {
+        if batch.is_empty() && reads.is_empty() && shell.is_none() {
+            match jobs.recv().await {
+                Some(job) => take(job, &mut batch, &mut reads, &mut shell),
+                None => return,
+            }
+        }
+        // A read, a flush or the thread list goes at once; writes alone wait a moment for more,
+        // so a streaming turn commits a few times a second rather than on every token.
+        let mut closed = false;
+        let due = tokio::time::Instant::now() + WRITE_WINDOW;
+        loop {
+            while let Ok(job) = jobs.try_recv() {
+                take(job, &mut batch, &mut reads, &mut shell);
+            }
+            if !reads.is_empty() || shell.is_some() || batch.is_empty() {
+                break;
+            }
+            match tokio::time::timeout_at(due, jobs.recv()).await {
+                Ok(Some(job)) => take(job, &mut batch, &mut reads, &mut shell),
+                Ok(None) => {
+                    closed = true;
+                    break;
+                }
+                Err(_) => break,
             }
         }
         if let Some(list) = shell.take() {
@@ -996,12 +1009,39 @@ async fn run(
             }
         }
         for (thread, before, reply) in reads.drain(..) {
-            let window = db::read_window(&pool, &env, &thread, before)
+            let window = db::read_window(&pool, &env, &thread, before, true)
                 .await
                 .ok()
                 .flatten();
             let _ = reply.send(window);
         }
+        if closed {
+            return;
+        }
+    }
+}
+
+type Reads = Vec<(String, Option<f64>, oneshot::Sender<Option<Window>>)>;
+
+fn take(
+    job: Job,
+    batch: &mut HashMap<String, ThreadWrite>,
+    reads: &mut Reads,
+    shell: &mut Option<Box<ShellState>>,
+) {
+    match job {
+        Job::Write(thread, write) => match batch.get_mut(&thread) {
+            Some(earlier) => earlier.merge(write),
+            None => {
+                batch.insert(thread, write);
+            }
+        },
+        Job::Read {
+            thread,
+            before,
+            reply,
+        } => reads.push((thread, before, reply)),
+        Job::Shell(list) => *shell = Some(list),
     }
 }
 
@@ -1405,6 +1445,33 @@ mod tests {
         }
     }
 
+    /// The first launch after the upgrade peeks at a version 1 file, which lacks the window
+    /// indexes: the open thread still draws from it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_version_1_file_still_draws_at_launch() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let path = dir.path().join("local.sqlite3");
+        let items = stream("thread_turn_stream.json");
+        let thread = items[0]["projection"]["thread"]["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        let mut engine = engine(&path, Settings::default()).await;
+        engine.handle(
+            &thread,
+            from_json(items[0].clone()).unwrap_or_else(|e| panic!("{e}")),
+        );
+        settle(&engine, &thread).await;
+        sqlx::raw_sql(
+            "DROP INDEX rows_control_run; DROP INDEX rows_control_live; PRAGMA user_version = 1;",
+        )
+        .execute(&engine.pool)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+        let peeked = peek(&path, "env", Some(&thread)).await.thread;
+        assert!(peeked.is_some_and(|t| !t.entries.is_empty()));
+    }
+
     /// A thread the kept set does not hold leaves its stream when it closes, not only on the
     /// next shell change; a kept one stays subscribed.
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
@@ -1550,7 +1617,7 @@ mod tests {
         db::commit(&pool, "env", batch)
             .await
             .unwrap_or_else(|e| panic!("{e}"));
-        let window = db::read_window(&pool, "env", "t", None)
+        let window = db::read_window(&pool, "env", "t", None, true)
             .await
             .unwrap_or_else(|e| panic!("{e}"))
             .unwrap_or_else(|| panic!("a window"));
@@ -1560,6 +1627,215 @@ mod tests {
                 .iter()
                 .any(|row| row.kind == "messages" && row.id == "m2")
         );
+    }
+
+    /// A long thread's rows: per turn a user and an assistant message, `tools` tool items of
+    /// `pad` bytes, its run, attempt, provider turn, subagent and checkpoint; the last run is
+    /// live, and one more run is queued with only its message.
+    fn long_thread(turns: usize, tools: usize, pad: usize) -> ThreadWrite {
+        let mut write = ThreadWrite {
+            record: Some(json!({"id": "t", "updatedAt": "2026-11-28T00:00:00.000Z"})),
+            seq: Some(1),
+            ..ThreadWrite::default()
+        };
+        let body = "x".repeat(pad);
+        let mut ord = 0;
+        for turn in 0..turns {
+            let run = format!("r{turn}");
+            let live = turn + 1 == turns;
+            let mut item = |kind: &str, extra: Value| {
+                ord += 1;
+                let mut it = json!({"id": format!("i{ord}"), "ordinal": ord, "type": kind,
+                    "runId": run, "status": "completed"});
+                if let (Value::Object(it), Value::Object(extra)) = (&mut it, extra) {
+                    it.extend(extra);
+                }
+                write.put(rows::row(OWN, it));
+            };
+            item(
+                "user_message",
+                json!({"messageId": format!("mu{turn}"), "text": body}),
+            );
+            for _ in 0..tools {
+                item("command_execution", json!({"output": body}));
+            }
+            item(
+                "assistant_message",
+                json!({"messageId": format!("ma{turn}"), "text": body}),
+            );
+            let status = if live { "running" } else { "completed" };
+            write.put(rows::row("runs", json!({"id": run, "status": status})));
+            write.put(rows::row(
+                "attempts",
+                json!({"id": format!("a{turn}"), "runId": run, "status": status}),
+            ));
+            write.put(rows::row(
+                "providerTurns",
+                json!({"id": format!("p{turn}"), "runAttemptId": format!("a{turn}")}),
+            ));
+            write.put(rows::row(
+                "subagents",
+                json!({"id": format!("s{turn}"), "runId": run, "prompt": body}),
+            ));
+            write.put(rows::row(
+                "checkpoints",
+                json!({"id": format!("c{turn}"), "runId": run}),
+            ));
+            for id in [format!("mu{turn}"), format!("ma{turn}")] {
+                write.put(rows::row(
+                    "messages",
+                    json!({"id": id, "runId": run, "text": body}),
+                ));
+            }
+        }
+        write.put(rows::row(
+            "runs",
+            json!({"id": "rq", "status": "queued", "userMessageId": "mq"}),
+        ));
+        write.put(rows::row(
+            "messages",
+            json!({"id": "mq", "runId": "rq", "text": "queued"}),
+        ));
+        write.put(rows::row(
+            "messages",
+            json!({"id": "loose", "text": "no run"}),
+        ));
+        write
+    }
+
+    /// The thread line keeps what a write leaves out: fields patch a stored record, a change
+    /// never moves the cursor back, a fresh window does, and `older` changes only when given.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_thread_line_keeps_what_a_write_leaves_out() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let pool = db::open(&dir.path().join("local.sqlite3"))
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let commit = |write: ThreadWrite| {
+            let pool = pool.clone();
+            async move {
+                let mut batch = HashMap::new();
+                batch.insert("t".to_owned(), write);
+                db::commit(&pool, "env", batch)
+                    .await
+                    .unwrap_or_else(|e| panic!("{e}"));
+                db::read_index(&pool, "env")
+                    .await
+                    .unwrap_or_default()
+                    .remove("t")
+                    .unwrap_or_default()
+            }
+        };
+        let record = json!({"id": "t", "title": "a", "updatedAt": "2026-11-28T00:00:00.000Z"});
+        let ix = commit(ThreadWrite {
+            record: Some(record),
+            seq: Some(10),
+            older: Some(Some("c1".into())),
+            ..ThreadWrite::default()
+        })
+        .await;
+        assert_eq!((ix.cursor, ix.older.as_deref()), (Some(10), Some("c1")));
+        assert!(ix.active_at > 0);
+        let ix = commit(ThreadWrite {
+            record_fields: Some(json!({"lastVisitedAt": "x"})),
+            seq: Some(7),
+            opened_at: Some(5),
+            ..ThreadWrite::default()
+        })
+        .await;
+        let record = ix.record.unwrap_or_default();
+        assert_eq!(
+            (record["title"].as_str(), record["lastVisitedAt"].as_str()),
+            (Some("a"), Some("x"))
+        );
+        assert_eq!(
+            (ix.cursor, ix.older.as_deref(), ix.opened_at),
+            (Some(10), Some("c1"), 5),
+            "kept"
+        );
+        let ix = commit(ThreadWrite {
+            reset: true,
+            seq: Some(4),
+            older: Some(None),
+            ..ThreadWrite::default()
+        })
+        .await;
+        assert_eq!(
+            (ix.cursor, ix.older, ix.opened_at),
+            (Some(4), None, 5),
+            "a fresh window"
+        );
+        assert_eq!(ix.record.unwrap_or_default()["title"], "a");
+    }
+
+    /// The control rows a window brings are exactly those of the query before the indexes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn window_control_rows_match_the_scanning_query() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let pool = db::open(&dir.path().join("local.sqlite3"))
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut batch = HashMap::new();
+        batch.insert("t".to_owned(), long_thread(60, 3, 16));
+        db::commit(&pool, "env", batch)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let window = db::read_window(&pool, "env", "t", None, true)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("a window"));
+        let mut runs: Vec<String> = window
+            .timeline
+            .iter()
+            .filter_map(|r| r.run.clone())
+            .collect();
+        runs.sort();
+        runs.dedup();
+        let attempts: Vec<String> = sqlx::query_scalar(
+            "SELECT id FROM rows WHERE env = 'env' AND thread = 't' AND kind = 'attempts'
+             AND run IN (SELECT value FROM json_each(?))",
+        )
+        .bind(serde_json::to_string(&runs).unwrap_or_default())
+        .fetch_all(&pool)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+        let mut scope = runs.clone();
+        scope.extend(attempts);
+        let ids: Vec<&str> = window
+            .timeline
+            .iter()
+            .filter_map(|r| r.body["messageId"].as_str())
+            .collect();
+        let before: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(db::CONTROL_ROWS_SCAN)
+            .bind("env")
+            .bind("t")
+            .bind(serde_json::to_string(&rows::ALWAYS).unwrap_or_default())
+            .bind(serde_json::to_string(&scope).unwrap_or_default())
+            .bind(serde_json::to_string(&ids).unwrap_or_default())
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_else(|e| panic!("{e}"));
+        let mut before: Vec<(String, String)> = before
+            .iter()
+            .map(|row| (sqlx::Row::get(row, 0), sqlx::Row::get(row, 1)))
+            .collect();
+        let mut now: Vec<(String, String)> = window
+            .control
+            .iter()
+            .map(|r| (r.kind.clone(), r.id.clone()))
+            .collect();
+        before.sort();
+        now.sort();
+        assert!(
+            now.iter().any(|(k, id)| k == "messages" && id == "mq"),
+            "queued message"
+        );
+        assert!(
+            now.iter().any(|(k, _)| k == "providerTurns"),
+            "attempt rows"
+        );
+        assert!(!now.iter().any(|(_, id)| id == "loose"), "out of scope");
+        assert_eq!(now, before);
     }
 
     /// When the device file cannot be opened, the engine runs on a database in memory: threads
@@ -1663,7 +1939,7 @@ mod tests {
             .unwrap_or_default();
         assert!(!index.contains_key(&thread));
         assert!(
-            db::read_window(&engine.pool, "env", &thread, None)
+            db::read_window(&engine.pool, "env", &thread, None, true)
                 .await
                 .ok()
                 .flatten()

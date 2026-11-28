@@ -11,8 +11,9 @@ use sqlx::{Executor as _, Row as _, SqlitePool};
 
 use crate::rows::{self, Row};
 
-/// Bumped when the tables change; an older file is dropped and refetched (`open`).
-const SCHEMA_VERSION: i64 = 1;
+/// Bumped when the tables change; an older file is dropped and refetched (`open`), except a
+/// version [`open_file`] upgrades in place.
+const SCHEMA_VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS rows (
@@ -22,6 +23,8 @@ CREATE TABLE IF NOT EXISTS rows (
   PRIMARY KEY (env, thread, kind, id)) WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS rows_timeline ON rows(env, thread, ord) WHERE ord IS NOT NULL;
 CREATE INDEX IF NOT EXISTS rows_by_run ON rows(env, thread, kind, run);
+CREATE INDEX IF NOT EXISTS rows_control_run ON rows(env, thread, run) WHERE ord IS NULL;
+CREATE INDEX IF NOT EXISTS rows_control_live ON rows(env, thread) WHERE ord IS NULL AND live = 1;
 CREATE TABLE IF NOT EXISTS threads (
   env TEXT NOT NULL, thread TEXT NOT NULL,
   cursor INTEGER, older TEXT, record TEXT,
@@ -221,12 +224,15 @@ async fn open_file(path: &Path) -> Result<SqlitePool, sqlx::Error> {
     if version == SCHEMA_VERSION {
         return Ok(pool);
     }
-    pool.execute(
-        "DROP TABLE IF EXISTS rows; DROP TABLE IF EXISTS threads;
+    // Version 2 only added indexes: `SCHEMA` creates them, and the rows stay.
+    if version != 1 {
+        pool.execute(
+            "DROP TABLE IF EXISTS rows; DROP TABLE IF EXISTS threads;
          DROP TABLE IF EXISTS messages; DROP TABLE IF EXISTS thread_views;
          DROP TABLE IF EXISTS thread_task_links; DROP TABLE IF EXISTS thread_outlines;",
-    )
-    .await?;
+        )
+        .await?;
+    }
     pool.execute(SCHEMA).await?;
     sqlx::query(sqlx::AssertSqlSafe(format!(
         "PRAGMA user_version = {SCHEMA_VERSION}"
@@ -236,8 +242,9 @@ async fn open_file(path: &Path) -> Result<SqlitePool, sqlx::Error> {
     Ok(pool)
 }
 
-/// Opens an existing database of this schema to read, without creating or migrating it.
-pub(crate) async fn open_existing(path: &Path) -> Result<SqlitePool, sqlx::Error> {
+/// Opens an existing database of this schema to read, without creating or migrating it. True
+/// when it has the indexes of [`CONTROL_ROWS`]; a version 1 file reads with [`CONTROL_ROWS_SCAN`].
+pub(crate) async fn open_existing(path: &Path) -> Result<(SqlitePool, bool), sqlx::Error> {
     let pool = SqlitePoolOptions::new()
         .max_connections(1)
         .connect_with(
@@ -250,11 +257,12 @@ pub(crate) async fn open_existing(path: &Path) -> Result<SqlitePool, sqlx::Error
     let version: i64 = sqlx::query_scalar("PRAGMA user_version")
         .fetch_one(&pool)
         .await?;
-    if version != SCHEMA_VERSION {
+    // Version 1 has the same tables, only fewer indexes.
+    if version != SCHEMA_VERSION && version != 1 {
         pool.close().await;
         return Err(sqlx::Error::RowNotFound);
     }
-    Ok(pool)
+    Ok((pool, version == SCHEMA_VERSION))
 }
 
 pub(crate) async fn read_index(
@@ -350,63 +358,77 @@ pub(crate) async fn commit(
                 }
             }
         }
-        sqlx::query("INSERT INTO threads (env, thread) VALUES (?, ?) ON CONFLICT DO NOTHING")
-            .bind(env)
-            .bind(&thread)
-            .execute(&mut *tx)
-            .await?;
-        if let Some(record) = &write.record {
-            sqlx::query("UPDATE threads SET record = ?, active_at = MAX(active_at, ?) WHERE env = ? AND thread = ?")
-                .bind(record.to_string())
-                .bind(ms_of(record))
-                .bind(env)
-                .bind(&thread)
-                .execute(&mut *tx)
-                .await?;
-        }
-        if let Some(fields) = &write.record_fields {
-            sqlx::query("UPDATE threads SET record = json_patch(record, ?) WHERE env = ? AND thread = ? AND record IS NOT NULL")
-                .bind(fields.to_string())
-                .bind(env)
-                .bind(&thread)
-                .execute(&mut *tx)
-                .await?;
-        }
-        if let Some(older) = &write.older {
-            sqlx::query("UPDATE threads SET older = ? WHERE env = ? AND thread = ?")
-                .bind(older)
-                .bind(env)
-                .bind(&thread)
-                .execute(&mut *tx)
-                .await?;
-        }
-        if let Some(at) = write.opened_at {
-            sqlx::query("UPDATE threads SET opened_at = ? WHERE env = ? AND thread = ?")
-                .bind(at)
-                .bind(env)
-                .bind(&thread)
-                .execute(&mut *tx)
-                .await?;
-        }
+        // A whole record takes in fields that came with it; fields alone patch a stored record.
+        let (record, fields) = match (write.record, write.record_fields) {
+            (Some(mut record), Some(fields)) => {
+                json_merge(&mut record, fields);
+                (Some(record), None)
+            }
+            other => other,
+        };
+        // One statement for the thread's line; a fresh window sets the sequence, changes only
+        // move it forward.
+        sqlx::query(
+            "INSERT INTO threads (env, thread, cursor, older, record, opened_at, active_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, COALESCE(?6, 0), COALESCE(?7, 0))
+             ON CONFLICT (env, thread) DO UPDATE SET
+               record = CASE WHEN ?5 IS NOT NULL THEN ?5
+                 WHEN ?8 IS NOT NULL AND record IS NOT NULL THEN json_patch(record, ?8)
+                 ELSE record END,
+               active_at = CASE WHEN ?5 IS NOT NULL THEN MAX(active_at, ?7) ELSE active_at END,
+               older = CASE WHEN ?9 THEN ?4 ELSE older END,
+               opened_at = COALESCE(?6, opened_at),
+               cursor = CASE WHEN ?3 IS NULL THEN cursor WHEN ?10 THEN ?3
+                 ELSE MAX(COALESCE(cursor, 0), ?3) END",
+        )
+        .bind(env)
+        .bind(&thread)
+        .bind(write.seq)
+        .bind(write.older.clone().flatten())
+        .bind(record.as_ref().map(Value::to_string))
+        .bind(write.opened_at)
+        .bind(record.as_ref().map(ms_of))
+        .bind(fields.as_ref().map(Value::to_string))
+        .bind(write.older.is_some())
+        .bind(write.reset)
+        .execute(&mut *tx)
+        .await?;
         if let Some(seq) = write.seq {
-            // A fresh window sets the sequence; changes only move it forward.
-            sqlx::query(
-                "UPDATE threads SET cursor = CASE WHEN ? THEN ? ELSE MAX(COALESCE(cursor, 0), ?) END
-                 WHERE env = ? AND thread = ?",
-            )
-            .bind(write.reset)
-            .bind(seq)
-            .bind(seq)
-            .bind(env)
-            .bind(&thread)
-            .execute(&mut *tx)
-            .await?;
             committed.push((thread, seq));
         }
     }
     tx.commit().await?;
     Ok(committed)
 }
+
+/// The control rows a window needs, found through small indexes (the key, `rows_control_run`,
+/// `rows_control_live`) so the thread's timeline rows and their bodies are never scanned.
+/// Binds: env, thread, the kinds loaded whole, the runs in scope, the message ids in view.
+const CONTROL_ROWS: &str = "
+WITH wanted(kind, id) AS (
+  SELECT kind, id FROM rows WHERE env = ?1 AND thread = ?2
+    AND kind IN (SELECT value FROM json_each(?3))
+  UNION SELECT kind, id FROM rows INDEXED BY rows_control_live
+    WHERE env = ?1 AND thread = ?2 AND ord IS NULL AND live = 1
+  UNION SELECT kind, id FROM rows INDEXED BY rows_control_run
+    WHERE env = ?1 AND thread = ?2 AND ord IS NULL AND run IN (SELECT value FROM json_each(?4))
+  UNION SELECT 'messages', value FROM json_each(?5)
+  -- A queued run has no row yet: its prompt and files live in its message.
+  UNION SELECT 'messages', json_extract(body, '$.userMessageId') FROM rows INDEXED BY rows_control_live
+    WHERE env = ?1 AND thread = ?2 AND ord IS NULL AND live = 1 AND kind = 'runs')
+SELECT r.kind, r.id, r.ord, r.run, r.live, r.body FROM wanted w CROSS JOIN rows r
+WHERE r.env = ?1 AND r.thread = ?2 AND r.kind = w.kind AND r.id = w.id AND r.ord IS NULL";
+
+/// [`CONTROL_ROWS`] without its indexes: a scan of the thread, for a version 1 file read
+/// without upgrading it.
+pub(crate) const CONTROL_ROWS_SCAN: &str = "
+SELECT kind, id, ord, run, live, body FROM rows
+WHERE env = ?1 AND thread = ?2 AND ord IS NULL AND (
+  kind IN (SELECT value FROM json_each(?3)) OR live = 1
+  OR run IN (SELECT value FROM json_each(?4))
+  OR (kind = 'messages' AND id IN (SELECT value FROM json_each(?5)))
+  OR (kind = 'messages' AND id IN (SELECT json_extract(body, '$.userMessageId')
+      FROM rows WHERE env = ?1 AND thread = ?2 AND kind = 'runs' AND live = 1)))";
 
 /// The newest window of a thread's stored rows older than `before` (all when `None`), and the
 /// control rows it needs: runs, requests and sessions whole; the rest of its runs, or live.
@@ -415,6 +437,7 @@ pub(crate) async fn read_window(
     env: &str,
     thread: &str,
     before: Option<f64>,
+    indexed: bool,
 ) -> Result<Option<Window>, sqlx::Error> {
     let head =
         sqlx::query("SELECT record, older, cursor FROM threads WHERE env = ? AND thread = ?")
@@ -467,23 +490,16 @@ pub(crate) async fn read_window(
         let mut scope = runs.clone();
         scope.extend(attempts);
         let always = serde_json::to_string(&rows::ALWAYS).unwrap_or_default();
-        sqlx::query(
-            "SELECT kind, id, ord, run, live, body FROM rows
-             WHERE env = ? AND thread = ? AND ord IS NULL AND (
-               kind IN (SELECT value FROM json_each(?)) OR live = 1
-               OR run IN (SELECT value FROM json_each(?))
-               OR (kind = 'messages' AND id IN (SELECT value FROM json_each(?)))
-               -- A queued run has no row yet: its prompt and files live in its message.
-               OR (kind = 'messages' AND id IN (SELECT json_extract(body, '$.userMessageId')
-                   FROM rows WHERE env = ? AND thread = ? AND kind = 'runs' AND live = 1)))",
-        )
+        sqlx::query(if indexed {
+            CONTROL_ROWS
+        } else {
+            CONTROL_ROWS_SCAN
+        })
         .bind(env)
         .bind(thread)
         .bind(always)
         .bind(serde_json::to_string(&scope).unwrap_or_default())
         .bind(serde_json::to_string(&message_ids).unwrap_or_default())
-        .bind(env)
-        .bind(thread)
         .fetch_all(pool)
         .await?
     } else {

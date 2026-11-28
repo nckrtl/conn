@@ -4,7 +4,7 @@ import type { OrbitGatewayEnvironment } from "./client.ts";
 
 /**
  * Conn: the Orbit facts of a clone's server, from its Gateway record. Clones run the stock T3
- * server, which sends no `orbitInstance`, so the Gateway is their source (see FORK.md, "Orbit").
+ * server, which sends no `orbitInstance`, so the Gateway is their source (see docs/conn-features.md, "Orbit").
  * Without both ids there is no descriptor; a URL other than http(s) is left out.
  */
 export function orbitInstanceFromEnvironment(

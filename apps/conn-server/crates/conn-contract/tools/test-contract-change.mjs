@@ -1,5 +1,5 @@
 // Proves a contract change is caught: copies packages/contracts under target/, changes two
-// schemas as an upstream merge might, then shows `gen-contract.mjs --check` fails and code
+// schemas as a real contract edit might, then shows `gen-contract.mjs --check` fails and code
 // written against the old contract stops compiling against the regenerated crate.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";

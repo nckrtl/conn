@@ -1,14 +1,13 @@
 ---
 name: nckrtl-shell-design
-description: The nckrtl fork's shell design system for T3 Code (ChatGPT-desktop structure, active-theme palette, shell tokens). Use for UI polish in Conn (the fork's `main` branch), when you style a new or changed web component, after you merge upstream T3 Code into the fork, and when you review upstream components for consistency with the fork's look.
+description: The nckrtl fork's shell design system for T3 Code (ChatGPT-desktop structure, active-theme palette, shell tokens). Use for UI polish in Conn (the fork's `main` branch), when you style a new or changed web component, and when you review upstream components for consistency with the fork's look.
 ---
 
 # nckrtl shell design
 
 Conn, the fork's `main` branch, restyles T3 Code's web shell. The structure follows the
 ChatGPT desktop app. The colors come from the active theme. This skill records
-the user's feedback so you can apply the same style and keep it alive across
-upstream merges.
+the user's feedback so you can apply the same style.
 
 Sources: the fork's `style(web)` commits after the upstream merge-base
 (`git merge-base nckrtl upstream/main`), annotation records in
@@ -24,7 +23,6 @@ build and install the fork's desktop app is in
 - A UI polish pass in Conn, from annotations or chat feedback.
 - New or changed web UI in Conn, including fork-only panels (annotator,
   Laravel toolbar, Orbit, device).
-- After a merge of upstream T3 Code into Conn's `main`. Run the sync procedure below.
 - A review of new upstream components for consistency with the fork.
 
 ## Principles
@@ -282,57 +280,9 @@ Do not reintroduce these:
 - Thin dividers in `border-border/60` (too light) where shell dividers belong.
 - Agent duration and metadata at 11px or in mono. They are `text-ui` sans.
 
-## Upstream sync procedure
+## Upstream merges
 
-1. Merge upstream. Resolve conflicts with the fork's style. These files and
-   tokens are fork-owned; keep the fork's side and re-apply upstream logic
-   around it:
-   - `apps/web/src/index.css`: `@theme inline` additions (`--text-ui`,
-     `--radius-tile`, `--radius-bubble`, `--spacing-toolbar*`),
-     `dropdown-glass`, `--glass-divider`, `.scrollbar-inset`, the shell token
-     block at the end, `shell-divider-r|l`, mock window classes.
-   - `lib/utils.ts` tailwind-merge registration of `text-ui`.
-   - `components/ToolbarGroup.tsx`, `ui/input-group.tsx` (`soft`),
-     `files/fileSurfaceChrome.tsx` (ghost actions), `chat/OpenInPicker.tsx`
-     (compact group), `laravelToolbar/ui/*` (sheet, groups, rows),
-     `pierre-tree-theme.ts` (tree scrollbar),
-     `apps/desktop/src/window/DesktopWindow.ts` (traffic lights),
-     `ui/kbd.tsx` (`raised`), `ui/switch.tsx`, `ui/menu.tsx`,
-     `ui/toggle.tsx`, `ui/toggle-group.tsx`, `ui/sidebar.tsx` (`row`,
-     dividers), `ui/empty.tsx`, `chat/ComposerControl.tsx` (`field`).
-   - `settings/SettingsGroup.tsx`, `settings/settingsLayout.tsx`,
-     `AppRouteModal.tsx`, `routes/_chat.settings.tsx`, `ChatView.tsx` header and card,
-     `RightPanelTabs.tsx`, `routes/__root.tsx` (mock window).
-2. Scan new and changed upstream UI for regressions:
-
-   ```bash
-   B=$(git merge-base nckrtl upstream/main)
-   git diff "$B"..nckrtl --stat -- apps/web/src   # fork surface
-   git diff ORIG_HEAD..HEAD -- apps/web/src | grep -nE \
-     'border-border/[0-9]+|h-dvh|bg-card\b|text-(xs|2xs)\b|font-mono|rounded-md|uppercase|bg-(white|black)/|rounded-full'
-   ```
-
-   Review each hit. Typical fixes: `border-border/60` to `border-(--shell-divider)!`;
-   `h-dvh` page frame to `h-full`; `bg-card` tile to `--shell-tile`;
-   `text-xs` panel text to `text-ui`; mono version text to sans; ungrouped
-   toolbar icon buttons to `ToolbarGroup`; `rounded-md` hover rows to the
-   container's radius or `--control-radius`; new popups to `dropdown-glass`;
-   `bg-muted` selected rows to `--shell-highlight`; `outline` buttons in panel
-   toolbars to ghost buttons in a `ToolbarGroup`.
-
-3. Check that new scroll containers in cards use `scrollbar-inset`, and new
-   switches use the primitive (no own track color).
-4. Lint the touched files (`vp lint <files>`) and run `vp run check:changed`.
-   That always typechecks `@t3tools/desktop` via the existing Vite task.
-   `scripts/build-desktop-artifact.ts` runs the same task before packing and
-   fails closed. Packaging also requires the full HEAD SHA to be the tip of an
-   origin `sync/*` branch (`scripts/publish-sync-branch.ts` then
-   `scripts/check-sync-provenance.ts`). Do not add `scripts.typecheck` to
-   `apps/desktop/package.json`.
-   Do not run repo-wide checks.
-5. Visual check, when the user agrees: use the `test-t3-app` skill. Check
-   Dark Ocean and at least one built-in light theme. Look at the chat,
-   sidebar, Settings, browser, Files, Diff and terminal.
+Full upstream merges ended on 2026-11-19; see [FORK.md](../../../FORK.md).
 
 ## Lint constraints
 

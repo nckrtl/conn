@@ -435,6 +435,9 @@ pub(crate) struct ConnApp {
     orbit: crate::orbit_sync::OrbitSyncState,
     /// Thread id requested via `conn://thread/...` or control socket while switching servers.
     pending_open_thread: Option<String>,
+    /// Bumped by each `Open thread` click on an agent card; only the latest click's server check
+    /// may open a thread (`app/agent_sender.rs`).
+    sender_open_generation: u64,
     /// Orbit environments listed beside the primary one (`app/linked.rs`).
     linked: linked::LinkedEnvironments,
     /// Child threads subscribed for their approvals (`app/child_approvals.rs`).
@@ -903,6 +906,7 @@ impl ConnApp {
             connection_gen: 1,
             orbit,
             pending_open_thread: None,
+            sender_open_generation: 0,
             linked: linked::LinkedEnvironments::load(),
             child_approvals: child_approvals::ChildApprovals::default(),
             speculative: hover_prefetch::SpeculativeThreads::default(),

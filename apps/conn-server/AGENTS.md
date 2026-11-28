@@ -72,7 +72,7 @@ shutdown. Follow it byte for byte where a provider can see it.
 - The proofs for Claude: `crates/conn-provider-claude/tools/conformance/run.sh` (a stub CLI
   records argv, environment and stdin from both servers; they must be equal) and
   `tools/t3-replay/run.sh` (the T3 server's own Claude transcripts against our session). Rerun
-  both on every SDK or CLI change, and after an upstream sync.
+  both on every SDK or CLI change, and after porting an upstream provider fix.
 
 ## Safety
 
@@ -142,8 +142,7 @@ follows the Conn commit it is part of. There is no pin.
   `T3_SERVER_VERSION`, `tools/upkeep/http-routes.json`). Never edit one by hand; change its
   generator and regenerate.
 - `docs/upkeep.md` says how the Conn Server follows Conn and what to do when a check is red.
-  The nightly sync follows the Conn Server too: it ports the in-scope upstream server changes
-  and waits for the Conn Server checks (Nick, 2026-11-16; `FORK.md`, "Upstream scope").
+  `docs/scope.md` says what the server serves and what it skips by decision.
 - Do not change TypeScript in the Conn monorepo for Conn Server work.
 
 ## Where things go

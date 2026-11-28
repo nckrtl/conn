@@ -1,6 +1,6 @@
 /**
  * Conn: the Orbit panel's pages, in nav order. The panel holds the fork's Orbit configuration, so
- * Settings stays close to upstream (see FORK.md, "Orbit panel"). It opens on the first page.
+ * Settings stays close to upstream (see docs/conn-features.md, "Orbit"). It opens on the first page.
  */
 export const ORBIT_PANEL_PAGES = [
   { path: "/orbit/instances", label: "Instances" },

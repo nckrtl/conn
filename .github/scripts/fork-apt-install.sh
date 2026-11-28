@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fork-only: installs Ubuntu packages on GitHub-hosted ubuntu-24.04 runners
-# with a hard time bound. See FORK.md "Pull request runners".
+# with a hard time bound. See docs/development.md, "Pull request runners".
 #
 # On 2026-11-11 Canonical's nameservers stopped answering, so the runners
 # could not resolve *.ubuntu.com and apt hung on its sources. This script skips

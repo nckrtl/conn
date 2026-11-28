@@ -46,7 +46,7 @@ import {
 import { rememberOrbitComposerControls } from "./orbitComposerControls";
 import { getOrbitReservations, takeOrbitReservation } from "./orbitReservations";
 
-/** Conn: runs the threads started in an Orbit Project (FORK.md, "Orbit"), in the main window only. */
+/** Conn: runs the threads started in an Orbit Project (docs/conn-features.md, "Orbit"), in the main window only. */
 
 /** The clone's T3 project: the create flow adds the container's workspace. */
 const ORBIT_CLONE_WORKSPACE = "/srv/workspace";

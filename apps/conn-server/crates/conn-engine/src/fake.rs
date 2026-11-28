@@ -4,6 +4,7 @@
 //!   that ignores `turn/interrupt`.
 //! - `ask`: the turn asks for a command approval, then answers once approved.
 //! - `question`: the turn asks the user a question (`user_input`) and waits for the answer.
+//! - `stuck-question`: `question`, and the turn never confirms a Stop, as `stuck`.
 //! - `fail`: the turn fails. `report-fail`: it says `partial report`, then fails.
 //! - `hook-stop`: the turn completes with a stop reason, as Codex reports a turn a hook
 //!   stopped. `hook-interrupt`: the turn ends interrupted with that reason. `hook-hang`: the
@@ -916,7 +917,10 @@ impl Session for FakeSession {
             }
             let tx = self.events();
             let mut started = vec![provider_turn(&turn, "running")];
-            self.stuck.store(text == "stuck", Ordering::SeqCst);
+            self.stuck.store(
+                matches!(text.as_str(), "stuck" | "stuck-question"),
+                Ordering::SeqCst,
+            );
             self.hook_hang.store(text == "hook-hang", Ordering::SeqCst);
             match text.as_str() {
                 "mcp-app" => {
@@ -939,14 +943,30 @@ impl Session for FakeSession {
                     "responseCapability": {"type": "live", "providerSessionId": self.id},
                     "createdAt": now_iso(), "resolvedAt": null,
                 }}))),
-                "question" => started.push(event(json!({"type": "runtime_request.updated",
-                    "threadId": turn.thread_id, "runtimeRequest": {
-                    "id": format!("question:{}", turn.run_id), "nodeId": turn.root,
-                    "providerTurnId": format!("turn:{}", turn.run_id),
-                    "nativeRequestRef": null, "kind": "user_input", "status": "pending",
-                    "responseCapability": {"type": "live", "providerSessionId": self.id},
-                    "createdAt": now_iso(), "resolvedAt": null,
-                }}))),
+                // The request comes before the item with its questions, as Claude sends them.
+                // `stuck-question` also never confirms a Stop.
+                "question" | "stuck-question" => {
+                    let (id, now) = (format!("question:{}", turn.run_id), now_iso());
+                    started.push(event(json!({"type": "runtime_request.updated",
+                        "threadId": turn.thread_id, "runtimeRequest": {
+                        "id": id, "nodeId": turn.root,
+                        "providerTurnId": format!("turn:{}", turn.run_id),
+                        "nativeRequestRef": null, "kind": "user_input", "status": "pending",
+                        "responseCapability": {"type": "live", "providerSessionId": self.id},
+                        "createdAt": now, "resolvedAt": null,
+                    }})));
+                    started.push(event(json!({"type": "turn_item.updated", "turnItem": {
+                        "id": format!("turn-item:{id}"), "threadId": turn.thread_id,
+                        "runId": turn.run_id, "nodeId": turn.root,
+                        "providerThreadId": turn.provider_thread_id,
+                        "providerTurnId": format!("turn:{}", turn.run_id), "nativeItemRef": null,
+                        "parentItemId": null, "ordinal": 1, "status": "waiting", "title": null,
+                        "startedAt": now, "completedAt": null, "updatedAt": now,
+                        "type": "user_input_request", "requestId": id,
+                        "questions": [{"id": "q", "header": "Question", "question": "Go on?",
+                            "options": [{"label": "yes", "description": "Go on."}]}],
+                    }})));
+                }
                 "subagent" => {
                     let child = format!("child:{}", turn.run_id);
                     let now = now_iso();

@@ -4,13 +4,10 @@ name: Conn Server checks
 # Main checks are called after CI. Generated drift fails the job on every trigger.
 
 on:
-  # Every PR and sync push starts the workflow; the `changes` job decides from the full diff
+  # Every PR starts the workflow; the `changes` job decides from the full diff
   # (.github/scripts/conn-server-checks-paths.cjs) whether the checks run. GitHub's `paths`
   # filter sees only the first 3,000 changed files, and a skipped run would report nothing.
   pull_request:
-  push:
-    branches:
-      - "sync/**"
   workflow_call:
     inputs:
       source_sha:
@@ -48,7 +45,7 @@ jobs:
       # A pull request checks out GitHub's merge commit with fetch-depth: 2, so its first
       # parent is the base branch and the diff is the PR's change.
       - name: Checkout
-        if: github.event_name == 'pull_request' || github.event_name == 'push'
+        if: github.event_name == 'pull_request'
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
         with:
           ref: ${{ inputs.source_sha }}
@@ -62,7 +59,6 @@ jobs:
         id: detect
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -uo pipefail
           run_all() {
@@ -72,12 +68,6 @@ jobs:
           }
           case "$EVENT_NAME" in
             pull_request) base=HEAD^1 ;;
-            push)
-              base=$BEFORE_SHA
-              [[ "$base" =~ ^0+$ ]] && run_all "New branch."
-              git fetch --quiet --no-tags --depth=1 --filter=blob:none origin "$base" \
-                || run_all "Could not fetch ${base}."
-              ;;
             *) run_all "A ${EVENT_NAME} run always checks." ;;
           esac
           git diff -z --name-only --no-renames "$base" HEAD > "$RUNNER_TEMP/changed-paths" \

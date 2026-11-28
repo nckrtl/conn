@@ -4981,6 +4981,53 @@ async fn a_blocking_delegate_returns_on_a_question_after_the_childs_first_turn()
     let (task, ()) = tokio::join!(wait, drive);
     assert_eq!(task["waitTimedOut"], false, "{task}");
     assert_eq!(task["hasPendingQuestion"], true, "{task}");
+    // The wait returned the question and upgraded the wake: the question's wake waits in the
+    // parent's queue, and the parent's answer cancels it.
+    let wakes = question_wakes(&f, &parent).await;
+    assert_eq!(wakes.len(), 1);
+    let child = first_child(&f, &parent).await;
+    let request = projection_of(&f, &child).await["runtimeRequests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["status"] == "pending")
+        .unwrap()["id"]
+        .clone();
+    agent
+        .ok(
+            "conn_pending_request",
+            json!({"action": "respond", "threadId": child, "requestId": request,
+                   "answers": {"q": "yes"}}),
+        )
+        .await;
+    assert_eq!(
+        question_wake_runs(&f, &parent, &wakes[0]).await,
+        ["cancelled"]
+    );
+}
+
+/// The parent's queued messages that tell it a delegated task asked a question.
+async fn question_wakes(f: &Fixture, parent: &str) -> Vec<Value> {
+    projection_of(f, parent).await["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| {
+            m["notification"]["source"]["kind"] == "delegated_task"
+                && m["notification"]["outcome"] == "updated"
+        })
+        .cloned()
+        .collect()
+}
+
+async fn question_wake_runs(f: &Fixture, parent: &str, wake: &Value) -> Vec<String> {
+    projection_of(f, parent).await["runs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["userMessageId"] == wake["id"])
+        .map(|r| r["status"].as_str().unwrap().to_owned())
+        .collect()
 }
 
 /// Holds a blocking `delegate_task` once, right after its first read of the task.
@@ -5058,6 +5105,57 @@ async fn a_wait_dropped_while_it_upgrades_the_wake_still_upgrades() {
         () = reached.notified() => {}
     }
     until_wake_upgraded(&f, &parent).await;
+}
+
+/// A question the child asks after the wait's last read, while the wait upgrades its wake,
+/// still wakes the parent: the wait never returned it, and its intake held the wake back.
+#[tokio::test(flavor = "current_thread")]
+async fn a_question_asked_while_a_wait_upgrades_its_wake_wakes_the_parent() {
+    let f = fixture("task-wait-upgrade-question");
+    let (parent, mut operator, mut agent) = parent_with_agent(&f).await;
+    let reached = park_at_next("wake-upgrade");
+    let mut wait = Box::pin(agent.ok(
+        "delegate_task",
+        json!({"task": "hang", "mode": "wait", "timeoutMs": 50}),
+    ));
+    tokio::select! {
+        task = &mut wait => panic!("the wait ended without upgrading: {task}"),
+        () = reached.notified() => {}
+    }
+    let child = first_child(&f, &parent).await;
+    child_waiting_on_a_delegate(&f, &mut operator, &child).await;
+    operator
+        .ok(
+            "conn_thread_send",
+            json!({"threadId": child, "message": "question", "mode": "queue"}),
+        )
+        .await;
+    let mut asked = false;
+    for _ in 0..200 {
+        asked = projection_of(&f, &child).await["turnItems"]
+            .as_array()
+            .is_some_and(|items| items.iter().any(|i| i["type"] == "user_input_request"));
+        if asked {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(asked, "the child asked before the upgrade");
+    assert!(
+        question_wakes(&f, &parent).await.is_empty(),
+        "a blocking wait holds the wake back"
+    );
+    drop(wait);
+    until_wake_upgraded(&f, &parent).await;
+    for _ in 0..200 {
+        if !question_wakes(&f, &parent).await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let wakes = question_wakes(&f, &parent).await;
+    assert_eq!(wakes.len(), 1);
+    assert_eq!(question_wake_runs(&f, &parent, &wakes[0]).await, ["queued"]);
 }
 
 /// The child a parent's first task runs in, once the task exists.

@@ -27,7 +27,7 @@ const NAME_CHECK_DEBOUNCE_MS = 400;
 
 /**
  * Conn: starts a thread in an Orbit Project. Orbit creates a clone of the Project's default
- * Instance, and the thread starts there with the first message (FORK.md, "Orbit").
+ * Instance, and the thread starts there with the first message (docs/conn-features.md, "Orbit").
  */
 export function OrbitThreadStartScreen() {
   const navigation = useNavigation();

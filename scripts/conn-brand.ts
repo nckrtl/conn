@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
-// Conn: the GT catalogs name the app only through `{appName}`. See FORK.md, "i18n and the app name".
+// Conn: the GT catalogs name the app only through `{appName}`. See docs/conn-features.md, "i18n and the app name".
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 

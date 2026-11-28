@@ -5,14 +5,10 @@ name: Conn Server CI
 
 on:
   pull_request:
-    paths: &paths
+    paths:
       - apps/conn-server/**
       - .github/workflows/conn-server-ci.yml
       - .github/workflows/conn-server-checks.yml
-  push:
-    branches:
-      - "sync/**"
-    paths: *paths
   workflow_call:
     inputs:
       source_sha:

@@ -146,7 +146,9 @@ For mobile verification, a missing or outdated native client is an install step,
 
 ## Build in nick-vm
 
-Build, run and test the iOS app (`apps/mobile`) in the macOS VM `nick-vm`, never on Nick's Mac.
+Build, run and test both iOS apps in the macOS VM `nick-vm`, never on Nick's Mac: the native
+SwiftUI app (`apps/ios`, steps in [docs/development.md](docs/development.md#iphone-app-native))
+and the legacy Expo app (`apps/mobile`).
 Checkouts live in `~/apps` there. Other agents build in the VM at the same time:
 
 - Work in your own checkout or worktree.
@@ -154,7 +156,7 @@ Checkouts live in `~/apps` there. Other agents build in the VM at the same time:
   checkout. Do not open Xcode.app.
 - Create your own simulator (`xcrun simctl create "conn-<task>" "iPhone 18 Pro"`),
   pass its UDID to every build, test and screenshot, and delete it when done.
-- Run Metro on a free port: `npx expo run:ios --device <udid> --port <port>`.
+- Legacy Expo app only: run Metro on a free port: `npx expo run:ios --device <udid> --port <port>`.
 - Never kill or shut down Xcode, simulators, Metro or apps you did not start.
 - Before a GUI step, run `mkdir /tmp/vm-gui.lock` in the VM (retry every 20 s)
   and `rmdir /tmp/vm-gui.lock` right after.

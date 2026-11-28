@@ -48,7 +48,7 @@ test("only the initial completion of CI for a push to Conn main admits the selec
   assert.equal(selects(original, "pingdotgg/t3code"), false);
 });
 
-test("fan-out waits for selection, pins every checkout and keeps native PR, sync and manual runs", () => {
+test("fan-out waits for selection, pins every checkout and keeps native PR and manual runs", () => {
   assert.match(workflow, /needs: select\n    if: needs\.select\.outputs\.checks == 'true'/);
   assert.match(workflow, /needs: select\n    if: needs\.select\.outputs\.musl == 'true'/);
   assert.match(workflow, /source_sha: \$\{\{ needs\.select\.outputs\.source_sha \}\}/);
@@ -56,11 +56,10 @@ test("fan-out waits for selection, pins every checkout and keeps native PR, sync
     const companion = workflowFile(file);
     if (file === "conn-server-checks.yml") {
       // Its `changes` job selects from the full diff instead of a `paths` filter.
-      assert.match(companion, /pull_request:\n  push:\n    branches:\n      - "sync\/\*\*"\n/);
+      assert.match(companion, /pull_request:\n  workflow_call:\n/);
       assert.match(companion, /\n  changes:\n/);
     } else {
-      assert.match(companion, /pull_request:\n    paths: &paths/);
-      assert.match(companion, /push:\n    branches:\n      - "sync\/\*\*"\n    paths: \*paths/);
+      assert.match(companion, /pull_request:\n    paths:\n/);
     }
     assert.match(companion, /workflow_dispatch:/);
     const group = companion.match(/^  group: (.+)$/m);
@@ -94,7 +93,6 @@ test("fan-out waits for selection, pins every checkout and keeps native PR, sync
       assert.equal(savesCache("workflow_run", "refs/heads/main"), true);
       assert.equal(savesCache("workflow_run", "refs/heads/main", "true"), false);
       assert.equal(savesCache("pull_request", "refs/pull/1/merge"), false);
-      assert.equal(savesCache("push", "refs/heads/sync/upstream"), false);
       assert.equal(savesCache("workflow_dispatch", "refs/heads/main"), false);
       if (condition.includes("matrix.profile")) {
         assert.equal(savesCache("workflow_run", "refs/heads/main", "false", "debug"), false);

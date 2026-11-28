@@ -1,5 +1,5 @@
 // What the Conn Server serves, read from its sources and its binary. Used by
-// tools/bump-report.mjs and crates/conn-server/tools/decode-coverage.mjs.
+// tools/bump-report.mjs and crates/conn-server/tools/{decode-coverage,capabilities-check}.mjs.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -39,11 +39,29 @@ export function registeredTags(tags) {
   return found;
 }
 
+/** Every command type of the contract, from the generated `COMMAND_TYPES`. */
+export function contractCommands() {
+  const file = NodePath.join(repoRoot, "crates/conn-contract/src/generated.rs");
+  const list = /^pub const COMMAND_TYPES: &\[&str\] = &\[([^\]]*)\];$/m.exec(NodeFS.readFileSync(file, "utf8"));
+  return new Set(Array.from(list?.[1].matchAll(/"([^"]+)"/g) ?? [], (m) => m[1]));
+}
+
 /**
- * Starts `binary` once on a temp state folder and returns its `methods:` line
- * (`81 of 235 methods (...)`), or undefined. The process is stopped by PID before this returns.
+ * The command types the engine accepts: every one of `types` that heads a `match` arm in
+ * crates/conn-engine/src/commands.rs.
  */
-export async function binaryCoverage(binary) {
+export function engineCommands(types) {
+  const file = NodePath.join(repoRoot, "crates/conn-engine/src/commands.rs");
+  const arms = NodeFS.readFileSync(file, "utf8").matchAll(/"([^"]+)"(?=\s*(?:=>|\|))/g);
+  return new Set(Array.from(arms, (m) => m[1]).filter((type) => types.has(type)));
+}
+
+/**
+ * Starts `binary` once on a temp state folder, waits for `pattern` in its output and returns
+ * what `use` makes of the match, or undefined. The process is stopped by PID before this
+ * returns.
+ */
+async function started(binary, pattern, use) {
   if (!binary || !NodeFS.existsSync(binary)) return undefined;
   const program = NodePath.resolve(binary);
   const tmp = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "conn-served-"));
@@ -55,15 +73,15 @@ export async function binaryCoverage(binary) {
     { cwd: tmp, stdio: ["ignore", "pipe", "pipe"], env: sealedEnv(tmp) },
   );
   try {
-    return await new Promise((ok) => {
+    const match = await new Promise((ok) => {
       let text = "";
       const timer = setTimeout(() => ok(undefined), 15000);
       child.stdout.on("data", (d) => {
         text += d;
-        const m = /^methods: (.+)$/m.exec(text);
+        const m = pattern.exec(text);
         if (m) {
           clearTimeout(timer);
-          ok(m[1]);
+          ok(m);
         }
       });
       child.on("error", () => {
@@ -75,12 +93,23 @@ export async function binaryCoverage(binary) {
         ok(undefined);
       });
     });
+    return match && (await use(match));
   } finally {
     if (child.exitCode === null) child.kill("SIGTERM");
     await new Promise((r) => (child.exitCode === null ? child.once("exit", r) : r()));
     NodeFS.rmSync(tmp, { recursive: true, force: true });
   }
 }
+
+/** The `methods:` line of `binary` (`81 of 235 methods (...)`), or undefined. */
+export const binaryCoverage = (binary) => started(binary, /^methods: (.+)$/m, (m) => m[1]);
+
+/** The `capabilities` of the descriptor that `binary` serves, or undefined. */
+export const binaryCapabilities = (binary) =>
+  started(binary, /^conn-server listening on (http:\/\/\S+)$/m, async (m) => {
+    const response = await fetch(`${m[1]}/.well-known/t3/environment`);
+    return (await response.json()).capabilities;
+  });
 
 /** The served count in a `methods:` line. */
 export const servedCount = (line) => Number(/^(\d+) of/.exec(line ?? "")?.[1]);

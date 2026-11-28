@@ -67,6 +67,7 @@ pub(super) async fn request(cx: &Cx<'_>, args: &Args) -> ToolResult {
         })?;
     let secrets = cx
         .config()
+        .features
         .secrets
         .as_ref()
         .ok_or_else(|| fail("capability_denied", "Secret requests are not supported."))?;

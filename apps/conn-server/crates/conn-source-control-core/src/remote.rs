@@ -6,7 +6,7 @@
 //! The T3 code uses regular expressions and the WHATWG URL parser. Each function here says
 //! which pattern it follows; none needs a regex engine.
 
-use crate::hosts::github::encode_uri_component;
+use conn_support::url::encode_uri_component;
 
 /// `CloneProtocol`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -218,9 +218,7 @@ pub fn clone_url_for_protocol(url: &str, protocol: CloneProtocol) -> Option<Stri
 /// Lowering before encoding matters: lowering the escape `%C3%84` never reaches the `Ä` it names.
 fn canonical_path_segment(segment: &str) -> String {
     match decode_uri_component(segment) {
-        Some(decoded) => {
-            crate::hosts::github::encode_uri_component(&decoded.to_lowercase()).to_lowercase()
-        }
+        Some(decoded) => encode_uri_component(&decoded.to_lowercase()).to_lowercase(),
         None => segment.to_lowercase(),
     }
 }

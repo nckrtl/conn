@@ -35,7 +35,9 @@ pub mod vcs;
 /// Services handlers may use. `None` until the owning track wires it in `main.rs`.
 #[derive(Clone, Default)]
 pub struct Deps {
-    pub preview: Option<conn_preview::tabs::Preview>,
+    /// The feature services, built in `feature_services` (`serve.rs`); the engine host and
+    /// `/mcp` hold the same struct. Without one, its methods are not served.
+    pub features: conn_mcp::Features,
     pub engine: Option<Arc<dyn Engine>>,
     /// The provider instances; `instances` changes them as the settings change.
     pub providers: conn_provider::ProviderSet,
@@ -55,20 +57,9 @@ pub struct Deps {
     pub workspace_locks: Option<Arc<conn_vcs::locks::WorkspaceLocks>>,
     /// Files, assets and attachments; without it those methods and routes are not served.
     pub files: Option<Arc<conn_files::Files>>,
-    /// Scheduled tasks (`conn_features::scheduled`); without it `scheduledTasks.*` is not served.
-    pub scheduled_tasks: Option<conn_features::scheduled::ScheduledTasks>,
-    /// Shared by the desktop request stream and the agent panel tool.
-    pub panels: Option<conn_features::panels::PanelBroker>,
-    /// Shared by secret card answers and the agent secret tool.
-    pub secrets: Option<conn_features::secrets::SecretRequests>,
-    pub test_logins: Option<conn_features::test_logins::TestLogins>,
-    /// Annotations (`conn_features::annotations`); without it `annotations.*` is not served.
-    pub annotations: Option<conn_features::annotations::Annotations>,
     /// Text generators (`crate::text_generation`); without it `listTextGeneratorModels` is not
     /// served.
     pub text_generators: Option<Arc<crate::text_generation::TextGenerators>>,
-    /// Device hosts (`conn_devices`); without it `device.*` is not served.
-    pub devices: Option<conn_devices::Devices>,
     /// Bumped when a provider's `ServerProvider` entry changes (`provider::ProviderStatus`).
     pub provider_status: provider::ProviderStatus,
     /// MCP OAuth for outside agents and peer links (`crate::oauth`).

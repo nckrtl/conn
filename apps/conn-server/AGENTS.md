@@ -152,11 +152,14 @@ follows the Conn commit it is part of. There is no pin.
 | --- | --- | --- |
 | An RPC method in an existing area | that area's file in `crates/conn-server/src/methods/` | the method table checks the tag, the kind and the scope against the contract at start; add a call to `crates/conn-server/tools/effect-client.mjs`, or the `decode coverage` check fails |
 | A new area | a new file there, and one line in `methods/mod.rs` | |
+| A feature service (state that methods, `/mcp` tools or the engine host share) | one field in `conn_mcp::Features` and one line in `feature_services` in `crates/conn-server/src/serve.rs` | `Deps`, the engine host and `/mcp` hold the same struct; nothing to copy |
+| A part that must stop | one line in `stop_in_order` in `crates/conn-server/src/serve.rs` | say why it sits where it does |
 | An engine command or event | `crates/conn-engine` (`commands.rs`, `runner.rs`, `store.rs`) | prove it with `crates/conn-engine/tools/client-check.mjs` |
 | An `/mcp` tool | `crates/conn-mcp/src/tools/` | `gen-tools.mjs --check` and `parity.mjs` |
 | A provider | a crate that implements `Provider` and `Session` from `crates/conn-provider`; shared parts go in `crates/conn-provider-support` | replay tests against the T3 adapter's events, and the comparison in [Providers](#providers) |
 | A settings rule | `crates/conn-server/src/settings.rs` | add a case to `crates/conn-server/tools/settings-cases.json`; `settings-diff.mjs` runs it against the T3 server's own functions |
-| A capability or `ServerConfig` flag | `capabilities` / `config_flags` in `crates/conn-server/src/environment.rs` | advertise only what the server serves |
+| A capability or `ServerConfig` flag | `capabilities` / `config_flags` in `crates/conn-server/src/environment.rs`; a capability also has its row in `crates/conn-server/tools/capabilities.json` | advertise only what the server serves. The `capabilities` check fails when a registered method's capability is off without a reason, or one is on with nothing registered; it does not read the `ServerConfig` flags |
+| A source control rule the engine needs too | `crates/conn-source-control-core`: text in, text out | the engine depends on no feature crate |
 | A part that follows upstream files | a pathspec in `tools/upkeep/followed-files.txt` | the `follow-conn.sh` report then prints that part's upstream commits |
 | A helper two crates need (time, hex, base64, HMAC, atomic file write, ids) | `crates/conn-support`: std only (plus `sha2`, `uuid`, `getrandom`), no async, no state | a test there |
 | A dependency | the workspace `Cargo.toml` | state why and what it costs; `cargo deny` must pass |

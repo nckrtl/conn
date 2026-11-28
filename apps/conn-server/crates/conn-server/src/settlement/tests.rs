@@ -485,6 +485,64 @@ async fn a_sweep_settles_threads_idle_past_the_threshold_and_nothing_else() {
     assert!(h.thread("later").await["settledOverride"].is_null());
 }
 
+/// The opt-out (`thread.auto-settle.set`), as T3's `isAutoSettlementCandidate` and its candidate
+/// read (`ProjectionSettlement.test.ts`, "auto-settle-disabled"; `ThreadSettlementService.test.ts`,
+/// the "opted-out" delegate of a settled parent): a thread set to never settle stays past the
+/// threshold, a delegate set so stays behind its settled parent, and each settles at the next
+/// sweep once it follows the settings again.
+#[tokio::test(flavor = "current_thread")]
+async fn an_opted_out_thread_stays_until_it_follows_the_settings_again() {
+    let opted_out = shell(json!({"autoSettleDisabledAt": at(-DAY_MS)}));
+    assert!(!is_auto_settlement_candidate(&opted_out, NOW_MS));
+
+    let h = harness("opt-out");
+    h.environment
+        .settings
+        .update(json!({"sidebarAutoSettleAfterDays": 1}), None)
+        .unwrap();
+    h.launch("never", "baseline").await;
+    h.launch("follows", "baseline").await;
+    h.launch("parent", "subagent").await;
+    let parent = h.engine.get_thread_projection("parent".into()).await;
+    let delegate = format!(
+        "child:{}",
+        parent.unwrap()["runs"][0]["id"].as_str().unwrap()
+    );
+    let set = |thread: &str, enabled: bool| {
+        json!({"type": "thread.auto-settle.set", "commandId": format!("set-{thread}-{enabled}"),
+            "threadId": thread, "enabled": enabled})
+    };
+    for thread in ["never", delegate.as_str()] {
+        assert!(h.dispatch(set(thread, false)).await);
+        assert!(h.thread(thread).await["autoSettleDisabledAt"].is_string());
+    }
+
+    // Past the threshold. The first sweep settles the parent, so the second one reads its
+    // delegate as free.
+    h.clock
+        .advance(std::time::Duration::from_secs(2 * 24 * 60 * 60));
+    for _ in 0..2 {
+        sweep(&h.engine, &h.environment).await;
+    }
+    assert_eq!(h.thread("follows").await["settledOverride"], "settled");
+    assert_eq!(h.thread("parent").await["settledOverride"], "settled");
+    for thread in ["never", delegate.as_str()] {
+        let candidates = h.engine.settlement_candidates(Some(thread.into())).await;
+        assert_eq!(candidates.unwrap(), [] as [Value; 0], "{thread}");
+        assert!(h.thread(thread).await["settledOverride"].is_null());
+    }
+
+    for thread in ["never", delegate.as_str()] {
+        assert!(h.dispatch(set(thread, true)).await);
+        assert!(h.thread(thread).await["autoSettleDisabledAt"].is_null());
+    }
+    sweep(&h.engine, &h.environment).await;
+    for thread in ["never", delegate.as_str()] {
+        let settled = h.thread(thread).await;
+        assert_eq!(settled["settledOverride"], "settled", "{settled}");
+    }
+}
+
 /// `pendingGuestMessageCount` (`ProjectionStore.ts:8717`): a guest's message still waiting keeps
 /// an otherwise idle thread, which settles once nothing waits.
 #[tokio::test(flavor = "current_thread")]

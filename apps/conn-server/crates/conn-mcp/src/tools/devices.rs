@@ -15,7 +15,7 @@ pub(super) async fn call(cx: &Cx<'_>, name: &str, args: &Args) -> ToolResult {
     if matches!(name, "device_open" | "device_close") {
         cx.writing_caller().await?;
     }
-    let devices = match (&cx.config().devices, caller.device) {
+    let devices = match (&cx.config().features.devices, caller.device) {
         (Some(devices), true) => devices.clone(),
         _ => return Err(denied(name)),
     };

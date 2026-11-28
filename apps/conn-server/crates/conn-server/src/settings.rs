@@ -377,6 +377,12 @@ impl SettingsStore {
     }
 }
 
+/// `String.prototype.trim`, as the contract's `TrimmedNonEmptyString` decodes: Rust's `trim`
+/// keeps U+FEFF and strips U+0085, JavaScript does the reverse.
+pub(crate) fn contract_trim(text: &str) -> &str {
+    text.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}')
+}
+
 /// `loadSettingsFromDisk` ([`file::decode`]). A file that cannot be read, parsed or decoded
 /// gives T3's conservative defaults and the reason; it stays on disk byte for byte for the
 /// user to repair. Otherwise a secret the file holds inline moves to the store

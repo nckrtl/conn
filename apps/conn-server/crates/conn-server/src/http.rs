@@ -1930,7 +1930,9 @@ mod tests {
         std::fs::read_dir(dir.join("secrets"))
             .map(|entries| {
                 entries
-                    .map(|entry| std::fs::read_to_string(entry.unwrap().path()).unwrap())
+                    .map(|entry| entry.unwrap().path())
+                    .filter(|path| path.is_file())
+                    .map(|path| std::fs::read_to_string(path).unwrap())
                     .collect()
             })
             .unwrap_or_default()
@@ -2590,6 +2592,265 @@ mod tests {
         .await;
         assert_eq!(status, 200);
         assert_eq!(raw_instance(&deps, "c")["config"]["blob"], blob);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The store name of a provider config secret, as `secrets.rs` builds it.
+    fn config_secret_path(
+        dir: &std::path::Path,
+        id: &str,
+        driver: &str,
+        field: &str,
+    ) -> std::path::PathBuf {
+        let encode = |text: &str| conn_support::base64::url_encode(text.as_bytes());
+        dir.join("secrets").join(format!(
+            "provider-config-{}-{}-{}.bin",
+            encode(id),
+            encode(driver),
+            encode(field)
+        ))
+    }
+
+    /// A driver padded with U+FEFF, which the contract's trim strips and Rust's does not,
+    /// still names its secret fields: GET shows the marker, never the value.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_bom_padded_driver_keeps_its_secrets_redacted() {
+        let dir = temp("bom");
+        std::fs::write(
+            dir.join("settings.json"),
+            json!({"providerInstances": {
+                "agyBom": {"driver": "\u{feff}antigravity\u{feff}", "config": {"apiKey": "bom-key-3"}},
+                "openBom": {"driver": "\u{feff}opencode", "config": {"serverPassword": "bom-pass-4"}}}})
+            .to_string(),
+        )
+        .unwrap();
+        let (addr, auth, _) = serve_settings(&dir, None).await;
+        let admin = token(&auth, &["providers:manage"]);
+        let (status, body) = instances_get(addr, &admin).await;
+        assert_eq!(status, 200, "{body}");
+        let text = body.to_string();
+        assert!(
+            !text.contains("bom-key-3") && !text.contains("bom-pass-4"),
+            "{text}"
+        );
+        assert_eq!(
+            body["providerInstances"]["agyBom"]["config"]["apiKey"],
+            "••••••"
+        );
+        assert_eq!(
+            body["providerInstances"]["openBom"]["config"]["serverPassword"],
+            "••••••"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `server.updateSettings` given the client view of a value the store never held keeps the
+    /// value, as the HTTP batch does: the marker is restored at the shared save.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_update_settings_echo_keeps_a_value_the_store_never_held() {
+        let dir = temp("ws-unstored");
+        std::fs::write(
+            dir.join("settings.json"),
+            json!({"providerInstances": {
+                "agyList": {"driver": "antigravity", "config": {"apiKey": [1, 2]}},
+                "agyNumber": {"driver": "antigravity", "config": {"apiKey": 7}}}})
+            .to_string(),
+        )
+        .unwrap();
+        let (_, _, deps) = serve_settings(&dir, None).await;
+        let settings = &deps.environment.as_ref().unwrap().settings;
+        let view = settings.for_client();
+        for id in ["agyList", "agyNumber"] {
+            let mutation = json!({"operation": "upsert", "instanceId": id,
+                "instance": view["providerInstances"][id]});
+            let saved = settings.update(json!({}), Some(mutation)).unwrap();
+            assert_eq!(saved["providerInstances"], view["providerInstances"]);
+        }
+        let patch = json!({"providerInstances": view["providerInstances"]});
+        let saved = settings.update(patch, None).unwrap();
+        assert_eq!(saved["providerInstances"], view["providerInstances"]);
+        assert_eq!(
+            raw_instance(&deps, "agyList")["config"]["apiKey"],
+            json!([1, 2])
+        );
+        assert_eq!(
+            raw_instance(&deps, "agyNumber")["config"]["apiKey"],
+            json!(7)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// References are stored as the contract decodes them (trimmed), and their path length
+    /// counts UTF-16 units: 513 supplementary characters are 1026 units, over the limit.
+    #[tokio::test(flavor = "current_thread")]
+    async fn secret_references_are_stored_canonical_and_measured_in_utf16() {
+        let dir = temp("canonical-ref");
+        let (addr, auth, _) = serve_settings(&dir, None).await;
+        let admin = token(&auth, &["providers:manage"]);
+        let padded = json!({"provider": " op\u{feff}", "reference": " vault/item "});
+        let (status, body) = instances_post(
+            addr,
+            &admin,
+            json!([{"operation": "upsert", "instanceId": "agy", "instance": agy(
+                padded.clone(),
+                json!([{"name": "TOKEN", "value": "", "secret": padded, "sensitive": true}]),
+            )}]),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let file: Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("settings.json")).unwrap())
+                .unwrap();
+        let canonical = json!({"provider": "op", "reference": "vault/item"});
+        let saved = &file["providerInstances"]["agy"];
+        assert_eq!(saved["config"]["apiKey"], canonical);
+        assert_eq!(saved["environment"][0]["secret"], canonical);
+        let long = json!({"provider": "op", "reference": "\u{1d7d8}".repeat(513)});
+        let (status, body) = instances_post(
+            addr,
+            &admin,
+            json!([{"operation": "upsert", "instanceId": "agy2",
+                    "instance": agy(long, json!([]))}]),
+        )
+        .await;
+        assert_invalid(status, &body, 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A batch whose own write fails undoes the migrations its load wrote: the file, the
+    /// store and the running settings stay as they were.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failed_batch_undoes_its_migrations() {
+        let dir = temp("rollback");
+        let (addr, auth, deps) = serve_settings(&dir, None).await;
+        let admin = token(&auth, &["providers:manage"]);
+        let path = dir.join("settings.json");
+        std::fs::write(
+            &path,
+            json!({"github": {"tokens": {"github.com": "gh-inline-9"}}}).to_string(),
+        )
+        .unwrap();
+        // The batch's secret cannot be written: a folder holds its name.
+        std::fs::create_dir_all(config_secret_path(&dir, "agy", "antigravity", "apiKey")).unwrap();
+        let before = (file_state(&path), revision(&deps));
+        let (status, _) = instances_post(
+            addr,
+            &admin,
+            json!([{"operation": "upsert", "instanceId": "agy",
+                    "instance": agy(json!("k-rollback"), json!([]))}]),
+        )
+        .await;
+        assert_eq!(status, 500);
+        assert_eq!(file_state(&path).0, before.0.0);
+        assert!(
+            stored_secrets(&dir).is_empty(),
+            "the migration stayed in the store"
+        );
+        assert_eq!(revision(&deps), before.1);
+        let raw = deps.environment.as_ref().unwrap().settings.raw();
+        assert!(raw.get("sourceControlHosts").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A stored secret that cannot be read fails the save: a no-op echo never replaces the
+    /// credential the server runs with by the marker, and publishes nothing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_unreadable_secret_fails_the_batch_and_keeps_the_runtime_value() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp("unreadable");
+        let (addr, auth, deps) = serve_settings(&dir, None).await;
+        let admin = token(&auth, &["providers:manage"]);
+        let (status, first) = instances_post(
+            addr,
+            &admin,
+            json!([{"operation": "upsert", "instanceId": "agy",
+                    "instance": agy(json!("known-key-5"), json!([]))}]),
+        )
+        .await;
+        assert_eq!(status, 200, "{first}");
+        let secret = config_secret_path(&dir, "agy", "antigravity", "apiKey");
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let before = revision(&deps);
+        let (status, _) = instances_post(
+            addr,
+            &admin,
+            json!([{"operation": "upsert", "instanceId": "agy",
+                    "instance": first["providerInstances"]["agy"]}]),
+        )
+        .await;
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(status, 500);
+        assert_eq!(revision(&deps), before);
+        assert_eq!(
+            raw_instance(&deps, "agy")["config"]["apiKey"],
+            "known-key-5"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A batch that fails after a repaired load keeps the retry flag: the next refresh still
+    /// loads the repaired settings.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_failed_batch_keeps_the_retry_flag() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp("retry-failed");
+        let path = dir.join("settings.json");
+        let instance = json!({"driver": "codex", "displayName": "C"});
+        std::fs::write(
+            &path,
+            json!({"providerInstances": {"c": instance}}).to_string(),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let (addr, auth, deps) = serve_settings(&dir, None).await;
+        let settings = &deps.environment.as_ref().unwrap().settings;
+        assert!(settings.needs_reload());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let blocker = config_secret_path(&dir, "agy", "antigravity", "apiKey");
+        std::fs::create_dir_all(&blocker).unwrap();
+        let admin = token(&auth, &["providers:manage"]);
+        let (status, _) = instances_post(
+            addr,
+            &admin,
+            json!([{"operation": "upsert", "instanceId": "agy",
+                    "instance": agy(json!("k-retry"), json!([]))}]),
+        )
+        .await;
+        assert_eq!(status, 500);
+        assert!(
+            settings.needs_reload(),
+            "the failed batch cleared the retry flag"
+        );
+        std::fs::remove_dir(&blocker).unwrap();
+        settings.reload_if_failed();
+        assert_eq!(raw_instance(&deps, "c"), instance);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The longest valid instance id and variable names fit the store, sensitive or public.
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_longest_valid_names_fit_the_secret_store() {
+        let dir = temp("long-names");
+        let (addr, auth, deps) = serve_settings(&dir, None).await;
+        let admin = token(&auth, &["providers:manage"]);
+        let id = format!("a{}", "b".repeat(63));
+        let secret_name = "S".repeat(128);
+        let public_name = "P".repeat(128);
+        let (status, body) = instances_post(
+            addr,
+            &admin,
+            json!([{"operation": "upsert", "instanceId": id, "instance": agy(
+                json!("long-key-6"),
+                json!([{"name": secret_name, "value": "long-secret-6", "sensitive": true},
+                       {"name": public_name, "value": "public-6", "sensitive": false}]),
+            )}]),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let saved = raw_instance(&deps, &id);
+        assert_eq!(saved["environment"][0]["value"], "long-secret-6");
+        assert_eq!(saved["environment"][1]["value"], "public-6");
+        assert!(stored_secrets(&dir).iter().any(|v| v == "long-secret-6"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

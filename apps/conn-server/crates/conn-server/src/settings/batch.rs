@@ -11,6 +11,11 @@
 //!
 //! Error messages name the field and the expected type, never a submitted value.
 
+use std::{
+    io,
+    path::{Path, PathBuf},
+};
+
 use serde_json::{Map, Value, json};
 
 use conn_contract::ProviderInstanceMutation;
@@ -54,53 +59,141 @@ impl SettingsStore {
             return Err(BatchError::Failed(self.error("read-file", detail)));
         }
         stage(&decoded.doc, mutations.clone())?;
-        // The batch passes: load as every save does (`updateAndPersistSettings`), migrations
-        // included, then apply it to what that load gives.
+        // The batch passes. Every save loads first, and that load writes its migrations; the
+        // snapshot lets any later failure undo them with the batch's own writes, so a failed
+        // batch leaves the file, the store and the running settings as they were.
+        let snapshot = Snapshot::take(&self.path, &self.secrets_dir)
+            .map_err(|error| BatchError::Failed(self.error("read-file", error.to_string())))?;
+        let result = self.commit(mutations);
+        if result.is_err() {
+            snapshot.restore(&self.path, &self.secrets_dir);
+        }
+        result
+    }
+
+    fn commit(&self, mutations: Vec<Value>) -> Result<Value, BatchError> {
+        let failed = |operation: &'static str, detail: String| {
+            BatchError::Failed(self.error(operation, detail))
+        };
         let seen = self.lock().materialized.clone();
         let (loaded, failure, retry) = super::load(&self.path, &self.secrets_dir);
-        self.retry
-            .store(retry, std::sync::atomic::Ordering::Relaxed);
         if let Some(detail) = failure {
-            return Err(BatchError::Failed(self.error("read-file", detail)));
+            return Err(failed("read-file", detail));
         }
-        let (staged, changes) = stage(&loaded.doc, mutations)?;
+        // `load` serves the markers when a stored secret cannot be read; a save never installs
+        // that over the credentials the server runs with.
         let dir = &self.secrets_dir;
+        let materialized = secrets::materialize(dir, &served(&loaded.doc))
+            .map_err(|(_, error)| failed("read-secret", error.to_string()))?;
+        let (staged, changes) = stage(&loaded.doc, mutations)?;
         let store_unchanged = changes.iter().all(|change| {
             secret_store::read(dir, &change.name).is_ok_and(|stored| stored == change.write)
         });
         if staged == loaded.doc && store_unchanged {
             // Nothing to write. The registry reconciles on a revision, so one is published
             // when the served settings differ from what it last saw (an edit on disk).
-            let changed = loaded.materialized != seen;
-            *self.lock() = loaded;
+            let changed = materialized != seen;
+            self.install(loaded.doc, materialized, retry);
             if changed {
                 self.revision.send_modify(|r| *r += 1);
             }
             return Ok(self.for_client());
         }
-        let undo = secrets::apply(dir, &changes).map_err(|(operation, error)| {
-            BatchError::Failed(self.error(operation, error.to_string()))
-        })?;
-        let materialized = match secrets::materialize(dir, &served(&staged)) {
-            Ok(materialized) => materialized,
-            Err((_, error)) => {
-                undo.run(dir);
-                return Err(BatchError::Failed(
-                    self.error("read-secret", error.to_string()),
-                ));
-            }
-        };
-        if let Err(error) = write_settings(&self.path, &staged) {
-            undo.run(dir);
-            return Err(BatchError::Failed(self.error("write-file", error)));
-        }
-        *self.lock() = Loaded {
-            doc: staged,
-            materialized,
-        };
+        secrets::apply(dir, &changes)
+            .map_err(|(operation, error)| failed(operation, error.to_string()))?;
+        let materialized = secrets::materialize(dir, &served(&staged))
+            .map_err(|(_, error)| failed("read-secret", error.to_string()))?;
+        write_settings(&self.path, &staged).map_err(|error| failed("write-file", error))?;
+        self.install(staged, materialized, retry);
         self.revision.send_modify(|r| *r += 1);
         Ok(self.for_client())
     }
+
+    /// The settings the server runs with, and the retry flag of the load they came from:
+    /// both change together, only once the batch is saved.
+    fn install(&self, doc: Map<String, Value>, materialized: Map<String, Value>, retry: bool) {
+        *self.lock() = Loaded { doc, materialized };
+        self.retry
+            .store(retry, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// The settings file and the secret store as they were before a batch's writes.
+struct Snapshot {
+    file: Option<Vec<u8>>,
+    secrets: Vec<(PathBuf, Vec<u8>)>,
+}
+
+impl Snapshot {
+    fn take(path: &Path, dir: &Path) -> io::Result<Self> {
+        let file = match std::fs::read(path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let mut secrets = Vec::new();
+        for path in secret_files(dir)? {
+            let bytes = std::fs::read(&path)?;
+            secrets.push((path, bytes));
+        }
+        Ok(Self { file, secrets })
+    }
+
+    /// Puts both back; a step that fails is logged by path, never with a value.
+    fn restore(self, path: &Path, dir: &Path) {
+        let mut failed: Vec<PathBuf> = Vec::new();
+        for current in secret_files(dir).unwrap_or_default() {
+            if !self.secrets.iter().any(|(kept, _)| *kept == current)
+                && std::fs::remove_file(&current).is_err()
+            {
+                failed.push(current);
+            }
+        }
+        for (kept, bytes) in &self.secrets {
+            if std::fs::read(kept).ok().as_ref() != Some(bytes)
+                && conn_support::fs::write_private(kept, bytes).is_err()
+            {
+                failed.push(kept.clone());
+            }
+        }
+        let file = match &self.file {
+            Some(bytes) => conn_support::fs::resolve_symlink_target(path)
+                .and_then(|target| conn_support::fs::write_private(&target, bytes)),
+            None => std::fs::remove_file(path).or_else(|error| {
+                if error.kind() == io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            }),
+        };
+        if file.is_err() {
+            failed.push(path.to_owned());
+        }
+        for path in failed {
+            eprintln!(
+                "conn-server: failed to restore {} after a refused provider-instance batch",
+                path.display()
+            );
+        }
+    }
+}
+
+/// The `<name>.bin` files of the secret store; none when the folder does not exist.
+fn secret_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut files = Vec::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().is_some_and(|extension| extension == "bin") && path.is_file() {
+            files.push(path);
+        }
+    }
+    Ok(files)
 }
 
 /// The batch applied in order to a copy of `current`, and the store changes it makes; or the
@@ -134,7 +227,6 @@ fn stage(
         }
         let before = staged.clone();
         apply_provider_instance_mutation(&mut staged, mutation).map_err(invalid)?;
-        secrets::restore_echoed_unstored(&before, &mut staged);
         if file::check(&staged).is_err() {
             return Err(invalid(
                 "the settings would not decode after this mutation".into(),
@@ -202,7 +294,7 @@ fn instance_config(mut instance: Map<String, Value>) -> Result<Value, String> {
         if let Some(value) = instance.get(field) {
             let trimmed = value
                 .as_str()
-                .map(str::trim)
+                .map(super::contract_trim)
                 .filter(|text| !text.is_empty())
                 .ok_or_else(|| format!("instance.{field} must be a non-empty string"))?
                 .to_owned();
@@ -215,17 +307,14 @@ fn instance_config(mut instance: Map<String, Value>) -> Result<Value, String> {
     {
         return Err("instance.enabled must be a boolean".into());
     }
-    match instance.get("config") {
+    match instance.get_mut("config") {
         None => {}
         Some(Value::Object(config)) => {
             for field in secrets::provider_secret_fields(&driver) {
-                if let Some(value) = config.get(*field)
-                    && !value.is_string()
-                    && !secret_reference(value)
-                {
-                    return Err(format!(
-                        "instance.config.{field} must be a string or a secret reference"
-                    ));
+                if let Some(value) = config.get_mut(*field) {
+                    secret_value(value).map_err(|()| {
+                        format!("instance.config.{field} must be a string or a secret reference")
+                    })?;
                 }
             }
         }
@@ -244,7 +333,7 @@ fn instance_config(mut instance: Map<String, Value>) -> Result<Value, String> {
             let name = variable
                 .get("name")
                 .and_then(Value::as_str)
-                .map(str::trim)
+                .map(super::contract_trim)
                 .filter(|name| environment_name(name))
                 .ok_or_else(|| {
                     format!(
@@ -254,22 +343,18 @@ fn instance_config(mut instance: Map<String, Value>) -> Result<Value, String> {
                 })?
                 .to_owned();
             variable.insert("name".into(), json!(name));
-            if let Some(value) = variable.get("value")
-                && !value.is_string()
-                && !secret_reference(value)
-            {
-                return Err(format!("{at}.value must be a string or a secret reference"));
+            if let Some(value) = variable.get_mut("value") {
+                secret_value(value)
+                    .map_err(|()| format!("{at}.value must be a string or a secret reference"))?;
             }
             for flag in ["sensitive", "valueRedacted"] {
                 if variable.get(flag).is_some_and(|value| !value.is_boolean()) {
                     return Err(format!("{at}.{flag} must be a boolean"));
                 }
             }
-            if variable
-                .get("secret")
-                .is_some_and(|secret| !secret_reference(secret))
-            {
-                return Err(format!("{at}.secret must be a secret reference"));
+            if let Some(secret) = variable.get_mut("secret") {
+                *secret = secret_reference(secret)
+                    .ok_or_else(|| format!("{at}.secret must be a secret reference"))?;
             }
         }
     }
@@ -278,7 +363,7 @@ fn instance_config(mut instance: Map<String, Value>) -> Result<Value, String> {
 
 /// A provider slug (`PROVIDER_SLUG_PATTERN`), trimmed.
 fn slug(value: &Value, field: &str) -> Result<String, String> {
-    let text = value.as_str().map(str::trim).unwrap_or_default();
+    let text = value.as_str().map(super::contract_trim).unwrap_or_default();
     let mut chars = text.chars();
     let valid = chars.next().is_some_and(|c| c.is_ascii_alphabetic())
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
@@ -303,23 +388,27 @@ fn environment_name(name: &str) -> bool {
         && name.chars().count() <= ENVIRONMENT_NAME_MAX_CHARS
 }
 
-/// `SecretReference`: a secret provider slug and a one-line path, each trimmed and non-empty.
-fn secret_reference(value: &Value) -> bool {
-    let (Some(provider), Some(reference)) = (
-        value.get("provider").and_then(Value::as_str).map(str::trim),
-        value
-            .get("reference")
-            .and_then(Value::as_str)
-            .map(str::trim),
-    ) else {
-        return false;
-    };
+/// A secret slot's value: a string as it is, or a valid reference stored in its canonical form.
+fn secret_value(value: &mut Value) -> Result<(), ()> {
+    if value.is_string() {
+        return Ok(());
+    }
+    *value = secret_reference(value).ok_or(())?;
+    Ok(())
+}
+
+/// `SecretReference`, as the contract decodes it: a secret provider slug and a one-line path,
+/// each trimmed and non-empty, lengths in UTF-16 units as JavaScript counts them. Returns the
+/// trimmed reference to store.
+fn secret_reference(value: &Value) -> Option<Value> {
+    let provider = super::contract_trim(value.get("provider")?.as_str()?);
+    let reference = super::contract_trim(value.get("reference")?.as_str()?);
     let mut chars = provider.chars();
     let provider_ok = chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-        && provider.chars().count() <= SLUG_MAX_CHARS;
+        && provider.len() <= SLUG_MAX_CHARS;
     let reference_ok = !reference.is_empty()
-        && reference.chars().count() <= SECRET_REFERENCE_MAX_CHARS
+        && reference.encode_utf16().count() <= SECRET_REFERENCE_MAX_CHARS
         && !reference.contains(['\r', '\n']);
-    provider_ok && reference_ok
+    (provider_ok && reference_ok).then(|| json!({ "provider": provider, "reference": reference }))
 }

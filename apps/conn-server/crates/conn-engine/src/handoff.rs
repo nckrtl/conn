@@ -10,8 +10,7 @@
 //! - Delivery follows `ContextHandoffDelivery.ts` (`deliverContextHandoffs`): injected into
 //!   the native thread when the provider can, else inline ahead of the user's text.
 //!
-//! `tools/gen-handoff-cases.mjs` runs T3's own functions on the same inputs; the tests here
-//! must give the same values.
+//! The tests here hold the values T3's own functions gave on the same inputs, recorded once.
 
 use conn_support::text::{is_js_space, js_trim, utf16_prefix};
 use serde_json::{Value, json};
@@ -805,7 +804,7 @@ pub(crate) fn with_inline_context(context: &str, user_text: &str) -> String {
 mod tests {
     use super::*;
 
-    /// T3's own functions on the same inputs (`tools/gen-handoff-cases.mjs`).
+    /// T3's own functions on the same inputs (recorded once from T3's code).
     #[test]
     fn handoff_functions_match_t3s() {
         let cases: Vec<Value> =

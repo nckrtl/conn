@@ -41,10 +41,10 @@ with its state and what it needs from outside the server.
   is per folder, so two ids that map to one folder share it.
 - **`/mcp`:** the caller thread's project. Failures reach the agent as their plain message:
   Effect's `McpServer` renders a declared `Error` with a message that way
-  (`declaredFailureResult`), and `parity.mjs` shows the T3 server does so for this toolkit.
+  (`declaredFailureResult`); the removed `parity.mjs` showed the T3 server does so for this toolkit.
 - **Proofs:** 11 unit tests (the 8 cases of `AnnotationStore.test.ts`, the id rule, files
   the T3 server wrote, and 3 for hostile project ids); the 2 cases of `McpAnnotationsToolkit.test.ts` plus the refusals;
-  the 3 methods decode with the real client's decoders; 7 `parity.mjs` steps, no differences.
+  when the TypeScript checks still ran, the 3 methods decoded with the real client's decoders and 7 `parity.mjs` steps showed no differences.
 - **Not done:** no client reducer check: the web client keeps the stream's latest list as it
   is, so the decode check is what it needs.
 
@@ -151,17 +151,17 @@ with its state and what it needs from outside the server.
 
 - Webhooks: 16 tests ported from `ScheduledTaskService.webhook.test.ts` (`webhook/tests.rs`),
   2 store tests, 29 tests from `webhookTemplate.test.ts`, `webhookFilter.test.ts` and
-  `webhookVerification.test.ts`; `tools/webhook-diff.mjs` runs T3's own template, filter,
-  redaction and signature functions against `examples/webhook_functions.rs` on 140 cases;
-  `effect-client.mjs` decodes the 3 methods and checks the route's refusals.
+  `webhookVerification.test.ts`. Until the TypeScript checks were removed, `webhook-diff.mjs`
+  ran T3's own template, filter, redaction and signature functions on 140 cases, and
+  `effect-client.mjs` decoded the 3 methods and checked the route's refusals.
 
 - 31 unit tests: the cases of `Schedule.test.ts`, `ScheduledTaskService.interval.test.ts`,
   `.schedule.test.ts` and `.test.ts` that do not need webhooks or managed policy (with the
   interrupted `runNow`), on a paused tokio clock (`clock::TestClock` follows it), and the engine runner's outcome rules.
 - `conn-engine`: `a_scheduled_launch_keeps_its_task_id_and_actor`.
-- `effect-client.mjs`: the five methods decode with the real client's decoders.
-- `conn-mcp`: refusal tests for every access rule, the normal path, and 19 `parity.mjs` steps
-  (no differences), including the argument errors in Effect's words.
+- `conn-mcp`: refusal tests for every access rule and the normal path. Until the TypeScript
+  checks were removed, `effect-client.mjs` decoded the five methods and 19 `parity.mjs` steps
+  showed no differences, including the argument errors in Effect's words.
 
 ## Dependencies
 

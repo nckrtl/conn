@@ -1,6 +1,6 @@
 //! GitHub's GraphQL operations, as T3 sends them. `generated.rs` holds every operation's text
-//! and document template, printed from the monorepo by `tools/gen-graphql.mjs` (never by
-//! hand). This module renders an operation once (`Operation::document`) or batched under
+//! and document template, hand-owned since upstream T3 Code `05e3674636` (once printed from
+//! the monorepo by a generator). This module renders an operation once (`Operation::document`) or batched under
 //! aliases, as `GraphQLResolver.aliased` does (`render_slices`, Effect's `renderSlices`).
 
 pub mod generated;

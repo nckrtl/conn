@@ -1,14 +1,14 @@
-//! What the server shares with its providers: [`LiveManifest`], the model manifest it accepted
-//! last (T3's `ModelManifest.current`), and [`StatusNotifier`], how a provider reports that its
+//! What the server shares with its providers: [`LiveManifest`], its model manifest (T3's
+//! `ModelManifest.current`), and [`StatusNotifier`], how a provider reports that its
 //! entry changed.
 
 use std::sync::{Arc, RwLock};
 
 use serde_json::Value;
 
-/// The accepted manifest, or none: then the providers use the manifest bundled at build time.
-/// The server sets it when it loads a newer disk cache or accepts a fetch; providers read it
-/// on every probe, so the next probe shows it. Cheap to clone; clones share the manifest.
+/// The server's manifest, or none: then the providers use the catalogs they bundle. The server
+/// sets its bundled manifest at start; providers read it on every probe. Cheap to clone; clones
+/// share the manifest.
 #[derive(Clone, Debug, Default)]
 pub struct LiveManifest(Arc<RwLock<Option<Arc<Value>>>>);
 

@@ -594,7 +594,7 @@ mod tests {
         assert_eq!(default_slug(&provider), Some(json!("claude-opus-5-5")));
         let path = concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../../server/src/provider/model-manifest.json"
+            "/../conn-server/src/model_manifest/bundled.json"
         );
         let mut manifest: Value =
             serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();

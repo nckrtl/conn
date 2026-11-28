@@ -15,7 +15,7 @@ calls, so the same transcripts test the Conn Server's Claude session:
 drives `ClaudeSession` through the steps of the fixture's `input.ts` (`scenarios.json`; prompt
 texts come from the transcript). Every outbound frame must equal the recorded one.
 
-`tools/check.sh` runs `check.mjs`: it fails when a scenario that is not in
+`tools/audit.sh` runs `check.mjs`: it fails when a scenario that is not in
 `expected-failures.txt` fails, and when a listed one passes (then remove it from the list).
 
 ## Result at the pinned commit

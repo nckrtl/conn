@@ -1,4 +1,4 @@
-//! Building blocks the generated code uses. Hand-written; `tools/gen-contract.mjs` targets them.
+//! Building blocks the contract types in `generated.rs` use. Hand-written.
 
 use serde::de::{self, Deserializer, Unexpected};
 use serde::{Deserialize, Serialize, Serializer};

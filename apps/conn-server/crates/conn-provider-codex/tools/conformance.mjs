@@ -423,8 +423,7 @@ function deriveSubagentStop(fixture, dir) {
 }
 
 /**
- * T3's `subagent_v2` recording with the subagent ending after the root turn (as
- * `crates/conn-server/tools/idle-diff.mjs` derives it): the child's last status change and turn
+ * T3's `subagent_v2` recording with the subagent ending after the root turn: the child's last status change and turn
  * end, and the root's subagent items that report them, move behind the root's `turn/completed`.
  * Then the wake turn: `simple`'s turn on the root thread.
  */

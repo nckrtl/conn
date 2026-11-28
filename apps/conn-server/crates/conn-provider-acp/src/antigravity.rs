@@ -198,7 +198,7 @@ pub(crate) fn resolve_executable(
     search_path(Path::new("agy"), path_var).ok_or_else(|| EXECUTABLE_MISSING.into())
 }
 
-/// `AntigravityDriver.ts` texts for `resolveExecutable` (`tools/check-copies.mjs`).
+/// `AntigravityDriver.ts` texts for `resolveExecutable`, copied by hand.
 const CUSTOM_EXECUTABLE_MISSING: &str =
     "The custom Antigravity executable is not installed or not executable.";
 const EXECUTABLE_MISSING: &str =
@@ -471,7 +471,7 @@ fn link_user_configuration(profile: &Path, gemini: &Path) {
     }
 }
 
-/// `antigravityAuthSupport.ts` texts for `prepareAntigravityProfile` (`tools/check-copies.mjs`).
+/// `antigravityAuthSupport.ts` texts for `prepareAntigravityProfile`, copied by hand.
 pub(crate) const PROFILE_DIRECTORY_FAILED: &str =
     "The Antigravity profile directory could not be created.";
 const PROFILE_PERMISSIONS_FAILED: &str =
@@ -1198,7 +1198,7 @@ pub(crate) fn is_wake(params: &Value) -> bool {
 pub(crate) const SIGN_IN_REQUIRED: &str = "sign-in-required";
 /// `ProviderError::Failed` operation of an error reply whose details T3 shows.
 pub(crate) const RECEIVE_RESPONSE: &str = "receive-response";
-/// `AntigravityDriver.ts`'s `PYTHON_SOCKS_REQUIRED` (`tools/check-copies.mjs`).
+/// `AntigravityDriver.ts`'s `PYTHON_SOCKS_REQUIRED`, copied by hand.
 pub(crate) const PYTHON_SOCKS_REQUIRED: &str = "python-socks is required to use a SOCKS proxy";
 /// `NATIVE_CLI_NO_BROWSER_PREFIX` (`antigravityAuthSupport.ts`).
 const NO_BROWSER_PREFIX: &str = "No browser is available here";
@@ -1594,7 +1594,7 @@ pub(crate) fn needs_session(observed: &Observed) -> bool {
         && !observed.signed_out
 }
 
-/// `AntigravityProvider.ts`'s `SIGN_IN_MESSAGE` (`tools/check-copies.mjs`).
+/// `AntigravityProvider.ts`'s `SIGN_IN_MESSAGE`, copied by hand.
 const SIGN_IN_MESSAGE: &str = "Sign in with Google to use Antigravity.";
 
 /// `signInMessage`.

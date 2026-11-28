@@ -1,8 +1,7 @@
 //! A pull request watch's wake and how several become one, as T3's
 //! `apps/server/src/orchestration-v2/pullRequestWatch.ts` does it
 //! (`combinePullRequestWatchWakes`). The engine rebuilds a queued wake with it; what a wake
-//! says is written in `conn-source-control` (`pull_requests/watch.rs`), whose
-//! `tools/pr-watch-diff.mjs` runs T3's functions and these on the same cases.
+//! says is written in `conn-source-control` (`pull_requests/watch.rs`).
 
 use serde_json::{Value, json};
 

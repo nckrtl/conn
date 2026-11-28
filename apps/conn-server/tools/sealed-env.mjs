@@ -120,8 +120,6 @@ export function sealedEnv(dir) {
     // Nor the Codex status probe: an entry stays T3's pending one. Checks that probe Codex on
     // a stub turn it on.
     CONN_CODEX_STATUS_PROBE: "off",
-    // The server never fetches model-manifest.json from GitHub.
-    CONN_MODEL_MANIFEST_URL: "off",
   };
 }
 
@@ -139,9 +137,7 @@ export function sealedEnvTemp() {
  * real home. `dir` must be a fresh temp folder the check removes.
  */
 export function sealedNodeEnv(dir) {
-  // No server of ours reads CONN_MODEL_MANIFEST_URL there, but a check that starts one from
-  // this environment must not fetch either.
-  return { ...runtimeVariables(), HOME: freshHome(dir), SHELL: standInShell(dir), CONN_MODEL_MANIFEST_URL: "off" };
+  return { ...runtimeVariables(), HOME: freshHome(dir), SHELL: standInShell(dir) };
 }
 
 /**
@@ -206,7 +202,7 @@ export const RUN_KNOBS = [
 /** What the cargo runner sets itself, whatever the shell has. */
 export const RUN_SET = [
   "HOME", "PATH", "SHELL", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
-  "GIT_CEILING_DIRECTORIES", "CONN_CLAUDE_STATUS_PROBE", "CONN_CODEX_STATUS_PROBE", "CONN_MODEL_MANIFEST_URL",
+  "GIT_CEILING_DIRECTORIES", "CONN_CLAUDE_STATUS_PROBE", "CONN_CODEX_STATUS_PROBE",
 ];
 
 /**
@@ -260,7 +256,6 @@ export function sealedRunEnv(dir, env = process.env) {
     GIT_CEILING_DIRECTORIES: env.TMPDIR || NodeOS.tmpdir(),
     CONN_CLAUDE_STATUS_PROBE: "off",
     CONN_CODEX_STATUS_PROBE: "off",
-    CONN_MODEL_MANIFEST_URL: "off",
   };
 }
 

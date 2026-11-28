@@ -455,7 +455,6 @@ name = "conn-source-control"
 version = "0.5.7"
 dependencies = [
  "conn-contract",
- "conn-engine",
  "conn-source-control-core",
  "conn-support",
  "conn-vcs",

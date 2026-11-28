@@ -16,6 +16,12 @@ apps/server/src/mcp/toolkits/device
 packages/contracts/src/device.ts
 packages/ssh/src/command.ts
 
+[crates/conn-contract]
+# The inputs of the deleted gen-contract.mjs: generated.rs is hand-owned now, so every schema
+# change upstream is a candidate to port.
+packages/contracts
+packages/provider-core/src/server/ProviderAdapter.ts
+
 [crates/conn-contract/src/tool_output.rs]
 packages/shared/src/toolOutput.ts
 packages/shared/src/t3McpToolPresentation.ts

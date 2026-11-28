@@ -1,5 +1,5 @@
 // What the Conn Server serves, read from its sources and its binary. Used by
-// tools/bump-report.mjs and crates/conn-server/tools/{decode-coverage,capabilities-check}.mjs.
+// tools/bump-report.mjs and crates/conn-server/tools/capabilities-check.mjs.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
@@ -8,7 +8,7 @@ import * as NodePath from "node:path";
 import { repoRoot } from "./monorepo.mjs";
 import { sealedEnv } from "./sealed-env.mjs";
 
-/** Every method of the contract, from the generated `methods.json`: [{ tag, stream }]. */
+/** Every method of the contract, from `methods.json`: [{ tag, stream }]. */
 export function contractMethods() {
   const file = NodePath.join(repoRoot, "crates/conn-contract/methods.json");
   return JSON.parse(NodeFS.readFileSync(file, "utf8")).methods;
@@ -39,7 +39,7 @@ export function registeredTags(tags) {
   return found;
 }
 
-/** Every command type of the contract, from the generated `COMMAND_TYPES`. */
+/** Every command type of the contract, from `COMMAND_TYPES`. */
 export function contractCommands() {
   const file = NodePath.join(repoRoot, "crates/conn-contract/src/generated.rs");
   const list = /^pub const COMMAND_TYPES: &\[&str\] = &\[([^\]]*)\];$/m.exec(NodeFS.readFileSync(file, "utf8"));

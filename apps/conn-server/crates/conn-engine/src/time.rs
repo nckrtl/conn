@@ -57,7 +57,7 @@ pub(crate) fn unique_suffix() -> String {
 mod tests {
     use super::{TimeZone, date_input_millis};
 
-    /// T3's `DateTime.make` in five zones on the strings of `tools/gen-date-cases.mjs`.
+    /// T3's `DateTime.make` in five zones on recorded strings.
     #[test]
     fn date_input_matches_t3s() {
         let cases: serde_json::Value =

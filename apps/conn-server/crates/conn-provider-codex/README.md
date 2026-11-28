@@ -73,7 +73,7 @@ dies, open turns end as failed, and the next call starts a new process and resum
   `approval_policy` / `sandbox_policy` override (sandbox decoded as TS does), so model, effort
   and mode changes apply on the next turn.
 - **Turn context:** with the `conn` MCP server, `additionalContext` carries T3's
-  orchestration, runtime and tool text, byte for byte (`tools/gen-instructions.mjs`).
+  orchestration, runtime and tool text, byte for byte (`src/instructions.rs`, hand-owned).
 - **Attachments:** a path line per attachment in the text (`attachmentPrompt.ts`), and GIF,
   JPEG, PNG and WebP images inline as data URLs, from `CodexConfig::attachments_dir`.
   File reads and base64 encoding run on the blocking pool.
@@ -197,7 +197,7 @@ against 11.4 MiB with it off; no Codex process is left after it. The real CLI ad
 start and, for a ChatGPT account, up to 3 s for its catalog refresh, for one short-lived
 `codex app-server` process (not measured: no check runs the real CLI).
 
-Proof: `tools/probe-conformance/run.mjs` (in `tools/check.sh`) runs T3's own function and
+Proof: `tools/probe-conformance/run.mjs` (in `tools/audit.sh`) runs T3's own function and
 ours against a stub `codex` (`stub-codex.mjs`) in 17 scenarios: disabled, missing binary (a
 path and a bare name on a PATH without it), an old CLI without `app-server`, a hang, a failed
 `initialize`, signed out with and without a home, ChatGPT with and without the cache refresh,
@@ -208,8 +208,8 @@ argv, environment, folder, every stdin line (ids aside; the concurrent reads aft
 `account/read` grouped by method, since their order is timing on both sides) and the signals
 it got. Both sides are
 sealed (T3's in `sealedNodeEnv` with the fetch guard; both probe with `PATH=/usr/bin:/bin`).
-`check-copies.mjs` holds the plan and effort labels and the preferred default models;
-`gen-model-catalog.mjs --check` the catalog.
+The plan and effort labels and the preferred default models are copied by hand;
+`gen-model-catalog.mjs --check` (in `tools/audit.sh`) holds the catalog.
 
 Not ported, on purpose: the version advisory (a registry lookup), the managed setup mode and
 shadow homes, and the watch on `auth.json` that probes again after `codex login` outside T3
@@ -277,7 +277,7 @@ The notice text is `conn_provider_support::notification`, shared with Claude. Pr
 conformance scenarios `subagentWake` and `commandWake` (T3's recordings with the child or the
 command moved behind the root turn's end, and a wake turn; T3's adapter offers are logged and
 compared with our events: text, notice, delivery; both servers send the same wake
-`turn/start`), `idle-diff` (the "background work ended" state is the same as T3's), the
+`turn/start`), the
 replay of all 21 recordings with `completionWake`, unit tests
 `a_command_that_ends_after_its_turn_wakes_the_agent_once`,
 `a_stopped_turns_command_asks_for_no_wake`, `a_closed_thread_ends_a_settled_turns_commands`,
@@ -322,7 +322,6 @@ Typed upstream definitions were measured and not used:
 
 ```sh
 node crates/conn-provider-codex/tools/conformance.mjs  # the wire check
-node crates/conn-provider-codex/tools/gen-instructions.mjs --check
 node crates/conn-provider-codex/tools/gen-model-catalog.mjs --check
 node crates/conn-provider-codex/tools/probe-conformance/run.mjs
 cargo test -p conn-provider-codex                                                # offline
@@ -330,7 +329,7 @@ cargo test -p conn-provider-codex live_ -- --ignored --test-threads=1 --nocaptur
 node tools/capture-ts-events.mjs   # regenerate testdata, offline
 ```
 
-- `tools/conformance.mjs` (in `tools/check.sh`) proves the launch and the wire equal to the
+- `tools/conformance.mjs` (in `tools/audit.sh`) proves the launch and the wire equal to the
   T3 server's. A stub `codex` (`tools/codex-stub.mjs`) records argv, environment, every stdin
   line and the shutdown signals, and replays a recording. The same scenarios run through the
   T3 server's real `CodexAdapterV2` spawn path and through this crate

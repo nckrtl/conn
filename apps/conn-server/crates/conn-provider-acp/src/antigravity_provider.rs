@@ -512,12 +512,12 @@ fn credential_failure(error: &OpenError) -> &str {
 /// text shows when a session opens, while a check and a refresh show their fixed texts.
 const PROFILE_OPERATION: &str = "prepare-profile";
 
-/// `AntigravityDriver.ts` texts for the server's own setup steps (`tools/check-copies.mjs`).
+/// `AntigravityDriver.ts` texts for the server's own setup steps, copied by hand.
 const SETUP_WORKSPACE_FAILED: &str = "Could not create an Antigravity setup workspace.";
 const RUNTIME_TEMP_FAILED: &str = "Could not create an Antigravity runtime temp directory.";
 /// T3's `refreshModels` limit for the throwaway session.
 const MODEL_LOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
-/// `AntigravityAuth.ts` texts for a failed credential check (`tools/check-copies.mjs`).
+/// `AntigravityAuth.ts` texts for a failed credential check, copied by hand.
 const CREDENTIALS_FAILED: &str =
     "Antigravity could not authenticate with the configured credentials.";
 const SUBSCRIPTION_REQUIRED: &str =
@@ -527,7 +527,7 @@ const NO_SESSION: &str =
     "Antigravity authenticated, but could not initialize a session or load models.";
 const REJECTED: &str =
     "Antigravity rejected the configured credentials. Check the provider settings.";
-/// `AntigravityDriver.ts` texts for a failed explicit refresh (`tools/check-copies.mjs`).
+/// `AntigravityDriver.ts` texts for a failed explicit refresh, copied by hand.
 const REFRESH_FAILED: &str =
     "Could not refresh Antigravity models. The previous model list is unchanged.";
 const REFRESH_TIMED_OUT: &str =

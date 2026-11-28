@@ -6,11 +6,7 @@ import { repoRoot } from "./monorepo.mjs";
 import { cargoBuildEnv } from "./sealed-env.mjs";
 
 const examples = [
-  ["release", "conn-server", "effect_fixture", "replay_server", "settings_secrets", "text_generation", "model_manifest_cache", "mcp_apps", "background_gate"],
-  ["release", "conn-engine", "export_turn", "tool_output_cases"],
-  ["release", "conn-source-control", "registry_cases", "pr_watch_cases", "pr_link_sync_cases"],
-  ["release", "conn-features", "webhook_functions"],
-  ["release", "conn-mcp", "html_cases"],
+  ["release", "conn-server", "replay_server", "text_generation"],
   ["debug", "conn-provider-codex", "conformance", "codex_probe"],
   ["debug", "conn-provider-claude", "conformance", "claude_probe", "t3_replay"],
   ["debug", "conn-provider-acp", "conformance", "grok_probe", "antigravity_conformance"],
@@ -36,7 +32,6 @@ function build(profile, selections, withServer = false) {
   if (profile === "release") args.push("--release");
   for (const [pkg, ...names] of selections) {
     args.push("-p", pkg);
-    if (pkg === "conn-engine" && names.includes("export_turn")) args.push("--features", "conn-engine/fake-provider");
     for (const name of names) args.push("--example", name);
   }
   if (withServer) args.push("--bin", "conn-server");

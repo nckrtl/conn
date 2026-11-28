@@ -84,7 +84,7 @@ fn without_watch(link: &Value) -> Value {
 
 /// The thread after `command`, or `None` when T3's decider returns the thread unchanged.
 /// T3 emits `thread.pull-request-synced` with the thread either way.
-pub fn decide(thread: &Value, command: &Value, now: &str) -> Option<Value> {
+pub(crate) fn decide(thread: &Value, command: &Value, now: &str) -> Option<Value> {
     let key = key_of(command);
     let links = links_of(thread);
     let existing = links.iter().position(|link| key_of(link) == key);
@@ -126,7 +126,7 @@ fn with_links(thread: &Value, pull_requests: Vec<Value>, now: Option<&str>) -> V
 /// `thread.pull-request-link.sync`: the link's snapshot and stack as the host read them.
 /// `None` when no link has the key; T3 then returns the thread unchanged and emits nothing.
 /// `updatedAt` stays: a host read is not thread activity.
-pub fn decide_link_sync(thread: &Value, command: &Value) -> Option<Value> {
+pub(crate) fn decide_link_sync(thread: &Value, command: &Value) -> Option<Value> {
     let key = key_of(command);
     let mut links = links_of(thread);
     let link = links
@@ -169,7 +169,7 @@ fn legacy_link(thread: &Value, linked: &Value, now: &str) -> Value {
 
 /// `thread.pull-request.sync`: the branch's pull request, and an optional replacement of the
 /// older single link. `updatedAt` stays.
-pub fn decide_branch_sync(thread: &Value, command: &Value, now: &str) -> Value {
+pub(crate) fn decide_branch_sync(thread: &Value, command: &Value, now: &str) -> Value {
     let mut updated = thread.clone();
     let Some(map) = updated.as_object_mut() else {
         return updated;

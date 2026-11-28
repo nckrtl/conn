@@ -10,10 +10,9 @@ expects, and the first replay input for `conn-server`. [CONNECT.md](CONNECT.md) 
 | --------------------------------- | ----------------------------------------------------------------------------- |
 | `sessions/<scenario>.ndjson`      | One wire frame per line: `{"dir","ms","ws","frame"}`, plus `"parts"` if split |
 | `sessions/<scenario>.http.ndjson` | HTTP calls to the same server, the `/ws` upgrade URLs, and socket closes      |
-| `recorder/record.mjs`             | Starts a server and headless Chromium, drives the web client, writes files    |
-| `recorder/scenarios.mjs`          | One driver per scenario                                                       |
-| `recorder/redact.mjs`             | Redaction applied before anything is written                                  |
 | `recorder/summarize.mjs`          | Prints one recording as a timeline of HTTP calls and RPCs                     |
+| `recorder/compare.mjs`            | Pairs the calls of two recordings and diffs their answers                     |
+| `recorder/compare-terminal.mjs`   | Prints a terminal recording as a timeline                                     |
 | `decode-check/`                   | Rust test: every frame decodes with `conn_wire`                               |
 
 Line format, as the workspace README fixes it, with two additions:
@@ -54,106 +53,24 @@ The server starts with `--auto-bootstrap-project-from-cwd` in a scratch git repo
 project and one empty thread before the client arrives. `pairing` therefore lands on that thread,
 not on an empty list. `remote` records only the second server's traffic.
 
-## Rerun
+## Read them
 
-Run the recorder from `apps/conn-server`, after `vp i` at the monorepo root: the recorder runs
-the monorepo's TypeScript server and serves its web build, and takes Playwright from its
-`node_modules`. Build the web client once:
-
-```sh
-(cd ../web && vp build)
-node fixtures/recorder/record.mjs
-```
-
-`CONN_RECORDER_SHOTS=<dir>` keeps the screenshots after the run. `--out <dir>` writes the
-recordings to `<dir>` instead of `sessions/`, for a proof run that must not change them.
-
-Without scenario names it rewrites every non-`rust-*` file in `sessions/`. It takes about two
-minutes and spends four Haiku turns. Name scenarios to record only those, in order:
-`record.mjs pairing turn`. Every scenario after `pairing` needs the cookie `pairing` earns, so
-always name `pairing` first.
-
-Then check the result:
+The recorder that drove the web client (`record.mjs`, its scenarios and `rust-scenarios.sh`)
+was removed with the TypeScript checks; these recordings are frozen. To read them:
 
 ```sh
 cargo test --manifest-path fixtures/decode-check/Cargo.toml -- --nocapture
 node fixtures/recorder/summarize.mjs turn
-git diff --stat fixtures/sessions
+node fixtures/recorder/compare.mjs ts-queue rust-queue
 ```
-
-The `rust-*` scenarios run only when named, after `pairing`, with `--rust <binary>`. They
-record only the Rust server's traffic and always write a screenshot per checkpoint. Each one
-does what a user does and checks the result (a reply, a file, a diff line, a value on disk),
-not only that a view opens. One command runs a whole set:
-
-```sh
-cargo build --release -p conn-server --bins --examples
-(cd helpers/sdk-host && npm ci)                       # live only
-fixtures/recorder/rust-scenarios.sh fake              # 16 scenarios, no model call, ~17 min
-fixtures/recorder/rust-scenarios.sh live              # 22 scenarios, 27 Claude Haiku turns
-```
-
-Both write recordings to a new temp folder (or `--out <dir>`), and `CONN_RECORDER_SHOTS=<dir>`
-keeps the screenshots. The fake set is not in `tools/check.sh`: it passed in each full run
-(2026-11-14), but it takes about 17 minutes, twice the whole check. `fake` runs `target/release/examples/replay_server`, the engine's
-scripted fake provider: no tool runs, so the follow-up and queue scenarios send into the next
-turn, not into a running one, and the worktree scenario writes the agent's file itself.
-`live` runs `target/release/conn-server` with the user's own Claude login and settings, and
-adds the scenarios where Claude must act: `rust-permission`, `rust-stop-continue`, `rust-mcp`,
-`rust-attachment`, `rust-subagent` and `rust-memory` (it sets `CONN_SESSION_IDLE_TIMEOUT=1`
-so the idle session closes in a minute). Turns per scenario: `rust-restart`, `rust-follow-up`,
-`rust-queue`, `rust-two-clients`, `rust-stop-continue` and `rust-model-switch` 2,
-`rust-memory` 3, `rust-files`, `rust-terminal`, `rust-settings` and `rust-secrets` 0, the
-others 1. The recorder runs scenarios in its own table order, not in the order named.
-
-`rust-terminal` runs the `terminal` steps on the Conn Server;
-`recorder/compare-terminal.mjs <recording>` prints either as a timeline. `rust-restart` stops
-and restarts the Rust server on the same state and waits for the client to reconnect without
-a reload. `rust-load` runs 11 turns in three threads, then idles two minutes; it is in neither
-set. Memory samples (`rust-turn`, `rust-memory`) give RSS and macOS `footprint` in KB for the
-server and, as `hostRss`/`hostFootprint`, its SDK host.
 
 `recorder/compare.mjs <a> <b> [tag prefix ...]` pairs the calls of two recordings (names in
 `sessions/` or paths to `.ndjson` files) and diffs their answers, for the `ts-`/`rust-` pairs.
-
-`--rust-url <pairingUrl>` uses a Rust server that already runs (for example on another host,
-through `ssh -L` on the same port) instead of starting one. `--rust-sample <command>` measures
-it: the recorder runs `<command> <label>` at each checkpoint and expects one JSON line with a
-`server` object of numbers. `rust-restart` needs `--rust`, since it must stop the server.
-
-Ids, timings and Claude's wording change on every run, so every file changes. Read the
-redaction checklist below before you commit.
-
-`--explore` keeps the temp folders, writes a screenshot per step, and logs the visible controls:
-use it to fix a driver after a UI change. A failed scenario writes `<scenario>.partial.ndjson`
-and a `failure.png`, and the run exits 1. Do not commit partial files.
-
-### What the recorder does
-
-- Builds the monorepo's `apps/web` first if `apps/web/dist` is missing. The server serves
-  that build.
-- Runs the monorepo's `apps/server/src/bin.ts` under `env -i` with only `HOME`, `USER`,
-  `PATH` and `T3CODE_HOME` set, on a free port, with its base directory in a new temp folder.
-  It never touches `~/.t3` or a running T3 server. It stops the servers it started by their
-  PIDs and deletes the temp folders.
-- Captures traffic through Chromium's own protocol (Playwright `websocket` and request events),
-  not a proxy, and joins frame parts the way `joinSocketFrameParts` does.
-
-### Host requirements and traps
-
-- **Claude must be logged in for the user who runs it.** The server uses the real `HOME`, so the
-  Claude CLI finds its credentials. With an isolated `HOME`, Claude reports "Not logged in".
-- **The host's user Claude settings apply.** The scratch project gets `.claude/settings.json`
-  with `{"permissions":{"ask":["Bash"]}}`. Without it, a user setting that allows all `Bash`
-  skips the prompt that `permission` needs. An ask rule wins over allow, even in full access, so
-  `interrupt` also gets a prompt, which its driver approves.
-- **Host hooks apply.** A hook that rejects bare `sleep` is why `interrupt` runs `ping`.
-- **Provider status reflects the host.** `subscribeServerConfig` lists the host's installed
-  providers, skills and plugins, with home paths rewritten to `/Users/user`.
+`recorder/compare-terminal.mjs <recording>` prints a terminal recording as a timeline.
 
 ## Redaction
 
-`redact.mjs` runs on every line before it is written. It keeps shapes and lengths:
+The recorder redacted every line before it wrote it, keeping shapes and lengths:
 
 - Values under secret-like keys become `<redacted:N>` (N is the original length): tokens,
   tickets, credentials, cookies, `authorization` (the scheme stays: `Bearer <redacted:N>`), DPoP
@@ -167,6 +84,6 @@ and a `failure.png`, and the run exits 1. Do not commit partial files.
 A redacted value no longer matches its schema (a redacted id is not a UUID), so contract
 round-trips must skip those fields.
 
-Before you commit a refresh, search the new files for: the login name, `/Users/` followed by
+Before you commit a recording made another way, search it for: the login name, `/Users/` followed by
 anything but `user`, `eyJ`, `sk-`, `Bearer ` or `DPoP ` followed by anything but `<redacted`,
 and `wsTicket=` followed by anything but `<redacted>`.

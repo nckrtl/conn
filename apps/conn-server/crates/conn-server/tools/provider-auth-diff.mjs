@@ -237,8 +237,7 @@ const CALLS = [
   ["provider.auth.logout", {}],
   ["provider.auth.subscribe", {}],
   // Install (`provider.install.*`) is not compared: neither server serves it, by decision
-  // (Nick, 2026-11-20; Orbit installs and updates provider CLIs). effect-client.mjs checks
-  // that the Conn Server answers it as an unsupported method.
+  // (Nick, 2026-11-20; Orbit installs and updates provider CLIs).
 ];
 
 /** The reply as the client decodes it: a value, the first stream item, or the typed error. */

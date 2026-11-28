@@ -14,20 +14,21 @@
 //   behaviour           no method proves it: where the behaviour lives. Advertised.
 //   undecided           nobody has looked: what the flag promises. Not advertised.
 //
-// The gate reads the flags from the contract, what the T3 server declares from
-// apps/server/src/environment/ServerEnvironment.ts, the registered methods and the commands
-// the engine handles (the arms of its `fn handler`, not the ones it refuses) from the
-// sources, and the advertised flags from the binary's own descriptor. It fails when a flag
-// has no row, when a row names a method or a command that does not exist, and when a row and
-// the descriptor disagree. So a new upstream flag needs a decision, and a newly registered
-// method turns its flag on or fails here.
+// The gate reads the flags from the contract's `ExecutionEnvironmentCapabilities` in
+// crates/conn-contract/src/generated.rs, the registered methods and the commands the engine
+// handles (the arms of its `fn handler`, not the ones it refuses) from the sources, and the
+// advertised flags from the binary's own descriptor. It fails when a flag has no row, when a
+// row names a method or a command that does not exist, and when a row and the descriptor
+// disagree. So a new contract flag needs a decision, and a newly registered method turns its
+// flag on or fails here. Needs no monorepo.
 //
 // Its strength is the row: a `behaviour` row is a decision, and an `undecided` row proves
 // nothing. The summary prints both counts.
 import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 
-import { inMonorepo } from "../../../tools/monorepo.mjs";
+import { repoRoot } from "../../../tools/monorepo.mjs";
 import {
   binaryCapabilities,
   contractCommands,
@@ -39,16 +40,23 @@ import {
 const [binary] = process.argv.slice(2);
 if (!binary) throw new Error("usage: capabilities-check.mjs <conn-server binary>");
 
-const contractFile = "packages/contracts/src/environment.ts";
-const struct = /^export const ExecutionEnvironmentCapabilities = Schema\.Struct\(\{\n([\s\S]*?)^\}\);/m.exec(
-  NodeFS.readFileSync(inMonorepo(contractFile), "utf8"),
+// Each field's wire name: its serde `rename`, else the camelCase of its Rust name.
+const contractFile = "crates/conn-contract/src/generated.rs";
+const struct = /^pub struct ExecutionEnvironmentCapabilities \{\n([\s\S]*?)^\}/m.exec(
+  NodeFS.readFileSync(NodePath.join(repoRoot, contractFile), "utf8"),
 );
-const flags = Array.from(struct?.[1].matchAll(/^ {2}(\w+):/gm) ?? [], (m) => m[1]);
+const flags = [];
+let rename;
+for (const line of struct?.[1].split("\n") ?? []) {
+  const renamed = /#\[serde\([^\]]*\brename = "([^"]+)"/.exec(line);
+  if (renamed) rename = renamed[1];
+  const field = /^\s*pub (\w+):/.exec(line);
+  if (field) {
+    flags.push(rename ?? field[1].replace(/_([a-z0-9])/g, (_, c) => c.toUpperCase()));
+    rename = undefined;
+  }
+}
 if (flags.length === 0) throw new Error(`no ExecutionEnvironmentCapabilities in ${contractFile}`);
-
-const t3File = "apps/server/src/environment/ServerEnvironment.ts";
-const t3Source = NodeFS.readFileSync(inMonorepo(t3File), "utf8");
-const t3 = new Set(flags.filter((flag) => new RegExp(`\\b${flag}\\b`).test(t3Source)));
 
 const rowsFile = NodeURL.fileURLToPath(new URL("capabilities.json", import.meta.url));
 const rows = JSON.parse(NodeFS.readFileSync(rowsFile, "utf8"));
@@ -69,7 +77,7 @@ for (const flag of Object.keys(rows)) {
   if (!flags.includes(flag)) fail(flag, "is no flag of the contract: remove the row");
 }
 for (const flag of advertised) {
-  if (!t3.has(flag)) fail(flag, `is advertised, and ${t3File} does not declare it`);
+  if (!flags.includes(flag)) fail(flag, "is advertised, and is no flag of the contract");
 }
 
 for (const flag of flags) {
@@ -123,7 +131,7 @@ if (failures.length > 0) {
   process.exitCode = 1;
 }
 console.log(
-  `${advertised.size} of ${flags.length} capabilities advertised (the T3 server declares ${t3.size}): ` +
+  `${advertised.size} of ${flags.length} capabilities advertised: ` +
     `${tally.registration} proven by what is registered, ${tally.decision} by decision`,
 );
 console.log(`not advertised: ${tally.absent} not registered`);

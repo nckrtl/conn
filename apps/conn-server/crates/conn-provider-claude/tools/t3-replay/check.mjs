@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// The T3 replay as a check for tools/check.sh: runs run.sh and compares each scenario's result
+// The T3 replay as a check for tools/audit.sh: runs run.sh and compares each scenario's result
 // with `expected-failures.txt`. Exit 0 when exactly the listed scenarios fail; exit 1 when a
 // scenario that passed fails now, when a listed one passes now (remove it from the list), or
 // when the replay did not report every scenario in scenarios.json.

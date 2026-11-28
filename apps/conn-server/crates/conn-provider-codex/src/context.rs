@@ -86,7 +86,7 @@ pub fn additional_context(model: &str, effort: Option<&str>, tools: ToolAvailabi
 mod tests {
     use super::*;
 
-    /// Every case `tools/gen-instructions.mjs` ran through the TS function.
+    /// Every case recorded through the TS function (`testdata/instructions.json`).
     #[test]
     fn matches_the_ts_builder_byte_for_byte() {
         let samples: Vec<Value> =

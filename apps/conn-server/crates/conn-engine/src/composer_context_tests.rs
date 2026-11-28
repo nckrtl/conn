@@ -2,7 +2,7 @@ use serde_json::Value;
 
 use super::project_for_provider;
 
-/// T3's own function on the same inputs (`tools/gen-composer-context-cases.mjs`), after the
+/// T3's own function on the same inputs (recorded once from T3's code), after the
 /// contract's record decoding.
 #[test]
 fn projection_matches_t3s() {

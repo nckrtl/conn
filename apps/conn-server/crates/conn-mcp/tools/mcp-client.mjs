@@ -1,5 +1,5 @@
 // A small MCP client over Streamable HTTP, and the two ways to get a credential for `/mcp`
-// from outside a thread. Shared by parity.mjs and probe runs; no dependencies.
+// from outside a thread. Shared by the flows and probe runs; no dependencies.
 import * as NodeCrypto from "node:crypto";
 
 const PROTOCOL = "2025-06-18";

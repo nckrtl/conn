@@ -46,7 +46,7 @@ const AUTH_TIMEOUT: Duration = Duration::from_secs(300);
 /// `STARTUP_HINT_MS` and `NO_RESPONSE_HINT_MS`.
 const STARTUP_HINT: Duration = Duration::from_secs(90);
 const NO_RESPONSE_HINT: Duration = Duration::from_secs(30);
-/// `AntigravityAuth.ts` texts (`tools/check-copies.mjs`).
+/// `AntigravityAuth.ts` texts, copied by hand.
 const CHECKING: &str = "Checking credentials.";
 const VERIFYING: &str = "Checking Antigravity access and models.";
 const CONNECTED: &str = "Connected to Antigravity.";

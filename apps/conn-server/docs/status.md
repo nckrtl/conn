@@ -16,6 +16,14 @@ from the tool call and its permission request. Handoffs budget serialized histor
 
 PR checks now include GitHub’s start and completion timestamps when available. Clients can show elapsed time for completed runs.
 
+**Native CI (2026-11-28):** CI runs no TypeScript for the Conn Server. `tools/check.sh` keeps
+the checks that need nothing outside `apps/conn-server` (`--group rust`, `--group flows`). The
+provider comparisons against the T3 server moved to the audit kit, `tools/audit.sh`, which the
+`audit-t3-providers` skill runs. The generated contract, `/mcp` catalog, upstream tables,
+instruction texts and case files are hand-owned now; their generators and the checks against
+Conn's forked TypeScript client and Conn-only areas are gone (README.md, "Frozen files"). The
+server writes its bundled model manifest to `model-manifest.json` at start and fetches none.
+
 **Server boundaries (2026-11-27):** five steps on the server's own structure. No method, flag or
 answer changed: `/health` and the descriptor's capabilities equal those of the commit before.
 

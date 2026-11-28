@@ -1,9 +1,9 @@
 //! Decodes contract payloads into the generated types, encodes them again and compares the JSON.
 //!
 //! - `fixtures/sampled.jsonl`: values sampled from every root schema with Effect's `Arbitrary` and
-//!   encoded with the real JSON codec (`tools/gen-contract.mjs` writes it).
-//! - `CONN_CONTRACT_REAL_PAYLOADS=<file>`: real payloads in the same `[{key, value}]` form, from
-//!   `tools/real-payloads.mjs`. They hold user data, so they are never committed.
+//!   encoded with the real JSON codec; hand-owned since upstream T3 Code `05e3674636`.
+//! - `CONN_CONTRACT_REAL_PAYLOADS=<file>`: real payloads in the same `[{key, value}]` form. They
+//!   hold user data, so they are never committed.
 
 mod registry;
 

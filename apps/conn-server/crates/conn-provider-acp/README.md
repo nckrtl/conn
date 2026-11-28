@@ -334,7 +334,6 @@ cargo test -p conn-provider-acp                                                 
 node crates/conn-provider-acp/tools/conformance.mjs   # the wire check
 node crates/conn-provider-acp/tools/antigravity-conformance.mjs   # Antigravity's launch and wire
 node crates/conn-provider-acp/tools/probe-conformance.mjs   # the status probe
-node crates/conn-provider-acp/tools/gen-instructions.mjs --check
 node crates/conn-provider-acp/tools/make-scenarios.mjs   # the hand-made scenarios
 node crates/conn-provider-acp/tools/capture-ts-events.mjs grok   # regenerate testdata
 ```
@@ -352,7 +351,7 @@ node crates/conn-provider-acp/tools/capture-ts-events.mjs grok   # regenerate te
   (T3 offers it outside the event stream) is checked to come before each continuation turn
   and is left out of the event comparison; the deferred finalize debounce is 5 ms, and the
   text flush fires before it, as T3's test clock fires both on one advance.
-- **Probe conformance (`tools/probe-conformance.mjs`, in `tools/check.sh`):** T3's own
+- **Probe conformance (`tools/probe-conformance.mjs`, in `tools/audit.sh`):** T3's own
   `checkGrokProviderStatus` and ours, each against a stub CLI (`tools/grok-cli-stub.mjs`) per
   scenario: disabled, missing, not executable, `--version` hangs and ignores SIGTERM,
   `--version` fails, an old CLI without `models`, `inspect` or ACP, ready, logged out, a
@@ -361,9 +360,9 @@ node crates/conn-provider-acp/tools/capture-ts-events.mjs grok   # regenerate te
   (`checkedAt` aside) and, per CLI run, argv, environment, folder, stdin lines and signals.
   **14 of 14 the same.** One normalisation: T3 ends the ACP probe's stdin just before its
   SIGKILL and the stub logs that only sometimes, so a last "stdin-closed" is not compared.
-  The real client decodes a probed, ready Grok entry: `effect-client.mjs` enables Grok with
-  the stub CLI through `server.updateSettings` and reads `server.refreshProviders`.
-- **Stub conformance (`tools/conformance.mjs`, in `tools/check.sh`):** the same stub agent
+  Until the TypeScript checks were removed, `effect-client.mjs` showed the real client decodes a
+  probed, ready Grok entry.
+- **Stub conformance (`tools/conformance.mjs`, in `tools/audit.sh`):** the same stub agent
   under T3's real Grok adapter and spawn path and under `AcpProvider`; argv, environment,
   every stdin line byte for byte (workspace path and trace ids normalized) and the shutdown
   order compared. **17 of 17 scenarios the same**, `simple` with a T3 MCP session (the `/mcp`
@@ -379,7 +378,7 @@ node crates/conn-provider-acp/tools/capture-ts-events.mjs grok   # regenerate te
   keeps its normalisation of a last "stdin-closed".
 - **Bounded state:** `state_stays_bounded_over_many_turns` runs 200 turns with text, a tool
   call and an approval each; no turn, request or reply is left behind.
-- **Fixture replay (`crates/conn-engine/tools/t3-fixture-replay`, in `tools/check.sh`):** the
+- **Fixture replay (`crates/conn-engine/tools/t3-fixture-replay`, in `tools/audit.sh`):** the
   engine runs T3's Grok fixtures with this provider on a stub `grok` that runs T3's own ACP
   replay agent, and T3's assertions judge the result. Grok 10 of 15: frames are equal for the
   10 non-background variants, and since the engine delivers streamed text as T3 does and

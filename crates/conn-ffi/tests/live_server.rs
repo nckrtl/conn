@@ -229,7 +229,6 @@ fn spawn_disposable_server(
         .arg(state_dir.path())
         .arg("--project")
         .arg(&project_canonical)
-        .env("CONN_MODEL_MANIFEST_URL", "off")
         .env("CONN_SERVER_INERT", "1")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

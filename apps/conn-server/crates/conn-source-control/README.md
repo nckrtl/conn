@@ -36,10 +36,10 @@ The specification is `packages/source-control-core`, `packages/source-control-gi
 | `repository.rs` | `SourceControlRepositoryService`: lookup, clone (its own `git clone` child), publish (`ensureRemote`, push, upstream) |
 | `hosts/github.rs` | GitHub discovery, credentials and REST requests |
 | `hosts/repositories.rs` | GitHub's `getRepositoryCloneUrls` and `createRepository` (`Hosts`) |
-| `hosts/github_graphql/` | GitHub's GraphQL operations: `generated.rs` (by `tools/gen-graphql.mjs`) and the batch renderer |
+| `hosts/github_graphql/` | GitHub's GraphQL operations: `generated.rs` (hand-owned) and the batch renderer |
 | `detect.rs` | Provider detection: the checkout's remotes, the recognised context, unknown hosts refined |
 | `cache.rs` | `TtlCache`: bounded, one shared lookup per key, a time to live per answer (Effect's `Cache`) |
-| `pull_requests/watch.rs` | A watch's evaluation and wake texts (`pullRequestWatch.ts`); `tools/pr-watch-diff.mjs` runs T3's functions and ours on the same cases |
+| `pull_requests/watch.rs` | A watch's evaluation and wake texts (`pullRequestWatch.ts`) |
 
 The host definition registry (`registry`), the clone URL and remote text (`remote`:
 `cloneUrl.ts`, `parseGitRemoteRepository`, `repositoryKeyFromRemote`, the redaction helpers)
@@ -77,9 +77,9 @@ that matter (`GIT_CONFIG_*`, `GH_DEBUG`, `GH_PROMPT_DISABLED`), and the tests co
 T3 driver's argv. Every API request goes to a local fake server that records method, path and
 headers; the tests check the `authorization` shape with a fake token. No test runs a real host
 CLI or calls a real API: the stubs come first on the children's `PATH`, and the environment is
-a fixed set (`hosts::Environment::fixed`). The checks that start a server (`effect-client.mjs`,
-`replay.mjs`) start it with `tools/sealed-env.mjs`: no token variable and a fresh `HOME`, so no
-CLI login of the machine is read.
+a fixed set (`hosts::Environment::fixed`). The checks that start a server start it with
+`tools/sealed-env.mjs`: no token variable and a fresh `HOME`, so no CLI login of the machine is
+read.
 
 Deviations from the T3 server:
 
@@ -126,8 +126,8 @@ text.
 
 Proofs: the cases of `SourceControlRepositoryService.test.ts` on local bare repositories, with
 a stub `git` for the SSH refusals and the slow clone (`repository_tests.rs`); GitHub requests
-against a loopback fake server (`hosts/repositories_tests.rs`); the real client decoding the
-server's responses (`effect-client.mjs`). No model or external API is called.
+against a loopback fake server (`hosts/repositories_tests.rs`). No model or external API is
+called.
 
 Deviations:
 
@@ -156,11 +156,10 @@ selectors, project predicates and thread link keys. URLs use the WHATWG parser (
 Unclaimed remotes use T3's `unknownRemoteProvider` fallback. Local paths have no host.
 GitHub's `/owner/repo/pull/number` URL parser still accepts any HTTP host, as T3 does.
 
-`tools/registry-diff.mjs` constructs that registry from T3's own GitHub definition and core
-code, then compares it with `examples/registry_cases.rs`. It harvests every GitHub definition
-test literal and exercises a fixed grid, including removed hosts as unknown-host inputs.
-Other host packages are neither imported nor harvested. GitHub and core drift still fail
-`tools/check.sh`; changes confined to removed host definitions do not.
+Until the TypeScript checks were removed, `registry-diff.mjs` compared this registry with T3's
+own GitHub definition and core code on every GitHub test literal and a fixed grid. Upstream
+changes to GitHub and core now reach the audit's report through
+`tools/upkeep/followed-files.txt`.
 
 ## Provider detection
 
@@ -183,10 +182,9 @@ each detection here runs `git rev-parse` before `git remote -v`. The server does
 
 ## GitHub GraphQL
 
-`tools/gen-graphql.mjs` imports T3's generated `*.graphql.ts` modules
-(`packages/source-control-github/src/server`) and prints each operation with
-`effect/graphql`'s own joiner into `hosts/github_graphql/generated.rs`: 55 operations, with
-their template parts. `--check` runs in `tools/check.sh`. `github_graphql` renders an operation
+`hosts/github_graphql/generated.rs` holds T3's 55 GraphQL operations with their template parts,
+as `effect/graphql`'s joiner printed them from `packages/source-control-github/src/server`; it
+is hand-owned since upstream T3 Code `05e3674636`. `github_graphql` renders an operation
 once or batched under `_<i>_` aliases, as `GraphQLResolver.aliased` does; tests hold every
 joined template to T3's text and every two-slice batch to Effect's `renderSlices` output. The
 request body is `{query, operationName, variables}` as JSON (Effect's `requestBody`); no request
@@ -196,13 +194,11 @@ sends one yet.
 
 `conn-engine/src/pull_requests.rs` decides `thread.pull-request.link` and `unlink` as T3's
 `Orchestrator.ts` does, with the registry's keys (see that file). Both emit
-`thread.pull-request-synced` with the thread, also when nothing changed. Proof: unit tests and
-`client-check.mjs` (a GitHub link, a stack member, its unlink and a relink through the client's
-own reducers).
+`thread.pull-request-synced` with the thread, also when nothing changed. Proof: unit tests.
 
 `conn-mcp/src/tools/pull_requests.rs` serves the five link tools (`pullRequestTarget.ts`
-`resolveTarget`, `resolveThreadPullRequestChains`, T3's paging). Proof: 26 `parity.mjs` steps
-against the T3 server, values compared, no differences. It also serves the watch and guide
+`resolveTarget`, `resolveThreadPullRequestChains`, T3's paging). Proof: `conn-mcp` tests; until
+the TypeScript checks were removed, 26 `parity.mjs` steps showed no differences. It also serves the watch and guide
 tools; the engine decides `thread.pull-request.watch` and `thread.pull-request-watch.sync`,
 and `conn-server/src/methods/pull_requests/watches.rs` is the watch loop (`docs/status.md`,
 "PR watching and review guides").
@@ -221,8 +217,8 @@ The branch lookup asks GitHub's `PullRequestsByHead` (25 heads per document, by 
 active thread's published head every minute while a client is in the foreground (branches
 without a pull request at most 4 per sweep, each after 30 minutes or more), and on the thread's
 own events (created, run ended, unsettled, branch changed), and writes
-`thread.pull-request.sync`. Proof: `tools/pr-link-sync-diff.mjs` (T3's own services on stub
-services and a test clock against ours, minute by minute, and T3's `BackgroundPolicy` gate).
+`thread.pull-request.sync`. Proof: unit tests; until the TypeScript checks were removed,
+`pr-link-sync-diff.mjs` compared T3's own services with ours on a test clock.
 
 Not built: per-host pauses until a rate limit's reset time (a limited read backs off instead),
 host power state in the gate, the replacement of an older single `linkedPullRequest`, re-reads
@@ -267,8 +263,7 @@ the T3 way yet.
   release binary: 16,800,544 to 17,001,824 bytes (+201,280). No run-time heap of its own; the
   IDNA tables are static. `idna_adapter` 1.0 (ASCII only) would save most of that, but a host
   name in another script would then read differently from T3's (the diff has `bücher.example`).
-- **conn-engine** (dev-dependency only): `examples/pr_link_sync_cases.rs` applies a sync's
-  commands with the engine's deciders. The engine itself must still not depend on this crate.
+- The engine must not depend on this crate.
 
 ## Costs
 

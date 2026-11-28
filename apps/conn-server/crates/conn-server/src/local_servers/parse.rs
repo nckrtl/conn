@@ -1,7 +1,6 @@
 //! The pure parts of `PortScanner.ts`: what `lsof`, `/proc` and `ps` print, read as T3 reads
 //! them, the configured URL rules, the projection a subscriber sees, and the process group a
-//! stop may signal. `tools/local-servers-diff.mjs` runs T3's functions and these on the same
-//! inputs.
+//! stop may signal.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 

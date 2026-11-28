@@ -141,7 +141,7 @@ path needs are built [code, `R/crates/conn-server/src/cli_thread.rs`, `cli.rs`,
 4. `auth session issue --json` in T3's key order, with the `sessionId` that
    `t3_copy_rpc.mjs` revokes with `t3 auth session revoke`.
 
-Proof [measured, macOS]: `R/crates/conn-server/tools/thread-cli-diff.mjs` runs Orbit's commands
+Proof [measured, macOS, before the TypeScript checks were removed]: `thread-cli-diff.mjs` ran Orbit's commands
 on the T3 server with its own `t3` and on the Conn Server with ours, with a stub `codex` and
 T3's recorded transcripts: 30 steps, no difference beyond two fields the engine fills
 differently (`branch`, `itemCount`). It covers a turn that completes, fails or asks, a send,
@@ -206,8 +206,8 @@ the server has no idle timer, as in T3 [test, `a_suspended_client_stays_connecte
 `tools/check.sh`]: no read of a provider, `gh` or `git` setting or credential, no real provider
 or host CLI, no connection outside loopback. See `docs/status.md`, "The canary".
 
-**The idle check, proven against T3** [check, `R/crates/conn-server/tools/idle-diff.mjs`, in
-`tools/check.sh`]. Orbit's idle sleep reads `status`, `activityRunStatus`,
+**The idle check, proven against T3** [check, `idle-diff.mjs`, until the TypeScript checks
+were removed]. Orbit's idle sleep reads `status`, `activityRunStatus`,
 `blockedOnThreadWait`, `pendingBackgroundTasks`, `pendingRuntimeRequest` (`createdAt`,
 `blocking`), `latestUserAuthoredMessageAt` or `latestUserMessageAt` and `latestRunCompletedAt`
 from `threads` and `archivedThreads` (`ConnAgentActivity.php:52-118`). The thread index also
@@ -381,7 +381,7 @@ is **17,397,232 bytes** [measured, `ls -l`, read only].
 | Repository lookup, clone, publish | about 52 K (`repository`, `repositories`) | None | `git` child processes; outbound calls | in source control's 238 commits | Orbit clones and publishes. On the mini: "new project from a GitHub repository" from a phone. | Keep, off in the container profile |
 | TLS stack (rustls, ring, webpki) | about 330 K, plus about 0.2 MB of roots [estimate] | None | Every outbound HTTPS call | n/a | Needed only for GitHub's API and a text generator over HTTPS. In a container the router is plain HTTP on the bridge. `ring` also verifies Ed25519, which section 4b needs. | Keep |
 | Grok and the ACP runtime (`conn-provider-acp`) | 157 K (Grok's own part 31 K) | 310 KiB per idle Grok session, 11 KiB after close (`R/docs/status.md`, ACP part 3) | A child process when enabled; CLI probes every 5 minutes when enabled; off by default | 187 commits / 20.8 k lines | ACP agents in containers once the router serves them (section 8) | Keep on, off by setting as T3 has it |
-| Payload limits (`conn-server::limits`) | 14 K | None | Reduces surface | generated, `limits-diff` check | Keeps a misbehaving client from filling a small container | Keep on |
+| Payload limits (`conn-server::limits`) | 14 K | None | Reduces surface | hand-owned table, `limits::check` tests | Keeps a misbehaving client from filling a small container | Keep on |
 | The secret store (settings secrets inline in `settings.json`, `secrets/*.bin` read for text generator keys) | in `settings` (22 K) | None | Secrets at rest in the container | `settingsSecrets.ts` 10 commits | The router's placeholder key needs no secret. A host keeps user keys here. | Keep |
 | Keybindings | 21 K | None | None | 18 commits / 413 lines | The desktop's shortcuts | Keep on |
 | Codex | 131 K | One `codex app-server` while a session lives | A child process | 139 commits / 9.4 k lines | Orbit already writes Codex's router config | Keep on |

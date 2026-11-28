@@ -5,10 +5,11 @@
 use std::collections::HashSet;
 
 use conn_contract::{
+    OrchestrationV2AppThread as AppThread, OrchestrationV2AppThreadLineage as Lineage,
     OrchestrationV2AppThreadLineageRelationshipToParent as Relationship,
     OrchestrationV2PendingRuntimeRequestSummaryKind as RequestKind,
     OrchestrationV2ShellThreadStatus as ShellStatus, OrchestrationV2TurnItemForkSource,
-    PullRequestState,
+    PullRequestState, ThreadLinkedPullRequest, ThreadPullRequestLink,
 };
 
 use crate::{
@@ -23,19 +24,130 @@ pub fn format_thread_link(environment_id: &str, thread_id: &str) -> String {
     format!("conn://thread/{environment_id}/{thread_id}")
 }
 
+/// The thread a details panel describes: its shell row, else the open thread's own record. A
+/// thread can be open without a shell row: an older settled thread the shell leaves out, one
+/// opened from search or a link, or any thread while a new connection's shell has not arrived.
+#[derive(Clone, Copy, Debug)]
+pub enum ThreadRecord<'a> {
+    Listed(&'a ThreadShell),
+    Open(&'a AppThread),
+}
+
+impl<'a> From<&'a ThreadShell> for ThreadRecord<'a> {
+    fn from(thread: &'a ThreadShell) -> Self {
+        Self::Listed(thread)
+    }
+}
+
+impl<'a> From<&'a AppThread> for ThreadRecord<'a> {
+    fn from(thread: &'a AppThread) -> Self {
+        Self::Open(thread)
+    }
+}
+
+/// Reads one field that the shell row and the thread record share.
+macro_rules! record_field {
+    ($record:expr, $field:ident) => {
+        match $record {
+            ThreadRecord::Listed(thread) => &thread.$field,
+            ThreadRecord::Open(thread) => &thread.$field,
+        }
+    };
+}
+
+impl<'a> ThreadRecord<'a> {
+    /// `thread_id`'s shell row, else the record of `timeline` when it is that thread's.
+    #[must_use]
+    pub fn resolve(
+        shell: &'a ShellState,
+        timeline: Option<&'a ThreadState>,
+        thread_id: &str,
+    ) -> Option<Self> {
+        shell.find_thread(thread_id).map(Self::Listed).or_else(|| {
+            timeline
+                .filter(|t| t.thread_id == thread_id && !t.deleted)
+                .and_then(ThreadState::thread)
+                .filter(|t| t.id == thread_id)
+                .map(Self::Open)
+        })
+    }
+
+    #[must_use]
+    pub fn id(self) -> &'a str {
+        record_field!(self, id)
+    }
+
+    #[must_use]
+    pub fn project_id(self) -> &'a str {
+        record_field!(self, project_id)
+    }
+
+    #[must_use]
+    pub fn provider_instance_id(self) -> &'a str {
+        record_field!(self, provider_instance_id)
+    }
+
+    /// The thread's branch, `None` when unset or empty.
+    #[must_use]
+    pub fn branch(self) -> Option<&'a str> {
+        record_field!(self, branch)
+            .as_deref()
+            .filter(|b| !b.is_empty())
+    }
+
+    /// The thread's worktree, `None` when unset or empty.
+    #[must_use]
+    pub fn worktree_path(self) -> Option<&'a str> {
+        record_field!(self, worktree_path)
+            .as_deref()
+            .filter(|p| !p.is_empty())
+    }
+
+    /// The shell row, for what only the shell carries (run status, background tasks).
+    #[must_use]
+    pub fn listed(self) -> Option<&'a ThreadShell> {
+        match self {
+            Self::Listed(thread) => Some(thread),
+            Self::Open(_) => None,
+        }
+    }
+
+    fn lineage(self) -> &'a Lineage {
+        record_field!(self, lineage)
+    }
+
+    fn forked_from(self) -> Option<&'a OrchestrationV2TurnItemForkSource> {
+        record_field!(self, forked_from).as_ref()
+    }
+
+    fn pull_requests(self) -> &'a [ThreadPullRequestLink] {
+        record_field!(self, pull_requests)
+            .as_deref()
+            .unwrap_or_default()
+    }
+
+    fn branch_pull_request(self) -> Option<&'a ThreadLinkedPullRequest> {
+        record_field!(self, branch_pull_request)
+            .as_ref()
+            .and_then(Option::as_ref)
+            .or_else(|| {
+                record_field!(self, linked_pull_request)
+                    .as_ref()
+                    .and_then(Option::as_ref)
+            })
+    }
+}
+
 /// The folder the thread works in: its worktree, else its project's root.
 #[must_use]
-pub fn thread_cwd(shell: &ShellState, thread: &ThreadShell) -> Option<String> {
-    thread
-        .worktree_path
-        .clone()
-        .filter(|p| !p.is_empty())
-        .or_else(|| {
-            shell
-                .project(&thread.project_id)
-                .map(|p| p.workspace_root.clone())
-                .filter(|p| !p.is_empty())
-        })
+pub fn thread_cwd<'a>(shell: &ShellState, thread: impl Into<ThreadRecord<'a>>) -> Option<String> {
+    let thread = thread.into();
+    thread.worktree_path().map(str::to_owned).or_else(|| {
+        shell
+            .project(thread.project_id())
+            .map(|p| p.workspace_root.clone())
+            .filter(|p| !p.is_empty())
+    })
 }
 
 /// `path` with the home folder written as `~`: `/Users/nick/apps/conn` reads `~/apps/conn`.
@@ -359,22 +471,21 @@ fn timeline_agents(
 /// The parent (or fork source) and child agents of `thread`: the shell's children, then the
 /// children only its timeline lists (the ones on another environment).
 #[must_use]
-pub fn thread_lineage<'a>(
+pub fn thread_lineage<'a, 'b>(
     shell: &'a ShellState,
-    thread: &ThreadShell,
+    thread: impl Into<ThreadRecord<'b>>,
     timeline: Option<&ThreadState>,
     now_secs: i64,
 ) -> ThreadLineage<'a> {
-    let fork_source = match &thread.forked_from {
+    let thread = thread.into();
+    let fork_source = match thread.forked_from() {
         Some(OrchestrationV2TurnItemForkSource::Run(run)) => Some(run.thread_id.as_str()),
         _ => None,
     };
-    let parent_id = thread.lineage.parent_thread_id.as_deref().or(fork_source);
-    let is_fork = fork_source.is_some()
-        || matches!(
-            thread.lineage.relationship_to_parent,
-            Some(Relationship::Fork)
-        );
+    let lineage = thread.lineage();
+    let parent_id = lineage.parent_thread_id.as_deref().or(fork_source);
+    let is_fork =
+        fork_source.is_some() || matches!(lineage.relationship_to_parent, Some(Relationship::Fork));
     let mut lineage = ThreadLineage {
         parent: parent_id.and_then(|id| shell.find_thread(id)),
         is_fork,
@@ -384,7 +495,7 @@ pub fn thread_lineage<'a>(
     let mut rows = Vec::new();
     for child in shell.threads.iter().chain(shell.archived_threads.iter()) {
         if child.deleted_at.is_some()
-            || child.lineage.parent_thread_id.as_deref() != Some(thread.id.as_str())
+            || child.lineage.parent_thread_id.as_deref() != Some(thread.id())
             || child.lineage.side_chat == Some(true)
             || !seen.insert(child.id.clone())
         {
@@ -453,11 +564,10 @@ impl ThreadPullRequest {
 
 /// The thread's linked pull requests, latest first; without any, the PR of its branch.
 #[must_use]
-pub fn thread_pull_requests(thread: &ThreadShell) -> Vec<ThreadPullRequest> {
+pub fn thread_pull_requests<'a>(thread: impl Into<ThreadRecord<'a>>) -> Vec<ThreadPullRequest> {
+    let thread = thread.into();
     let mut prs: Vec<ThreadPullRequest> = thread
-        .pull_requests
-        .as_deref()
-        .unwrap_or_default()
+        .pull_requests()
         .iter()
         .rev()
         .map(|pr| {
@@ -484,11 +594,7 @@ pub fn thread_pull_requests(thread: &ThreadShell) -> Vec<ThreadPullRequest> {
         })
         .collect();
     if prs.is_empty()
-        && let Some(pr) = thread
-            .branch_pull_request
-            .as_ref()
-            .and_then(Option::as_ref)
-            .or_else(|| thread.linked_pull_request.as_ref().and_then(Option::as_ref))
+        && let Some(pr) = thread.branch_pull_request()
     {
         prs.push(ThreadPullRequest {
             host: None,

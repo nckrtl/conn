@@ -956,8 +956,8 @@ public protocol ConnCoreProtocol: AnyObject, Sendable {
     func submitComposer(target: FfiComposerTarget, key: String, text: String, files: [FfiComposerFile]) async throws  -> String
     
     /**
-     * What the thread details sheet lists for `thread_id`; `None` while the shell does not list
-     * the thread.
+     * What the thread details sheet lists for `thread_id`: from the shell, else from the open
+     * thread, else only the id. `None` only once the core has shut down.
      */
     func threadDetails(threadId: String) async  -> FfiThreadDetails?
     
@@ -1812,8 +1812,8 @@ open func submitComposer(target: FfiComposerTarget, key: String, text: String, f
 }
     
     /**
-     * What the thread details sheet lists for `thread_id`; `None` while the shell does not list
-     * the thread.
+     * What the thread details sheet lists for `thread_id`: from the shell, else from the open
+     * thread, else only the id. `None` only once the core has shut down.
      */
 open func threadDetails(threadId: String)async  -> FfiThreadDetails?  {
     return
@@ -20896,7 +20896,7 @@ private let initializationResult: InitializationResult = {
     if (uniffi_conn_ffi_checksum_method_conncore_submit_composer() != 29646) {
         return InitializationResult.apiChecksumMismatch
     }
-    if (uniffi_conn_ffi_checksum_method_conncore_thread_details() != 25788) {
+    if (uniffi_conn_ffi_checksum_method_conncore_thread_details() != 19522) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_conn_ffi_checksum_method_conncore_turn_patch() != 19061) {

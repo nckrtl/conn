@@ -142,7 +142,7 @@ enum PumpControl {
     },
     ThreadDetails {
         thread_id: String,
-        reply: oneshot::Sender<Option<crate::details::FfiThreadDetails>>,
+        reply: oneshot::Sender<crate::details::FfiThreadDetails>,
     },
     ModelPicker {
         thread_id: String,
@@ -955,8 +955,8 @@ impl ConnCore {
             .map(|_| ())
     }
 
-    /// What the thread details sheet lists for `thread_id`; `None` while the shell does not list
-    /// the thread.
+    /// What the thread details sheet lists for `thread_id`: from the shell, else from the open
+    /// thread, else only the id. `None` only once the core has shut down.
     pub async fn thread_details(
         &self,
         thread_id: String,
@@ -965,7 +965,7 @@ impl ConnCore {
         self.ctrl_tx
             .send(PumpControl::ThreadDetails { thread_id, reply })
             .ok()?;
-        rx.await.ok().flatten()
+        rx.await.ok()
     }
 
     /// The Git facts of `cwd` for the details sheet (`vcs.refreshStatus`, local only).

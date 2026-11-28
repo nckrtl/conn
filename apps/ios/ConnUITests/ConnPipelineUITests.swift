@@ -177,17 +177,18 @@ final class ConnPipelineUITests: XCTestCase {
         return total
     }
 
-    /// The agents capsule shows with the first projection, though no agent row is loaded.
-    func testAgentsCapsuleShowsWithTheFirstProjection() throws {
+    /// The running subagents show in the thread details sheet with the first projection, though no
+    /// agent row is loaded; no capsule floats above the composer for them.
+    func testRunningAgentsShowInDetailsWithTheFirstProjection() throws {
         openThread("mock-agents")
-        let capsule = app.descendants(matching: .any)["thread.agents"]
-        XCTAssertTrue(capsule.waitForExistence(timeout: 10))
-        print("PIPELINE-RESULT capsule=\(capsule.label)")
-        XCTAssertTrue(capsule.label.contains("1 of 2"), capsule.label)
-        shot("agents-capsule")
-        capsule.tap()
-        XCTAssertTrue(app.descendants(matching: .any)["thread.agents.agent-a"].waitForExistence(timeout: 5))
-        shot("agents-sheet")
+        XCTAssertTrue(field.waitForExistence(timeout: 20))
+        XCTAssertFalse(app.descendants(matching: .any)["thread.agents"].exists, "no agents capsule")
+        app.buttons["thread.moreButton"].tap()
+        let heading = app.staticTexts.containing(NSPredicate(format: "label BEGINSWITH %@", "Subagents")).firstMatch
+        XCTAssertTrue(heading.waitForExistence(timeout: 10))
+        print("PIPELINE-RESULT subagents=\(heading.label)")
+        XCTAssertTrue(heading.label.contains("1 running"), heading.label)
+        shot("details-running-agents")
     }
 
     /// Body evaluations while a reply streams and while typing (read from the `bodycount` log).

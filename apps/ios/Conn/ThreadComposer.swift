@@ -4,6 +4,7 @@ import UIKit
 
 /// The thread's bottom bar: the approval and question cards, and the composer. It is the only part
 /// of the thread screen that reads the draft, so typing re-runs this body and not the feed's.
+/// Short status ("Not connected", the history notice) floats above it in `FeedFloatingControl`.
 struct ThreadComposerArea: View {
     @Bindable var store: CoreStore
     let threadId: String
@@ -12,7 +13,6 @@ struct ThreadComposerArea: View {
     let isWorking: Bool
     /// An older window of the thread is on screen: nothing can be sent.
     let readingHistory: Bool
-    let historyNotice: String?
     let viewHeight: CGFloat
     let modelDriver: String?
     let modelLabel: String?
@@ -68,7 +68,6 @@ struct ThreadComposerArea: View {
     /// With a question open, text answers it and an empty composer runs the answer action.
     private var overlayHasCards: Bool {
         !pendingApprovals.isEmpty || questionPanelModel != nil
-            || historyNotice != nil || (store.showsOffline && !store.showsSavedConnectionAlert)
     }
 
     private var composerCanSend: Bool {
@@ -91,12 +90,6 @@ struct ThreadComposerArea: View {
         GlassEffectContainer(spacing: 8) {
           VStack(alignment: .leading, spacing: 0) {
           VStack(alignment: .leading, spacing: 10.5) {
-            if let historyNotice {
-                Text(historyNotice).font(.kitDetail)
-            }
-            if store.showsOffline && !store.showsSavedConnectionAlert {
-                OfflinePill(store: store).frame(maxWidth: .infinity)
-            }
             // Conn mobile pins the first pending approval above the composer.
             if let approval = pendingApprovals.first {
                 HeightCappedScroll(maxHeight: approvalMaxHeight) {

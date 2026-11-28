@@ -1836,6 +1836,8 @@ mod tests {
             merged.shell.subagent_request("parent"),
             Some(crate::shell::PendingSubagentRequest::Approval)
         );
+        assert_eq!(merged.shell.listed_ancestor("task"), Some("parent"));
+        assert_eq!(merged.shell.child_approval_threads("parent").len(), 1);
     }
 
     #[test]
@@ -1880,6 +1882,8 @@ mod tests {
             merged.shell.subagent_request("parent"),
             Some(crate::shell::PendingSubagentRequest::Approval)
         );
+        assert_eq!(merged.shell.listed_ancestor("task"), Some("parent"));
+        assert_eq!(merged.shell.child_approval_threads("parent").len(), 1);
     }
 
     /// Env a and env b both hold `shared`; a's copy is listed. b's subagent of `shared` and

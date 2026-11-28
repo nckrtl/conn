@@ -159,11 +159,11 @@ struct ThreadComposerArea: View {
                         onSendReply()
                     }
                 },
-                onStop: {
+                onStop: store.status == .connected ? {
                     Task {
                         await store.stopThread(threadId: threadId)
                     }
-                },
+                } : nil,
                 trailing: {
                     HStack(spacing: 0) {
                         if isWorking && hasDraft && questionPanelModel == nil && composer.queuedEdit == nil {
@@ -183,10 +183,13 @@ struct ThreadComposerArea: View {
                         }
                         ConnComposerModelChip(driver: modelDriver, modelLabel: modelLabel, action: onModelChip)
                     }
+                    .disabled(store.status != .connected)
                 }
             )
             .id(ObjectIdentifier(composer))
-            .disabled(store.status != .connected || readingHistory)
+            // Not on the connection: a disabled field resigns first responder, so every reconnect
+            // (each return from the background) took the keyboard down and up again.
+            .disabled(readingHistory)
             .accessibilityIdentifier("thread.composer")
           }
         }

@@ -451,12 +451,15 @@ impl LinkedShells {
         }
         let mut refresh = false;
         for id in plan {
-            if let Some(old) = shell.take_foreign(index, id) {
+            let old = shell.take_foreign(index, id);
+            // A row that comes or goes may be the thread another row's request rolls up to.
+            let held = old.is_some();
+            if let Some(old) = old {
                 refresh |= crate::shell::moves_others(&old);
             }
             match linked.shell.locate(id) {
                 Some((place, thread)) => {
-                    refresh |= crate::shell::moves_others(thread);
+                    refresh |= crate::shell::moves_others(thread) || !held;
                     if place == Place::Loaded {
                         origins.thread_env.remove(id);
                     } else {
@@ -467,6 +470,7 @@ impl LinkedShells {
                     shell.put_foreign(index, place, thread.clone());
                 }
                 None => {
+                    refresh |= held;
                     origins.thread_env.remove(id);
                 }
             }
@@ -1383,6 +1387,7 @@ mod tests {
             }
             shell.extend_with_environment(id, &env.shell);
         }
+        shell.set_environment_id("nick");
         shell.refresh_derived();
         origins
     }
@@ -1589,6 +1594,79 @@ mod tests {
         assert_eq!(
             blind["p-vm-site"], blind["p-conn"],
             "the blind grouping merges the folders"
+        );
+    }
+
+    #[test]
+    fn a_delegated_task_takes_no_request_from_another_environments_thread_with_its_id() {
+        let mut primary = ShellState::default();
+        primary.apply(snapshot(
+            vec![],
+            vec![thread_json("parent", "p", |_| {})],
+            vec![],
+        ));
+        let task = thread_json("task", "p", |t| {
+            t["delegatedFrom"] = json!({"environmentId": "a", "threadId": "parent", "title": "P"});
+            t["status"] = json!("running");
+        });
+        let mut linked = LinkedShells::default();
+        linked.ensure("b", "b");
+        linked.apply("b", snapshot(vec![], vec![task], vec![]));
+        // c's `task` is another thread; its subagent's approval is not b's task's.
+        linked.ensure("c", "c");
+        linked.apply(
+            "c",
+            snapshot(
+                vec![],
+                vec![
+                    thread_json("task", "p", |_| {}),
+                    thread_json("sub", "p", |t| {
+                        t["lineage"]["parentThreadId"] = json!("task");
+                        t["lineage"]["relationshipToParent"] = json!("subagent");
+                        t["status"] = json!("running");
+                        t["pendingRuntimeRequest"] = json!(
+                            {"id": "r", "kind": "command", "createdAt": "2026-11-13T09:00:00.000Z"}
+                        );
+                    }),
+                ],
+                vec![],
+            ),
+        );
+        let merged = linked.merged("a", "a", &primary);
+        assert_eq!(merged.origins.environment_of_thread("task"), "b");
+        assert_eq!(merged.shell.subagent_request("task"), None);
+        assert_eq!(merged.shell.subagent_request("parent"), None);
+    }
+
+    #[test]
+    fn a_delegating_thread_that_first_appears_in_place_shows_its_tasks_approval() {
+        let mut primary = ShellState::default();
+        primary.apply(snapshot(vec![], vec![], vec![]));
+        let task = thread_json("task", "p", |t| {
+            t["delegatedFrom"] = json!({"environmentId": "b", "threadId": "parent", "title": "P"});
+            t["status"] = json!("running");
+            t["pendingRuntimeRequest"] =
+                json!({"id": "r", "kind": "command", "createdAt": "2026-11-13T09:00:00.000Z"});
+        });
+        let mut linked = LinkedShells::default();
+        linked.ensure("b", "b");
+        linked.apply("b", snapshot(vec![], vec![], vec![]));
+        linked.ensure("c", "c");
+        linked.apply("c", snapshot(vec![], vec![task], vec![]));
+        let mut shell = primary.clone();
+        let mut origins = linked.merge_into("a", "a", &mut shell, &Origins::default());
+
+        let item: ShellStreamItem = from_json(json!({
+            "kind": "thread.updated", "sequence": 9, "location": "active",
+            "thread": thread_json("parent", "p", |_| {}),
+        }))
+        .expect("update decodes");
+        let change = linked.apply("b", item).expect("held environment");
+        assert!(linked.update_merged("b", &change.threads_changed, &mut shell, &mut origins));
+        assert_eq!(origins.environment_of_thread("parent"), "b");
+        assert_eq!(
+            shell.subagent_request("parent"),
+            Some(crate::shell::PendingSubagentRequest::Approval)
         );
     }
 

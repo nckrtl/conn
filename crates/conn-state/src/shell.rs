@@ -234,10 +234,11 @@ fn side_chat_request(thread: &ThreadShell) -> Option<Rolled> {
 }
 
 /// Flags `parent_id` with a child's `request`, and its parents while they are subagents or side
-/// chats (`flag` in `pendingSubagentRequestsByThread`).
+/// chats (`flag` in `pendingSubagentRequestsByThread`). Each hop stays on one environment.
 fn flag_up<'a>(
     requests: &mut HashMap<String, Rolled>,
     by_id: &HashMap<&'a str, &'a ThreadShell>,
+    same_environment: &impl Fn(&str, &str) -> bool,
     parent_id: Option<&'a str>,
     request: Rolled,
     child_id: &'a str,
@@ -259,6 +260,7 @@ fn flag_up<'a>(
                 || parent.lineage.side_chat == Some(true))
             .then_some(parent.lineage.parent_thread_id.as_deref())
             .flatten()
+            .filter(|next| same_environment(id, next))
         });
     }
 }
@@ -272,8 +274,17 @@ fn rolled_up_requests<'a>(
 ) -> HashMap<String, PendingSubagentRequest> {
     let mut requests: HashMap<String, Rolled> = HashMap::new();
     let by_id: HashMap<&str, &ThreadShell> = threads.iter().map(|t| (t.id.as_str(), t)).collect();
+    // Another environment's thread with a child's parent id is not its parent. Unmerged shells
+    // know no environments and match by id.
+    let same_environment = |a: &str, b: &str| match (environment_of(a), environment_of(b)) {
+        (Some(a), Some(b)) => a == b,
+        _ => true,
+    };
     for child in threads {
         let parent_id = child.lineage.parent_thread_id.as_deref();
+        if parent_id.is_some_and(|parent| !same_environment(&child.id, parent)) {
+            continue;
+        }
         if child.lineage.side_chat == Some(true) {
             if let (Some(parent), Some(request)) = (parent_id, side_chat_request(child))
                 && requests.get(parent) != Some(&Rolled::Approval)
@@ -286,7 +297,14 @@ fn rolled_up_requests<'a>(
             continue;
         }
         if let Some(request) = subagent_request(child) {
-            flag_up(&mut requests, &by_id, parent_id, request, child.id.as_str());
+            flag_up(
+                &mut requests,
+                &by_id,
+                &same_environment,
+                parent_id,
+                request,
+                child.id.as_str(),
+            );
         }
     }
     // A task delegated from another environment's thread asks on that thread, with what its own
@@ -315,6 +333,7 @@ fn rolled_up_requests<'a>(
                 flag_up(
                     &mut requests,
                     &by_id,
+                    &same_environment,
                     Some(parent_id),
                     request,
                     task.id.as_str(),

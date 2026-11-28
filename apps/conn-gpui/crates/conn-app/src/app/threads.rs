@@ -18,8 +18,6 @@ use crate::chat::{ThreadOutline, TocEntry};
 
 /// How long shell changes settle before the kept sets are brought in line.
 const KEPT_DELAY: Duration = Duration::from_millis(300);
-/// How often the primary thread list is saved on the device at most.
-const SHELL_SAVE_EVERY: Duration = Duration::from_secs(5);
 
 struct Slot {
     engine: Engine,
@@ -47,8 +45,9 @@ pub(super) struct Threads {
     /// Linked environments whose live shell has synchronized since they connected.
     synced: HashSet<String>,
     kept_scheduled: bool,
-    /// When the primary thread list was last handed to its engine to save.
-    shell_saved_at: Option<Instant>,
+    /// Linked engines being opened off the main thread, by environment, with the generation
+    /// each will get; a stop or a newer start makes the opened engine stale.
+    opening: HashMap<String, u64>,
     /// Outlines of opened threads, with the `updatedAt` each was read at.
     outlines: HashMap<String, (String, Arc<ThreadOutline>)>,
     outline_loading: Option<String>,
@@ -96,6 +95,20 @@ impl Threads {
     }
 }
 
+/// Opens `env`'s engine on the device database. `None` (logged) when it will not open.
+async fn open_engine(path: PathBuf, env: String, connection: Connection) -> Option<Engine> {
+    if let Some(dir) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(dir)
+    {
+        eprintln!("thread database folder: {err}");
+        return None;
+    }
+    Engine::open(&path, &env, connection, Settings::default())
+        .await
+        .inspect_err(|err| eprintln!("thread database: {err}"))
+        .ok()
+}
+
 impl ConnApp {
     /// The environment a thread's state is kept under: its linked environment, else the
     /// primary server.
@@ -133,7 +146,9 @@ impl ConnApp {
         self.threads.local.insert(id, state);
     }
 
-    /// Starts the engine of `env` on its connection, replacing an earlier one.
+    /// Starts the engine of `env` on its connection, replacing an earlier one. The primary
+    /// engine opens at once, so its saved thread list draws first; a linked one opens off the
+    /// main thread.
     pub(super) fn start_engine(
         &mut self,
         env: &str,
@@ -144,28 +159,41 @@ impl ConnApp {
         let Some(path) = self.threads.db.clone() else {
             return;
         };
-        if let Some(dir) = path.parent()
-            && let Err(err) = std::fs::create_dir_all(dir)
-        {
-            eprintln!("thread database folder: {err}");
+        self.threads.generation = self.threads.generation.wrapping_add(1);
+        let generation = self.threads.generation;
+        if self.server_url.as_deref() == Some(env) {
+            let opened = crate::live::RT.block_on(open_engine(path, env.to_owned(), connection));
+            if let Some(engine) = opened {
+                self.insert_engine(env, Slot { engine, generation }, cx);
+            }
             return;
         }
-        let opened =
-            crate::live::RT.block_on(Engine::open(&path, env, connection, Settings::default()));
-        match opened {
-            Ok(engine) => {
-                self.threads.generation = self.threads.generation.wrapping_add(1);
-                let generation = self.threads.generation;
-                self.threads
-                    .engines
-                    .insert(env.to_owned(), Slot { engine, generation });
-                if self.server_url.as_deref() == Some(env) {
-                    self.draw_saved_shell(env, cx);
+        self.threads.opening.insert(env.to_owned(), generation);
+        let env = env.to_owned();
+        let task = crate::live::RT.spawn(open_engine(path, env.clone(), connection));
+        cx.spawn(async move |this, cx| {
+            let Ok(Some(engine)) = task.await else {
+                return;
+            };
+            let _ = this.update(cx, |app, cx| {
+                if app.threads.opening.get(&env) != Some(&generation) {
+                    return;
                 }
-                self.schedule_kept(cx);
-            }
-            Err(err) => eprintln!("thread database: {err}"),
+                app.threads.opening.remove(&env);
+                app.insert_engine(&env, Slot { engine, generation }, cx);
+                // Open threads of this environment move from their plain stream to the engine.
+                app.sync_open_threads(cx);
+            });
+        })
+        .detach();
+    }
+
+    fn insert_engine(&mut self, env: &str, slot: Slot, cx: &mut Context<'_, Self>) {
+        self.threads.engines.insert(env.to_owned(), slot);
+        if self.server_url.as_deref() == Some(env) {
+            self.draw_saved_shell(env, cx);
         }
+        self.schedule_kept(cx);
     }
 
     /// Draws the primary thread list saved on the device (not synchronized) until the server's
@@ -198,43 +226,34 @@ impl ConnApp {
         self.settle_shell(cx);
     }
 
-    /// Saves the primary environment's own thread list on the device for the next launch, at
-    /// most every [`SHELL_SAVE_EVERY`] unless `now`. Only a synchronized list is saved. The
-    /// future resolves once it is written (for quitting).
+    /// Saves the primary environment's own thread list on the device for the next launch, when
+    /// it changed and the engine's interval passed, or at once when `now`. Only a synchronized
+    /// list is saved. With `now` the future resolves once it is written (for quitting).
     pub(super) fn save_primary_shell(
         &mut self,
         now: bool,
     ) -> Option<impl std::future::Future<Output = ()> + Send + 'static + use<>> {
-        if !self.shell.synchronized
-            || (!now
-                && self
-                    .threads
-                    .shell_saved_at
-                    .is_some_and(|at| at.elapsed() < SHELL_SAVE_EVERY))
-        {
+        if !self.shell.synchronized {
             return None;
         }
         let slot = self
             .server_url
             .as_deref()
             .and_then(|env| self.threads.engines.get_mut(env))?;
-        self.threads.shell_saved_at = Some(Instant::now());
-        // Throttled here so the merged list is copied only when a save is due.
-        let origins = self.linked.origins();
-        if *origins == conn_state::environments::Origins::default() {
-            slot.engine.save_shell(&self.shell, true);
-        } else {
-            let mut own = self.shell.clone();
-            origins.strip_from(&mut own);
-            slot.engine.save_shell(&own, true);
+        if !slot.engine.shell_save_due(self.shell.sequence, now) {
+            return None;
         }
-        Some(slot.engine.flush())
+        let mut own = self.shell.clone();
+        self.linked.origins().strip_from(&mut own);
+        slot.engine.save_shell(own);
+        now.then(|| slot.engine.flush())
     }
 
     /// Drops the engine of an environment whose connection went away. Its rows stay on the
     /// device for the next connection.
     pub(super) fn stop_engine(&mut self, env: &str) {
         self.threads.engines.remove(env);
+        self.threads.opening.remove(env);
         self.threads.synced.remove(env);
         self.threads
             .open
@@ -570,13 +589,8 @@ impl ConnApp {
                 if !self.shell.synchronized {
                     continue;
                 }
-                if *origins == conn_state::environments::Origins::default() {
-                    slot.engine.update_kept(&self.shell);
-                } else {
-                    let mut own = self.shell.clone();
-                    origins.strip_from(&mut own);
-                    slot.engine.update_kept(&own);
-                }
+                slot.engine
+                    .update_kept_where(&self.shell, |id| !origins.is_linked_thread(id));
             } else if self.threads.synced.contains(env)
                 && let Some(shell) = self.linked.shell_for_cache(env)
             {

@@ -13,7 +13,8 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use super::{
     CoreListener, FfiComposerLimits, FfiConnectionStatus, FfiSavedSession, FfiShellSnapshot,
-    FfiThreadSnapshot, PumpControl, PumpState, PumpStats, SessionIdentity, run_pump,
+    FfiThreadSnapshot, PumpControl, PumpState, PumpStats, SessionIdentity, TAG_SUBSCRIBE_THREAD,
+    run_pump,
 };
 use crate::types::FfiTimelineEntry;
 
@@ -721,4 +722,26 @@ fn a_reply_shows_at_once_and_its_echo_leaves_exactly_one_row_before_or_after_the
     let _ = state.handle_control(settle("k3", false));
     state.flush_due_at(t0 + Duration::from_secs(6));
     assert_eq!(rows_for(&last(&state), "k3"), 0);
+}
+
+/// A thread stream the server refused stays down: it is not asked for again on every shell
+/// change. One that ended cleanly is.
+#[test]
+fn a_refused_thread_stream_is_not_asked_for_again() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let _rt = rt.enter();
+    let dir = tempfile::tempdir().expect("dir");
+    let (mut state, _, _ctrl) = bare_pump(&rt, dir.path());
+    let ended = |key: &str, error: Option<&str>| ClientEvent::StreamEnded {
+        tag: TAG_SUBSCRIBE_THREAD.to_owned(),
+        key: key.to_owned(),
+        error: error.map(str::to_owned),
+    };
+    state.handle_event(ended("refused", Some("not allowed")));
+    state.handle_event(ended("ended", None));
+    assert!(!state.ended_threads.contains("refused"));
+    assert!(
+        state.ended_threads.contains("ended"),
+        "waits for its shell row"
+    );
 }

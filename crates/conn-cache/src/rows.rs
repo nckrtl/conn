@@ -193,7 +193,9 @@ fn is_own(thread: &str, visible: &Value) -> bool {
         && visible["sourceItemId"] == visible["item"]["id"]
 }
 
-/// Every row a snapshot's projection holds, timeline and control.
+/// Every row a snapshot's projection holds, timeline and control. Bodies the server left out
+/// of timeline items (`acceptDedupedBodies`) are filled in from the same snapshot's messages
+/// and subagents, so the device stores whole rows.
 pub(crate) fn snapshot_rows(thread: &str, projection: &Value) -> Vec<Row> {
     let visible = projection["visibleTurnItems"].as_array();
     let mut out = match visible.filter(|rows| !rows.is_empty()) {
@@ -203,12 +205,62 @@ pub(crate) fn snapshot_rows(thread: &str, projection: &Value) -> Vec<Row> {
             .map(|items| items.iter().map(|item| row(OWN, item.clone())).collect())
             .unwrap_or_default(),
     };
+    restore_bodies(projection, &mut out);
     for kind in CONTROL.iter().filter(|kind| **kind != OWN) {
         if let Some(rows) = projection[*kind].as_array() {
             out.extend(rows.iter().map(|body| row(kind, body.clone())));
         }
     }
     out
+}
+
+/// Fills in the text, prompt and result a deduped snapshot blanked in its timeline items.
+fn restore_bodies(projection: &Value, timeline: &mut [Row]) {
+    let index = |collection: &str| -> std::collections::HashMap<&str, &Value> {
+        projection[collection]
+            .as_array()
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|row| Some((row["id"].as_str()?, row)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let (messages, subagents) = (index("messages"), index("subagents"));
+    if messages.is_empty() && subagents.is_empty() {
+        return;
+    }
+    for row in timeline {
+        let item = if row.kind == SHOWN {
+            &mut row.body["item"]
+        } else {
+            &mut row.body
+        };
+        let Some(fields) = item.as_object_mut() else {
+            continue;
+        };
+        if fields.contains_key("textOmitted")
+            && let Some(message) = fields
+                .get("messageId")
+                .and_then(Value::as_str)
+                .and_then(|id| messages.get(id))
+        {
+            fields.insert("text".into(), message["text"].clone());
+            fields.remove("textOmitted");
+        }
+        let subagent = fields
+            .get("subagentId")
+            .and_then(Value::as_str)
+            .and_then(|id| subagents.get(id));
+        if let Some(subagent) = subagent {
+            if fields.remove("promptOmitted").is_some() {
+                fields.insert("prompt".into(), subagent["prompt"].clone());
+            }
+            if fields.remove("resultOmitted").is_some() {
+                fields.insert("result".into(), subagent["result"].clone());
+            }
+        }
+    }
 }
 
 /// The window rows read back as a projection the thread reducer takes, oldest row first.
@@ -349,6 +401,57 @@ mod tests {
         assert_eq!(back["visibleTurnItems"][0]["sourceThreadId"], "parent");
         assert_eq!(back["visibleTurnItems"][2]["item"]["id"], "own1");
         assert_eq!(back["visibleTurnItems"][3]["position"], 3);
+    }
+
+    /// A snapshot that left message texts and subagent bodies out of its timeline items
+    /// (`acceptDedupedBodies`) is stored with them filled in from its own messages and subagents.
+    #[test]
+    fn deduped_snapshot_bodies_are_stored_whole() {
+        let own = |it: Value| {
+            json!({"position": 0, "visibility": "local", "sourceThreadId": "t",
+                "sourceItemId": it["id"], "item": it})
+        };
+        let projection = json!({
+            "visibleTurnItems": [
+                own(json!({"id": "u", "ordinal": 1, "type": "user_message", "messageId": "m1",
+                    "text": "", "textOmitted": true})),
+                {"position": 1, "visibility": "inherited", "sourceThreadId": "p",
+                    "sourceItemId": "a", "item": {"id": "a", "ordinal": 9,
+                    "type": "assistant_message", "messageId": "m2", "text": "",
+                    "textOmitted": true}},
+                own(json!({"id": "s", "ordinal": 2, "type": "subagent", "subagentId": "sa",
+                    "prompt": "", "promptOmitted": true, "result": null, "resultOmitted": true})),
+                own(json!({"id": "k", "ordinal": 3, "type": "user_message", "messageId": "m3",
+                    "text": "kept as sent"})),
+            ],
+            "messages": [
+                {"id": "m1", "text": "hello"},
+                {"id": "m2", "text": "from the parent"},
+                {"id": "m3", "text": "other"},
+            ],
+            "subagents": [{"id": "sa", "prompt": "look", "result": "found"}],
+        });
+        let rows = snapshot_rows("t", &projection);
+        let item = |id: &str| {
+            let row = rows
+                .iter()
+                .find(|r| r.body["id"] == id || r.body["item"]["id"] == id)
+                .unwrap_or_else(|| panic!("{id}"));
+            if row.kind == SHOWN {
+                row.body["item"].clone()
+            } else {
+                row.body.clone()
+            }
+        };
+        assert_eq!(item("u")["text"], "hello");
+        assert!(item("u").get("textOmitted").is_none());
+        assert_eq!(item("a")["text"], "from the parent");
+        assert_eq!(item("s")["prompt"], "look");
+        assert_eq!(item("s")["result"], "found");
+        assert!(
+            item("s").get("promptOmitted").is_none() && item("s").get("resultOmitted").is_none()
+        );
+        assert_eq!(item("k")["text"], "kept as sent", "not omitted: untouched");
     }
 
     #[test]

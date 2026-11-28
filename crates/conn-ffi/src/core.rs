@@ -1763,7 +1763,7 @@ impl PumpState {
                     self.shell.older_page_failed(&request);
                 }
                 if self.shell.synchronized {
-                    self.emit_or_buffer_shell(build_shell_snapshot(&self.shell));
+                    self.mark_shell();
                     self.save_shell(false);
                 }
                 true
@@ -2040,8 +2040,7 @@ impl PumpState {
                     self.shell.synchronized = false;
                 }
                 if self.shell.synchronized {
-                    self.sync_shell_run_meta();
-                    self.emit_or_buffer_shell(build_shell_snapshot(&self.shell));
+                    self.mark_shell();
                     self.schedule_kept();
                     self.save_shell(false);
                 }
@@ -2082,7 +2081,9 @@ impl PumpState {
                     }
                 }
                 let deleted = is_thread_deleted(&item);
-                let meta_before = self.resolve_thread_meta(&thread_id);
+                // Only an open thread's header is drawn.
+                let open = self.open_threads.contains(&thread_id);
+                let meta_before = open.then(|| self.resolve_thread_meta(&thread_id)).flatten();
                 let applying = Instant::now();
                 let changed = self
                     .engine
@@ -2096,9 +2097,8 @@ impl PumpState {
                     self.update_thread_run_meta(&thread_id, state);
                 }
                 // A thread-level event (model, title, ...) changes the header, not the timeline.
-                let meta = self.resolve_thread_meta(&thread_id);
+                let meta = open.then(|| self.resolve_thread_meta(&thread_id)).flatten();
                 let emit = changed || force_emit || meta != meta_before;
-                let open = self.open_threads.contains(&thread_id);
                 if open && emit {
                     self.coalescer.mark_thread(&thread_id);
                 }
@@ -2128,11 +2128,11 @@ impl PumpState {
                         self.shell_snapshot_required = false;
                         self.connection.subscribe_shell_with_idle_subagents();
                     }
-                } else if tag == TAG_SUBSCRIBE_THREAD {
+                } else if tag == TAG_SUBSCRIBE_THREAD && error.is_none() {
+                    // A refused stream stays down until the thread opens again or the next
+                    // connection: asking on every shell change loops against the server.
                     self.ended_threads.insert(key);
-                    if error.is_none() {
-                        self.resubscribe_ended_threads();
-                    }
+                    self.resubscribe_ended_threads();
                 }
             }
             ClientEvent::ServerConfig(event) => {
@@ -2286,12 +2286,14 @@ impl PumpState {
         conn_client::perf::shell_cached();
     }
 
-    /// Saves a synchronized thread list for the next launch: throttled, unless `now`.
+    /// Saves a synchronized thread list for the next launch when it changed and the engine's
+    /// interval passed, or at once when `now`. The engine's task serializes it.
     fn save_shell(&mut self, now: bool) {
         if self.shell.synchronized
             && let Some(engine) = &mut self.engine
+            && engine.shell_save_due(self.shell.sequence, now)
         {
-            engine.save_shell(&self.shell, now);
+            engine.save_shell(self.shell.clone());
         }
     }
 
@@ -2307,10 +2309,20 @@ impl PumpState {
         }
     }
 
-    fn emit_or_buffer_shell(&mut self, snapshot: FfiShellSnapshot) {
-        if let Some(ready) = self.coalescer.push_shell(snapshot, Instant::now()) {
-            self.publish_shell(ready);
+    /// Marks the synchronized shell changed: it publishes now, or once its window allows.
+    fn mark_shell(&mut self) {
+        if self.coalescer.push_shell(Instant::now()) {
+            self.publish_current_shell();
         }
+    }
+
+    /// Builds the shell snapshot and its run states only when one goes to the app.
+    fn publish_current_shell(&mut self) {
+        if !self.shell.synchronized {
+            return;
+        }
+        self.sync_shell_run_meta();
+        self.publish_shell(build_shell_snapshot(&self.shell));
     }
 
     /// Builds an open thread's snapshot, with its pending replies, and hands it over unless it
@@ -2353,8 +2365,8 @@ impl PumpState {
     }
 
     fn flush_due_at(&mut self, now: Instant) {
-        if let Some(snapshot) = self.coalescer.drain_due_shell(now) {
-            self.publish_shell(snapshot);
+        if self.coalescer.drain_due_shell(now) {
+            self.publish_current_shell();
         }
         for thread_id in self.coalescer.drain_due_threads(now) {
             self.publish_thread(&thread_id);

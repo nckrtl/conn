@@ -1406,19 +1406,9 @@ where
                 })
                 .collect();
             handle_chunk_raw(state, request_id, raw_values, ws_write, events_tx, timing).await?;
-            if std::mem::take(&mut state.admit_due) {
-                admit_threads(state, ws_write)
-                    .await
-                    .map_err(SessionOutcome::Disconnected)?;
-            }
         }
         IncomingServerFrame::Other(FromServer::Exit { request_id, exit }) => {
             handle_exit(state, request_id, exit, events_tx).await?;
-            if std::mem::take(&mut state.admit_due) {
-                admit_threads(state, ws_write)
-                    .await
-                    .map_err(SessionOutcome::Disconnected)?;
-            }
         }
         IncomingServerFrame::Other(FromServer::Defect { defect }) => {
             for (_, call) in state.in_flight_unary.drain() {
@@ -1442,6 +1432,13 @@ where
             }
         }
         IncomingServerFrame::Other(FromServer::Request(_)) => {}
+    }
+    // An opening slot freed (a thread's `synchronized`, or its stream ended): send the
+    // subscribes waiting for one. Once here, so no frame path can miss it.
+    if std::mem::take(&mut state.admit_due) {
+        admit_threads(state, ws_write)
+            .await
+            .map_err(SessionOutcome::Disconnected)?;
     }
     Ok(())
 }
@@ -1861,6 +1858,59 @@ mod tests {
         );
         assert!(state.subscribe_from("t".into(), Some(3), 1), "asked again");
         assert!(state.thread_subs.get("t").is_some_and(|s| s.waiting));
+    }
+
+    /// A thread's `synchronized`, arriving as an ordinary stream chunk, frees its slot and the
+    /// next waiting thread's subscribe goes out. (The raw chunk path once skipped this, so
+    /// only the first two background threads ever caught up.)
+    #[tokio::test]
+    async fn a_synchronized_chunk_admits_the_next_waiting_thread() {
+        let mut state = state();
+        for (id, rank) in [("a", 1), ("b", 2), ("c", 3)] {
+            state.subscribe_from(id.into(), None, rank);
+        }
+        sent(&mut state, "a");
+        sent(&mut state, "b");
+        let request_id = RequestId::Number(1);
+        state
+            .in_flight_streams
+            .insert(request_id.clone(), ActiveStream::Thread("a".into()));
+        let mut frames = Vec::new();
+        let sink = futures::sink::unfold(&mut frames, |frames, frame: Frame| async move {
+            frames.push(frame);
+            Ok::<_, WebSocketError>(frames)
+        });
+        let mut sink = std::pin::pin!(sink);
+        let (events_tx, mut events_rx) = mpsc::channel(16);
+        let synchronized = RawValue::from_string(r#"{"kind":"synchronized"}"#.into())
+            .unwrap_or_else(|e| panic!("{e}"));
+        let frame = IncomingServerFrame::Chunk {
+            request_id,
+            values: vec![synchronized],
+        };
+        let timing = MessageTiming {
+            started_at: std::time::Instant::now(),
+            bytes: 0,
+        };
+        let mut missed = 0;
+        let handled = handle_incoming_frame(
+            &mut state,
+            frame,
+            &mut sink,
+            &events_tx,
+            &mut missed,
+            timing,
+        )
+        .await;
+        assert!(handled.is_ok());
+        assert!(events_rx.try_recv().is_ok(), "the marker reached the app");
+        assert!(
+            state
+                .thread_subs
+                .get("c")
+                .is_some_and(|s| s.request_id.is_some()),
+            "the waiting thread was sent"
+        );
     }
 
     /// A new session subscribes the store's ranks first (the open thread is 0).

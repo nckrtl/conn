@@ -1525,7 +1525,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.21",
  "tokio-rustls",
- "yawc",
+ "yawc 0.4.2",
 ]
 
 [[package]]
@@ -1784,6 +1784,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "url",
+ "yawc 0.5.0",
 ]
 
 [[package]]
@@ -14463,6 +14464,39 @@ dependencies = [
  "pin-project",
  "rand 0.8.6",
  "send_wrapper",
+ "sha1 0.10.7",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-rustls",
+ "tokio-util",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "webpki-roots 1.0.10",
+]
+
+[[package]]
+name = "yawc"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7b69940f68e6cbe7d7f85350b81e51fafe62786d812b92c263727addc13a272"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "crossbeam-queue",
+ "flate2",
+ "futures",
+ "getrandom 0.2.16",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "js-sys",
+ "log",
+ "nom 8.0.0",
+ "percent-encoding",
+ "pin-project",
+ "rand 0.8.6",
  "sha1 0.10.7",
  "thiserror 2.0.21",
  "tokio",

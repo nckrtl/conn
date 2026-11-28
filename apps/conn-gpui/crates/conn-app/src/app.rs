@@ -1793,7 +1793,12 @@ impl ConnApp {
         {
             self.pending_open_thread = None;
             self.select_thread(pending_id, cx);
-        } else if self.layout.selected_thread_id.is_none() && self.draft.is_none() {
+        } else if self.layout.selected_thread_id.is_none()
+            && self.draft.is_none()
+            // A saved list's order is the last launch's: open the newest thread only once the
+            // server's list says which one that is now.
+            && self.shell.synchronized
+        {
             let initial = self
                 .shell
                 .top_level_active_threads()

@@ -197,8 +197,8 @@ impl ConnApp {
     }
 
     /// Saves the primary environment's own thread list on the device for the next launch, at
-    /// most every [`SHELL_SAVE_EVERY`] unless `now`. Only a synchronized list is saved.
-    /// Saves the primary thread list; the future resolves once it is written (for quitting).
+    /// most every [`SHELL_SAVE_EVERY`] unless `now`. Only a synchronized list is saved. The
+    /// future resolves once it is written (for quitting).
     pub(super) fn save_primary_shell(
         &mut self,
         now: bool,

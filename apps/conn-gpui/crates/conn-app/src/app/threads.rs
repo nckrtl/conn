@@ -52,6 +52,8 @@ pub(super) struct Threads {
     /// Outlines of opened threads, with the `updatedAt` each was read at.
     outlines: HashMap<String, (String, Arc<ThreadOutline>)>,
     outline_loading: Option<String>,
+    /// The thread and `updatedAt` whose outline read last failed, so it is not asked again.
+    outline_failed: Option<(String, String)>,
     /// A launched thread's first projection, drawn until its stream sends one.
     launched: Option<(
         String,
@@ -607,6 +609,7 @@ impl ConnApp {
             .outlines
             .get(&id)
             .is_some_and(|(read, _)| *read == stamp)
+            || self.threads.outline_failed.as_ref() == Some(&(id.clone(), stamp.clone()))
             || !self.thread_connected(&id)
         {
             return;
@@ -659,9 +662,7 @@ impl ConnApp {
                     Err(err) => {
                         eprintln!("thread outline: {err}");
                         // Not asked again until the thread changes.
-                        if let Some(old) = app.threads.outlines.get_mut(&id) {
-                            old.0 = stamp;
-                        }
+                        app.threads.outline_failed = Some((id, stamp));
                     }
                 }
             });

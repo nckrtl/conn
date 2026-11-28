@@ -267,6 +267,8 @@ the T3 way yet.
   release binary: 16,800,544 to 17,001,824 bytes (+201,280). No run-time heap of its own; the
   IDNA tables are static. `idna_adapter` 1.0 (ASCII only) would save most of that, but a host
   name in another script would then read differently from T3's (the diff has `bücher.example`).
+- **conn-engine** (dev-dependency only): `examples/pr_link_sync_cases.rs` applies a sync's
+  commands with the engine's deciders. The engine itself must still not depend on this crate.
 
 ## Costs
 

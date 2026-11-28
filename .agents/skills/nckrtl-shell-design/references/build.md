@@ -2,10 +2,7 @@
 
 Conn is the fork's one customizations branch: `main` of `nckrtl/conn` (renamed
 from `nckrtl/t3code` and its `nckrtl` branch on 2026-10-11). It is checked out
-on Nick's MacBook (`~/apps/conn`) and tracks `origin/main`. Merge
-`upstream/main` into it to take upstream changes (it carries merge commits,
-so a rebase replays them), then run the sync procedure in
-[SKILL.md](../SKILL.md).
+on Nick's MacBook (`~/apps/conn`) and tracks `origin/main`. Full upstream merges ended on 2026-11-19; see [FORK.md](../../../../FORK.md).
 
 `~/apps/conn` is shared. Never build, switch branches or stash there. Every
 build uses its own worktree.

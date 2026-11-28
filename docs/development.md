@@ -30,7 +30,8 @@ apply too. Run from the repo root:
    apps/ios/Conn.xcodeproj -scheme Conn`), passing your simulator's UDID as the destination.
    The scheme's tests are `ConnTests` and `ConnUITests`.
 
-`Conn.xcodeproj` is generated from `apps/ios/project.yml` with XcodeGen (`xcodegen generate`);
+`Conn.xcodeproj` is generated from `apps/ios/project.yml` with XcodeGen
+(`xcodegen generate --spec apps/ios/project.yml` from the repo root);
 commit both. The project also needs the `DesignKit` package at `../../../design-kit/DesignKit`
 relative to `apps/ios`.
 

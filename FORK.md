@@ -43,8 +43,9 @@ Builds:
 
 ## Provider audit checkpoint
 
-The `audit-t3-providers` skill reads this block to find its review window and updates it at
-the end of each audit. Keep the field names.
+The [`audit-t3-providers`](.agents/skills/audit-t3-providers/SKILL.md) skill reads this block
+to find its review window and updates it after each full-scope audit (all four providers plus
+engine, contract and MCP); the skill defines that scope. Keep the field names.
 
 <!-- provider-audit-checkpoint:start -->
 

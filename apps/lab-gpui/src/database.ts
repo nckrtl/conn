@@ -4,7 +4,7 @@ import type {
   DesktopDatabaseColumn,
   DesktopDatabaseRequest,
   DesktopDatabaseResponse,
-} from "@t3tools/contracts";
+} from "../../lab-shared/contracts";
 
 type Cell = string | number | boolean | null;
 type Row = Record<string, Cell>;

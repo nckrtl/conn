@@ -1,0 +1,32 @@
+{
+  "name": "conn-labs",
+  "private": true,
+  "description": "The design labs: browser mocks of Conn's desktop and iPhone shells. Not part of the root pnpm workspace.",
+  "type": "module",
+  "scripts": {
+    "lab:gpui": "vite lab-gpui",
+    "lab:ios": "vite lab-ios",
+    "build:gpui": "vite build lab-gpui",
+    "build:ios": "vite build lab-ios",
+    "typecheck": "tsc -p lab-gpui && tsc -p lab-ios"
+  },
+  "dependencies": {
+    "@pierre/diffs": "1.7.0-beta.4",
+    "@pierre/trees": "1.0.0-beta.6",
+    "hast-util-to-jsx-runtime": "2.3.6",
+    "lowlight": "3.3.0",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1",
+    "sql.js": "1.15.0"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@types/sql.js": "1.4.11",
+    "@vitejs/plugin-react": "6.1.2",
+    "typescript": "6.0.3",
+    "vite": "8.3.8"
+  }
+}

@@ -4,7 +4,7 @@ import mono from "../../../crates/conn-theme/themes/dark-mono.json";
 import {
   T3_CODE_LIGHT_THEME_COLORS,
   type ThemeColors,
-} from "../../../packages/shared/src/themePalettes";
+} from "../../lab-shared/themePalettes";
 export type PhoneTheme = "dark-ocean" | "dark-mono" | "light";
 // ConnTheme.swift resolves these roles through conn-ffi's themeTokens.
 export function nativeTheme(choice: PhoneTheme): CSSProperties {

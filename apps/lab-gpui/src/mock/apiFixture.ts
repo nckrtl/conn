@@ -1,4 +1,4 @@
-import type { DesktopApiHeader, DesktopApiResponse } from "@t3tools/contracts";
+import type { DesktopApiHeader, DesktopApiResponse } from "../../../lab-shared/contracts";
 
 // Local fixtures for the API panel. Mirrors apps/web/src/api/apiRequestStore.ts (draft shapes)
 // and the DesktopApiResponse contract; `respond` stands in for window.desktopBridge.apiSend.

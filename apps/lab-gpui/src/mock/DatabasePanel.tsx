@@ -5,8 +5,8 @@ import {
   DRIVER_LABELS,
   type DatabaseConnection,
   type DatabaseDriver,
-} from "../../../web/src/database/databaseApi";
-import vaultIcon from "../../../web/src/database/vault-icon.png";
+} from "../../../lab-shared/databaseApi";
+import vaultIcon from "../../../lab-shared/images/vault-icon.png";
 import HighlightedCode from "../../../lab-ios/src/components/HighlightedCode";
 import { labDatabaseRun } from "../database";
 import {

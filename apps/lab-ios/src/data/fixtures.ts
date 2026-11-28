@@ -2,8 +2,8 @@
 // (apps/mobile/scripts/lab/fixtures.mts), copied so the web typecheck stays out of apps/mobile.
 // Edit the text here; the screens read it live.
 import handoffImage from "../../../lab-gpui/image-preview/handoff.webp";
-import claudeImage from "../../../marketing/public/95/providers/claude-code-320.webp";
-import codexImage from "../../../marketing/public/95/providers/codex-320.webp";
+import claudeImage from "../../../lab-shared/images/claude-code-320.webp";
+import codexImage from "../../../lab-shared/images/codex-320.webp";
 import checkpointFiles from "./fileChanges.json";
 import type { Provider } from "../components/Icon";
 

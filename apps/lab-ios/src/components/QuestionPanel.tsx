@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
-import { observeResize } from "../../../web/src/lib/observeResize";
+import { observeResize } from "../../../lab-shared/observeResize";
 import { MarkdownText, markdownPreviewText } from "./Markdown";
 import { Icon } from "./Icon";
 import { isAnswered, type QuestionFlow } from "../screens/useQuestionFlow";

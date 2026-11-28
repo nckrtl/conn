@@ -2,11 +2,11 @@ import { Icon } from "./Icon";
 
 const samples = import.meta.glob<string>(
   [
-    "../../../marketing/public/95/providers/{antigravity,claude-code,codex,cursor,grok,opencode}-320.webp",
-    "../../../marketing/public/95/t3-code-concepts/{t3-code-lime,t3-code-nightly-clouds}-320.webp",
-    "../../../marketing/src/assets/{app-desktop,social-card}.webp",
+    "../../../lab-shared/images/{antigravity,claude-code,codex,cursor,grok,opencode}-320.webp",
+    "../../../lab-shared/images/{t3-code-lime,t3-code-nightly-clouds}-320.webp",
+    "../../../lab-shared/images/{app-desktop,social-card}.webp",
     "../../image-preview/handoff.webp",
-    "../../../../docs/internals/images/mobile-workspace-split.png",
+    "../../../lab-shared/images/mobile-workspace-split.png",
   ],
   { eager: true, import: "default", query: "?url" },
 );

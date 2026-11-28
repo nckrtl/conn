@@ -189,6 +189,10 @@ export default defineConfig({
       "apps/conn-gpui/**",
       // The native SwiftUI iPhone app (Xcode project, asset catalogs, generated bindings).
       "apps/ios/**",
+      // The design labs are a standalone npm package that CI does not check.
+      "apps/lab-*/**",
+      "apps/package.json",
+      "apps/package-lock.json",
       "crates/**",
       "infra/task-cache/vendor/**",
       // Macroscope requires one glob per line; Markdown formatting corrupts it.
@@ -229,6 +233,7 @@ export default defineConfig({
       "apps/conn-server/**",
       "apps/conn-gpui/**",
       "apps/ios/**",
+      "apps/lab-*/**",
       "crates/**",
       "infra/task-cache/vendor/**",
       "dist",
@@ -570,7 +575,7 @@ export default defineConfig({
         ],
         rules: { "t3code/no-em-dash-copy": "error" },
       },
-      // Conn: copy names the app through the `{appName}` placeholder (docs/conn-features.md, "i18n and the
+      // Conn: copy names the app through the `{appName}` placeholder (apps/conn-gpui/docs/reference/conn-features.md, "i18n and the
       // app name"); `node scripts/check-conn-brand.ts` checks the catalogs.
       {
         files: [
@@ -814,13 +819,7 @@ export default defineConfig({
         rules: { "t3code/no-manual-memo": ["error", { allowMemoHooks: true }] },
       },
       {
-        files: [
-          "apps/web/src/**",
-          "apps/lab-gpui/src/**",
-          "apps/lab-ios/src/**",
-          "apps/mobile/src/**",
-          "packages/*/src/**",
-        ],
+        files: ["apps/web/src/**", "apps/mobile/src/**", "packages/*/src/**"],
         rules: { "t3code/no-unreasoned-state-sync": "error" },
       },
       {
@@ -861,16 +860,10 @@ export default defineConfig({
         },
       },
       {
-        // The UI labs are design tools, not product code: fixture copy is English sample text,
-        // the mobile lab styles with plain CSS classes, its scripts are node tools, the generated
-        // icon maps list every glyph name, the stand-ins keep the hook names of the modules they
-        // replace, and the lab driver talks to the fake environment's RPC.
-        files: [
-          "apps/lab-gpui/**",
-          "apps/lab-ios/**",
-          "apps/mobile/scripts/lab/**",
-          "apps/mobile/src/lab/**",
-        ],
+        // The mobile UI lab is a design tool, not product code: fixture copy is English sample
+        // text, it styles with plain CSS classes, its scripts are node tools, and the generated
+        // icon maps list every glyph name.
+        files: ["apps/mobile/scripts/lab/**", "apps/mobile/src/lab/**"],
         rules: {
           "shadcn/no-unknown-classes": "off",
           "t3code/namespace-node-imports": "off",

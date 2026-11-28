@@ -4,7 +4,7 @@ import type { IconName } from "../icons.generated";
 import {
   BUILT_IN_THEMES,
   getThemeColorsForAppearance,
-} from "../../../../packages/shared/src/themePalettes";
+} from "../../../lab-shared/themePalettes";
 import { nativeTheme, nativeThemeTokens } from "../nativeTheme";
 import { GlassButton } from "./GlassHeader";
 import { Icon } from "./Icon";

@@ -1,30 +1,4 @@
 {
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "module": "Preserve",
-    "moduleResolution": "Bundler",
-    "erasableSyntaxOnly": false,
-    "verbatimModuleSyntax": false,
-    "jsx": "react-jsx",
-    "lib": ["ES2023", "ES2024.Promise", "ESNext.Disposable", "DOM", "DOM.Iterable"],
-    "types": ["vite-plus/client"],
-    "paths": {
-      // The lab renders the web app's real modules; `~/` is apps/web/src, as in the app.
-      "~/*": ["../web/src/*"],
-      "lucide-react": ["../web/src/icons/lucide-react.ts"]
-    },
-    "plugins": [
-      {
-        "name": "@effect/language-service",
-        "diagnosticSeverity": {
-          "globalDate": "off",
-          "globalConsole": "off",
-          "globalRandom": "off",
-          "globalTimers": "off",
-          "globalFetch": "off"
-        }
-      }
-    ]
-  },
-  "include": ["src", "vite.config.ts", "vite.reference.config.ts", "../web/src/vite-env.d.ts"]
+  "extends": "../lab-shared/tsconfig.base.json",
+  "include": ["src", "../lab-shared"]
 }

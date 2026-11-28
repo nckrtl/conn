@@ -1,5 +1,5 @@
-import type { DesktopDatabaseConnection } from "@t3tools/contracts";
-import type { DatabaseConnection } from "../../../web/src/database/databaseApi";
+import type { DesktopDatabaseConnection } from "../../../lab-shared/contracts";
+import type { DatabaseConnection } from "../../../lab-shared/databaseApi";
 import { labDatabaseRun } from "../database";
 
 export const envDatabase: DatabaseConnection = {

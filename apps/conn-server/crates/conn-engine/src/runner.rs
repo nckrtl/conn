@@ -2283,17 +2283,24 @@ impl Inner {
         let written = self
             .write(move |tx| {
                 let mut settled = Vec::new();
+                let mut effects = Vec::new();
                 for draft in drafts {
                     if crate::families::settles_child_work(tx, &draft)?
                         && !settled.contains(&draft.thread_id)
                     {
                         settled.push(draft.thread_id.clone());
                     }
+                    let request = (draft.event_type == "runtime-request.updated").then(|| {
+                        let id = draft.payload["id"].as_str().unwrap_or_default().to_owned();
+                        (draft.thread_id.clone(), id)
+                    });
                     tx.append(draft)?;
+                    if let Some((thread_id, id)) = request {
+                        effects.extend(crate::families::on_child_request(tx, &thread_id, &id)?);
+                    }
                 }
                 // `Orchestrator.ts:16085`: work a child's task waited on ended with no run update,
                 // so its end is where the task can settle.
-                let mut effects = Vec::new();
                 for thread_id in settled {
                     effects.extend(crate::families::finalize_tasks(tx, &thread_id)?);
                 }
@@ -2694,6 +2701,9 @@ impl Inner {
                     if let Some(mut row) = tx.entity(&thread_id, "runtimeRequests", &request_id)? {
                         row["status"] = json!("expired");
                         tx.append(Draft::new(&thread_id, "runtime-request.updated", row))?;
+                        let effects =
+                            crate::families::on_child_request(tx, &thread_id, &request_id)?;
+                        tx.enqueue(None, &effects)?;
                     }
                     Ok(())
                 })
@@ -2988,14 +2998,18 @@ impl Inner {
                         Draft::new(&tid, "provider-session.updated", session).payload_instance(),
                     )?;
                 }
+                let mut effects = vec![];
                 for mut request in tx.entities(&tid, "runtimeRequests")? {
                     let live = request["responseCapability"]["type"] == "live"
                         && request["responseCapability"]["providerSessionId"] == sid.as_str();
                     if request["status"] == "pending" && live {
                         request["status"] = json!("expired");
+                        let id = request["id"].as_str().unwrap_or_default().to_owned();
                         tx.append(Draft::new(&tid, "runtime-request.updated", request))?;
+                        effects.extend(crate::families::on_child_request(tx, &tid, &id)?);
                     }
                 }
+                tx.enqueue(None, &effects)?;
                 Ok(())
             })
             .await;

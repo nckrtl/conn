@@ -164,7 +164,9 @@ The T3 sources are under `apps/server/src/orchestration-v2/` unless a path says 
 - **Delegated tasks.** Ids come from the command id: task `node:delegated-task:<commandId>`,
   child `thread:delegated-task:<commandId>`, so a tool knows them after `dispatch` returns.
   The parent wakes with a queued agent message at once (`completionWake: always`) or after its
-  own run ends (`settled_only`). Stop reaches running children.
+  own run ends (`settled_only`). A child's question wakes the parent once too, unless a
+  blocking `delegate_task` wait returns it; an answer or the task's end cancels a queued wake.
+  Stop reaches running children.
 - **Restart.** A run the provider had ends `cancelled` with a "Server restarted" notice and a
   continuation message runs in the same provider thread (`restart.rs`; at most 3 in a row
   within 5 minutes). A run the provider never took starts again.

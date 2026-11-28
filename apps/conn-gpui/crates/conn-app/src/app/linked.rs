@@ -1726,11 +1726,14 @@ impl ConnApp {
             }
             ClientEvent::StreamEnded { tag, key, error } => {
                 if tag == "orchestration.subscribeThread" && self.keeps_stream(&key) {
+                    // A refused stream stays down until the next connection: asking again at once
+                    // loops against a server that refuses it.
                     if let Some(error) = error {
                         eprintln!("thread stream {key} ended: {error}");
+                    } else {
+                        self.ended_threads.insert(key);
+                        self.resubscribe_ended_threads();
                     }
-                    self.ended_threads.insert(key);
-                    self.resubscribe_ended_threads();
                 }
                 None
             }

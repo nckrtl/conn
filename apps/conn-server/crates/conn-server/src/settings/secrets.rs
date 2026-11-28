@@ -110,10 +110,13 @@ fn walk(settings: &mut Map<String, Value>, visit: &mut dyn FnMut(Visit<'_>)) {
                     let Value::Object(instance) = instance else {
                         continue;
                     };
+                    // Trimmed, as the contract decodes `driver`: a padded driver keeps its
+                    // secret fields.
                     let driver = instance
                         .get("driver")
                         .and_then(Value::as_str)
                         .unwrap_or_default()
+                        .trim()
                         .to_owned();
                     if let Some(Value::Object(config)) = instance.get_mut("config") {
                         visit(Visit::Group(
@@ -362,6 +365,40 @@ pub(super) fn restore_echoed_references(
             .iter()
             .find(|(n, _)| n == name)
             .map(|(_, reference)| reference.clone())
+    });
+}
+
+/// A secret field that holds a number, a boolean or a list (a hand edit) shows the marker
+/// (`redact`) but has nothing in the store. A marker echoed back for it keeps that value, so a
+/// round trip through a client never erases it.
+pub(super) fn restore_echoed_unstored(current: &Map<String, Value>, next: &mut Map<String, Value>) {
+    let mut unstored: Vec<(String, Value)> = Vec::new();
+    let mut scratch = current.clone();
+    walk(&mut scratch, &mut |visit| {
+        if let Visit::Group(fields, secret_fields, name) = visit {
+            for field in secret_fields {
+                if let Some(slot) = fields.get(*field)
+                    && matches!(slot, Value::Number(_) | Value::Bool(_) | Value::Array(_))
+                {
+                    unstored.push((name(field, None), slot.clone()));
+                }
+            }
+        }
+    });
+    if unstored.is_empty() {
+        return;
+    }
+    walk(next, &mut |visit| {
+        if let Visit::Group(fields, secret_fields, name) = visit {
+            for field in secret_fields {
+                if let Some(slot) = fields.get_mut(*field)
+                    && *slot == SECRET_REDACTED
+                    && let Some((_, value)) = unstored.iter().find(|(n, _)| *n == name(field, None))
+                {
+                    *slot = value.clone();
+                }
+            }
+        }
     });
 }
 

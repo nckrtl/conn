@@ -947,8 +947,6 @@ async fn projects_mutate(
 }
 
 const PROVIDERS_MANAGE: &str = "providers:manage";
-/// The largest `POST /api/settings/provider-instances` body: 32 instances fit many times over.
-const PROVIDER_INSTANCES_BODY_LIMIT: usize = 1024 * 1024;
 
 /// `GET /api/settings/provider-instances`: `providerInstances` of the settings as
 /// `server.getSettings` sends them, secrets left out. Orbit reads what it provisioned here.
@@ -979,7 +977,7 @@ async fn mutate_provider_instances(
     let (Some(_), Some(environment)) = (&state.engine, &state.deps.environment) else {
         return engine_unavailable();
     };
-    let Ok(body) = axum::body::to_bytes(body, PROVIDER_INSTANCES_BODY_LIMIT).await else {
+    let Ok(body) = axum::body::to_bytes(body, MAX_MESSAGE_BYTES).await else {
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
     };
     let mutations = match provider_instance_mutations(&body) {
@@ -2014,7 +2012,9 @@ mod tests {
                         {"name": "GOOGLE_GEMINI_BASE_URL", "value": "http://router:8317"},
                         {"name": "ROUTER_TOKEN", "value": "inline-token-9a8b", "sensitive": true}]},
                 "agyNumber": {"driver": "antigravity", "config": {"apiKey": 424_242}},
-                "openList": {"driver": "opencode", "config": {"serverPassword": ["list-secret-7c"]}}}})
+                "openList": {"driver": "opencode", "config": {"serverPassword": ["list-secret-7c"]}},
+                "agyPadded": {"driver": " antigravity ", "config": {"apiKey": "padded-key-1"}},
+                "openPadded": {"driver": " opencode ", "config": {"serverPassword": "padded-pass-2"}}}})
             .to_string(),
         )
         .unwrap();
@@ -2028,6 +2028,8 @@ mod tests {
             "inline-token-9a8b",
             "424242",
             "list-secret-7c",
+            "padded-key-1",
+            "padded-pass-2",
         ] {
             assert!(!text.contains(secret), "{secret} in {text}");
         }
@@ -2039,6 +2041,11 @@ mod tests {
         assert_eq!(instance["environment"][1]["valueRedacted"], true);
         assert_eq!(instances["agyNumber"]["config"]["apiKey"], "••••••");
         assert_eq!(instances["openList"]["config"]["serverPassword"], "••••••");
+        assert_eq!(instances["agyPadded"]["config"]["apiKey"], "••••••");
+        assert_eq!(
+            instances["openPadded"]["config"]["serverPassword"],
+            "••••••"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2376,6 +2383,213 @@ mod tests {
             assert_eq!(revision(&deps), before.1);
             assert_eq!(file_state(&path), before.0);
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// GET of an instance whose secret field holds a number, a list or a boolean shows the
+    /// marker; echoing that instance back keeps the original value and changes nothing.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_echoed_marker_keeps_a_value_the_store_never_held() {
+        let dir = temp("unstored");
+        let path = dir.join("settings.json");
+        std::fs::write(
+            &path,
+            json!({"providerInstances": {
+                "agyList": {"driver": "antigravity", "config": {"apiKey": [1, 2]}},
+                "agyNumber": {"driver": "antigravity", "config": {"apiKey": 7}},
+                "agyBool": {"driver": "antigravity", "config": {"apiKey": true}}}})
+            .to_string(),
+        )
+        .unwrap();
+        let (addr, auth, deps) = serve_settings(&dir, None).await;
+        let admin = token(&auth, &["providers:manage"]);
+        let (_, view) = instances_get(addr, &admin).await;
+        let before = (file_state(&path), revision(&deps));
+        let echo: Vec<Value> = ["agyList", "agyNumber", "agyBool"]
+            .iter()
+            .map(|id| {
+                json!({"operation": "upsert", "instanceId": id,
+                       "instance": view["providerInstances"][id]})
+            })
+            .collect();
+        let (status, body) = instances_post(addr, &admin, Value::Array(echo)).await;
+        assert_eq!((status, &body), (200, &view));
+        assert_eq!(file_state(&path), before.0);
+        assert_eq!(revision(&deps), before.1);
+        assert_eq!(
+            raw_instance(&deps, "agyList")["config"]["apiKey"],
+            json!([1, 2])
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Numbers compare as the file stores them (`1.0` is `1`), nested ones too: repeating an
+    /// upsert with them publishes no revision.
+    #[tokio::test(flavor = "current_thread")]
+    async fn repeated_upserts_with_whole_floats_publish_nothing() {
+        let dir = temp("numbers");
+        let (addr, auth, deps) = serve_settings(&dir, None).await;
+        let admin = token(&auth, &["providers:manage"]);
+        let upsert = json!([{"operation": "upsert", "instanceId": "c", "instance":
+            {"driver": "codex", "config": {"ratio": 1.0, "nested": [{"depth": 2.0}]}}}]);
+        let (status, first) = instances_post(addr, &admin, upsert.clone()).await;
+        assert_eq!(status, 200, "{first}");
+        let path = dir.join("settings.json");
+        let before = (file_state(&path), revision(&deps));
+        let (status, again) = instances_post(addr, &admin, upsert).await;
+        assert_eq!((status, &again), (200, &first));
+        assert_eq!(revision(&deps), before.1);
+        assert_eq!(file_state(&path), before.0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A driver decodes its own config: any JSON passes, as `server.updateSettings` takes it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_opaque_config_is_accepted() {
+        let dir = temp("opaque");
+        let (addr, auth, deps) = serve_settings(&dir, None).await;
+        let admin = token(&auth, &["providers:manage"]);
+        let configs = [json!([1, 2]), json!("text"), json!(5), json!(true)];
+        for (position, config) in configs.iter().enumerate() {
+            let id = format!("ext{position}");
+            let (status, body) = instances_post(
+                addr,
+                &admin,
+                json!([{"operation": "upsert", "instanceId": id,
+                        "instance": {"driver": "extDriver", "config": config}}]),
+            )
+            .await;
+            assert_eq!(status, 200, "{body}");
+            assert_eq!(raw_instance(&deps, &id)["config"], *config);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A secret reference follows `SecretReference`: a provider slug and a one-line path of
+    /// at most 1024 characters, both non-empty. Anything else is refused and nothing is saved.
+    #[tokio::test(flavor = "current_thread")]
+    async fn invalid_secret_references_are_refused() {
+        let dir = temp("references");
+        let (addr, auth, _) = serve_settings(&dir, None).await;
+        let admin = token(&auth, &["providers:manage"]);
+        let bad = [
+            json!({"provider": "", "reference": ""}),
+            json!({"provider": "op", "reference": "  "}),
+            json!({"provider": "one password", "reference": "vault/item"}),
+            json!({"provider": "op", "reference": "vault\nitem"}),
+            json!({"provider": "op", "reference": "r".repeat(1025)}),
+        ];
+        for reference in bad {
+            for instance in [
+                agy(reference.clone(), json!([])),
+                agy(
+                    json!("k"),
+                    json!([{"name": "TOKEN", "value": reference, "sensitive": true}]),
+                ),
+                agy(
+                    json!("k"),
+                    json!([{"name": "TOKEN", "value": "", "secret": reference, "sensitive": true}]),
+                ),
+            ] {
+                let (status, body) = instances_post(
+                    addr,
+                    &admin,
+                    json!([{"operation": "upsert", "instanceId": "agy", "instance": instance}]),
+                )
+                .await;
+                assert_invalid(status, &body, 0);
+            }
+        }
+        assert!(!dir.join("settings.json").exists());
+        let (status, body) = instances_post(
+            addr,
+            &admin,
+            json!([{"operation": "upsert", "instanceId": "agy", "instance":
+                agy(json!({"provider": "op", "reference": "vault/item"}), json!([]))}]),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A successful batch runs the migrations every save runs: a legacy GitHub token an
+    /// outside edit left inline becomes a source control host, its token in the store.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_successful_batch_runs_the_settings_migrations() {
+        let dir = temp("migrate");
+        let (addr, auth, deps) = serve_settings(&dir, None).await;
+        let admin = token(&auth, &["providers:manage"]);
+        let path = dir.join("settings.json");
+        std::fs::write(
+            &path,
+            json!({"github": {"tokens": {"github.com": "gh-inline-1"}}}).to_string(),
+        )
+        .unwrap();
+        let (status, body) = instances_post(
+            addr,
+            &admin,
+            json!([{"operation": "upsert", "instanceId": "c",
+                    "instance": {"driver": "codex"}}]),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let file = std::fs::read_to_string(&path).unwrap();
+        assert!(!file.contains("gh-inline-1"), "the token stayed inline");
+        assert!(stored_secrets(&dir).iter().any(|v| v == "gh-inline-1"));
+        let raw = deps.environment.as_ref().unwrap().settings.raw();
+        assert_eq!(
+            raw["sourceControlHosts"]["github"]["tokens"]["github.com"],
+            "gh-inline-1"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// After a failed load is repaired, the batch's load is the reload: a later refresh finds
+    /// nothing to reload and publishes no second revision.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_batch_after_a_failed_load_publishes_once() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp("retry");
+        let path = dir.join("settings.json");
+        std::fs::write(&path, "{}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let (addr, auth, deps) = serve_settings(&dir, None).await;
+        let settings = &deps.environment.as_ref().unwrap().settings;
+        assert!(settings.needs_reload());
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let admin = token(&auth, &["providers:manage"]);
+        let (status, body) = instances_post(
+            addr,
+            &admin,
+            json!([{"operation": "upsert", "instanceId": "c",
+                    "instance": {"driver": "codex"}}]),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let after = revision(&deps);
+        assert!(!settings.needs_reload());
+        settings.reload_if_failed();
+        assert_eq!(revision(&deps), after);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A body takes the same limit as a `/ws` message: one valid mutation with a config over
+    /// 1 MiB is saved.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_large_valid_mutation_is_accepted() {
+        let dir = temp("large");
+        let (addr, auth, deps) = serve_settings(&dir, None).await;
+        let admin = token(&auth, &["providers:manage"]);
+        let blob = "x".repeat(3 << 19);
+        let (status, _) = instances_post(
+            addr,
+            &admin,
+            json!([{"operation": "upsert", "instanceId": "c",
+                    "instance": {"driver": "codex", "config": {"blob": blob}}}]),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(raw_instance(&deps, "c")["config"]["blob"], blob);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

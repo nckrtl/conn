@@ -26,6 +26,7 @@ pub const MAX_MUTATIONS: usize = 32;
 
 const SLUG_MAX_CHARS: usize = 64;
 const ENVIRONMENT_NAME_MAX_CHARS: usize = 128;
+const SECRET_REFERENCE_MAX_CHARS: usize = 1024;
 
 #[derive(Debug)]
 pub enum BatchError {
@@ -46,49 +47,36 @@ impl SettingsStore {
             });
         }
         let _writer = crate::lock(&self.writer);
-        // Read only: the migrations `load` writes wait until the batch succeeds.
+        // A dry run on the file as it is, read only: a refused batch writes nothing, not even
+        // the migrations `load` writes.
         let decoded = file::decode(&self.path);
         if let Some(detail) = decoded.failure {
             return Err(BatchError::Failed(self.error("read-file", detail)));
         }
-        let current = decoded.doc;
-        let mut staged = current.clone();
-        let mut store = Staged::default();
-        for (index, raw) in mutations.into_iter().enumerate() {
-            let invalid = |message: String| BatchError::Invalid { index, message };
-            let mutation = canonical(raw).map_err(invalid)?;
-            if conn_contract::from_json::<ProviderInstanceMutation>(mutation.clone()).is_err() {
-                return Err(invalid(
-                    "the mutation does not decode as providerInstanceMutation".into(),
-                ));
-            }
-            let id = mutation["instanceId"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned();
-            let exists = staged
-                .get("providerInstances")
-                .and_then(|instances| instances.get(&id))
-                .is_some();
-            if mutation["operation"] == "create" && exists {
-                return Err(invalid(format!("the provider instance `{id}` exists")));
-            }
-            let before = staged.clone();
-            apply_provider_instance_mutation(&mut staged, mutation).map_err(invalid)?;
-            if file::check(&staged).is_err() {
-                return Err(invalid(
-                    "the settings would not decode after this mutation".into(),
-                ));
-            }
-            store.stage(secrets::persist(&before, &mut staged));
+        stage(&decoded.doc, mutations.clone())?;
+        // The batch passes: load as every save does (`updateAndPersistSettings`), migrations
+        // included, then apply it to what that load gives.
+        let seen = self.lock().materialized.clone();
+        let (loaded, failure, retry) = super::load(&self.path, &self.secrets_dir);
+        self.retry
+            .store(retry, std::sync::atomic::Ordering::Relaxed);
+        if let Some(detail) = failure {
+            return Err(BatchError::Failed(self.error("read-file", detail)));
         }
-        let changes = store.into_changes();
+        let (staged, changes) = stage(&loaded.doc, mutations)?;
         let dir = &self.secrets_dir;
         let store_unchanged = changes.iter().all(|change| {
             secret_store::read(dir, &change.name).is_ok_and(|stored| stored == change.write)
         });
-        if staged == current && store_unchanged {
-            return self.publish_if_changed(current).map_err(BatchError::Failed);
+        if staged == loaded.doc && store_unchanged {
+            // Nothing to write. The registry reconciles on a revision, so one is published
+            // when the served settings differ from what it last saw (an edit on disk).
+            let changed = loaded.materialized != seen;
+            *self.lock() = loaded;
+            if changed {
+                self.revision.send_modify(|r| *r += 1);
+            }
+            return Ok(self.for_client());
         }
         let undo = secrets::apply(dir, &changes).map_err(|(operation, error)| {
             BatchError::Failed(self.error(operation, error.to_string()))
@@ -113,24 +101,48 @@ impl SettingsStore {
         self.revision.send_modify(|r| *r += 1);
         Ok(self.for_client())
     }
+}
 
-    /// Nothing to write: the settings on disk already hold the batch. The server's own view
-    /// may still be older (an edit on disk since the last load), and the registry reconciles
-    /// only on a revision, so the view is replaced and published when it differs.
-    fn publish_if_changed(&self, doc: Map<String, Value>) -> Result<Value, SettingsError> {
-        let materialized = secrets::materialize(&self.secrets_dir, &served(&doc))
-            .map_err(|(_, error)| self.error("read-secret", error.to_string()))?;
-        let changed = {
-            let mut state = self.lock();
-            let changed = state.materialized != materialized;
-            *state = Loaded { doc, materialized };
-            changed
-        };
-        if changed {
-            self.revision.send_modify(|r| *r += 1);
+/// The batch applied in order to a copy of `current`, and the store changes it makes; or the
+/// first mutation it refuses.
+fn stage(
+    current: &Map<String, Value>,
+    mutations: Vec<Value>,
+) -> Result<(Map<String, Value>, Vec<secrets::Change>), BatchError> {
+    let mut staged = current.clone();
+    let mut store = Staged::default();
+    for (index, raw) in mutations.into_iter().enumerate() {
+        let invalid = |message: String| BatchError::Invalid { index, message };
+        let mut mutation = canonical(raw).map_err(invalid)?;
+        // `30.0` is a whole number to T3: read it as the file stores it.
+        file::normalize_numbers(&mut mutation);
+        if conn_contract::from_json::<ProviderInstanceMutation>(mutation.clone()).is_err() {
+            return Err(invalid(
+                "the mutation does not decode as providerInstanceMutation".into(),
+            ));
         }
-        Ok(self.for_client())
+        let id = mutation["instanceId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let exists = staged
+            .get("providerInstances")
+            .and_then(|instances| instances.get(&id))
+            .is_some();
+        if mutation["operation"] == "create" && exists {
+            return Err(invalid(format!("the provider instance `{id}` exists")));
+        }
+        let before = staged.clone();
+        apply_provider_instance_mutation(&mut staged, mutation).map_err(invalid)?;
+        secrets::restore_echoed_unstored(&before, &mut staged);
+        if file::check(&staged).is_err() {
+            return Err(invalid(
+                "the settings would not decode after this mutation".into(),
+            ));
+        }
+        store.stage(secrets::persist(&before, &mut staged));
     }
+    Ok((staged, store.into_changes()))
 }
 
 /// The store as the batch leaves it: the last change to each secret, in first-seen order.
@@ -204,12 +216,12 @@ fn instance_config(mut instance: Map<String, Value>) -> Result<Value, String> {
         return Err("instance.enabled must be a boolean".into());
     }
     match instance.get("config") {
-        None | Some(Value::Null) => {}
+        None => {}
         Some(Value::Object(config)) => {
             for field in secrets::provider_secret_fields(&driver) {
                 if let Some(value) = config.get(*field)
                     && !value.is_string()
-                    && !secrets::is_secret_reference(value)
+                    && !secret_reference(value)
                 {
                     return Err(format!(
                         "instance.config.{field} must be a string or a secret reference"
@@ -217,7 +229,8 @@ fn instance_config(mut instance: Map<String, Value>) -> Result<Value, String> {
                 }
             }
         }
-        Some(_) => return Err("instance.config must be an object".into()),
+        // Drivers decode their own config: any other JSON passes as it is.
+        Some(_) => {}
     }
     if let Some(environment) = instance.get_mut("environment") {
         let Value::Array(variables) = environment else {
@@ -243,7 +256,7 @@ fn instance_config(mut instance: Map<String, Value>) -> Result<Value, String> {
             variable.insert("name".into(), json!(name));
             if let Some(value) = variable.get("value")
                 && !value.is_string()
-                && !secrets::is_secret_reference(value)
+                && !secret_reference(value)
             {
                 return Err(format!("{at}.value must be a string or a secret reference"));
             }
@@ -254,7 +267,7 @@ fn instance_config(mut instance: Map<String, Value>) -> Result<Value, String> {
             }
             if variable
                 .get("secret")
-                .is_some_and(|secret| !secrets::is_secret_reference(secret))
+                .is_some_and(|secret| !secret_reference(secret))
             {
                 return Err(format!("{at}.secret must be a secret reference"));
             }
@@ -288,4 +301,25 @@ fn environment_name(name: &str) -> bool {
         .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
         && name.chars().count() <= ENVIRONMENT_NAME_MAX_CHARS
+}
+
+/// `SecretReference`: a secret provider slug and a one-line path, each trimmed and non-empty.
+fn secret_reference(value: &Value) -> bool {
+    let (Some(provider), Some(reference)) = (
+        value.get("provider").and_then(Value::as_str).map(str::trim),
+        value
+            .get("reference")
+            .and_then(Value::as_str)
+            .map(str::trim),
+    ) else {
+        return false;
+    };
+    let mut chars = provider.chars();
+    let provider_ok = chars.next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        && provider.chars().count() <= SLUG_MAX_CHARS;
+    let reference_ok = !reference.is_empty()
+        && reference.chars().count() <= SECRET_REFERENCE_MAX_CHARS
+        && !reference.contains(['\r', '\n']);
+    provider_ok && reference_ok
 }

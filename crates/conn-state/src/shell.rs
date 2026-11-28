@@ -232,6 +232,36 @@ fn side_chat_request(thread: &ThreadShell) -> Option<Rolled> {
     request_kind(thread).map(as_rolled)
 }
 
+/// Flags `parent_id` with a child's `request`, and its parents while they are subagents or side
+/// chats (`flag` in `pendingSubagentRequestsByThread`).
+fn flag_up<'a>(
+    requests: &mut HashMap<String, Rolled>,
+    by_id: &HashMap<&'a str, &'a ThreadShell>,
+    parent_id: Option<&'a str>,
+    request: Rolled,
+    child_id: &'a str,
+) {
+    // The coordinator answers a child's questions; approvals and user-only cards need the user.
+    if request == Rolled::UserInput {
+        return;
+    }
+    let mut seen: HashSet<&str> = HashSet::from([child_id]);
+    let mut next = parent_id;
+    while let Some(id) = next
+        && seen.insert(id)
+    {
+        if requests.get(id) != Some(&Rolled::Approval) {
+            requests.insert(id.to_owned(), request);
+        }
+        next = by_id.get(id).and_then(|parent| {
+            (parent.lineage.relationship_to_parent == Some(Relationship::Subagent)
+                || parent.lineage.side_chat == Some(true))
+            .then_some(parent.lineage.parent_thread_id.as_deref())
+            .flatten()
+        });
+    }
+}
+
 /// `pendingSubagentRequestsByThread`: the threads to flag for a subagent's live request, up its
 /// subagent chain and through a side chat to its parent.
 fn rolled_up_requests(threads: &[ThreadShell]) -> HashMap<String, PendingSubagentRequest> {
@@ -250,27 +280,37 @@ fn rolled_up_requests(threads: &[ThreadShell]) -> HashMap<String, PendingSubagen
         if child.lineage.relationship_to_parent != Some(Relationship::Subagent) {
             continue;
         }
-        let Some(request) = subagent_request(child) else {
-            continue;
-        };
-        // The coordinator answers a child's questions; approvals and user-only cards need the user.
-        if request == Rolled::UserInput {
-            continue;
+        if let Some(request) = subagent_request(child) {
+            flag_up(&mut requests, &by_id, parent_id, request, child.id.as_str());
         }
-        let mut seen: HashSet<&str> = HashSet::from([child.id.as_str()]);
-        let mut next = parent_id;
-        while let Some(id) = next
-            && seen.insert(id)
-        {
-            if requests.get(id) != Some(&Rolled::Approval) {
-                requests.insert(id.to_owned(), request);
+    }
+    // A task delegated from another environment's thread asks on that thread, with what its own
+    // children ask (`delegatedSubagentRequestsAtom`). Each pass settles one more hop of a chain.
+    let tasks: Vec<(&ThreadShell, &str)> = threads
+        .iter()
+        .filter(|t| is_listed_lineage(&t.lineage))
+        .filter_map(|t| Some((t, t.delegated_from.as_ref()?.thread_id.as_str())))
+        .collect();
+    for _ in 0..tasks.len() {
+        let before = requests.clone();
+        for &(task, parent_id) in &tasks {
+            let own = subagent_request(task);
+            let request = match own {
+                Some(Rolled::Approval) => own,
+                _ => requests.get(task.id.as_str()).copied().or(own),
+            };
+            if let Some(request) = request {
+                flag_up(
+                    &mut requests,
+                    &by_id,
+                    Some(parent_id),
+                    request,
+                    task.id.as_str(),
+                );
             }
-            next = by_id.get(id).and_then(|parent| {
-                (parent.lineage.relationship_to_parent == Some(Relationship::Subagent)
-                    || parent.lineage.side_chat == Some(true))
-                .then_some(parent.lineage.parent_thread_id.as_deref())
-                .flatten()
-            });
+        }
+        if requests == before {
+            break;
         }
     }
     requests
@@ -1523,6 +1563,52 @@ mod tests {
             ]
         );
         assert!(state.child_approval_threads("other").is_empty());
+    }
+
+    #[test]
+    fn a_delegated_tasks_approval_flags_the_thread_that_delegated_it_until_answered() {
+        let task = |id: &'static str, parent: &'static str, kind: Option<&'static str>| {
+            thread_json(id, "p", move |t| {
+                t["delegatedFrom"] =
+                    json!({"environmentId": "env-b", "threadId": parent, "title": "P"});
+                t["status"] = json!("running");
+                if let Some(kind) = kind {
+                    t["pendingRuntimeRequest"] =
+                        json!({"id": "r", "kind": kind, "createdAt": "2026-11-13T09:00:00.000Z"});
+                }
+            })
+        };
+        let mut state = snapshot(
+            vec![
+                thread_json("parent", "p", |_| {}),
+                task("task", "parent", Some("command")),
+                thread_json("asker-parent", "p", |_| {}),
+                task("asker", "asker-parent", Some("user_input")),
+                thread_json("nested-parent", "p", |_| {}),
+                task("nested", "nested-parent", None),
+                thread_json("leaf", "p", child_of("nested", |_| {})),
+            ],
+            None,
+        );
+        assert_eq!(
+            state.subagent_request("parent"),
+            Some(PendingSubagentRequest::Approval)
+        );
+        assert_eq!(state.activity("parent"), ThreadActivity::NeedsAttention);
+        // The coordinator answers a task's questions; a subagent's approval in the task needs the user.
+        assert_eq!(state.subagent_request("asker-parent"), None);
+        assert_eq!(
+            state.subagent_request("nested-parent"),
+            Some(PendingSubagentRequest::Approval)
+        );
+
+        let answered = task("task", "parent", None);
+        state.apply(
+            from_json(json!({"kind": "thread.updated", "sequence": 8, "location": "active", "thread": answered}))
+                .expect("update decodes"),
+        );
+        assert_eq!(state.subagent_request("parent"), None);
+        assert_ne!(state.activity("parent"), ThreadActivity::NeedsAttention);
     }
 
     #[test]

@@ -50,33 +50,61 @@ const COMMANDS_RS = "crates/conn-engine/src/commands.rs";
 const HANDLER = "fn handler(command_type: &str)";
 const FALLBACK = "_ => return None";
 
+/** `text` without its Rust comments. Block comments nest. */
+function withoutComments(text) {
+  let out = "";
+  let depth = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    const two = text.slice(i, i + 2);
+    if (two === "/*") {
+      depth += 1;
+      i += 1;
+    } else if (two === "*/" && depth > 0) {
+      depth -= 1;
+      i += 1;
+    } else if (two === "//" && depth === 0) {
+      const eol = text.indexOf("\n", i);
+      if (eol === -1) break;
+      i = eol - 1;
+    } else if (depth === 0) {
+      out += text[i];
+    }
+  }
+  return out;
+}
+
 /**
  * The command types that head an arm of `fn handler` in crates/conn-engine/src/commands.rs,
- * before any contract filter: each string literal before `=>` or `|` between the function's
- * signature and its fallback arm, comments left out. `fn refusal` names commands too, and the
- * engine refuses those, so the span must be the body of `fn handler` and nothing else. This
- * throws when the signature or the fallback arm is missing, when another `fn` starts in
- * between, when an arm is under `#[cfg]`, and when there is no arm.
+ * before any contract filter: each run of string patterns right before `=>`, between the
+ * function's signature and its fallback arm, comments left out. `fn refusal` names commands
+ * too, and the engine refuses those, so the span must be the body of `fn handler` and nothing
+ * else. This throws when the signature or the fallback arm is missing, when another `fn`
+ * starts in between, when an arm is under `#[cfg]`, and when there is no arm.
  *
- * One limit, on the safe side: a command the engine serves another way (an arm moved to a
- * helper, an arm with a guard, a type `dispatch_claimed` in engine.rs serves first) is missing
- * here without an error. A short set can only make the capability check refuse a row, never
- * accept a flag without proof.
+ * One limit, on the safe side: the set can be short without an error. An arm with a match
+ * guard is not always taken, so none of its patterns counts. A command the engine serves
+ * another way (an arm moved to a helper, a type `dispatch_claimed` in engine.rs serves first)
+ * is not seen. A short set can only make the capability check refuse a row, never accept a
+ * flag without proof.
  */
 export function handlerArms() {
   const unread = (why) => new Error(`tools/served.mjs cannot read \`fn handler\` in ${COMMANDS_RS}: ${why}`);
   const text = NodeFS.readFileSync(NodePath.join(repoRoot, COMMANDS_RS), "utf8");
   const start = text.indexOf(HANDLER);
   if (start === -1) throw unread(`no \`${HANDLER}\``);
-  const rest = text.slice(start + HANDLER.length).replace(/\/\/.*|\/\*[\s\S]*?\*\//g, "");
+  const rest = withoutComments(text.slice(start + HANDLER.length));
   const end = rest.indexOf(FALLBACK);
   if (end === -1) throw unread(`no \`${FALLBACK}\` arm after the signature`);
   const body = rest.slice(0, end);
   if (/^[ \t]*(?:[\w()]+[ \t]+)*fn[ \t]+\w/m.test(body)) {
     throw unread(`another \`fn\` starts before the \`${FALLBACK}\` arm`);
   }
-  if (body.includes("#[cfg(")) throw unread("an arm under `#[cfg]` is handled in some builds only");
-  const arms = Array.from(body.matchAll(/"([^"]+)"(?=\s*(?:=>|\|))/g), (m) => m[1]);
+  if (/#\[cfg\([^\]]*\]\s*(?:#\[[^\]]*\]\s*)*"/.test(body)) {
+    throw unread("an arm under `#[cfg]` is handled in some builds only");
+  }
+  const arms = Array.from(body.matchAll(/("[^"]*"(?:\s*\|\s*"[^"]*")*)\s*(=>)?/g))
+    .filter((run) => run[2])
+    .flatMap((run) => Array.from(run[1].matchAll(/"([^"]*)"/g), (m) => m[1]));
   if (arms.length === 0) throw unread("no string arm");
   return arms;
 }

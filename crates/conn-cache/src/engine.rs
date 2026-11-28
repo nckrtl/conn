@@ -180,7 +180,13 @@ impl Engine {
             .await?
             .and_then(|bytes| saved_shell(&bytes, env));
         let (jobs, rx) = mpsc::unbounded_channel();
-        let committed = Committed::default();
+        // The cursors on the device are committed: a thread resumes only from one of those.
+        let committed: Committed = std::sync::Arc::new(std::sync::Mutex::new(
+            index
+                .iter()
+                .filter_map(|(id, ix)| Some((id.clone(), ix.cursor?)))
+                .collect(),
+        ));
         tokio::spawn(run(
             pool.clone(),
             env.to_owned(),
@@ -204,7 +210,7 @@ impl Engine {
             recent: VecDeque::new(),
             subscribed: HashMap::new(),
             kept: None,
-            committed: committed.clone(),
+            committed,
             stale: HashSet::new(),
             resetting: HashSet::new(),
             catching_up: HashSet::new(),
@@ -567,7 +573,9 @@ impl Engine {
                 self.forget(id, false);
             }
         } else if let Some(rank) = self.subscribed.get_mut(id) {
+            // The driver learns it too, so after a reconnect the open thread catches up first.
             *rank = rank.saturating_add(1);
+            self.connection.rank_thread(id, *rank);
         }
         if self.held.contains_key(id) {
             self.recent.retain(|recent| recent != id);
@@ -591,17 +599,15 @@ impl Engine {
         }
     }
 
-    /// Where `id`'s stream resumes: its last committed sequence, else the one read at start.
-    /// A thread the device dropped starts cold.
+    /// Where `id`'s stream resumes: the sequence its rows were last committed at. A thread
+    /// with no committed window, or one the device dropped, starts cold.
     fn cursor(&self, id: &str) -> Option<i64> {
-        let ix = self.index.get(id)?;
-        let committed = self
-            .committed
+        self.index.get(id)?;
+        self.committed
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(id)
-            .copied();
-        committed.or(ix.cursor)
+            .copied()
     }
 
     /// Whether the kept set holds `id`; every thread is kept until the first
@@ -768,13 +774,19 @@ impl Engine {
             } else {
                 u32::try_from(rank + 1).unwrap_or(u32::MAX)
             };
-            if self.subscribed.get(&id) != Some(&rank) {
-                let after = self.cursor(&id);
-                if !self.subscribed.contains_key(&id) {
-                    self.catching_up.insert(id.clone());
+            match self.subscribed.get(&id) {
+                Some(now) if *now == rank => {}
+                // Only the order changes: a stream the server ended or refused stays down.
+                Some(_) => {
+                    self.connection.rank_thread(&id, rank);
+                    self.subscribed.insert(id, rank);
                 }
-                self.connection.subscribe_thread_from(&id, after, rank);
-                self.subscribed.insert(id, rank);
+                None => {
+                    let after = self.cursor(&id);
+                    self.catching_up.insert(id.clone());
+                    self.connection.subscribe_thread_from(&id, after, rank);
+                    self.subscribed.insert(id, rank);
+                }
             }
         }
         let leaving: Vec<String> = self
@@ -1179,6 +1191,31 @@ mod tests {
         assert!(engine.stale.is_empty() && engine.resetting.is_empty());
     }
 
+    /// A first window that never reached the device leaves no cursor to resume from: opening
+    /// the thread asks for a snapshot, not the changes after one it does not hold.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn a_lost_first_window_resumes_from_nothing() {
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+        let items = stream("thread_turn_stream.json");
+        let thread = items[0]["projection"]["thread"]["id"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        let mut engine = engine(&dir.path().join("local.sqlite3"), Settings::default()).await;
+        sqlx::query(
+            "CREATE TRIGGER boom BEFORE INSERT ON rows BEGIN SELECT RAISE(ABORT, 'disk full'); END",
+        )
+        .execute(&engine.pool)
+        .await
+        .unwrap_or_else(|e| panic!("{e}"));
+        engine.handle(
+            &thread,
+            from_json(items[0].clone()).unwrap_or_else(|e| panic!("{e}")),
+        );
+        settle(&engine, &thread).await;
+        assert_eq!(engine.cursor(&thread), None);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn a_failed_write_holds_the_cursor_until_a_fresh_window() {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
@@ -1385,6 +1422,11 @@ mod tests {
         engine.close_thread("settled");
         assert!(!engine.subscribed.contains_key("settled"), "closed: left");
         engine.index.entry("settled".into()).or_default().cursor = Some(9);
+        engine
+            .committed
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert("settled".into(), 9);
         open(&mut engine, "settled").await;
         assert!(
             engine.subscribed.contains_key("settled"),

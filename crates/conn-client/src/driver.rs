@@ -57,6 +57,11 @@ pub(crate) enum Command {
         after: Option<i64>,
         priority: u32,
     },
+    /// Re-ranks a store-owned thread without asking for its stream again.
+    RankThread {
+        thread_id: String,
+        priority: u32,
+    },
     /// The store committed this thread's rows through `after`: resume from there.
     SetThreadCursor {
         thread_id: String,
@@ -358,6 +363,18 @@ impl DriverState {
         }
     }
 
+    /// Re-ranks a store-owned thread. A stream the server ended stays out: a new rank is not
+    /// a request.
+    fn rank(&mut self, thread_id: &str, priority: u32) {
+        if let Some(sub) = self
+            .thread_subs
+            .get_mut(thread_id)
+            .filter(|s| s.store_owned)
+        {
+            sub.priority = priority;
+        }
+    }
+
     /// Whether `thread_id`'s subscribe may go out now: always, except a store-owned background
     /// thread while the open thread (rank 0) is still catching up or [`BACKGROUND_OPENINGS`]
     /// others are.
@@ -427,6 +444,10 @@ impl DriverState {
             Command::SetThreadCursor { thread_id, after } => {
                 self.set_cursor(&thread_id, after);
             }
+            Command::RankThread {
+                thread_id,
+                priority,
+            } => self.rank(&thread_id, priority),
             Command::UnsubscribeThread(thread_id) => {
                 if let Some(sub) = self.thread_subs.remove(&thread_id)
                     && !sub.store_owned
@@ -1030,6 +1051,14 @@ where
         }
         Command::SetThreadCursor { thread_id, after } => {
             state.set_cursor(&thread_id, after);
+        }
+        Command::RankThread {
+            thread_id,
+            priority,
+        } => {
+            state.rank(&thread_id, priority);
+            // A thread moved to the front may take an opening slot now.
+            admit_threads(state, ws_write).await?;
         }
         Command::UnsubscribeThread(thread_id) => {
             if let Some(sub) = state.thread_subs.remove(&thread_id) {
@@ -1892,6 +1921,11 @@ mod tests {
         assert!(
             !state.thread_subs.get("t").is_some_and(|s| s.waiting),
             "parked"
+        );
+        state.rank("t", 2);
+        assert!(
+            !state.thread_subs.get("t").is_some_and(|s| s.waiting),
+            "a new rank is not a request"
         );
         assert!(state.subscribe_from("t".into(), Some(3), 1), "asked again");
         assert!(state.thread_subs.get("t").is_some_and(|s| s.waiting));

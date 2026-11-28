@@ -902,6 +902,15 @@ impl Connection {
         });
     }
 
+    /// Re-ranks a thread [`Self::subscribe_thread_from`] asked for, without asking for its
+    /// stream again: one the server ended or refused stays down.
+    pub fn rank_thread(&self, thread_id: &str, priority: u32) {
+        let _ = self.cmd_tx.send(Command::RankThread {
+            thread_id: thread_id.to_owned(),
+            priority,
+        });
+    }
+
     /// The store committed `thread_id` through `after`; a reconnect resumes from there.
     pub fn set_thread_cursor(&self, thread_id: &str, after: i64) {
         let _ = self.cmd_tx.send(Command::SetThreadCursor {

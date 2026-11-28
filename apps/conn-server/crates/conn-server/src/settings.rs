@@ -32,11 +32,14 @@ use conn_support::fs::write_private;
 /// What `redactServerSettingsForClient` shows instead of a saved secret.
 pub const SECRET_REDACTED: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
 
+mod batch;
 mod file;
 
 pub(crate) mod generated;
 
 mod secrets;
+
+pub use batch::{BatchError, MAX_MUTATIONS};
 
 use generated::{
     BACKGROUND_PRESETS, CLIENT_PATCH_KEYS, DEFAULT_DISABLED_DRIVERS, DEFAULT_ENABLED_INSTANCES,
@@ -369,6 +372,12 @@ impl SettingsStore {
     fn lock(&self) -> std::sync::MutexGuard<'_, Loaded> {
         crate::lock(&self.state)
     }
+}
+
+/// `String.prototype.trim`, as the contract's `TrimmedNonEmptyString` decodes: Rust's `trim`
+/// keeps U+FEFF and strips U+0085, JavaScript does the reverse.
+pub(crate) fn contract_trim(text: &str) -> &str {
+    text.trim_matches(|c: char| (c.is_whitespace() && c != '\u{85}') || c == '\u{feff}')
 }
 
 /// `loadSettingsFromDisk` ([`file::decode`]). A file that cannot be read, parsed or decoded

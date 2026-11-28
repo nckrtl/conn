@@ -17,6 +17,29 @@ use super::generated::{
 };
 use conn_support::secret_store;
 
+/// The start of every store name a settings secret gets here: the namers in [`walk`], the
+/// environment slots and the retired host names. Other features keep their own entries in the
+/// same folder (`test-logins`, `secret-request-…`, `peer-link-…`, signing keys); a settings
+/// save never changes those.
+const NAME_PREFIXES: &[&str] = &[
+    "voice-cloud-",
+    "provider-config-",
+    "provider-env-",
+    "source-control-",
+    "usage-limit-source-",
+    "text-generator-",
+    "device-host-",
+    "simlock-device-host-",
+    "github-token-",
+    "bitbucket-access-token",
+    "bitbucket-api-token",
+];
+
+/// Whether `name` is a store name a settings save can write or remove.
+pub(super) fn is_settings_secret(name: &str) -> bool {
+    NAME_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+}
+
 /// A field secret (in a group's config) or a provider instance's environment variable.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(super) enum Kind {
@@ -54,6 +77,21 @@ fn encode(text: &str) -> String {
     conn_support::base64::url_encode(text.as_bytes())
 }
 
+/// The secret store takes names of at most 200 bytes (`secret_store`). A longer slot name, as a
+/// 64-character instance id with a 128-character variable name gives, is stored under its
+/// first 100 characters and its SHA-256; every name that fits keeps its T3 form.
+fn bounded(name: String) -> String {
+    const STORE_NAME_MAX: usize = 200;
+    if name.len() <= STORE_NAME_MAX {
+        return name;
+    }
+    let head: String = name.chars().take(100).collect();
+    format!(
+        "{head}-{}",
+        conn_support::hex::hex(&conn_support::hmac::sha256(name.as_bytes()))
+    )
+}
+
 fn host_suffix(host: Option<&str>) -> String {
     host.map(|h| format!("-{}", encode(h))).unwrap_or_default()
 }
@@ -66,6 +104,11 @@ fn listed(
         .iter()
         .find(|(n, _)| *n == name)
         .map_or(&[], |(_, fields)| *fields)
+}
+
+/// The secret fields of a provider driver's `config` (`PROVIDER_CONFIG`).
+pub(super) fn provider_secret_fields(driver: &str) -> &'static [&'static str] {
+    listed(PROVIDER_CONFIG, driver)
 }
 
 /// `{ provider, reference }`: a secret kept by a secret provider, not a secret itself.
@@ -105,11 +148,15 @@ fn walk(settings: &mut Map<String, Value>, visit: &mut dyn FnMut(Visit<'_>)) {
                     let Value::Object(instance) = instance else {
                         continue;
                     };
-                    let driver = instance
-                        .get("driver")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned();
+                    // Trimmed, as the contract decodes `driver`: a padded driver keeps its
+                    // secret fields.
+                    let driver = super::contract_trim(
+                        instance
+                            .get("driver")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default(),
+                    )
+                    .to_owned();
                     if let Some(Value::Object(config)) = instance.get_mut("config") {
                         visit(Visit::Group(
                             config,
@@ -222,7 +269,7 @@ pub(super) fn map_secrets(settings: &mut Map<String, Value>, f: &mut dyn FnMut(&
                 };
                 let mut one = |host: Option<&str>, value: &str| {
                     let mapped = f(&Secret {
-                        name: name(field, host),
+                        name: bounded(name(field, host)),
                         kind: Kind::Field,
                         value: value.to_owned(),
                         redacted: value == SECRET_REDACTED,
@@ -280,7 +327,7 @@ pub(super) fn map_secrets(settings: &mut Map<String, Value>, f: &mut dyn FnMut(&
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 let mapped = f(&Secret {
-                    name: format!("provider-env-{}-{}", encode(id), encode(name)),
+                    name: bounded(format!("provider-env-{}-{}", encode(id), encode(name))),
                     kind: Kind::Environment,
                     value: value.as_str().unwrap_or_default().to_owned(),
                     redacted: value_redacted,
@@ -312,7 +359,7 @@ pub(super) fn map_field_values(
                 };
                 let mut one = |value: &mut Value, host: Option<&str>| {
                     if (value.is_string() || is_secret_reference(value))
-                        && let Some(next) = f(value, &name(field, host))
+                        && let Some(next) = f(value, &bounded(name(field, host)))
                     {
                         *value = next;
                     }
@@ -360,11 +407,60 @@ pub(super) fn restore_echoed_references(
     });
 }
 
+/// A secret field that holds a number, a boolean or a list (a hand edit) shows the marker
+/// (`redact`) but has nothing in the store. A marker echoed back for it keeps that value, so a
+/// round trip through a client never erases it.
+pub(super) fn restore_echoed_unstored(current: &Map<String, Value>, next: &mut Map<String, Value>) {
+    let mut unstored: Vec<(String, Value)> = Vec::new();
+    let mut scratch = current.clone();
+    walk(&mut scratch, &mut |visit| {
+        if let Visit::Group(fields, secret_fields, name) = visit {
+            for field in secret_fields {
+                if let Some(slot) = fields.get(*field)
+                    && matches!(slot, Value::Number(_) | Value::Bool(_) | Value::Array(_))
+                {
+                    unstored.push((bounded(name(field, None)), slot.clone()));
+                }
+            }
+        }
+    });
+    if unstored.is_empty() {
+        return;
+    }
+    walk(next, &mut |visit| {
+        if let Visit::Group(fields, secret_fields, name) = visit {
+            for field in secret_fields {
+                if let Some(slot) = fields.get_mut(*field)
+                    && *slot == SECRET_REDACTED
+                    && let Some((_, value)) = unstored
+                        .iter()
+                        .find(|(n, _)| *n == bounded(name(field, None)))
+                {
+                    *slot = value.clone();
+                }
+            }
+        }
+    });
+}
+
 /// `redactServerSettingsForClient` for a client without `secretReferences`: a saved
 /// secret shows `••••••`, a sensitive variable shows `""` with `valueRedacted`, and a
 /// reference shows the marker.
 pub(super) fn redact(settings: &mut Map<String, Value>) {
     super::retain_supported_hosts(settings);
+    // A secret field holding a number, a boolean or a list (a hand edit) is no shape the
+    // maps below touch: it shows the marker, never its value.
+    walk(settings, &mut |visit| {
+        if let Visit::Group(fields, secret_fields, _) = visit {
+            for field in secret_fields {
+                if let Some(slot) = fields.get_mut(*field)
+                    && matches!(slot, Value::Number(_) | Value::Bool(_) | Value::Array(_))
+                {
+                    *slot = json!(SECRET_REDACTED);
+                }
+            }
+        }
+    });
     map_secrets(settings, &mut |secret| {
         if secret.sensitive {
             Mapped {
@@ -429,6 +525,7 @@ pub(super) fn persist(current: &Map<String, Value>, next: &mut Map<String, Value
         Mapped::keep(secret)
     });
     restore_echoed_references(current, next);
+    restore_echoed_unstored(current, next);
     let mut changes: Vec<Change> = Vec::new();
     let mut next_names: Vec<String> = Vec::new();
     let mut kept: Vec<String> = Vec::new();

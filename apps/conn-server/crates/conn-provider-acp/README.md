@@ -77,6 +77,14 @@ write is built from `ordered::J`, which keeps T3's key order.
   `promptCapabilities.image`).
 - **Instance environment:** `~` is expanded only in `CODEX_HOME`, `CLAUDE_CONFIG_DIR` and
   `GROK_HOME` (`HOME_PATH_VARIABLES`; `probe-conformance.mjs` checks the list).
+- **Another endpoint (Orbit's AI router):** two instance variables, no config field.
+  `GROK_MODELS_BASE_URL` (`http://<router>:8317/v1`) and `XAI_API_KEY` with
+  `"sensitive": true`, which moves to the secret store. The grok CLI 1.0.52 documents both
+  in its built-in docs ("Custom Models Endpoint"). Run by hand against a local stub, it asked
+  for `GET /v1/models` and sent `POST /v1/chat/completions` there, with
+  `Authorization: Bearer <key>`. `grok --help` has no such flag. The test is
+  `a_posted_grok_instance_launches_the_cli_with_the_router_url_and_key` (`conn-server`
+  `http.rs`).
 - **Prompt:** T3's instruction wrapper on the first prompt and when the mode or tools change,
   the runtime notes until a prompt carrying them succeeds; Grok's `_meta.promptId` and
   `requestId` `t3-xai-prompt-N`. A prompt settles on its reply or Grok's `prompt_complete` /
